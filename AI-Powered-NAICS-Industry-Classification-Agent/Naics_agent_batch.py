@@ -1,188 +1,196 @@
-# ============================================================
-# 🌐 Streamlit Batch NAICS Enrichment Agent
-# ============================================================
+"""
+Batch Global Industry Enrichment Agent (RAG + OpenAI + UGO)
+============================================================
+Upgraded: Groq → OpenAI GPT-4o-mini, NAICS-only → 6-taxonomy UGO,
+limited suffixes → 100+ global entity resolver.
+"""
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import faiss
 import json
-import os
 import re
 from io import BytesIO
-from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
-from langchain_groq import ChatGroq
-# from langchain.schema import HumanMessage, SystemMessage
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+
+from config import OPENAI_API_KEY
+from openai import OpenAI
 from langchain_community.tools import DuckDuckGoSearchRun
+from entity_resolver import EntityResolver
 
-# ------------------------------------------------------------
-# 1. Load Environment Variables
-# ------------------------------------------------------------
-load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-if not GROQ_API_KEY:
-    st.error("❌ GROQ_API_KEY not found in .env file")
-    st.stop()
+_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ------------------------------------------------------------
-# 2. Page Setup
-# ------------------------------------------------------------
-st.set_page_config(page_title="Batch NAICS Enrichment Agent", page_icon="🌐", layout="wide")
-st.title("🌐 Batch NAICS Enrichment Agent (RAG + ChatGroq)")
-st.markdown("### Upload a file of organizations to predict their NAICS 2022 codes using AI + Web Search + RAG")
+st.set_page_config(
+    page_title="Batch Global Enrichment Agent",
+    page_icon="🌐",
+    layout="wide",
+)
 
-# ------------------------------------------------------------
-# 3. Load NAICS Dataset
-# ------------------------------------------------------------
-@st.cache_data(show_spinner=True)
-def load_naics_data():
-    df = pd.read_excel("naics_code.xlsx")
-    df.columns = df.columns.str.strip()
-    return df
+st.title("🌐 Batch Global Industry Enrichment Agent (RAG + OpenAI + UGO)")
+st.markdown(
+    "Upload organisations to predict their industry codes across NAICS 2022, "
+    "UK SIC 2007, NACE Rev2, ISIC Rev4, US SIC 1987, and MCC using AI + Web Search + RAG."
+)
 
-df_naics = load_naics_data()
-st.success(f"✅ Loaded {len(df_naics)} NAICS records.")
+# ── Load UGO ───────────────────────────────────────────────────────────────────
+@st.cache_resource(show_spinner="Building Unified Global Ontology …")
+def setup_ugo():
+    from taxonomy_engine import TaxonomyEngine
+    return TaxonomyEngine()
 
-# ------------------------------------------------------------
-# 4. Prepare FAISS + Embeddings
-# ------------------------------------------------------------
-@st.cache_resource(show_spinner=True)
-def setup_retriever():
-    embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-    descriptions = df_naics["Description"].tolist()
-    embeddings = embed_model.encode(descriptions, convert_to_numpy=True).astype(np.float32)
 
-    dimension = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dimension)
-    index.add(embeddings)
-    return embed_model, index
-
-embed_model, index = setup_retriever()
-st.info("✅ Embedding model and FAISS index ready.")
-
-# ------------------------------------------------------------
-# 5. Initialize LLM and Search Tool
-# ------------------------------------------------------------
+te = setup_ugo()
+er = EntityResolver()
 search_tool = DuckDuckGoSearchRun()
-chat = ChatGroq(model="llama-3.1-8b-instant", temperature=0.2, api_key=GROQ_API_KEY)
 
-# ------------------------------------------------------------
-# 6. NAICS Prediction Function (Single Row)
-# ------------------------------------------------------------
-def predict_naics_agent(org_name, org_description="", country="", top_k=5):
-    query = f"{org_name} company profile {country}"
+st.success(f"✅ UGO loaded: {te.record_count:,} taxonomy records")
+st.info("✅ OpenAI GPT-4o-mini and entity resolver ready")
+
+
+# ── Prediction function ────────────────────────────────────────────────────────
+def predict_global_agent(
+    org_name: str,
+    org_description: str = "",
+    country: str = "",
+    top_k: int = 8,
+) -> dict:
+    profile = er.resolve(org_name, country=country)
+    query_text = f"{org_name} {org_description} {country}"
+
     try:
-        web_info = search_tool.run(query)
-    except Exception as e:
+        web_info = search_tool.run(
+            f"{profile.clean_name} company profile industry {country}"
+        )[:1500]
+    except Exception:
         web_info = ""
-        st.warning(f"⚠️ Web search failed: {e}")
 
-    query_text = f"{org_name} {org_description} {country} {web_info[:1000]}"
-    query_vec = embed_model.encode([query_text], convert_to_numpy=True).astype(np.float32)
+    full_query = f"{query_text} {web_info[:500]}"
+    ugo_results = te.search(full_query, top_k=top_k * 6)
 
-    D, I = index.search(query_vec, top_k)
-    retrieved = df_naics.iloc[I[0]][["Naics code", "Description"]].to_dict(orient="records")
-    retrieved_json = json.dumps(retrieved, indent=2)
+    candidates: dict = {}
+    for rec, score in ugo_results:
+        candidates.setdefault(rec.taxonomy, []).append(
+            {"code": rec.code, "description": rec.description, "score": round(float(score), 4)}
+        )
+    candidates = {k: v[:top_k] for k, v in candidates.items()}
 
-    prompt = f"""
-You are an expert NAICS classification analyst.
-Analyze the company's main business and select the best matching NAICS 2022 code.
+    prompt = f"""You are a global KYB and industry classification expert.
 
-Organization Name: {org_name}
+Organization: {org_name}
 Country: {country}
-Organization Description: {org_description}
+Description: {org_description}
+Jurisdiction: {profile.detected_jurisdiction}
+Entity Type: {profile.detected_entity_type}
+Web Summary: {web_info[:800]}
 
-Web Search Summary:
-{web_info}
+Candidate codes from Unified Global Ontology:
+{json.dumps(candidates, indent=2)[:2500]}
 
-Candidate NAICS Codes (2022 version):
-{retrieved_json}
-
-Instructions:
-1. Analyze the organization’s primary line of business.
-2. Select ONE NAICS code ONLY from the candidate list.
-3. Respond strictly in this JSON format:
+Select the best code per taxonomy. Respond with valid JSON only:
 {{
-  "naics_code": "XXXXX",
-  "description": "..."
-}}
-"""
+  "primary_taxonomy": "...",
+  "primary_code": "...",
+  "primary_description": "...",
+  "naics_code": "... or null",
+  "naics_description": "... or null",
+  "uk_sic_code": "... or null",
+  "uk_sic_description": "... or null",
+  "nace_code": "... or null",
+  "nace_description": "... or null",
+  "mcc_code": "... or null",
+  "mcc_description": "... or null",
+  "confidence": "HIGH | MEDIUM | LOW"
+}}"""
 
-    response = chat.invoke([HumanMessage(content=prompt)])
-    raw_output = response.content.strip()
+    try:
+        resp = _client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=500,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content.strip()
+        result = json.loads(raw)
+        result["clean_name"] = profile.clean_name
+        result["jurisdiction"] = profile.detected_jurisdiction
+        result["entity_type"] = profile.detected_entity_type
+        return result
+    except Exception as exc:
+        return {
+            "primary_code": None,
+            "primary_description": str(exc),
+            "confidence": "LOW",
+            "clean_name": profile.clean_name,
+            "jurisdiction": profile.detected_jurisdiction,
+            "entity_type": profile.detected_entity_type,
+        }
 
-    json_match = re.search(r"\{.*\}", raw_output, re.DOTALL)
-    if json_match:
-        try:
-            result = json.loads(json_match.group())
-        except json.JSONDecodeError:
-            result = {"naics_code": None, "description": raw_output}
-    else:
-        result = {"naics_code": None, "description": raw_output}
 
-    return result
+# ── File upload ────────────────────────────────────────────────────────────────
+uploaded_file = st.file_uploader(
+    "Upload Excel/CSV with organisations", type=["xlsx", "csv"]
+)
 
-# ------------------------------------------------------------
-# 7. File Upload
-# ------------------------------------------------------------
-uploaded_file = st.file_uploader("📂 Upload Excel/CSV file with organizations", type=["xlsx","csv"])
 if uploaded_file:
-    if uploaded_file.name.endswith(".xlsx"):
-        df_input = pd.read_excel(uploaded_file)
-    else:
-        df_input = pd.read_csv(uploaded_file)
-    
-    st.success(f"✅ Loaded {len(df_input)} organizations for enrichment.")
+    df_input = (
+        pd.read_excel(uploaded_file)
+        if uploaded_file.name.endswith(".xlsx")
+        else pd.read_csv(uploaded_file)
+    )
+    df_input.columns = df_input.columns.str.strip()
+    st.success(f"✅ Loaded {len(df_input)} organisations for enrichment.")
 
-    # Check required columns
-    required_cols = ["Org Name"]
-    for col in required_cols:
-        if col not in df_input.columns:
-            st.error(f"❌ Missing required column: {col}")
-            st.stop()
+    if "Org Name" not in df_input.columns:
+        st.error("Missing required column: Org Name")
+        st.stop()
 
-    # Optional: fill missing columns
-    df_input["Description"] = df_input.get("Description", "")
-    df_input["Country"] = df_input.get("Country", "")
+    df_input["Description"] = df_input.get("Description", pd.Series([""] * len(df_input)))
+    df_input["Country"]     = df_input.get("Country",     pd.Series([""] * len(df_input)))
 
-    # ------------------------------------------------------------
-    # 8. Batch Prediction
-    # ------------------------------------------------------------
-    if st.button("🚀 Enrich Organizations"):
+    if st.button("🚀 Enrich Organisations (Global Multi-Taxonomy)"):
         results = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        progress = st.progress(0)
+        status   = st.empty()
 
         for idx, row in df_input.iterrows():
-            status_text.text(f"Processing {idx+1}/{len(df_input)}: {row['Org Name']}")
-            res = predict_naics_agent(row["Org Name"], row.get("Description",""), row.get("Country",""))
+            status.text(f"Processing {idx+1}/{len(df_input)}: {row['Org Name']}")
+            res = predict_global_agent(
+                org_name=row["Org Name"],
+                org_description=str(row.get("Description", "")),
+                country=str(row.get("Country", "")),
+            )
             results.append({
-                "Org Name": row["Org Name"],
-                "Description": row.get("Description",""),
-                "Country": row.get("Country",""),
-                "NAICS Code": res.get("naics_code"),
-                "NAICS Description": res.get("description")
+                "Org Name":          row["Org Name"],
+                "Clean Name":        res.get("clean_name", ""),
+                "Jurisdiction":      res.get("jurisdiction", ""),
+                "Entity Type":       res.get("entity_type", ""),
+                "Primary Taxonomy":  res.get("primary_taxonomy", ""),
+                "Primary Code":      res.get("primary_code", ""),
+                "Primary Desc":      res.get("primary_description", ""),
+                "Confidence":        res.get("confidence", ""),
+                "NAICS Code":        res.get("naics_code", ""),
+                "NAICS Desc":        res.get("naics_description", ""),
+                "UK SIC Code":       res.get("uk_sic_code", ""),
+                "UK SIC Desc":       res.get("uk_sic_description", ""),
+                "NACE Code":         res.get("nace_code", ""),
+                "NACE Desc":         res.get("nace_description", ""),
+                "MCC Code":          res.get("mcc_code", ""),
+                "MCC Desc":          res.get("mcc_description", ""),
             })
-            progress_bar.progress((idx+1)/len(df_input))
+            progress.progress((idx + 1) / len(df_input))
 
         st.success("✅ Enrichment Complete!")
-
         df_results = pd.DataFrame(results)
-        st.dataframe(df_results)
+        st.dataframe(df_results, use_container_width=True)
 
-        # ------------------------------------------------------------
-        # 9. Download Enriched Excel
-        # ------------------------------------------------------------
         def to_excel(df):
-            output = BytesIO()
-            df.to_excel(output, index=False)
-            output.seek(0)
-            return output
+            buf = BytesIO()
+            df.to_excel(buf, index=False)
+            buf.seek(0)
+            return buf
 
         st.download_button(
-            label="📥 Download Enriched Excel",
+            "📥 Download Enriched Excel",
             data=to_excel(df_results),
-            file_name="enriched_organizations.xlsx"
+            file_name="global_enriched_organisations.xlsx",
         )

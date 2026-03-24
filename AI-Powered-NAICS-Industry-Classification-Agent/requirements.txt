@@ -1,10 +1,28 @@
-langchain
-langchain-core
-langchain-community
-pypdf
-pymupdf
-sentence-transformers
-faiss-cpu
-chromadb
-langchain-groq
-python-dotenv
+# ── Core LLM & AI ─────────────────────────────────────────────────────────────
+openai>=1.30.0
+langchain>=0.2.0
+langchain-core>=0.2.0
+langchain-community>=0.2.0
+
+# ── Embeddings & Vector Search ────────────────────────────────────────────────
+sentence-transformers>=2.7.0
+faiss-cpu>=1.8.0
+
+# ── ML / Consensus Engine ─────────────────────────────────────────────────────
+xgboost>=2.0.0
+scikit-learn>=1.4.0
+numpy>=1.26.0
+
+# ── Data Processing ───────────────────────────────────────────────────────────
+pandas>=2.2.0
+openpyxl>=3.1.0
+
+# ── Web Search ────────────────────────────────────────────────────────────────
+duckduckgo-search>=5.3.0
+
+# ── Web App ───────────────────────────────────────────────────────────────────
+streamlit>=1.35.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+rapidfuzz>=3.9.0

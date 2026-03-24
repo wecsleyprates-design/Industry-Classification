@@ -1,0 +1,89 @@
+code,description,section,division
+A01,Crop and animal production hunting and related service activities,A,01
+A02,Forestry and logging,A,02
+A03,Fishing and aquaculture,A,03
+B05,Mining of coal and lignite,B,05
+B06,Extraction of crude petroleum and natural gas,B,06
+B07,Mining of metal ores,B,07
+B08,Other mining and quarrying,B,08
+B09,Mining support service activities,B,09
+C10,Manufacture of food products,C,10
+C11,Manufacture of beverages,C,11
+C12,Manufacture of tobacco products,C,12
+C13,Manufacture of textiles,C,13
+C14,Manufacture of wearing apparel,C,14
+C15,Manufacture of leather and related products,C,15
+C16,Manufacture of wood and of products of wood and cork,C,16
+C17,Manufacture of paper and paper products,C,17
+C18,Printing and reproduction of recorded media,C,18
+C19,Manufacture of coke and refined petroleum products,C,19
+C20,Manufacture of chemicals and chemical products,C,20
+C21,Manufacture of basic pharmaceutical products and pharmaceutical preparations,C,21
+C22,Manufacture of rubber and plastic products,C,22
+C23,Manufacture of other non-metallic mineral products,C,23
+C24,Manufacture of basic metals,C,24
+C25,Manufacture of fabricated metal products except machinery and equipment,C,25
+C26,Manufacture of computer electronic and optical products,C,26
+C27,Manufacture of electrical equipment,C,27
+C28,Manufacture of machinery and equipment nec,C,28
+C29,Manufacture of motor vehicles trailers and semi-trailers,C,29
+C30,Manufacture of other transport equipment,C,30
+C31,Manufacture of furniture,C,31
+C32,Other manufacturing,C,32
+C33,Repair and installation of machinery and equipment,C,33
+D35,Electricity gas steam and air conditioning supply,D,35
+E36,Water collection treatment and supply,E,36
+E37,Sewerage,E,37
+E38,Waste collection treatment and disposal activities,E,38
+E39,Remediation activities and other waste management services,E,39
+F41,Construction of buildings,F,41
+F42,Civil engineering,F,42
+F43,Specialised construction activities,F,43
+G45,Wholesale and retail trade and repair of motor vehicles and motorcycles,G,45
+G46,Wholesale trade except of motor vehicles and motorcycles,G,46
+G47,Retail trade except of motor vehicles and motorcycles,G,47
+H49,Land transport and transport via pipelines,H,49
+H50,Water transport,H,50
+H51,Air transport,H,51
+H52,Warehousing and support activities for transportation,H,52
+H53,Postal and courier activities,H,53
+I55,Accommodation,I,55
+I56,Food and beverage service activities,I,56
+J58,Publishing activities,J,58
+J59,Motion picture video television programme sound recording and music publishing activities,J,59
+J60,Programming and broadcasting activities,J,60
+J61,Telecommunications,J,61
+J62,Computer programming consultancy and related activities,J,62
+J63,Information service activities,J,63
+K64,Financial service activities except insurance and pension funding,K,64
+K65,Insurance reinsurance and pension funding except compulsory social security,K,65
+K66,Activities auxiliary to financial services and insurance activities,K,66
+L68,Real estate activities,L,68
+M69,Legal and accounting activities,M,69
+M70,Activities of head offices and management consultancy activities,M,70
+M71,Architectural and engineering activities and related technical consultancy,M,71
+M72,Scientific research and development,M,72
+M73,Advertising and market research,M,73
+M74,Other professional scientific and technical activities,M,74
+M75,Veterinary activities,M,75
+N77,Rental and leasing activities,N,77
+N78,Employment activities,N,78
+N79,Travel agency tour operator and other reservation service activities,N,79
+N80,Security and investigation activities,N,80
+N81,Services to buildings and landscape activities,N,81
+N82,Office administrative office support and other business support activities,N,82
+O84,Public administration and defence and compulsory social security,O,84
+P85,Education,P,85
+Q86,Human health activities,Q,86
+Q87,Residential care activities,Q,87
+Q88,Social work activities without accommodation,Q,88
+R90,Creative arts and entertainment activities,R,90
+R91,Libraries archives museums and other cultural activities,R,91
+R92,Gambling and betting activities,R,92
+R93,Sports activities and amusement and recreation activities,R,93
+S94,Activities of membership organisations,S,94
+S95,Repair of computers and personal and household goods,S,95
+S96,Other personal service activities,S,96
+T97,Activities of households as employers of domestic personnel,T,97
+T98,Undifferentiated goods-and services-producing activities of private households for own use,T,98
+U99,Activities of extraterritorial organisations and bodies,U,99

@@ -1,6 +1,10 @@
-# ============================================================
-# 🌐 Smart NAICS Classification Agent (Interactive Version)
-# ============================================================
+"""
+Smart Global Industry Classification Agent (Interactive)
+=========================================================
+Upgraded from single-taxonomy (NAICS-only) to multi-taxonomy global engine.
+Replaced Groq with OpenAI GPT-4o-mini.
+Expanded entity suffix registry to 100+ global legal forms.
+"""
 
 import streamlit as st
 import pandas as pd
@@ -9,354 +13,270 @@ import os
 import re
 import time
 from io import BytesIO
-from dotenv import load_dotenv
-from langchain_groq import ChatGroq
-from langchain_core.messages import HumanMessage
+
+# ── API key + LLM ─────────────────────────────────────────────────────────────
+from config import OPENAI_API_KEY
+from openai import OpenAI
+
+_client = OpenAI(api_key=OPENAI_API_KEY)
+
 from langchain_community.tools import DuckDuckGoSearchRun
+from entity_resolver import EntityResolver
 
-# ------------------------------------------------------------
-# 1. Load Environment Variables
-# ------------------------------------------------------------
-load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-if not GROQ_API_KEY:
-    st.error("❌ GROQ_API_KEY not found in .env")
-    st.stop()
-
-# ------------------------------------------------------------
-# 2. Page Setup
-# ------------------------------------------------------------
+# ── Page setup ─────────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Smart NAICS Classification Agent",
+    page_title="Global Industry Classification Agent",
     page_icon="🌐",
-    layout="wide"
+    layout="wide",
 )
 
-st.title("🌐 Smart NAICS Classification Agent")
-st.markdown("Upload organizations and classify NAICS codes automatically.")
-
-# ------------------------------------------------------------
-# 3. Sidebar Settings
-# ------------------------------------------------------------
-st.sidebar.title("⚙️ Agent Settings")
-
-show_summary = st.sidebar.checkbox("Show company summary", False)
-show_candidates = st.sidebar.checkbox("Show NAICS candidates", False)
-
-max_candidates = st.sidebar.slider(
-    "Number of NAICS candidates",
-    min_value=10,
-    max_value=50,
-    value=30
+st.title("🌐 Global Industry Classification Agent")
+st.markdown(
+    "Upload organisations and classify them across **NAICS 2022, UK SIC 2007, "
+    "NACE Rev2, ISIC Rev4, SIC 1987, and MCC** code systems automatically."
 )
 
-# ------------------------------------------------------------
-# 4. Load NAICS Dataset
-# ------------------------------------------------------------
-@st.cache_data
-def load_naics():
+# ── Sidebar settings ───────────────────────────────────────────────────────────
+st.sidebar.title("⚙️ Settings")
+show_summary    = st.sidebar.checkbox("Show web summary", False)
+show_candidates = st.sidebar.checkbox("Show UGO candidates", False)
+max_candidates  = st.sidebar.slider("Candidate codes per taxonomy", 5, 20, 8)
 
-    df = pd.read_excel("naics_code.xlsx")
-    df.columns = df.columns.str.strip()
+# ── Load taxonomy data ─────────────────────────────────────────────────────────
+@st.cache_data(show_spinner="Loading taxonomy data …")
+def load_all_taxonomies() -> dict:
+    from taxonomy_engine import TaxonomyEngine
+    te = TaxonomyEngine()
+    return te
 
-    return df
 
-df_naics = load_naics()
+@st.cache_resource
+def get_taxonomy_engine():
+    from taxonomy_engine import TaxonomyEngine
+    return TaxonomyEngine()
 
-st.success(f"✅ Loaded {len(df_naics)} NAICS codes")
 
-# ------------------------------------------------------------
-# 5. Initialize LLM
-# ------------------------------------------------------------
-chat = ChatGroq(
-    model="llama-3.1-8b-instant",
-    temperature=0,
-    max_tokens=400,
-    api_key=GROQ_API_KEY
-)
+te = get_taxonomy_engine()
+st.success(f"✅ Unified Global Ontology loaded: {te.record_count:,} codes across 6 taxonomy systems")
+
+# ── Entity resolver ────────────────────────────────────────────────────────────
+er = EntityResolver()
 
 search_tool = DuckDuckGoSearchRun()
 
-# ------------------------------------------------------------
-# 6. Clean Company Name
-# ------------------------------------------------------------
-def clean_company_name(name):
 
-    suffixes = [
-        "llc","inc","ltd","corp","corporation",
-        "company","co","holdings","group"
-    ]
-
-    name = name.lower()
-
-    for s in suffixes:
-        name = name.replace(s,"")
-
-    return name.strip()
-
-# ------------------------------------------------------------
-# 7. Get Company Summary
-# ------------------------------------------------------------
-def get_company_summary(org_name, address, country):
-
-    org_clean = clean_company_name(org_name)
-
-    query = f"""
-    {org_clean} company industry
-    what does {org_clean} company do
-    {address} {country}
-    """
-
+def get_company_summary(org_name: str, address: str, country: str) -> str:
+    profile = er.resolve(org_name, address, country)
+    query = (
+        f"{profile.clean_name} company industry business "
+        f"what does {profile.clean_name} do {address} {country}"
+    )
     try:
-
         result = search_tool.run(query)
-        return result[:1500]
-
-    except:
-
+        return result[:1800]
+    except Exception:
         return ""
 
-# ------------------------------------------------------------
-# 8. Candidate NAICS Filtering
-# ------------------------------------------------------------
-def get_candidate_naics(summary):
 
-    summary = summary.lower()
+def get_ugo_candidates(summary: str, jurisdiction: str) -> dict:
+    results = te.search(summary, top_k=max_candidates * 6)
+    by_tax: dict = {}
+    for rec, score in results:
+        by_tax.setdefault(rec.taxonomy, []).append(
+            {"code": rec.code, "description": rec.description}
+        )
+    return {k: v[:max_candidates] for k, v in by_tax.items()}
 
-    df_temp = df_naics.copy()
 
-    df_temp["score"] = df_temp["Description"].str.lower().apply(
-        lambda x: sum(word in x for word in summary.split())
-    )
+def predict_global(org_name: str, address: str, country: str):
+    profile = er.resolve(org_name, address, country)
+    summary = get_company_summary(org_name, address, country) or org_name
+    candidates = get_ugo_candidates(summary, profile.detected_jurisdiction)
 
-    candidates = df_temp.sort_values(
-        "score",
-        ascending=False
-    ).head(max_candidates)
+    prompt = f"""You are an expert global industry classification analyst.
 
-    return candidates[["Naics code","Description"]].to_dict(orient="records")
+Determine the best industry codes for the company across all relevant taxonomies.
 
-# ------------------------------------------------------------
-# 9. Predict NAICS
-# ------------------------------------------------------------
-def predict_naics(org_name, address, country):
+Company Name: {org_name}
+Cleaned Name: {profile.clean_name}
+Detected Jurisdiction: {profile.detected_jurisdiction}
+Detected Entity Type: {profile.detected_entity_type}
+Address: {address}
+Country: {country}
+Web Summary: {summary[:1200]}
 
-    summary = get_company_summary(org_name,address,country)
+Candidate codes from Unified Global Ontology:
+{json.dumps(candidates, indent=2)[:3000]}
 
-    if summary == "":
-        summary = org_name
-
-    candidates = get_candidate_naics(summary)
-
-    prompt = f"""
-You are an expert industry classification analyst.
-
-Determine the best NAICS code for the company.
-
-Company Name:
-{org_name}
-
-Address:
-{address}
-
-Country:
-{country}
-
-Business Summary:
-{summary}
-
-Candidate NAICS Codes:
-{json.dumps(candidates,indent=2)}
-
-Select the MOST appropriate NAICS code.
+Select the MOST appropriate code per taxonomy. For the jurisdiction {profile.detected_jurisdiction},
+prioritise the most relevant taxonomy (US->NAICS, GB->UK_SIC, EU->NACE, others->ISIC).
 
 Return JSON ONLY:
-
 {{
-"naics_code":"XXXXX",
-"description":"NAICS description",
-"confidence":"HIGH | MEDIUM | LOW",
-"reasoning":"Why this NAICS code was selected"
-}}
-"""
+  "primary_taxonomy": "US_NAICS_2022",
+  "primary_code": "XXXXXX",
+  "primary_description": "...",
+  "confidence": "HIGH | MEDIUM | LOW",
+  "reasoning": "...",
+  "naics_code": "XXXXXX or null",
+  "naics_description": "... or null",
+  "uk_sic_code": "XXXXX or null",
+  "uk_sic_description": "... or null",
+  "nace_code": "... or null",
+  "nace_description": "... or null",
+  "mcc_code": "XXXX or null",
+  "mcc_description": "... or null"
+}}"""
 
-    for attempt in range(2):
-
+    for attempt in range(3):
         try:
-
-            response = chat.invoke(
-                [HumanMessage(content=prompt)]
+            resp = _client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=500,
+                response_format={"type": "json_object"},
             )
-
-            raw_output = response.content.strip()
-
-            match = re.search(r"\{.*\}",raw_output,re.DOTALL)
-
-            result = json.loads(match.group())
-
+            raw = resp.choices[0].message.content.strip()
+            result = json.loads(raw)
             return (
-                result.get("naics_code"),
-                result.get("description"),
+                result.get("primary_taxonomy"),
+                result.get("primary_code"),
+                result.get("primary_description"),
                 result.get("confidence"),
                 result.get("reasoning"),
+                result.get("naics_code"),
+                result.get("naics_description"),
+                result.get("uk_sic_code"),
+                result.get("uk_sic_description"),
+                result.get("nace_code"),
+                result.get("nace_description"),
+                result.get("mcc_code"),
+                result.get("mcc_description"),
                 summary,
-                candidates
+                candidates,
+                profile,
             )
-
-        except:
+        except Exception:
+            if attempt < 2:
+                time.sleep(1.5)
             continue
 
-    return None,None,"LOW","LLM parsing failed",summary,candidates
-
-# ------------------------------------------------------------
-# 10. Single Company Lookup
-# ------------------------------------------------------------
-st.sidebar.subheader("🔎 Quick Company Lookup")
-
-company = st.sidebar.text_input("Company Name")
-address = st.sidebar.text_input("Address")
-country = st.sidebar.text_input("Country")
-
-if st.sidebar.button("Classify Company"):
-
-    code,desc,conf,reason,summary,candidates = predict_naics(
-        company,address,country
+    return (
+        "US_NAICS_2022", None, None, "LOW", "Classification failed",
+        None, None, None, None, None, None, None, None,
+        summary, candidates, profile,
     )
 
-    st.sidebar.write("### Result")
 
-    st.sidebar.write("NAICS Code:",code)
-    st.sidebar.write("Description:",desc)
-    st.sidebar.write("Confidence:",conf)
+# ── Sidebar quick lookup ───────────────────────────────────────────────────────
+st.sidebar.subheader("🔎 Quick Lookup")
+s_company = st.sidebar.text_input("Company Name")
+s_address = st.sidebar.text_input("Address")
+s_country  = st.sidebar.text_input("Country")
 
-# ------------------------------------------------------------
-# 11. Upload Input File
-# ------------------------------------------------------------
-uploaded_file = st.file_uploader(
-    "Upload Excel or CSV file",
-    type=["xlsx","csv"]
-)
+if st.sidebar.button("Classify"):
+    (
+        primary_tax, primary_code, primary_desc, conf, reason,
+        naics_code, naics_desc, uk_sic_code, uk_sic_desc,
+        nace_code, nace_desc, mcc_code, mcc_desc,
+        summary, cands, prof,
+    ) = predict_global(s_company, s_address, s_country)
+
+    st.sidebar.write("**Primary Taxonomy:**", primary_tax)
+    st.sidebar.write("**Code:**", primary_code)
+    st.sidebar.write("**Description:**", primary_desc)
+    st.sidebar.write("**Confidence:**", conf)
+    st.sidebar.write("**Jurisdiction:**", prof.detected_jurisdiction)
+    st.sidebar.write("**Entity Type:**", prof.detected_entity_type)
+    if naics_code:
+        st.sidebar.write("**NAICS:**", naics_code, "—", naics_desc)
+    if uk_sic_code:
+        st.sidebar.write("**UK SIC:**", uk_sic_code, "—", uk_sic_desc)
+    if nace_code:
+        st.sidebar.write("**NACE:**", nace_code, "—", nace_desc)
+    if mcc_code:
+        st.sidebar.write("**MCC:**", mcc_code, "—", mcc_desc)
+
+
+# ── Batch upload ───────────────────────────────────────────────────────────────
+uploaded_file = st.file_uploader("Upload Excel or CSV file", type=["xlsx", "csv"])
 
 if uploaded_file:
-
-    if uploaded_file.name.endswith(".xlsx"):
-        df_input = pd.read_excel(uploaded_file)
-    else:
-        df_input = pd.read_csv(uploaded_file)
-
+    df_input = (
+        pd.read_excel(uploaded_file)
+        if uploaded_file.name.endswith(".xlsx")
+        else pd.read_csv(uploaded_file)
+    )
     df_input.columns = df_input.columns.str.strip()
+    st.success(f"Loaded {len(df_input)} organisations")
 
-    st.success(f"Loaded {len(df_input)} organizations")
-
-# ------------------------------------------------------------
-# Data Preview
-# ------------------------------------------------------------
-    st.subheader("📄 Uploaded Data Preview")
+    st.subheader("Data Preview")
     st.dataframe(df_input.head(10))
 
-# ------------------------------------------------------------
-# Input Validation
-# ------------------------------------------------------------
-    required_columns = ["Org Name","Address"]
-
-    missing_cols = [
-        col for col in required_columns
-        if col not in df_input.columns
-    ]
-
+    required_columns = ["Org Name"]
+    missing_cols = [c for c in required_columns if c not in df_input.columns]
     if missing_cols:
-
-        st.error(
-            f"❌ Input must contain columns: {', '.join(required_columns)}"
-        )
-
+        st.error(f"Missing required columns: {', '.join(missing_cols)}")
         st.stop()
 
-    df_input["Country"] = df_input.get("Country","")
+    df_input["Address"] = df_input.get("Address", pd.Series([""] * len(df_input)))
+    df_input["Country"] = df_input.get("Country", pd.Series([""] * len(df_input)))
 
-# ------------------------------------------------------------
-# 12. Run Classification
-# ------------------------------------------------------------
-    if st.button("🚀 Classify NAICS"):
-
-        start_time = time.time()
-
+    if st.button("🚀 Classify All (Global Multi-Taxonomy)"):
+        start = time.time()
         results = []
+        progress = st.progress(0)
+        status   = st.empty()
 
-        progress_bar = st.progress(0)
-
-        status = st.empty()
-
-        for i,row in df_input.iterrows():
-
+        for i, row in df_input.iterrows():
             status.text(f"Processing: {row['Org Name']}")
-
-            code,desc,conf,reason,summary,candidates = predict_naics(
-                row["Org Name"],
-                row["Address"],
-                row["Country"]
-            )
+            (
+                primary_tax, primary_code, primary_desc, conf, reason,
+                naics_code, naics_desc, uk_sic_code, uk_sic_desc,
+                nace_code, nace_desc, mcc_code, mcc_desc,
+                summary, cands, prof,
+            ) = predict_global(row["Org Name"], row["Address"], row["Country"])
 
             results.append({
-
-                "Org Name":row["Org Name"],
-                "Address":row["Address"],
-                "Country":row["Country"],
-                "NAICS Code":code,
-                "NAICS Description":desc,
-                "Confidence":conf,
-                "Reasoning":reason
+                "Org Name":          row["Org Name"],
+                "Clean Name":        prof.clean_name,
+                "Jurisdiction":      prof.detected_jurisdiction,
+                "Entity Type":       prof.detected_entity_type,
+                "Primary Taxonomy":  primary_tax,
+                "Primary Code":      primary_code,
+                "Primary Desc":      primary_desc,
+                "Confidence":        conf,
+                "NAICS Code":        naics_code,
+                "NAICS Desc":        naics_desc,
+                "UK SIC Code":       uk_sic_code,
+                "UK SIC Desc":       uk_sic_desc,
+                "NACE Code":         nace_code,
+                "NACE Desc":         nace_desc,
+                "MCC Code":          mcc_code,
+                "MCC Desc":          mcc_desc,
+                "Reasoning":         reason,
             })
-
-            progress_bar.progress((i+1)/len(df_input))
+            progress.progress((i + 1) / len(df_input))
 
         df_results = pd.DataFrame(results)
+        elapsed = time.time() - start
 
-        end_time = time.time()
-
-        st.success("✅ Classification Completed")
-
-# ------------------------------------------------------------
-# Confidence Chart
-# ------------------------------------------------------------
-        st.subheader("📊 Confidence Distribution")
-
+        st.success(f"✅ Classification complete in {elapsed:.1f}s")
+        st.subheader("Confidence Distribution")
         st.bar_chart(df_results["Confidence"].value_counts())
 
-# ------------------------------------------------------------
-# Editable Results
-# ------------------------------------------------------------
-        st.subheader("✏️ Edit Results")
+        edited = st.data_editor(df_results)
+        st.dataframe(edited)
 
-        edited_df = st.data_editor(df_results)
-
-# ------------------------------------------------------------
-# Show Results
-# ------------------------------------------------------------
-        st.subheader("📋 Classification Results")
-
-        st.dataframe(edited_df)
-
-        st.info(
-            f"⏱ Processing Time: {round(end_time-start_time,2)} seconds"
-        )
-
-# ------------------------------------------------------------
-# 13. Download Output
-# ------------------------------------------------------------
         def to_excel(df):
-
-            output = BytesIO()
-
-            df.to_excel(output,index=False)
-
-            output.seek(0)
-
-            return output
+            buf = BytesIO()
+            df.to_excel(buf, index=False)
+            buf.seek(0)
+            return buf
 
         st.download_button(
-            label="📥 Download Excel",
-            data=to_excel(edited_df),
-            file_name="naics_classified_output.xlsx"
+            "📥 Download Excel",
+            data=to_excel(edited),
+            file_name="global_classified_output.xlsx",
         )

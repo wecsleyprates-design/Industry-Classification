@@ -1,272 +1,219 @@
-# ============================================================
-# 🌐 Streamlit Batch NAICS Enrichment Agent
-# ============================================================
+"""
+Batch Global Enrichment Agent with Confidence Scoring (OpenAI + UGO + FAISS)
+=============================================================================
+Upgraded: Groq → OpenAI GPT-4o-mini, NAICS-only → 6-taxonomy UGO,
+limited suffixes → 100+ global entity resolver.
+Confidence is derived from UGO vector distance + source agreement.
+"""
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import faiss
 import json
-import os
 import re
 from io import BytesIO
-from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
-from langchain_groq import ChatGroq
-from langchain_core.messages import HumanMessage
+
+from config import OPENAI_API_KEY
+from openai import OpenAI
 from langchain_community.tools import DuckDuckGoSearchRun
+from entity_resolver import EntityResolver
 
-# ------------------------------------------------------------
-# 1. Load Environment Variables
-# ------------------------------------------------------------
-load_dotenv()
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+_client = OpenAI(api_key=OPENAI_API_KEY)
 
-if not GROQ_API_KEY:
-    st.error("❌ GROQ_API_KEY not found in .env")
-    st.stop()
-
-# ------------------------------------------------------------
-# 2. Page Setup
-# ------------------------------------------------------------
 st.set_page_config(
-    page_title="Batch NAICS Enrichment Agent",
+    page_title="Global Enrichment Agent (with Confidence)",
     page_icon="🌐",
-    layout="wide"
+    layout="wide",
 )
 
-st.title("🌐 Batch NAICS Enrichment Agent")
-st.markdown("Upload organizations and automatically classify their NAICS codes.")
+st.title("🌐 Global Enrichment Agent (OpenAI + UGO + Confidence Scoring)")
+st.markdown("Upload organisations and get multi-taxonomy classification with confidence scores.")
 
-# ------------------------------------------------------------
-# 3. Load NAICS Dataset
-# ------------------------------------------------------------
-@st.cache_data
-def load_naics():
+# ── Load UGO ───────────────────────────────────────────────────────────────────
+@st.cache_resource(show_spinner="Building Unified Global Ontology …")
+def setup_ugo():
+    from taxonomy_engine import TaxonomyEngine
+    return TaxonomyEngine()
 
-    df = pd.read_excel("naics_code.xlsx")
-    df.columns = df.columns.str.strip()
 
-    return df
-
-df_naics = load_naics()
-
-st.success(f"✅ Loaded {len(df_naics)} NAICS records")
-
-# ------------------------------------------------------------
-# 4. Build FAISS Index
-# ------------------------------------------------------------
-@st.cache_resource
-def build_index():
-
-    embed_model = SentenceTransformer("all-MiniLM-L6-v2")
-
-    descriptions = df_naics["Description"].tolist()
-
-    embeddings = embed_model.encode(
-        descriptions,
-        convert_to_numpy=True
-    ).astype(np.float32)
-
-    dimension = embeddings.shape[1]
-
-    index = faiss.IndexFlatL2(dimension)
-    index.add(embeddings)
-
-    return embed_model, index
-
-embed_model, index = build_index()
-
-st.info("Embedding model and FAISS index ready")
-
-# ------------------------------------------------------------
-# 5. Initialize LLM + Search Tool
-# ------------------------------------------------------------
+te = setup_ugo()
+er = EntityResolver()
 search_tool = DuckDuckGoSearchRun()
 
-chat = ChatGroq(
-    model="llama-3.1-8b-instant",
-    temperature=0,
-    max_tokens=200,
-    api_key=GROQ_API_KEY
-)
+st.success(f"✅ UGO loaded: {te.record_count:,} records")
+st.info("✅ Embedding model and FAISS index ready")
 
-# ------------------------------------------------------------
-# 6. Get Company Summary
-# ------------------------------------------------------------
-def get_company_summary(org_name, country):
 
-    query = f"{org_name} company industry business what does {org_name} do {country}"
-
-    try:
-        result = search_tool.run(query)
-        return result[:1200]
-    except:
-        return ""
-
-# ------------------------------------------------------------
-# 7. Confidence Logic
-# ------------------------------------------------------------
-def calculate_confidence(distance, rank):
-
-    if distance < 0.35 and rank == 0:
+# ── Confidence calculation ─────────────────────────────────────────────────────
+def calculate_confidence(similarity_score: float, rank: int) -> str:
+    if similarity_score >= 0.75 and rank == 0:
         return "HIGH"
-
-    elif distance < 0.75 and rank <= 2:
+    elif similarity_score >= 0.55 and rank <= 2:
         return "MEDIUM"
-
     else:
         return "LOW"
 
-# ------------------------------------------------------------
-# 8. NAICS Prediction
-# ------------------------------------------------------------
-def predict_naics(org_name, description="", country=""):
 
-    summary = get_company_summary(org_name, country)
-
-    query_text = f"""
-    {org_name}
-    {description}
-    {summary}
-    """
-
-    query_vec = embed_model.encode(
-        [query_text],
-        convert_to_numpy=True
-    ).astype(np.float32)
-
-    D, I = index.search(query_vec, 5)
-
-    retrieved = df_naics.iloc[I[0]]
-
-    candidates = retrieved[["Naics code","Description"]].to_dict(orient="records")
-
-    prompt = f"""
-You are an expert industry classification analyst.
-
-Company:
-{org_name}
-
-Business Summary:
-{summary}
-
-Candidate NAICS Codes:
-{json.dumps(candidates, indent=2)}
-
-Select the BEST matching NAICS code.
-
-Return JSON only:
-
-{{
-"naics_code":"XXXXX",
-"description":"NAICS description"
-}}
-"""
-
-    response = chat.invoke([HumanMessage(content=prompt)])
-
-    raw_output = response.content.strip()
+# ── Prediction function ────────────────────────────────────────────────────────
+def predict_global_with_confidence(
+    org_name: str,
+    description: str = "",
+    country: str = "",
+):
+    profile = er.resolve(org_name, country=country)
 
     try:
+        web_info = search_tool.run(
+            f"{profile.clean_name} company industry business {country}"
+        )[:1200]
+    except Exception:
+        web_info = ""
 
-        match = re.search(r"\{.*\}", raw_output, re.DOTALL)
-        result = json.loads(match.group())
+    query_text = f"{org_name} {description} {web_info[:400]}"
+    ugo_results = te.search(query_text, top_k=30)
 
-        code = result.get("naics_code")
-        description = result.get("description")
+    # Organise top results by taxonomy
+    candidates: dict = {}
+    by_taxonomy_scores: dict = {}
+    for rec, score in ugo_results:
+        candidates.setdefault(rec.taxonomy, []).append(
+            {"code": rec.code, "description": rec.description}
+        )
+        by_taxonomy_scores.setdefault(rec.taxonomy, []).append(float(score))
+    candidates = {k: v[:6] for k, v in candidates.items()}
 
-    except:
-        return None, None, "LOW"
+    # Top UGO result info for confidence
+    top_score = float(ugo_results[0][1]) if ugo_results else 0.5
+    top_rank  = 0
+    raw_confidence = calculate_confidence(top_score, top_rank)
 
-    rank = 4
+    prompt = f"""You are a global industry classification expert.
 
-    for idx, row in retrieved.iterrows():
+Organization: {org_name} (jurisdiction: {profile.detected_jurisdiction})
+Entity Type: {profile.detected_entity_type}
+Description: {description}
+Web Summary: {web_info[:800]}
 
-        if str(row["Naics code"]) == str(code):
+UGO Candidates:
+{json.dumps(candidates, indent=2)[:2500]}
 
-            rank = list(retrieved.index).index(idx)
+Return valid JSON only:
+{{
+  "primary_taxonomy": "...",
+  "primary_code": "...",
+  "primary_description": "...",
+  "naics_code": "... or null",
+  "naics_description": "... or null",
+  "uk_sic_code": "... or null",
+  "uk_sic_description": "... or null",
+  "nace_code": "... or null",
+  "nace_description": "... or null",
+  "mcc_code": "... or null",
+  "mcc_description": "... or null"
+}}"""
 
-    distance = float(D[0][0])
+    try:
+        resp = _client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=500,
+            response_format={"type": "json_object"},
+        )
+        data = json.loads(resp.choices[0].message.content.strip())
+        data["confidence"]   = raw_confidence
+        data["ugo_score"]    = round(top_score, 4)
+        data["jurisdiction"] = profile.detected_jurisdiction
+        data["entity_type"]  = profile.detected_entity_type
+        data["clean_name"]   = profile.clean_name
+        return data
+    except Exception as exc:
+        return {
+            "primary_code":   None,
+            "primary_description": str(exc),
+            "confidence":     "LOW",
+            "ugo_score":      0.0,
+            "jurisdiction":   profile.detected_jurisdiction,
+            "entity_type":    profile.detected_entity_type,
+            "clean_name":     profile.clean_name,
+        }
 
-    confidence = calculate_confidence(distance, rank)
 
-    return code, description, confidence
-
-# ------------------------------------------------------------
-# 9. Upload Input File
-# ------------------------------------------------------------
-uploaded_file = st.file_uploader(
-    "Upload Excel or CSV file",
-    type=["xlsx","csv"]
-)
+# ── File upload ────────────────────────────────────────────────────────────────
+uploaded_file = st.file_uploader("Upload Excel or CSV file", type=["xlsx", "csv"])
 
 if uploaded_file:
-
-    if uploaded_file.name.endswith(".xlsx"):
-        df_input = pd.read_excel(uploaded_file)
-    else:
-        df_input = pd.read_csv(uploaded_file)
-
+    df_input = (
+        pd.read_excel(uploaded_file)
+        if uploaded_file.name.endswith(".xlsx")
+        else pd.read_csv(uploaded_file)
+    )
     df_input.columns = df_input.columns.str.strip()
-
-    st.success(f"Loaded {len(df_input)} organizations")
+    st.success(f"Loaded {len(df_input)} organisations")
 
     if "Org Name" not in df_input.columns:
-        st.error("❌ Input file must contain 'Org Name' column")
+        st.error("Input file must contain 'Org Name' column")
         st.stop()
 
-    df_input["Description"] = df_input.get("Description","")
-    df_input["Country"] = df_input.get("Country","")
+    df_input["Description"] = df_input.get("Description", pd.Series([""] * len(df_input)))
+    df_input["Country"]     = df_input.get("Country",     pd.Series([""] * len(df_input)))
 
-# ------------------------------------------------------------
-# 10. Run Batch Enrichment
-# ------------------------------------------------------------
-    if st.button("🚀 Enrich Organizations"):
-
+    if st.button("🚀 Enrich with Confidence Scoring"):
         results = []
+        progress = st.progress(0)
 
-        progress_bar = st.progress(0)
-
-        for i,row in df_input.iterrows():
-
-            code, desc, conf = predict_naics(
-                row["Org Name"],
-                row["Description"],
-                row["Country"]
+        for i, row in df_input.iterrows():
+            res = predict_global_with_confidence(
+                org_name=str(row["Org Name"]),
+                description=str(row.get("Description", "")),
+                country=str(row.get("Country", "")),
             )
-
             results.append({
-
-                "Org Name":row["Org Name"],
-                "Description":row["Description"],
-                "Country":row["Country"],
-                "NAICS Code":code,
-                "NAICS Description":desc,
-                "Confidence":conf
+                "Org Name":         row["Org Name"],
+                "Clean Name":       res.get("clean_name", ""),
+                "Jurisdiction":     res.get("jurisdiction", ""),
+                "Entity Type":      res.get("entity_type", ""),
+                "Primary Taxonomy": res.get("primary_taxonomy", ""),
+                "Primary Code":     res.get("primary_code", ""),
+                "Primary Desc":     res.get("primary_description", ""),
+                "Confidence":       res.get("confidence", ""),
+                "UGO Score":        res.get("ugo_score", ""),
+                "NAICS Code":       res.get("naics_code", ""),
+                "NAICS Desc":       res.get("naics_description", ""),
+                "UK SIC Code":      res.get("uk_sic_code", ""),
+                "UK SIC Desc":      res.get("uk_sic_description", ""),
+                "NACE Code":        res.get("nace_code", ""),
+                "NACE Desc":        res.get("nace_description", ""),
+                "MCC Code":         res.get("mcc_code", ""),
+                "MCC Desc":         res.get("mcc_description", ""),
             })
-
-            progress_bar.progress((i+1)/len(df_input))
+            progress.progress((i + 1) / len(df_input))
 
         df_results = pd.DataFrame(results)
-
         st.success("✅ Enrichment Completed")
 
-        st.dataframe(df_results)
+        st.subheader("Confidence Distribution")
+        st.bar_chart(df_results["Confidence"].value_counts())
 
-# ------------------------------------------------------------
-# 11. Download Results
-# ------------------------------------------------------------
+        st.subheader("UGO Similarity Score Distribution")
+        st.bar_chart(
+            pd.cut(
+                df_results["UGO Score"].dropna().astype(float),
+                bins=5,
+                labels=["Very Low","Low","Medium","High","Very High"],
+            ).value_counts().sort_index()
+        )
+
+        st.dataframe(df_results, use_container_width=True)
+
         def to_excel(df):
-
-            output = BytesIO()
-            df.to_excel(output,index=False)
-            output.seek(0)
-
-            return output
+            buf = BytesIO()
+            df.to_excel(buf, index=False)
+            buf.seek(0)
+            return buf
 
         st.download_button(
-            label="📥 Download Enriched Excel",
+            "📥 Download Enriched Excel",
             data=to_excel(df_results),
-            file_name="naics_enriched_output.xlsx"
+            file_name="global_enriched_with_confidence.xlsx",
         )
