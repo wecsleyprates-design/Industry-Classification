@@ -159,40 +159,48 @@ Input (Company Name + Metadata)
 - Python 3.10+
 - An [OpenAI API key](https://platform.openai.com/api-keys)
 
-### Step 1 — Clone the repo
+### Step 1 — Navigate into the project folder
+
+> **Important:** `requirements.txt` and `app.py` live inside the subfolder, not the repo root.
 
 ```bash
-git clone https://github.com/wecsleyprates-design/Industry-Classification.git
+# If you cloned the outer repo:
 cd Industry-Classification/AI-Powered-NAICS-Industry-Classification-Agent
+
+# Or if you're already at the repo root in Cursor:
+cd AI-Powered-NAICS-Industry-Classification-Agent
 ```
 
-### Step 2 — Set your OpenAI API key
-
-```bash
-cp .env.example .env
-# Open .env and replace the placeholder with your real key:
-#   OPENAI_API_KEY=sk-...
-```
-
-### Step 3 — Install dependencies
+### Step 2 — Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Step 4 — Launch (one command)
+> This downloads PyTorch (for embeddings) and several ML libraries — allow 2–5 minutes on first run.
+
+### Step 3 — Set your OpenAI API key
+
+```bash
+echo "OPENAI_API_KEY=sk-..." > .env
+```
+
+### Step 4 — Launch
+
+```bash
+# Use this form — works even if 'streamlit' is not on your PATH:
+python -m streamlit run app.py
+```
+
+> If you see `streamlit: command not found`, always use `python -m streamlit run app.py` instead of `streamlit run app.py`.
+
+Then open **http://localhost:8501** in your browser.
+
+### Alternative: one-command launcher
 
 ```bash
 bash run.sh
 ```
-
-Or manually:
-
-```bash
-streamlit run app.py
-```
-
-Then open **http://localhost:8501** in your browser.
 
 ---
 

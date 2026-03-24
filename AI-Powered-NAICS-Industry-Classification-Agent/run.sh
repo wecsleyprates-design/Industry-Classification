@@ -57,6 +57,7 @@ echo "Open your browser at: http://localhost:8501"
 echo "Press Ctrl+C to stop."
 echo ""
 
+# Always use 'python -m streamlit' so it works even when 'streamlit' is not on PATH
 $PYTHON -m streamlit run app.py \
   --server.port=8501 \
   --server.headless=true \
