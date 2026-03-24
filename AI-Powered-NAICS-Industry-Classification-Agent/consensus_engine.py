@@ -122,43 +122,57 @@ class FeatureEngineer:
     """
     Transforms a VendorBundle into a flat numeric feature vector.
 
-    Feature layout (30 features):
-      [0..5]  – per-source weighted confidence (opencorporates, equifax,
-                trulioo, zoominfo, duns, ai_semantic)
-      [6..11] – per-source status flags (MATCHED=1, else=0)
-      [12]    – Trulioo pollution flag
-      [13]    – web-to-registry semantic distance (0–1)
-      [14]    – temporal pivot score (0–1)
-      [15]    – cross-taxonomy agreement count (0–6)
-      [16]    – entity_type_holding flag
-      [17]    – entity_type_ngo flag
-      [18]    – entity_type_partnership flag
-      [19]    – jurisdiction_us flag
-      [20]    – jurisdiction_gb flag
-      [21]    – jurisdiction_eu flag (DE/FR/IT/ES/NL)
-      [22]    – jurisdiction_apac flag (SG/IN/AU/JP/CN)
-      [23]    – majority_code_agreement (fraction of sources agreeing)
-      [24]    – high_risk_naics_flag
-      [25]    – n_unique_codes (diversity of vendor opinions)
-      [26]    – registry_vs_ai_distance (cosine distance)
-      [27]    – avg_source_confidence
-      [28]    – max_source_confidence
-      [29]    – source_count (how many sources returned data)
+    Feature layout (38 features):
+      [0..5]   – per-source weighted confidence (opencorporates, equifax,
+                 trulioo, zoominfo, duns, ai_semantic)
+      [6..11]  – per-source status flags (MATCHED=1, else=0)
+      [12]     – Trulioo pollution flag
+      [13]     – web-to-registry semantic distance (0–1)
+      [14]     – temporal pivot score (0–1)
+      [15]     – cross-taxonomy agreement count (0–1 normalised)
+      [16]     – entity_type_holding flag
+      [17]     – entity_type_ngo flag
+      [18]     – entity_type_partnership flag
+
+      [19..28] – jurisdiction region bucket ONE-HOT (10 classes):
+                   idx 0 = US (federal)
+                   idx 1 = US_STATE (us_mo, us_ca, pr …)
+                   idx 2 = CA (federal)
+                   idx 3 = CA_PROV (ca_bc, ca_qc …)
+                   idx 4 = EU (gb, de, fr, es, it, nl, …)
+                   idx 5 = APAC (cn, jp, in, sg, au, hk, …)
+                   idx 6 = LATAM (mx, br, ar, co, …)
+                   idx 7 = MENA (ae, ae_az, sa, ae_du, …)
+                   idx 8 = AFRICA (za, ng, ke, …)
+                   idx 9 = OTHER
+
+      [29]     – is_subnational flag (1 if state/province/emirate level)
+      [30]     – is_naics_jurisdiction flag (1 if NAICS is primary taxonomy)
+      [31]     – majority_code_agreement (fraction of sources agreeing)
+      [32]     – high_risk_naics_flag
+      [33]     – n_unique_codes (diversity of vendor opinions)
+      [34]     – registry_vs_ai_distance (cosine distance)
+      [35]     – avg_source_confidence
+      [36]     – max_source_confidence
+      [37]     – source_count (how many sources returned data)
     """
+
+    N_FEATURES = 38
 
     _SOURCES = [
         "opencorporates", "equifax", "trulioo",
         "zoominfo", "duns", "ai_semantic",
     ]
-    _EU = {"DE", "FR", "IT", "ES", "NL", "BE", "AT", "SE", "PL", "DK", "FI", "NO"}
-    _APAC = {"SG", "IN", "AU", "JP", "CN", "HK", "TW", "KR", "TH", "VN", "PH", "MY", "ID", "NZ"}
 
     def __init__(self, taxonomy_engine=None) -> None:
-        self._te = taxonomy_engine  # optional; used for semantic distances
+        self._te = taxonomy_engine
 
     def transform(self, bundle: VendorBundle) -> np.ndarray:
+        import jurisdiction_registry as JR
+        from collections import Counter
+
         sig_map = {s.source: s for s in bundle.signals}
-        feats = np.zeros(30, dtype=np.float32)
+        feats = np.zeros(self.N_FEATURES, dtype=np.float32)
 
         # [0..5] per-source weighted confidence
         for i, src in enumerate(self._SOURCES):
@@ -176,11 +190,11 @@ class FeatureEngineer:
 
         # [13] web-to-registry semantic distance
         reg = sig_map.get("opencorporates")
-        ai = sig_map.get("ai_semantic")
+        ai  = sig_map.get("ai_semantic")
         if self._te and reg and ai and reg.label and ai.label:
             feats[13] = float(self._te.compute_semantic_distance(reg.label, ai.label))
         else:
-            feats[13] = 0.5   # unknown → neutral
+            feats[13] = 0.5
 
         # [14] temporal pivot score
         feats[14] = self._compute_pivot_score(bundle)
@@ -189,49 +203,50 @@ class FeatureEngineer:
         feats[15] = self._cross_taxonomy_agreement(bundle)
 
         # [16..18] entity type flags
-        feats[16] = 1.0 if bundle.entity_type == "Holding" else 0.0
-        feats[17] = 1.0 if bundle.entity_type == "NGO" else 0.0
+        feats[16] = 1.0 if bundle.entity_type == "Holding"     else 0.0
+        feats[17] = 1.0 if bundle.entity_type == "NGO"         else 0.0
         feats[18] = 1.0 if bundle.entity_type == "Partnership" else 0.0
 
-        # [19..22] jurisdiction flags
-        jur = bundle.jurisdiction
-        feats[19] = 1.0 if jur == "US" else 0.0
-        feats[20] = 1.0 if jur == "GB" else 0.0
-        feats[21] = 1.0 if jur in self._EU else 0.0
-        feats[22] = 1.0 if jur in self._APAC else 0.0
+        # [19..28] jurisdiction region bucket one-hot (10 buckets)
+        # bundle.jurisdiction is stored as the full jurisdiction_code
+        jc = bundle.jurisdiction.lower().strip()
+        one_hot = JR.bucket_one_hot(jc)        # returns 10-element list
+        for k, v in enumerate(one_hot):
+            feats[19 + k] = v
 
-        # [23] majority code agreement (fraction of sources giving same code)
+        # [29] is_subnational flag
+        jr_rec = JR.lookup(jc)
+        feats[29] = 1.0 if (jr_rec and jr_rec.is_subnational) else 0.0
+
+        # [30] is_naics_jurisdiction flag
+        feats[30] = 1.0 if JR.is_naics_jurisdiction(jc) else 0.0
+
+        # [31] majority code agreement
         codes = [s.raw_code for s in bundle.signals if s.status != "POLLUTED"]
         if codes:
-            from collections import Counter
             most_common_count = Counter(codes).most_common(1)[0][1]
-            feats[23] = most_common_count / len(codes)
+            feats[31] = most_common_count / len(codes)
         else:
-            feats[23] = 0.0
+            feats[31] = 0.0
 
-        # [24] high-risk NAICS prefix
-        naics_codes = [
-            s.raw_code for s in bundle.signals
-            if s.taxonomy == "US_NAICS_2022"
-        ]
-        feats[24] = 1.0 if any(
-            c[:4] in HIGH_RISK_NAICS_PREFIXES for c in naics_codes
-        ) else 0.0
+        # [32] high-risk NAICS prefix
+        naics_codes = [s.raw_code for s in bundle.signals if s.taxonomy == "US_NAICS_2022"]
+        feats[32] = 1.0 if any(c[:4] in HIGH_RISK_NAICS_PREFIXES for c in naics_codes) else 0.0
 
-        # [25] number of unique codes across all sources
+        # [33] unique-code diversity
         all_codes = [s.raw_code for s in bundle.signals]
-        feats[25] = float(len(set(all_codes))) / max(len(all_codes), 1)
+        feats[33] = float(len(set(all_codes))) / max(len(all_codes), 1)
 
-        # [26] registry vs AI distance (label-level)
-        feats[26] = feats[13]   # reuse; extend if te available
+        # [34] registry vs AI distance
+        feats[34] = feats[13]
 
-        # [27..28] aggregate confidence stats
+        # [35..36] aggregate confidence stats
         confs = [s.confidence for s in bundle.signals]
-        feats[27] = float(np.mean(confs)) if confs else 0.0
-        feats[28] = float(np.max(confs)) if confs else 0.0
+        feats[35] = float(np.mean(confs)) if confs else 0.0
+        feats[36] = float(np.max(confs))  if confs else 0.0
 
-        # [29] source count
-        feats[29] = float(len(bundle.signals)) / 6.0
+        # [37] source count
+        feats[37] = float(len(bundle.signals)) / 6.0
 
         return feats
 
@@ -314,14 +329,23 @@ class IndustryConsensusEngine:
                 consensus_probability=float(probs[idx]),
             ))
 
+        import jurisdiction_registry as JR
+        jc = bundle.jurisdiction.lower().strip()
+        jr_rec = JR.lookup(jc)
+
         feature_debug = {
-            "trulioo_polluted": bool(feats[0][12]),
-            "web_registry_distance": round(float(feats[0][13]), 4),
-            "temporal_pivot_score": round(float(feats[0][14]), 4),
-            "cross_taxonomy_agreement": round(float(feats[0][15]), 4),
-            "majority_code_agreement": round(float(feats[0][23]), 4),
-            "high_risk_naics_flag": bool(feats[0][24]),
-            "avg_source_confidence": round(float(feats[0][27]), 4),
+            "trulioo_polluted":          bool(feats[0][12]),
+            "web_registry_distance":     round(float(feats[0][13]), 4),
+            "temporal_pivot_score":      round(float(feats[0][14]), 4),
+            "cross_taxonomy_agreement":  round(float(feats[0][15]), 4),
+            "jurisdiction_code":         jc,
+            "jurisdiction_label":        jr_rec.label if jr_rec else jc,
+            "region_bucket":             JR.region_bucket(jc),
+            "is_subnational":            bool(feats[0][29]),
+            "is_naics_jurisdiction":     bool(feats[0][30]),
+            "majority_code_agreement":   round(float(feats[0][31]), 4),
+            "high_risk_naics_flag":      bool(feats[0][32]),
+            "avg_source_confidence":     round(float(feats[0][35]), 4),
         }
 
         return ConsensusResult(
@@ -424,18 +448,23 @@ class IndustryConsensusEngine:
         return f"Code {code}"
 
     def _code_to_taxonomy(self, code: str, bundle: VendorBundle) -> str:
-        """Detect taxonomy from code format or bundle signals."""
+        """Detect taxonomy from bundle signals, code format, or jurisdiction."""
+        import jurisdiction_registry as JR
         for s in bundle.signals:
             if s.raw_code == code:
                 return s.taxonomy
-        # NAICS 6-digit → US_NAICS_2022
+        # Use jurisdiction preferred taxonomy as context
+        pref = JR.preferred_taxonomy(bundle.jurisdiction.lower())
+        # Validate code format matches a known taxonomy
         if len(code) == 6 and code.isdigit():
             return "US_NAICS_2022"
-        if len(code) == 4 and code.isdigit():
-            return "US_SIC_1987"
         if len(code) == 5 and code.isdigit():
             return "UK_SIC_2007"
-        return "US_NAICS_2022"
+        if len(code) == 4 and code.isdigit():
+            return "US_SIC_1987"
+        if len(code) <= 4 and not code.isdigit():
+            return "NACE_REV2"
+        return pref
 
     def _save_model(self, path: str) -> None:
         os.makedirs(DATA_DIR, exist_ok=True)

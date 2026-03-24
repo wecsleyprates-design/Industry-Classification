@@ -11,9 +11,9 @@ real data providers:
   • AI Semantic     (our own web-scrape + NLP enrichment)
   • Redshift        (historical classifications from our data warehouse)
 
-The simulator returns a realistic VendorBundle containing raw codes,
-labels, source weights, and temporal history — all the inputs consumed
-by the ConsensusEngine.
+The simulator accepts jurisdiction codes in the full OpenCorporates format:
+  us_mo, ca_bc, ae_az, gb, de, th, tz, gg, je, pr  … any of the 200+
+  registered codes in jurisdiction_registry.py.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Optional
 from datetime import datetime, timedelta
+
+import jurisdiction_registry as JR
 
 # ── Simulated code crosswalk pools ───────────────────────────────────────────
 # These represent the realistic distributions that vendors return.
@@ -267,48 +269,60 @@ class DataSimulator:
 
     # ── Private vendor simulators ─────────────────────────────────────────────
 
+    # ── Internal: resolve taxonomy pool from jurisdiction_code ───────────────
+
+    @staticmethod
+    def _taxonomy_pool(jc: str, seed_offset: int) -> tuple[str, str, str]:
+        """
+        Return (code, label, taxonomy) appropriate for the given
+        OpenCorporates jurisdiction_code, using the registry.
+        """
+        pref = JR.preferred_taxonomy(jc)
+        if pref == "UK_SIC_2007":
+            code, label = _pick(_UK_SIC_POOL, seed_offset)
+            return code, label, "UK_SIC_2007"
+        elif pref == "NACE_REV2":
+            code, label = _pick(_NACE_POOL, seed_offset)
+            return code, label, "NACE_REV2"
+        elif pref == "ISIC_REV4":
+            code, label = _pick(_MCC_POOL, seed_offset)
+            return code, label, "ISIC_REV4"
+        else:
+            code, label = _pick(_NAICS_POOL, seed_offset)
+            return code, label, "US_NAICS_2022"
+
+    # ── Private vendor simulators ─────────────────────────────────────────────
+
     def _call_opencorporates(
         self, seed: int, jurisdiction: str, force_conflict: bool
     ) -> SourceSignal:
+        jc = jurisdiction.lower().strip()
         if force_conflict:
-            code, label = "551112", "Offices of Other Holding Companies"
-            taxonomy = "US_NAICS_2022"
-        elif jurisdiction == "GB":
-            code, label = _pick(_UK_SIC_POOL, seed)
-            taxonomy = "UK_SIC_2007"
-        elif jurisdiction in ("DE", "FR", "IT", "ES", "NL"):
-            code, label = _pick(_NACE_POOL, seed + 1)
-            taxonomy = "NACE_REV2"
+            code, label, taxonomy = "551112", "Offices of Other Holding Companies", "US_NAICS_2022"
         else:
-            code, label = _pick(_NAICS_POOL, seed)
-            taxonomy = "US_NAICS_2022"
+            code, label, taxonomy = self._taxonomy_pool(jc, seed)
 
         return SourceSignal(
             source="opencorporates",
-            raw_code=code,
-            taxonomy=taxonomy,
-            label=label,
+            raw_code=code, taxonomy=taxonomy, label=label,
             weight=_jitter(self.weights["opencorporates"], 0.05),
-            status="MATCHED",
-            confidence=_jitter(0.88, 0.07),
+            status="MATCHED", confidence=_jitter(0.88, 0.07),
             retrieved_at=_ts(0),
         )
 
     def _call_equifax(self, seed: int, jurisdiction: str) -> SourceSignal:
-        if jurisdiction == "US":
+        jc = jurisdiction.lower().strip()
+        if JR.is_naics_jurisdiction(jc):
             code, label = _pick(_NAICS_POOL, seed + 2)
             taxonomy = "US_NAICS_2022"
         else:
             code, label = _pick(_US_SIC_POOL, seed + 2)
             taxonomy = "US_SIC_1987"
 
-        # Equifax sometimes returns a SIC instead of NAICS for non-US
         conflict = random.random() < 0.15
         return SourceSignal(
             source="equifax",
-            raw_code=code,
-            taxonomy=taxonomy,
-            label=label,
+            raw_code=code, taxonomy=taxonomy, label=label,
             weight=_jitter(self.weights["equifax"], 0.08),
             status="CONFLICT" if conflict else "MATCHED",
             confidence=_jitter(0.75, 0.1),
@@ -317,31 +331,25 @@ class DataSimulator:
 
     def _call_trulioo(self, seed: int, jurisdiction: str) -> SourceSignal:
         """
-        Trulioo known issue: sometimes returns 4-digit SIC for a 5-digit
-        NAICS jurisdiction → "pollution" flag.
+        Trulioo known issue: sometimes returns 4-digit SIC regardless of jurisdiction.
         """
+        jc = jurisdiction.lower().strip()
         polluted = random.random() < 0.25
         if polluted:
             code, label = _pick(_US_SIC_POOL, seed + 3)
-            taxonomy = "US_SIC_1987"
-            status = "POLLUTED"
-        elif jurisdiction == "GB":
-            code, label = _pick(_UK_SIC_POOL, seed + 3)
-            taxonomy = "UK_SIC_2007"
-            status = "MATCHED"
-        else:
-            code, label = _pick(_NAICS_POOL, seed + 3)
-            taxonomy = "US_NAICS_2022"
-            status = "MATCHED"
-
+            return SourceSignal(
+                source="trulioo",
+                raw_code=code, taxonomy="US_SIC_1987", label=label,
+                weight=_jitter(self.weights["trulioo"], 0.07),
+                status="POLLUTED", confidence=_jitter(0.70, 0.1),
+                retrieved_at=_ts(0),
+            )
+        code, label, taxonomy = self._taxonomy_pool(jc, seed + 3)
         return SourceSignal(
             source="trulioo",
-            raw_code=code,
-            taxonomy=taxonomy,
-            label=label,
+            raw_code=code, taxonomy=taxonomy, label=label,
             weight=_jitter(self.weights["trulioo"], 0.07),
-            status=status,
-            confidence=_jitter(0.70, 0.1),
+            status="MATCHED", confidence=_jitter(0.70, 0.1),
             retrieved_at=_ts(0),
         )
 
@@ -349,80 +357,57 @@ class DataSimulator:
         code, label = _pick(_NAICS_POOL, seed + 4)
         return SourceSignal(
             source="zoominfo",
-            raw_code=code,
-            taxonomy="US_NAICS_2022",
-            label=label,
+            raw_code=code, taxonomy="US_NAICS_2022", label=label,
             weight=_jitter(self.weights["zoominfo"], 0.06),
-            status="MATCHED",
-            confidence=_jitter(0.80, 0.08),
+            status="MATCHED", confidence=_jitter(0.80, 0.08),
             retrieved_at=_ts(0),
         )
 
     def _call_duns(self, seed: int, jurisdiction: str) -> SourceSignal:
-        if jurisdiction == "US":
-            code, label = _pick(_NAICS_POOL, seed + 5)
-            taxonomy = "US_NAICS_2022"
-        else:
-            code, label = _pick(_NACE_POOL, seed + 5)
-            taxonomy = "NACE_REV2"
-
+        jc = jurisdiction.lower().strip()
+        code, label, taxonomy = self._taxonomy_pool(jc, seed + 5)
         return SourceSignal(
             source="duns",
-            raw_code=code,
-            taxonomy=taxonomy,
-            label=label,
+            raw_code=code, taxonomy=taxonomy, label=label,
             weight=_jitter(self.weights["duns"], 0.05),
-            status="MATCHED",
-            confidence=_jitter(0.83, 0.07),
+            status="MATCHED", confidence=_jitter(0.83, 0.07),
             retrieved_at=_ts(0),
         )
 
     def _call_ai_semantic(self, seed: int, web_summary: str) -> SourceSignal:
-        """
-        Simulates our in-house AI web-scrape enrichment.
-        In production this uses GPT-4o-mini + DuckDuckGo.
-        """
+        """In production: GPT-4o-mini + DuckDuckGo."""
         if web_summary:
             summary_seed = int(hashlib.md5(web_summary[:50].encode()).hexdigest(), 16)
             code, label = _pick(_NAICS_POOL, summary_seed)
         else:
             code, label = _pick(_NAICS_POOL, seed + 6)
-
         return SourceSignal(
             source="ai_semantic",
-            raw_code=code,
-            taxonomy="US_NAICS_2022",
-            label=label,
+            raw_code=code, taxonomy="US_NAICS_2022", label=label,
             weight=_jitter(self.weights["ai_semantic"], 0.06),
-            status="INFERRED",
-            confidence=_jitter(0.78, 0.10),
+            status="INFERRED", confidence=_jitter(0.78, 0.10),
             retrieved_at=_ts(0),
         )
 
     def _generate_history(
         self, seed: int, jurisdiction: str, n: int = 3
     ) -> list[TemporalRecord]:
+        jc = jurisdiction.lower().strip()
         records = []
         for i in range(n):
-            days_ago = (i + 1) * 90   # roughly every quarter
-            if jurisdiction == "GB":
-                code, label = _pick(_UK_SIC_POOL, seed + i * 7)
-                taxonomy = "UK_SIC_2007"
-            else:
-                code, label = _pick(_NAICS_POOL, seed + i * 7)
-                taxonomy = "US_NAICS_2022"
-            records.append(
-                TemporalRecord(
-                    taxonomy=taxonomy,
-                    code=code,
-                    label=label,
-                    source=random.choice(
-                        ["opencorporates", "equifax", "trulioo", "zoominfo"]
-                    ),
-                    retrieved_at=_ts(days_ago),
-                )
-            )
+            days_ago = (i + 1) * 90
+            code, label, taxonomy = self._taxonomy_pool(jc, seed + i * 7)
+            records.append(TemporalRecord(
+                taxonomy=taxonomy, code=code, label=label,
+                source=random.choice(["opencorporates", "equifax", "trulioo", "zoominfo"]),
+                retrieved_at=_ts(days_ago),
+            ))
         return records
+
+
+# ── Full jurisdiction list drawn from registry ────────────────────────────────
+# Used by simulate_training_dataset to cover all 200+ known codes.
+_ALL_JURISDICTION_CODES: list[str] = JR.all_codes()
 
 
 def simulate_training_dataset(
@@ -431,9 +416,53 @@ def simulate_training_dataset(
 ) -> list[VendorBundle]:
     """
     Generate a large synthetic dataset for XGBoost training / evaluation.
+    Jurisdictions default to a representative sample that covers every
+    region bucket (US states, Canadian provinces, UAE emirates, EU,
+    APAC, LATAM, MENA, Africa) to ensure the model learns all encodings.
     """
     if jurisdictions is None:
-        jurisdictions = ["US", "GB", "DE", "FR", "AU", "CA", "IN", "SG"]
+        # Representative sample: ~30 codes spanning all region buckets
+        jurisdictions = [
+            # US — federal + every state/territory
+            "us", "us_mo", "us_ca", "us_tx", "us_ny", "us_fl", "us_il",
+            "us_wa", "us_co", "us_nd", "us_sd", "us_vt", "us_va", "us_ks",
+            "us_ma", "us_mi", "us_oh", "us_ar", "us_ri", "us_wi", "us_ak",
+            "us_wy", "us_nc", "us_de", "us_dc", "us_nv", "us_nm", "us_ky",
+            "us_ne", "us_az", "us_pa", "us_al", "us_nj", "us_mn", "us_id",
+            "us_la", "us_nh", "us_or", "us_sc", "us_mt", "us_ut", "us_ct",
+            "us_md", "us_ga", "us_hi", "us_ia", "us_ms", "us_ok", "us_wv",
+            "us_tn", "us_in", "us_me", "pr",
+            # Canada
+            "ca", "ca_bc", "ca_qc", "ca_on", "ca_ab", "ca_ns", "ca_pe",
+            "ca_nu", "ca_sk", "ca_mb", "ca_nb", "ca_nl", "ca_nt", "ca_yt",
+            # United Kingdom + Crown dependencies
+            "gb", "gb_eng", "gb_sct", "gb_wls", "gb_nir", "gg", "je",
+            # UAE + emirates
+            "ae", "ae_az", "ae_du", "ae_sh",
+            # Australia + states
+            "au", "au_nsw", "au_vic", "au_qld", "au_wa",
+            # Europe
+            "de", "fr", "it", "es", "nl", "pl", "ch", "at", "be", "se",
+            "no", "dk", "fi", "pt", "gr", "ie", "cz", "ro", "hu", "bg",
+            "hr", "sk", "si", "ee", "lv", "lt", "cy", "mt", "lu", "is",
+            "li", "mc", "me", "al", "rs", "mk", "by", "ua", "md", "gi",
+            "gl", "gp", "re", "pm",
+            # Asia-Pacific
+            "in", "cn", "jp", "kr", "sg", "hk", "au", "my", "th", "vn",
+            "ph", "id", "tw", "nz", "mm", "bd", "pk", "lk", "np", "kh",
+            "mn", "bn", "la", "tj", "tl", "to", "vu",
+            # Latin America & Caribbean
+            "mx", "br", "ar", "co", "cl", "pe", "ve", "ec", "bo", "py",
+            "uy", "gt", "cr", "pa", "hn", "ni", "sv", "do", "cu", "jm",
+            "tt", "bb", "ky", "aw", "cw", "bz", "gy", "vg",
+            # MENA
+            "sa", "ae", "ir", "tr", "eg", "dz", "ma", "tn", "ly", "sd",
+            "iq", "sy", "jo", "lb", "il", "ps", "kw", "qa", "bh", "om", "ye",
+            # Africa
+            "za", "ng", "ke", "gh", "et", "tz", "ug", "rw", "ao", "cm",
+            "ci", "sn", "mu", "mz", "zw", "zm", "bw", "na", "mg", "ml",
+            "mw", "ne", "cd", "cg",
+        ]
 
     sim = DataSimulator()
     bundles: list[VendorBundle] = []
@@ -451,8 +480,8 @@ def simulate_training_dataset(
     for i in range(n):
         template = company_name_templates[i % len(company_name_templates)]
         name = template.format(n=i)
-        jur = jurisdictions[i % len(jurisdictions)]
-        force_conflict = i % 20 == 0   # 5% have deliberate shell-company signal
+        jur  = jurisdictions[i % len(jurisdictions)]
+        force_conflict = i % 20 == 0
 
         bundle = sim.fetch(
             company_name=name,
