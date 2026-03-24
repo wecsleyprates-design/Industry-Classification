@@ -16,8 +16,8 @@ data/*.ubj
 data/*_meta.pkl
 data/consensus_model*
 
-# Streamlit cache
-.streamlit/
+# Streamlit secrets (never commit)
+.streamlit/secrets.toml
 
 # Jupyter
 .ipynb_checkpoints/

@@ -153,18 +153,85 @@ Input (Company Name + Metadata)
 
 ---
 
-## Quick Start
+## How to Run
+
+### Prerequisites
+- Python 3.10+
+- An [OpenAI API key](https://platform.openai.com/api-keys)
+
+### Step 1 — Clone the repo
+
+```bash
+git clone https://github.com/wecsleyprates-design/Industry-Classification.git
+cd Industry-Classification/AI-Powered-NAICS-Industry-Classification-Agent
+```
+
+### Step 2 — Set your OpenAI API key
+
+```bash
+cp .env.example .env
+# Open .env and replace the placeholder with your real key:
+#   OPENAI_API_KEY=sk-...
+```
+
+### Step 3 — Install dependencies
 
 ```bash
 pip install -r requirements.txt
+```
+
+### Step 4 — Launch (one command)
+
+```bash
+bash run.sh
+```
+
+Or manually:
+
+```bash
 streamlit run app.py
 ```
 
-Open the Streamlit UI and navigate between:
-- **Single Company Lookup** — full pipeline for one company
-- **Batch Classification** — upload CSV/Excel
-- **Risk Dashboard** — AML/KYB portfolio analysis
-- **Taxonomy Explorer** — semantic search across the UGO
+Then open **http://localhost:8501** in your browser.
+
+---
+
+## App Pages
+
+| Page | What it does |
+|------|-------------|
+| **Single Company Lookup** | Enter any company name + address + country (or `us_mo`, `ca_bc`, `ae_az` jurisdiction code). Runs the full pipeline: entity resolution → vendor simulation → UGO semantic search → XGBoost consensus → LLM enrichment → AML/KYB risk scoring. Returns primary + secondary codes across all 6 taxonomies, source lineage, and risk signals. |
+| **Batch Classification** | Upload a CSV or Excel file with columns `Org Name`, `Address` (optional), `Country`/`jurisdiction_code` (optional). Processes all rows and returns a downloadable results file with multi-taxonomy codes, confidence, risk scores, and KYB recommendations. |
+| **Risk Dashboard** | Generates a synthetic portfolio of companies (10–100) and runs full AML/KYB analysis. Shows risk level distribution, jurisdiction heatmap, high-risk entity detail, and a downloadable Excel report. |
+| **Taxonomy Explorer** | Semantic search across the Unified Global Ontology (2,330 codes × 6 taxonomies). Type any business description and see cross-taxonomy matches ranked by cosine similarity. Also shows a semantic distance matrix between top results. |
+
+---
+
+## Input Formats Accepted
+
+The `Country` / jurisdiction field accepts **any** of these formats:
+
+```
+us_mo          → Missouri (US state)
+ca_bc          → British Columbia (Canadian province)
+ae_az          → Abu Dhabi (UAE emirate)
+gg             → Guernsey (Crown dependency)
+je             → Jersey (Crown dependency)
+gb             → United Kingdom
+de             → Germany
+tz             → Tanzania
+th             → Thailand
+do             → Dominican Republic
+pr             → Puerto Rico
+Missouri       → resolves to us_mo
+British Columbia → resolves to ca_bc
+United States  → resolves to us
+Dubai          → resolves to ae_du
+```
+
+200+ OpenCorporates-format codes are supported.
+
+---
 
 ---
 
