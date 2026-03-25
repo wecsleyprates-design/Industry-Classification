@@ -253,7 +253,138 @@ integration_data.request_response: business_id · platform_id · response(JSONB)
 
 **Result:** Every UK business either gets `naics_id = NULL` or an inappropriate US NAICS code applied to it.
 
-### 1.7 Known Issues and TODOs From the Codebase
+### 1.7 The AI Enrichment Step — How It Works in Worth AI
+
+#### What it is
+`AINaicsEnrichment` is a **deferrable asynchronous task** that runs OpenAI GPT (currently `gpt-5-mini`) to classify a business's NAICS code, MCC code, and optionally UK SIC code. It is implemented in `integration-service/lib/aiEnrichment/aiNaicsEnrichment.ts`.
+
+#### When is it triggered?
+The AI enrichment does NOT run for every business. It runs only when specific **fact-based conditions** are satisfied — this is controlled by the `DEPENDENT_FACTS` object and evaluated by `DeferrableTaskManager.evaluateReadyState()`.
+
+**Trigger conditions for `AINaicsEnrichment`:**
+
+```typescript
+static readonly DEPENDENT_FACTS = {
+  website:       { minimumSources: 1 },      // MUST have a website fact resolved
+  website_found: { minimumSources: 1 },      // MUST have website_found resolved
+  business_name: { minimumSources: 1 },      // MUST have a business name
+  primary_address:{ minimumSources: 1 },     // MUST have an address
+  dba:           { minimumSources: 0 },      // optional DBA name
+  naics_code:    {                           // KEY TRIGGER:
+    maximumSources: 3,                       //   SKIP if already 3+ sources for NAICS
+    minimumSources: 1,                       //   DEFER if 0 sources for NAICS
+    ignoreSources: ["AINaicsEnrichment"]     //   Don't count AI's own prior output
+  },
+  uk_sic_code:   { maximumSources: 3, minimumSources: 0, ignoreSources: ["AINaicsEnrichment"] },
+  mcc_code:      { maximumSources: 3, minimumSources: 1, ignoreSources: ["AINaicsEnrichment"] },
+  corporation:   { minimumSources: 0 }
+}
+```
+
+**In plain English:**
+- AI enrichment **runs** when: the business has a website, a name, an address, AND already has between 1 and 2 NAICS sources (i.e. some vendors responded but not all 3)
+- AI enrichment **skips** (marks SUCCESS without running) when: `naics_code` already has ≥ 3 source confirmations → saves OpenAI credits
+- AI enrichment **defers** (waits, retries) when: required facts are not yet resolved → polls via Bull queue up to 10 attempts with exponential backoff
+- AI enrichment **force-runs** after: 3-minute timeout (`TASK_TIMEOUT_IN_SECONDS = 60 * 3`) regardless of fact readiness
+
+#### The execution queue
+The task is enqueued to **Bull queue** (`QUEUES.AI_ENRICHMENT`), processed by a sandboxed worker (`deferrableTaskWorker.ts`). The worker calls `evaluateJob()` which calls `evaluateReadyState()` to check conditions, then calls `executeDeferrableTask()` which calls `getPrompt()` → `getOpenAIResponse()` → `parseOpenAIResponse()` → `saveRequestResponse()`.
+
+#### The prompt — Worth AI
+
+**System message:**
+```
+You are a helpful assistant that determines:
+1) 6 digit North American Industry Classification System (NAICS) codes as of the 2022 edition.
+   Do not use earlier editions only the 2022 edition.
+2) The canonical description of the NAICS Code from the 2022 edition.
+3) The 5 digit UK Standard Industrial Classification (SIC) code from the 2007 edition.
+   This is only required if the business country is GB (United Kingdom).
+4) The canonical description of the UK SIC Code.
+5) The 4 digit Merchant Category Code (MCC)
+6) The canonical description of the MCC Code.
+Infer this information from industry info and business names.
+If a website URL is available, parse the website for the information.
+If a company already has NAICS, UK SIC or MCC information, correct it if it doesn't match the business details.
+Return a JSON object with fields reasoning, naics_code, naics_description, uk_sic_code (if applicable),
+uk_sic_description (if applicable), mcc_code, mcc_description, confidence (HIGH|MED|LOW),
+previous_naics_code, previous_mcc_code.
+If there is no evidence at all, return naics_code 561499 and mcc_code 5614 as a last resort.
+```
+
+**Website tool use:**
+If the business has a website URL, the prompt includes a second system message instructing GPT to browse the URL using OpenAI's `web_search` tool, filtering to only the business's own domain:
+```typescript
+responseCreateWithInput.tools = [{
+  type: "web_search",
+  filters: { allowed_domains: domainArray },  // only the company's own domain
+  search_context_size: "medium"
+}];
+```
+
+**User message:**
+```
+START DATA RESEARCH MODE
+IMPORTANT: Only use NAICS codes from the 2022 edition!
+Business Details: {key}: {value} | {key}: {value} | ...
+```
+Where business details include: business name, address, DBA name, existing NAICS/MCC codes, corporation type, website.
+
+#### The response schema — Worth AI
+```typescript
+{
+  reasoning: string,
+  naics_code: string,              // 6-digit NAICS 2022
+  naics_description: string,
+  uk_sic_code?: string,            // 5-digit UK SIC — only if country is GB
+  uk_sic_description?: string,
+  mcc_code: string,                // 4-digit MCC
+  mcc_description: string,
+  confidence: "HIGH" | "MED" | "LOW",
+  previous_naics_code: string,
+  previous_mcc_code: string,
+  website_url_parsed: string | null,
+  website_summary: string | null,
+  tools_used: string[],
+  tools_summary: string | null
+}
+```
+
+#### Post-processing — Worth AI
+After the AI responds, `executePostProcessing()` validates the returned NAICS code:
+1. Calls `internalGetNaicsCode(response.naics_code)` → checks it exists in `core_naics_code` table
+2. If the NAICS code is NOT in the table → `removeNaicsCode()` replaces it with `561499` (the "last resort" code = Administrative and Support Services)
+3. Sends a Kafka `update_naics_code_event` to persist the result
+
+#### Confidence mapping — Worth AI
+```typescript
+calculateConfidence(input: "HIGH" | "MED" | "LOW"): number {
+  "HIGH" → 0.20
+  "MED"  → 0.15
+  "LOW"  → 0.10   // becomes the source weight in the fact engine
+}
+```
+**Critical observation:** The AI's confidence text string is mapped to a very small numeric weight (0.10–0.20). This means even when the AI returns "HIGH", it only has weight 0.10–0.20 compared to OpenCorporates at 0.90. The AI is explicitly the **last resort** in the fact engine.
+
+#### What the AI enrichment produces — Worth AI
+| Field | Persisted? | Where |
+|-------|-----------|-------|
+| `naics_code` | ✅ | `integration_data.request_response` → Kafka → `data_businesses.naics_id` |
+| `mcc_code` | ✅ | Same path → `data_businesses.mcc_id` |
+| `uk_sic_code` | ⚠️ Parsed but NOT persisted | No `core_uk_sic_code` table |
+| `reasoning` | ✅ | Stored in task metadata |
+| `confidence` | ✅ | Stored as source weight |
+| `website_summary` | ✅ | Stored in task metadata |
+| `previous_naics_code` | ✅ | Stored in task metadata (audit trail) |
+
+#### Critical UK SIC gap — Even in AI enrichment
+The prompt explicitly says "uk_sic_code is only required if the business country is GB". However, even when the AI returns a valid UK SIC code:
+- There is no `core_uk_sic_code` table to validate it against
+- There is no `uk_sic_id` column on `data_businesses` to store it
+- The code sits in `integration_data.request_response` JSONB only
+- It is never consumed by any report, Kafka handler, or downstream system
+
+### 1.8 Known Issues and TODOs From the Codebase
 
 | Issue | Location |
 |-------|----------|
@@ -300,7 +431,78 @@ XGBClassifier(
 
 **Output:** `predict_proba(X)` → softmax probability distribution over all codes → Top-5 codes with calibrated probabilities.
 
-### 2.2 The 38-Feature Vector — Complete Specification
+### 2.2 The AI Enrichment Step — How It Works in the Consensus Engine
+
+The Consensus Engine AI enrichment is fundamentally different from Worth AI's in architecture, trigger logic, prompt, model, and output.
+
+#### When is it triggered?
+The AI enrichment in the Consensus Engine runs **always as step 4** in the pipeline — not conditionally. There is no Bull queue, no deferrable task manager, no fact-source counting. It runs synchronously on every classification request:
+
+```
+Every request → Entity Resolver → 6-source signals → XGBoost consensus → LLM enrichment (always) → Risk Engine
+```
+
+**Why always?** Because AI is used for a different purpose: not to fill a gap when vendors don't respond, but to **select among UGO semantic search candidates** and produce **multi-taxonomy codes** (NAICS + UK SIC + NACE + ISIC simultaneously) that no single vendor can provide.
+
+#### The two AI calls in the Consensus Engine
+
+**Call 1 — Entity Profile Extraction** (`enrich_company_profile()`):
+
+Extracts cleaned name, jurisdiction, entity type, and one-sentence business description from company name + address + DuckDuckGo web search.
+
+```
+System: "You are a global KYB expert. Produce a structured business profile."
+User:   "Company Name: {name} / Address: {address} / Country: {country} / Web: {ddg_summary}"
+Output: { cleaned_name, probable_jurisdiction, probable_entity_type,
+          primary_business_description, secondary_activities, confidence }
+```
+
+**Call 2 — Multi-Taxonomy Code Selection** (`llm_classify()`):
+
+Selects the best code for every taxonomy from FAISS UGO semantic search candidates.
+
+```
+User: "You are a world-class industry classification expert.
+       Company: {name} | Jurisdiction: {jc} | Description: {desc} | Web: {summary}
+       Candidate codes from UGO (top-8 per taxonomy via FAISS cosine search):
+       { US_NAICS_2022: [{code, description, score}...],
+         UK_SIC_2007:   [{code, description, score}...], ... }
+       Instructions:
+       1. Pick primary taxonomy for jurisdiction (US→NAICS, GB→UK_SIC, EU→NACE, other→ISIC)
+       2. Select single MOST appropriate code from candidates
+       3. Select best MCC code
+       4. List up to 2 alternative codes from other taxonomies
+       5. Provide reasoning.
+       Return JSON: { primary_taxonomy, primary_code, primary_label, primary_confidence,
+                      reasoning, mcc_code, mcc_label, alternative_codes[] }"
+```
+
+#### Prompt comparison — Worth AI vs. Consensus Engine
+
+| Aspect | Worth AI (`AINaicsEnrichment`) | Consensus Engine (`llm_classify`) |
+|--------|-------------------------------|-----------------------------------|
+| **Model** | `gpt-5-mini` via `openai.responses.create` | `gpt-4o-mini` via `chat.completions` |
+| **Output schema** | Zod schema with `text.format.json_schema` (strict) | `response_format={"type":"json_object"}` |
+| **Website tool** | Real `web_search` tool (browses company's domain directly) | DuckDuckGo search pre-fetched, passed as text |
+| **Candidate pre-filtering** | None — AI picks from all NAICS 2022 | FAISS UGO semantic search pre-filters top-8 per taxonomy |
+| **Taxonomies produced** | NAICS + MCC + UK SIC (GB only) | All 6 taxonomies simultaneously |
+| **Trigger** | Conditional: 1 ≤ naics_sources ≤ 2, website+name+address resolved | Always — every request |
+| **Queue** | Bull async queue, 10 attempts, exponential backoff | Synchronous, 3 retries |
+| **Last resort** | Hardcoded `561499` | Returns empty code + `LOW_CONSENSUS_PROBABILITY` risk signal |
+| **Confidence** | HIGH=0.20, MED=0.15, LOW=0.10 (used as fact weight) | HIGH/MED/LOW (displayed in UI, not a numeric weight) |
+| **UK SIC** | Only when country=GB | Always included for GB, shown in output for all |
+
+#### How LLM output is used differently in each system
+
+**Worth AI:** LLM output → `integration_data.request_response` → Kafka `update_naics_code_event` → fact engine as `AINaicsEnrichment` source (weight 0.10) → may influence winner but usually loses to vendor sources with weights 0.70–0.90.
+
+**Consensus Engine:** LLM output is used in **two separate roles**:
+1. **Source signal** — the LLM's primary code enters the 38-feature vector as `ai_semantic` signal (weight 0.70, status `INFERRED`) — influences XGBoost probability
+2. **Enrichment output** — full multi-taxonomy result (all 6 codes, MCC, reasoning, alternatives) is returned in `consensus_output.LLMClassificationResult` — shown separately in the UI under "LLM Classification Reasoning" and "Cross-Taxonomy Alternative Codes"
+
+This means XGBoost and LLM can independently suggest different codes. Both are shown — the user understands the difference between model consensus and LLM reasoning.
+
+### 2.3 The 38-Feature Vector — Complete Specification
 
 This is the core innovation. Worth AI produces **0 numeric features** for its classification decision (pure rule). The Consensus Engine produces **38 numeric features**:
 
