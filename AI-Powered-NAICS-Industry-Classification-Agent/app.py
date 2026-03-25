@@ -37,13 +37,13 @@ logger = logging.getLogger(__name__)
 
 # ── Lazy-load heavy components (cached after first load) ──────────────────────
 
-@st.cache_resource(show_spinner="Loading Unified Global Ontology …")
+@st.cache_resource(show_spinner="Step 1/3 — Loading taxonomy index (2,330 industry codes across 6 systems)… ~20s")
 def get_taxonomy_engine():
     from taxonomy_engine import TaxonomyEngine
     return TaxonomyEngine()
 
 
-@st.cache_resource(show_spinner="Training consensus model …")
+@st.cache_resource(show_spinner="Step 2/3 — Training consensus model on 300 samples… ~15s on first load, cached afterwards")
 def get_consensus_engine():
     from consensus_engine import IndustryConsensusEngine
     te = get_taxonomy_engine()
