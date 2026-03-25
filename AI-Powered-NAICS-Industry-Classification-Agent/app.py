@@ -811,6 +811,82 @@ checkbox is enabled.
             elapsed = time.time() - t0
 
         st.success(f"Pipeline completed in {elapsed:.2f}s")
+
+        # ── Store in session state for Risk Dashboard + Taxonomy Explorer ──────
+        st.session_state["single_result"] = {
+            "entity":    entity,
+            "bundle":    bundle,
+            "result":    result,
+            "risk":      risk,
+            "llm":       llm,
+            "ext_reg":   ext_reg,
+            "company_name": company_name.strip(),
+        }
+        # Build a one-row DataFrame for Risk Dashboard compatibility
+        from risk_engine import _RISK_COLOURS as _RC
+        single_risk_row = {
+            "Company":       company_name.strip(),
+            "Jurisdiction":  entity.jurisdiction_code,
+            "Entity Type":   entity.detected_entity_type,
+            "Primary Code":  result.primary_industry.code,
+            "Primary Label": result.primary_industry.label,
+            "Risk Score":    round(risk.overall_risk_score, 4),
+            "Risk Level":    risk.overall_risk_level,
+            "KYB Action":    risk.kyb_recommendation,
+            "Flags":         "; ".join(s.flag for s in risk.signals[:5]),
+        }
+        st.session_state["single_risk_df"] = pd.DataFrame([single_risk_row])
+
+        # Build UGO code rows for Taxonomy Explorer
+        all_classification_codes = []
+        for code in [result.primary_industry] + result.secondary_industries:
+            all_classification_codes.append({
+                "Company":     company_name.strip(),
+                "Source":      "XGBoost Consensus",
+                "Taxonomy":    code.taxonomy.replace("_", " "),
+                "Code":        code.code,
+                "Description": code.label,
+                "Prob":        f"{code.consensus_probability:.1%}",
+            })
+        if llm.primary_code:
+            all_classification_codes.append({
+                "Company":     company_name.strip(),
+                "Source":      "GPT-4o-mini",
+                "Taxonomy":    llm.primary_taxonomy.replace("_", " "),
+                "Code":        llm.primary_code,
+                "Description": llm.primary_label,
+                "Prob":        llm.primary_confidence,
+            })
+        for alt in (llm.alternative_codes or []):
+            all_classification_codes.append({
+                "Company":     company_name.strip(),
+                "Source":      "GPT-4o-mini (alt)",
+                "Taxonomy":    alt.get("taxonomy","").replace("_"," "),
+                "Code":        alt.get("code",""),
+                "Description": alt.get("label",""),
+                "Prob":        "—",
+            })
+        if ext_reg and ext_reg.edgar:
+            all_classification_codes.append({
+                "Company":     company_name.strip(),
+                "Source":      "SEC EDGAR",
+                "Taxonomy":    "US SIC 1987",
+                "Code":        ext_reg.edgar.sic,
+                "Description": ext_reg.edgar.sic_description,
+                "Prob":        "Registry",
+            })
+        if ext_reg and ext_reg.companies_house:
+            for c, d in zip(ext_reg.companies_house.sic_codes, ext_reg.companies_house.sic_descriptions):
+                all_classification_codes.append({
+                    "Company":     company_name.strip(),
+                    "Source":      "Companies House",
+                    "Taxonomy":    "UK SIC 2007",
+                    "Code":        c,
+                    "Description": d,
+                    "Prob":        "Registry",
+                })
+        st.session_state["single_taxonomy_df"] = pd.DataFrame(all_classification_codes)
+
         display_consensus_result(entity, bundle, result, risk, llm, ext_reg)
 
     elif submitted:
@@ -954,8 +1030,42 @@ Upload a **CSV or Excel (.xlsx)** file. The file must contain at least:
 
             elapsed = time.time() - t0
             df_results = pd.DataFrame(results)
-            # Store in session state so Risk Dashboard can use it
+            # Store in session state so Risk Dashboard and Taxonomy Explorer can use it
             st.session_state["batch_results"] = df_results
+            # Clear single-company state so batch takes priority
+            st.session_state.pop("single_risk_df", None)
+            st.session_state.pop("single_taxonomy_df", None)
+            # Build taxonomy DataFrame from batch results for Taxonomy Explorer
+            tax_rows = []
+            for _, row in df_results.iterrows():
+                if row.get("Primary Code"):
+                    tax_rows.append({
+                        "Company":     row.get("Org Name",""),
+                        "Source":      "XGBoost Consensus",
+                        "Taxonomy":    str(row.get("Primary Taxonomy","")).replace("_"," "),
+                        "Code":        row.get("Primary Code",""),
+                        "Description": row.get("Primary Desc",""),
+                        "Prob":        str(row.get("Consensus Prob","")),
+                    })
+                if row.get("LLM Code"):
+                    tax_rows.append({
+                        "Company":     row.get("Org Name",""),
+                        "Source":      "GPT-4o-mini",
+                        "Taxonomy":    str(row.get("LLM Taxonomy","")).replace("_"," "),
+                        "Code":        row.get("LLM Code",""),
+                        "Description": row.get("LLM Label",""),
+                        "Prob":        str(row.get("LLM Confidence","")),
+                    })
+                if row.get("MCC Code"):
+                    tax_rows.append({
+                        "Company":     row.get("Org Name",""),
+                        "Source":      "MCC",
+                        "Taxonomy":    "MCC",
+                        "Code":        row.get("MCC Code",""),
+                        "Description": "",
+                        "Prob":        "—",
+                    })
+            st.session_state["batch_taxonomy_df"] = pd.DataFrame(tax_rows)
             status.empty()
             st.success(f"Batch complete in {elapsed:.1f}s")
 
@@ -1066,45 +1176,62 @@ real Redshift data (OpenCorporates, Equifax, ZoomInfo, Liberty Data).
     st.markdown("---")
 
     # ── Source selector ───────────────────────────────────────────────────────
-    batch_available = "batch_results" in st.session_state and st.session_state["batch_results"] is not None
+    single_available = "single_risk_df" in st.session_state and st.session_state["single_risk_df"] is not None
+    batch_available  = "batch_results"  in st.session_state and st.session_state["batch_results"]  is not None
 
+    options = []
+    if single_available:
+        cname = st.session_state.get("single_result", {}).get("company_name", "last searched company")
+        options.append(f"Single company result — {cname}")
     if batch_available:
-        mode = st.radio(
-            "Data source for risk analysis",
-            ["Use my batch results (from Batch Classification tab)", "Generate synthetic demo portfolio"],
-            index=0,
-        )
-    else:
-        mode = "Generate synthetic demo portfolio"
-        st.caption("No batch results available yet. Go to **Batch Classification** and classify a file first, "
-                   "or use the synthetic demo below.")
+        nrows = len(st.session_state["batch_results"])
+        options.append(f"Batch file results — {nrows} companies")
+    options.append("Generate synthetic demo portfolio")
 
-    n_companies = st.slider("Number of synthetic companies (demo mode only)", 10, 100, 50,
-                            disabled=(batch_available and "batch" in mode.lower()))
+    if len(options) > 1:
+        mode = st.radio("Data source for risk analysis", options, index=0)
+    else:
+        mode = options[0]
+        if "synthetic" in mode:
+            st.caption(
+                "No company results available yet. "
+                "Search a company in **Single Company Lookup** or upload a file in **Batch Classification**, "
+                "then come back here to see its risk profile."
+            )
+
+    n_companies = st.slider(
+        "Number of synthetic companies (demo mode only)", 10, 100, 50,
+        disabled=("synthetic" not in mode.lower()),
+    )
 
     if st.button("Generate Risk Report", type="primary"):
 
-        # ── Mode: use batch results ────────────────────────────────────────────
-        if batch_available and "batch" in mode.lower():
+        # ── Mode: single company ──────────────────────────────────────────────
+        if single_available and "single company" in mode.lower():
+            df_risk = st.session_state["single_risk_df"]
+            cname = st.session_state.get("single_result", {}).get("company_name", "")
+            st.success(f"Showing risk profile for: **{cname}**")
+
+        # ── Mode: batch results ────────────────────────────────────────────────
+        elif batch_available and "batch file" in mode.lower():
             df_batch = st.session_state["batch_results"]
             st.success(f"Loaded {len(df_batch)} companies from your batch classification results.")
-
-            # Map batch columns to risk dashboard format
             risk_rows = []
             for _, row in df_batch.iterrows():
                 risk_rows.append({
-                    "Company":        row.get("Org Name", ""),
-                    "Jurisdiction":   row.get("Jurisdiction", ""),
-                    "Entity Type":    row.get("Entity Type", ""),
-                    "Primary Code":   row.get("Primary Code", ""),
-                    "Primary Label":  row.get("Primary Desc", ""),
-                    "Risk Score":     float(row.get("Risk Score", 0)) if row.get("Risk Score", "") != "" else 0.0,
-                    "Risk Level":     row.get("Risk Level", ""),
-                    "KYB Action":     row.get("KYB Recommendation", ""),
-                    "Flags":          str(row.get("Risk Flags", ""))[:80],
+                    "Company":       row.get("Org Name", ""),
+                    "Jurisdiction":  row.get("Jurisdiction", ""),
+                    "Entity Type":   row.get("Entity Type", ""),
+                    "Primary Code":  row.get("Primary Code", ""),
+                    "Primary Label": row.get("Primary Desc", ""),
+                    "Risk Score":    float(row.get("Risk Score", 0)) if str(row.get("Risk Score", "")).replace(".","").isdigit() else 0.0,
+                    "Risk Level":    row.get("Risk Level", ""),
+                    "KYB Action":    row.get("KYB Recommendation", ""),
+                    "Flags":         str(row.get("Risk Flags", ""))[:80],
                 })
             df_risk = pd.DataFrame(risk_rows)
 
+        # ── Mode: synthetic demo ───────────────────────────────────────────────
         else:
         # ── Mode: synthetic demo ───────────────────────────────────────────────
             from data_simulator import simulate_training_dataset
@@ -1187,14 +1314,74 @@ elif page == "Taxonomy Explorer":
         "Type any business description and instantly see cross-taxonomy matches ranked by similarity."
     )
 
-    st.info(
-        "**How this tab relates to the others:**\n\n"
-        "- This is an **independent search tool** — it does not connect to Single Company Lookup or Batch Classification.\n"
-        "- Use it to **look up what code applies** to a type of business (e.g. 'licensed restaurant', 'software consulting'), "
-        "or to **translate a code from one taxonomy to another** (e.g. what is NAICS 722511 in UK SIC?).\n"
-        "- The codes you find here are the same codes that appear in your company classification results — "
-        "you can use this to verify or understand what a code means."
-    )
+    # ── Show codes from previous search/upload ────────────────────────────────
+    _single_tax_df = st.session_state.get("single_taxonomy_df")
+    _batch_tax_df  = st.session_state.get("batch_taxonomy_df")
+    _single_name   = st.session_state.get("single_result", {}).get("company_name", "")
+
+    if _single_tax_df is not None and not _single_tax_df.empty:
+        st.success(f"Showing codes classified for: **{_single_name}**")
+        st.subheader(f"Classification Codes for {_single_name}")
+        st.dataframe(_single_tax_df, use_container_width=True, hide_index=True)
+
+        # UGO semantic search for each code to show cross-taxonomy neighbours
+        te_e = get_taxonomy_engine()
+        with st.expander("Cross-taxonomy exploration — find similar codes in other systems"):
+            for _, row in _single_tax_df.iterrows():
+                if not row.get("Description") or row.get("Prob") == "—":
+                    continue
+                label = row["Description"]
+                sim_results = te_e.search(label, top_k=5)
+                st.markdown(f"**{row['Source']} `{row['Code']}`** — *{label}*")
+                sim_rows = [
+                    {
+                        "Taxonomy":    r.taxonomy.replace("_"," "),
+                        "Code":        r.code,
+                        "Description": r.description,
+                        "Similarity":  f"{score:.3f}",
+                    }
+                    for r, score in sim_results
+                    if r.code != row["Code"]
+                ][:4]
+                if sim_rows:
+                    st.dataframe(pd.DataFrame(sim_rows), use_container_width=True, hide_index=True)
+        st.markdown("---")
+        st.subheader("Search the full taxonomy index below")
+
+    elif _batch_tax_df is not None and not _batch_tax_df.empty:
+        n_companies = _batch_tax_df["Company"].nunique() if "Company" in _batch_tax_df.columns else 0
+        st.success(f"Showing codes from your batch file — {len(_batch_tax_df)} codes across {n_companies} companies.")
+        st.subheader("All Classification Codes from Batch File")
+
+        # Filter by company
+        companies = sorted(_batch_tax_df["Company"].unique().tolist()) if "Company" in _batch_tax_df.columns else []
+        if len(companies) > 1:
+            selected_company = st.selectbox("Filter by company (or show all)", ["All companies"] + companies)
+            if selected_company != "All companies":
+                show_df = _batch_tax_df[_batch_tax_df["Company"] == selected_company]
+            else:
+                show_df = _batch_tax_df
+        else:
+            show_df = _batch_tax_df
+
+        st.dataframe(show_df, use_container_width=True, hide_index=True)
+
+        # Download
+        csv_bytes = show_df.to_csv(index=False).encode()
+        st.download_button(
+            "📥 Download Taxonomy Results (CSV)",
+            data=csv_bytes,
+            file_name="taxonomy_codes.csv",
+            mime="text/csv",
+        )
+        st.markdown("---")
+        st.subheader("Search the full taxonomy index below")
+    else:
+        st.info(
+            "**Tip:** Search a company in **Single Company Lookup** or upload a file in **Batch Classification** "
+            "and the codes assigned to your companies will appear here automatically, with cross-taxonomy "
+            "exploration for each code."
+        )
 
     with st.expander("What this page does — how semantic search works and how to use it"):
         st.markdown("""
