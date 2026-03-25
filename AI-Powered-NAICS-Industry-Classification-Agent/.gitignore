@@ -1,0 +1,32 @@
+.env
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+dist/
+build/
+*.egg
+
+# Generated model/index files (large binaries)
+data/*.index
+data/*.pkl
+data/*.ubj
+data/*_meta.pkl
+data/consensus_model*
+
+# Streamlit secrets (never commit)
+.streamlit/secrets.toml
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp

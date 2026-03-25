@@ -1,0 +1,80 @@
+code,description,division,major_group
+0100,Crops,Agriculture,01
+0200,Agricultural Production Livestock,Agriculture,02
+0700,Agricultural Services,Agriculture,07
+0800,Forestry,Agriculture,08
+0900,Fishing Hunting and Trapping,Agriculture,09
+1000,Metal Mining,Mining,10
+1200,Coal Mining,Mining,12
+1300,Oil and Gas Extraction,Mining,13
+1400,Mining and Quarrying of Nonmetallic Minerals,Mining,14
+1500,Building Construction General Contractors,Construction,15
+1600,Heavy Construction Contractors,Construction,16
+1700,Special Trade Contractors,Construction,17
+2000,Food and Kindred Products,Manufacturing,20
+2100,Tobacco Products,Manufacturing,21
+2200,Textile Mill Products,Manufacturing,22
+2300,Apparel and Other Textile Products,Manufacturing,23
+2400,Lumber and Wood Products,Manufacturing,24
+2500,Furniture and Fixtures,Manufacturing,25
+2600,Paper and Allied Products,Manufacturing,26
+2700,Printing and Publishing,Manufacturing,27
+2800,Chemicals and Allied Products,Manufacturing,28
+2900,Petroleum and Coal Products,Manufacturing,29
+3000,Rubber and Plastics Products,Manufacturing,30
+3100,Leather and Leather Products,Manufacturing,31
+3200,Stone Clay and Glass Products,Manufacturing,32
+3300,Primary Metal Industries,Manufacturing,33
+3400,Fabricated Metal Products,Manufacturing,34
+3500,Industrial Machinery and Equipment,Manufacturing,35
+3600,Electronic and Other Electric Equipment,Manufacturing,36
+3700,Transportation Equipment,Manufacturing,37
+3800,Instruments and Related Products,Manufacturing,38
+3900,Misc Manufacturing Industries,Manufacturing,39
+4000,Railroad Transportation,Transportation,40
+4100,Local and Suburban Transit,Transportation,41
+4200,Trucking and Warehousing,Transportation,42
+4400,Water Transportation,Transportation,44
+4500,Air Transportation,Transportation,45
+4700,Transportation Services,Transportation,47
+4800,Communications,Communications,48
+4900,Electric Gas and Sanitary Services,Utilities,49
+5000,Durable Goods Wholesale,Wholesale Trade,50
+5100,Nondurable Goods Wholesale,Wholesale Trade,51
+5200,Building Materials Hardware Garden Supply,Retail Trade,52
+5300,General Merchandise Stores,Retail Trade,53
+5400,Food Stores,Retail Trade,54
+5500,Automotive Dealers and Service Stations,Retail Trade,55
+5600,Apparel and Accessory Stores,Retail Trade,56
+5700,Home Furniture Furnishings and Equipment,Retail Trade,57
+5800,Eating and Drinking Places,Retail Trade,58
+5900,Misc Retail,Retail Trade,59
+6000,Depository Institutions,Finance,60
+6100,Nondepository Credit Institutions,Finance,61
+6200,Security and Commodity Brokers,Finance,62
+6300,Insurance,Finance,63
+6400,Insurance Agents Brokers and Service,Finance,64
+6500,Real Estate,Finance,65
+6700,Holding and Other Investment Offices,Finance,67
+7000,Hotels and Other Lodging Places,Services,70
+7200,Personal Services,Services,72
+7300,Business Services,Services,73
+7500,Auto Repair Services and Parking,Services,75
+7600,Misc Repair Services,Services,76
+7800,Motion Picture,Services,78
+7900,Amusement and Recreation Services,Services,79
+8000,Health Services,Services,80
+8100,Legal Services,Services,81
+8200,Educational Services,Services,82
+8300,Social Services,Services,83
+8400,Museums Botanical Zoological Gardens,Services,84
+8600,Membership Organizations,Services,86
+8700,Engineering Management and Related Services,Services,87
+8900,Services NEC,Services,89
+9100,Executive Legislative General Government,Government,91
+9200,Justice Public Order and Safety,Government,92
+9300,Finance Taxation and Monetary Policy,Government,93
+9400,Administration of Human Resource Programs,Government,94
+9500,Environmental Quality and Housing,Government,95
+9600,Administration of Economic Programs,Government,96
+9700,National Security and International Affairs,Government,97
