@@ -177,8 +177,6 @@ def display_consensus_result(
     entity, bundle, result, risk_profile, llm_result
 ) -> None:
     """Render the full consensus output in the Streamlit UI."""
-    from risk_engine import _RISK_COLOURS
-
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Primary Code", result.primary_industry.code)
