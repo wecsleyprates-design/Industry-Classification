@@ -226,11 +226,28 @@ class DataSimulator:
     ) -> VendorBundle:
         """
         Simulate a complete multi-vendor data fetch.
+
+        For well-known companies: first performs an Entity Matching lookup
+        (simulating the Redshift + XGBoost matching pipeline from
+        entity_matching/core/matchers/matching_v1.py). If found, uses the
+        real industry codes from OpenCorporates, Equifax, and ZoomInfo.
+
+        For unknown companies: falls back to random-pool simulation.
         `force_conflict` injects a holding-company code to stress-test
         the discrepancy detection pipeline.
         """
+        from entity_lookup import lookup_entity
         seed = int(hashlib.md5(company_name.encode()).hexdigest(), 16)
         random.seed(seed)
+
+        # ── Entity Matching lookup (Redshift simulation) ───────────────────────
+        em_result = lookup_entity(company_name, address, country)
+        if em_result.found and not force_conflict:
+            # Use jurisdiction hint from known-entity table if not overridden
+            if em_result.jurisdiction_hint and jurisdiction in ("US", "us"):
+                jurisdiction = em_result.jurisdiction_hint
+            if em_result.entity_type:
+                entity_type = em_result.entity_type
 
         bundle = VendorBundle(
             business_id=f"sim-{seed % 1_000_000:08d}",
@@ -240,34 +257,73 @@ class DataSimulator:
             web_summary=web_summary,
         )
 
-        # ── Registry (OpenCorporates / Redshift) ──────────────────────────────
-        oc = self._call_opencorporates(seed, jurisdiction, force_conflict)
-        bundle.signals.append(oc)
-        bundle.registry_label = oc.label
-        bundle.registry_code = oc.raw_code
-        bundle.registry_taxonomy = oc.taxonomy
-
-        # ── Equifax ───────────────────────────────────────────────────────────
-        bundle.signals.append(self._call_equifax(seed, jurisdiction))
-
-        # ── Trulioo ───────────────────────────────────────────────────────────
-        bundle.signals.append(self._call_trulioo(seed, jurisdiction))
-
-        # ── ZoomInfo ──────────────────────────────────────────────────────────
-        bundle.signals.append(self._call_zoominfo(seed))
-
-        # ── Dun & Bradstreet ──────────────────────────────────────────────────
-        bundle.signals.append(self._call_duns(seed, jurisdiction))
-
-        # ── AI Semantic (our own enrichment) ──────────────────────────────────
-        bundle.signals.append(self._call_ai_semantic(seed, web_summary))
-
-        # ── Temporal history (3 historical snapshots) ─────────────────────────
-        bundle.history = self._generate_history(seed, jurisdiction)
+        if em_result.found and not force_conflict:
+            # ── Known entity: use Redshift/entity-matching results ─────────────
+            oc = self._signal_from_record(em_result.opencorporates, "opencorporates",
+                                          self.weights["opencorporates"])
+            eq = self._signal_from_record(em_result.equifax, "equifax",
+                                          self.weights["equifax"])
+            zi = self._signal_from_record(em_result.zoominfo, "zoominfo",
+                                          self.weights["zoominfo"])
+            bundle.signals.append(oc)
+            bundle.signals.append(eq)
+            bundle.signals.append(self._call_trulioo(seed, jurisdiction))
+            bundle.signals.append(zi)
+            bundle.signals.append(self._call_duns(seed, jurisdiction))
+            bundle.signals.append(self._call_ai_semantic(seed, web_summary))
+            bundle.registry_label = oc.label
+            bundle.registry_code  = oc.raw_code
+            bundle.registry_taxonomy = oc.taxonomy
+            # Stable history for known entities (same code across periods)
+            bundle.history = self._stable_history(oc.raw_code, oc.label, oc.taxonomy)
+        else:
+            # ── Unknown entity or stress-test: random-pool simulation ──────────
+            oc = self._call_opencorporates(seed, jurisdiction, force_conflict)
+            bundle.signals.append(oc)
+            bundle.registry_label = oc.label
+            bundle.registry_code  = oc.raw_code
+            bundle.registry_taxonomy = oc.taxonomy
+            bundle.signals.append(self._call_equifax(seed, jurisdiction))
+            bundle.signals.append(self._call_trulioo(seed, jurisdiction))
+            bundle.signals.append(self._call_zoominfo(seed))
+            bundle.signals.append(self._call_duns(seed, jurisdiction))
+            bundle.signals.append(self._call_ai_semantic(seed, web_summary))
+            bundle.history = self._generate_history(seed, jurisdiction)
 
         return bundle
 
     # ── Private vendor simulators ─────────────────────────────────────────────
+
+    # ── Build a SourceSignal from an EntityMatchResult record ─────────────────
+
+    def _signal_from_record(self, record, source: str, base_weight: float) -> "SourceSignal":
+        """Convert a known-entity SourceRecord into a SourceSignal."""
+        if record is None:
+            return SourceSignal(
+                source=source, raw_code="", taxonomy="US_NAICS_2022", label="",
+                weight=_jitter(base_weight, 0.05), status="UNAVAILABLE",
+                confidence=0.0, retrieved_at=_ts(0),
+            )
+        return SourceSignal(
+            source=source,
+            raw_code=record.naics_code,
+            taxonomy=record.taxonomy,
+            label=record.naics_label,
+            weight=_jitter(base_weight, 0.04),
+            status=record.status,
+            confidence=_jitter(record.match_confidence, 0.03),
+            retrieved_at=_ts(0),
+        )
+
+    def _stable_history(self, code: str, label: str, taxonomy: str, n: int = 3) -> list:
+        """Known entities have a stable classification history (no pivot)."""
+        return [
+            TemporalRecord(
+                taxonomy=taxonomy, code=code, label=label,
+                source="opencorporates", retrieved_at=_ts((i + 1) * 90),
+            )
+            for i in range(n)
+        ]
 
     # ── Internal: resolve taxonomy pool from jurisdiction_code ───────────────
 

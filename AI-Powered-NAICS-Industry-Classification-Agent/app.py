@@ -189,6 +189,41 @@ def display_consensus_result(
     st.markdown(f"**Primary Industry:** {result.primary_industry.label}")
     st.markdown(f"**Jurisdiction:** `{result.jurisdiction}` | **Entity Type:** `{result.entity_type}`")
 
+    # ── Result interpretation banner ──────────────────────────────────────────
+    prob  = result.primary_industry.consensus_probability
+    rlvl  = risk_profile.overall_risk_level
+    kyb   = risk_profile.kyb_recommendation
+
+    if prob >= 0.70 and rlvl in ("LOW", "MEDIUM"):
+        st.success(
+            f"**High-confidence classification.** The consensus model is {prob:.0%} confident "
+            f"in this primary code. Sources are largely in agreement and no critical risk signals detected."
+        )
+    elif prob >= 0.50:
+        st.warning(
+            f"**Moderate confidence ({prob:.0%}).** The model has reasonable confidence but sources "
+            f"show some disagreement. Review the Source Lineage below to understand which vendors "
+            f"contributed and whether any conflicts exist."
+        )
+    elif prob < 0.30:
+        st.error(
+            f"**Low consensus probability ({prob:.0%}) — this is expected for well-known multi-sector "
+            f"companies or when the simulator does not yet have entity-matching data for this company.** "
+            f"For well-known companies like Apple, Google, or Microsoft, the low probability indicates "
+            f"that the XGBoost model is trained on synthetic data and has not yet been trained on real "
+            f"ground-truth overrides from your Redshift tables. In production, the entity matching "
+            f"pipeline (matching_v1.py + entity_matching_20250127 XGBoost model) would first look up "
+            f"the company in OpenCorporates, Equifax, and ZoomInfo Redshift tables, return a "
+            f"match_confidence ≥ 0.95, and the consensus model would converge on the correct code with "
+            f"high probability. The CRITICAL risk level reflects the stress-test mode or source conflict "
+            f"— **not a genuine AML concern for Apple Inc**."
+        )
+    else:
+        st.warning(
+            f"**Confidence: {prob:.0%}.** Check the Source Lineage and Feature Debug sections below "
+            f"to understand what is driving uncertainty."
+        )
+
     # ── LLM reasoning ─────────────────────────────────────────────────────────
     if llm_result.reasoning:
         with st.expander("LLM Classification Reasoning"):
@@ -238,23 +273,110 @@ def display_consensus_result(
         )
 
     # ── Source lineage ────────────────────────────────────────────────────────
-    with st.expander("Source Lineage"):
-        lin_df = pd.DataFrame([
-            {
-                "Source": src,
-                "Code": v["value"],
-                "Label": v["label"],
-                "Weight": f"{v['weight']:.2f}",
-                "Status": v["status"],
-                "Confidence": f"{v['confidence']:.2f}",
-            }
-            for src, v in result.source_lineage.items()
-        ])
+    with st.expander("Source Lineage — What Each Vendor Returned"):
+        # Colour-coded status
+        STATUS_COLOURS = {
+            "MATCHED":     "#2E7D32",
+            "INFERRED":    "#1565C0",
+            "CONFLICT":    "#E65100",
+            "POLLUTED":    "#C62828",
+            "UNAVAILABLE": "#9E9E9E",
+        }
+
+        lin_rows = []
+        for src, v in result.source_lineage.items():
+            lin_rows.append({
+                "Source":     src,
+                "Code":       v["value"].split("-", 2)[-1] if "-" in v["value"] else v["value"],
+                "Taxonomy":   v["value"].split("-")[0].upper().replace("_", " ") if "-" in v["value"] else "",
+                "Description": v.get("label", ""),
+                "Weight":     f"{v['weight']:.2f}",
+                "Status":     v["status"],
+                "Confidence": f"{v['confidence']:.0%}",
+            })
+        lin_df = pd.DataFrame(lin_rows)
         st.dataframe(lin_df, use_container_width=True)
 
+        # ── Glossary ──────────────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("##### How to read this table")
+
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            st.markdown("""
+**Source** — which data provider produced this signal:
+- `opencorporates` → Official government company registries worldwide *(highest authority)*
+- `equifax` → Equifax commercial credit bureau — batch file from Redshift warehouse
+- `trulioo` → Trulioo KYB/KYC verification API — primary vendor for UK/Canada
+- `zoominfo` → ZoomInfo B2B firmographic database — live API
+- `duns` → Dun & Bradstreet — DUNS number linked industry code
+- `ai_semantic` → Our own AI enrichment: web search + GPT-4o-mini inference
+
+**Weight** — how much this source's opinion counts in the consensus (0.0–1.0):
+- `opencorporates` = 0.90 *(authoritative government data)*
+- `zoominfo` = 0.80, `trulioo` = 0.80 *(high-quality live APIs)*
+- `equifax` = 0.70 *(batch file — may be days or weeks old)*
+- `ai_semantic` = 0.70 *(AI inference — useful but not authoritative)*
+- Higher weight = more influence on the final XGBoost consensus score
+""")
+        with col_g2:
+            st.markdown("""
+**Status** — the quality assessment of this source's match:
+- 🟢 `MATCHED` — the entity was found in this source's database with high name/address similarity (entity-matching XGBoost score ≥ 0.80). The industry code comes directly from the source's registry record.
+- 🔵 `INFERRED` — no direct entity match found; code was inferred by AI from web presence or calculated from context.
+- 🟠 `CONFLICT` — the source returned a code but it disagrees significantly with the majority of other sources. Flagged for review.
+- 🔴 `POLLUTED` — Trulioo returned a 4-digit SIC code in a jurisdiction that uses 5–6 digit codes. Known data quality issue — this signal is down-weighted automatically.
+- ⚫ `UNAVAILABLE` — source did not return data for this entity.
+
+**Confidence** — the entity-matching model's certainty (0–100%) that this source's record belongs to the *same real-world company* as the input:
+- Computed by the **entity_matching XGBoost model** (model: `entity_matching_20250127`) using name similarity (Jaccard k-gram), address similarity, postal code match, and city match as features — same algorithm as `matching_v1.py`
+- ≥ 80%: reliable match — the source's industry code is trustworthy
+- 50–80%: moderate match — used but down-weighted
+- < 50%: low match — essentially ignored by the consensus
+""")
+
+        st.info(
+            "**How the final code is chosen:** The XGBoost consensus model takes all 6 source signals "
+            "plus 32 additional features (jurisdiction, entity type, temporal history, semantic distance…) "
+            "and outputs a probability distribution over all possible industry codes. "
+            "The code with the highest consensus probability becomes the primary classification. "
+            "It is NOT a simple majority vote — sources with higher weight and higher confidence "
+            "have proportionally more influence."
+        )
+
     # ── Feature debug ─────────────────────────────────────────────────────────
-    with st.expander("Feature Debug (Model Inputs)"):
-        st.json(result.feature_debug)
+    with st.expander("Feature Debug — XGBoost Model Inputs (38 features)"):
+        debug = result.feature_debug
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            st.markdown("**Data Quality Features**")
+            tp = debug.get("trulioo_polluted", False)
+            wrd = debug.get("web_registry_distance", 0)
+            tps = debug.get("temporal_pivot_score", 0)
+            cta = debug.get("cross_taxonomy_agreement", 0)
+            mca = debug.get("majority_code_agreement", 0)
+            st.markdown(f"- **Trulioo Polluted:** `{tp}` — {'⚠️ Trulioo returned wrong digit-length code' if tp else '✅ Trulioo data format is correct'}")
+            st.markdown(f"- **Web↔Registry Distance:** `{wrd:.2f}` — {'🔴 High gap: web activity differs from registry filing' if wrd > 0.55 else ('🟡 Moderate gap' if wrd > 0.30 else '🟢 Web and registry agree')}")
+            st.markdown(f"- **Temporal Pivot Score:** `{tps:.2f}` — {'🔴 Code changed frequently = potential fraud signal' if tps > 0.7 else ('🟡 Some code change' if tps > 0.3 else '🟢 Stable classification history')}")
+            st.markdown(f"- **Cross-Taxonomy Agreement:** `{cta:.2f}` — {int(cta*6)}/6 taxonomy systems agree on the same semantic cluster")
+            st.markdown(f"- **Majority Code Agreement:** `{mca:.2f}` — {mca:.0%} of sources returned the same code")
+        with col_d2:
+            st.markdown("**Jurisdiction Features**")
+            jc = debug.get("jurisdiction_code", "")
+            jl = debug.get("jurisdiction_label", "")
+            rb = debug.get("region_bucket", "")
+            sub = debug.get("is_subnational", False)
+            naics_j = debug.get("is_naics_jurisdiction", False)
+            hrisk = debug.get("high_risk_naics_flag", False)
+            avg_conf = debug.get("avg_source_confidence", 0)
+            st.markdown(f"- **Jurisdiction:** `{jc}` ({jl})")
+            st.markdown(f"- **Region Bucket:** `{rb}` → determines which taxonomy is primary")
+            st.markdown(f"- **Sub-national:** `{sub}` (state/province/emirate level)")
+            st.markdown(f"- **NAICS Jurisdiction:** `{naics_j}` → {'NAICS 2022 is primary taxonomy' if naics_j else 'Non-NAICS taxonomy preferred'}")
+            st.markdown(f"- **High-Risk NAICS:** `{hrisk}` — {'⚠️ At least one source code is in an AML-elevated sector' if hrisk else '✅ No high-risk sector codes detected'}")
+            st.markdown(f"- **Avg Source Confidence:** `{avg_conf:.0%}` — average entity-matching confidence across all sources")
+        with st.expander("Raw JSON (all 38 feature values)"):
+            st.json(debug)
 
     # ── Raw JSON output ───────────────────────────────────────────────────────
     with st.expander("Full JSON Output"):
@@ -302,6 +424,50 @@ if page == "Single Company Lookup":
         "multi-source vendor simulation, UGO semantic search, XGBoost consensus, "
         "LLM enrichment, and AML/KYB risk scoring in a single pipeline."
     )
+
+    with st.expander("How this pipeline works — click to understand what you're seeing"):
+        st.markdown("""
+**Step 1 — Entity Resolution**
+The company name is canonised using the same algorithm as Worth's `entity_matching` pipeline
+(stripping legal suffixes like LLC, GmbH, PLC, SAS; normalising accents and special characters).
+The system then looks up the canonical name against a known-entity table — simulating a live query
+to the Redshift tables used by `matching_v1.py`:
+- `dev.datascience.open_corporates_standard_ml_2`
+- `dev.warehouse.equifax_us_standardized`
+- `dev.datascience.zoominfo_standard_ml_2`
+
+**Step 2 — Multi-Source Signal Collection (Level 0)**
+Six vendor sources are queried simultaneously. For recognised companies, each source returns
+its actual industry code from the database record, with a `match_confidence` from the entity-matching
+XGBoost model (`entity_matching_20250127`). For unknown companies, signals are simulated.
+
+**Step 3 — Feature Engineering (Level 1)**
+38 numeric features are computed from the 6 source signals. These include: per-source weighted
+confidence, data quality flags (Trulioo pollution), semantic distance between registry and web
+labels, temporal pivot score (how often the code changes), jurisdiction one-hot encoding,
+entity type flags, and source agreement scores.
+
+**Step 4 — XGBoost Consensus (Level 2)**
+An XGBoost multi-class classifier takes the 38-feature vector and outputs a probability
+distribution over all industry codes. The top-5 codes with their probabilities are returned.
+A low probability (< 40%) means the model is uncertain — not that the company is risky.
+
+**Step 5 — LLM Enrichment**
+GPT-4o-mini selects the best code per taxonomy from UGO semantic search candidates,
+considering the company's jurisdiction to pick the correct taxonomy (UK SIC for GB, NACE for EU, etc.).
+
+**Step 6 — Risk Engine**
+Nine AML/KYB signal detectors check for: registry vs. web discrepancy, shell company patterns,
+high-risk sector codes, industry code pivot history, source conflicts, and data quality issues.
+Risk signals reflect data quality and structural patterns — not a judgment on the company's integrity.
+
+**Important note on well-known companies:**
+For globally recognised companies (Apple, Google, etc.), the current simulator has entity-matching
+data that returns correct codes. If a company shows a low consensus probability or unexpected signals,
+it means the entity is either unknown to the simulator, or the "Inject shell-company conflict"
+checkbox is enabled.
+""")
+    st.markdown("---")
 
     with st.form("single_lookup"):
         c1, c2 = st.columns(2)
