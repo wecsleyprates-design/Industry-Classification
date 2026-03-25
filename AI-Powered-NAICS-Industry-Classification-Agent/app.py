@@ -498,10 +498,190 @@ def display_consensus_result(
         with st.expander("Raw JSON (all 38 feature values)"):
             st.json(debug)
 
+    # ── Results summary table + download ─────────────────────────────────────
+    st.markdown("---")
+    st.subheader("Complete Results — Table View")
+    st.caption("All classification and risk data for this company in one downloadable table.")
+
+    # Build a flat table of all results
+    table_rows = []
+
+    # Primary + secondary codes
+    all_codes = [result.primary_industry] + result.secondary_industries
+    for i, code in enumerate(all_codes):
+        row_type = "PRIMARY" if i == 0 else f"SECONDARY {i}"
+        table_rows.append({
+            "Type":               row_type,
+            "Taxonomy":           code.taxonomy.replace("_", " "),
+            "Code":               code.code,
+            "Description":        code.label,
+            "Consensus Prob":     f"{code.consensus_probability:.1%}",
+            "Source":             "XGBoost Consensus",
+        })
+
+    # LLM codes
+    if llm_result.primary_code:
+        table_rows.append({
+            "Type":       "LLM PRIMARY",
+            "Taxonomy":   llm_result.primary_taxonomy.replace("_", " "),
+            "Code":       llm_result.primary_code,
+            "Description": llm_result.primary_label,
+            "Consensus Prob": llm_result.primary_confidence,
+            "Source":     f"GPT-4o-mini ({getattr(llm_result,'source_used','') or 'semantic_search'})",
+        })
+    for alt in (llm_result.alternative_codes or []):
+        table_rows.append({
+            "Type":       "LLM ALTERNATIVE",
+            "Taxonomy":   alt.get("taxonomy", "").replace("_", " "),
+            "Code":       alt.get("code", ""),
+            "Description": alt.get("label", ""),
+            "Consensus Prob": "—",
+            "Source":     "GPT-4o-mini (alternative)",
+        })
+    if llm_result.mcc_code:
+        table_rows.append({
+            "Type":       "MCC",
+            "Taxonomy":   "MCC (Visa/Mastercard)",
+            "Code":       llm_result.mcc_code,
+            "Description": llm_result.mcc_label or "",
+            "Consensus Prob": "—",
+            "Source":     f"GPT-4o-mini — {getattr(llm_result,'mcc_risk_note','normal') or 'normal'}",
+        })
+
+    # External registry
+    if external_registry:
+        if external_registry.edgar:
+            table_rows.append({
+                "Type":       "REGISTRY (SEC EDGAR)",
+                "Taxonomy":   "US SIC 1987",
+                "Code":       external_registry.edgar.sic,
+                "Description": external_registry.edgar.sic_description,
+                "Consensus Prob": "—",
+                "Source":     f"SEC EDGAR — official US government filing ({external_registry.edgar.ticker or external_registry.edgar.name})",
+            })
+        if external_registry.companies_house:
+            for code, desc in zip(
+                external_registry.companies_house.sic_codes,
+                external_registry.companies_house.sic_descriptions,
+            ):
+                table_rows.append({
+                    "Type":       "REGISTRY (Companies House)",
+                    "Taxonomy":   "UK SIC 2007",
+                    "Code":       code,
+                    "Description": desc,
+                    "Consensus Prob": "—",
+                    "Source":     f"Companies House UK — official government filing ({external_registry.companies_house.name})",
+                })
+
+    df_results_table = pd.DataFrame(table_rows)
+    st.dataframe(df_results_table, use_container_width=True, hide_index=True)
+
+    # Risk signals table
+    if risk_profile.signals:
+        st.markdown("**Risk Signals**")
+        risk_rows = [
+            {
+                "Severity": s.severity,
+                "Flag":     s.flag,
+                "Score":    f"{s.score:.2f}",
+                "Description": s.description[:120] + ("…" if len(s.description) > 120 else ""),
+            }
+            for s in risk_profile.signals
+        ]
+        st.dataframe(pd.DataFrame(risk_rows), use_container_width=True, hide_index=True)
+
+    # Source lineage table
+    st.markdown("**Source Lineage**")
+    lineage_rows = [
+        {
+            "Source":      src,
+            "Code":        v.get("value", "").split("-", 2)[-1] if "-" in v.get("value","") else v.get("value",""),
+            "Taxonomy":    v.get("value", "").split("-")[0].upper().replace("_"," ") if "-" in v.get("value","") else "",
+            "Description": v.get("label", ""),
+            "Weight":      f"{v.get('weight', 0):.2f}",
+            "Status":      v.get("status", ""),
+            "Confidence":  f"{v.get('confidence', 0):.0%}",
+        }
+        for src, v in result.source_lineage.items()
+    ]
+    st.dataframe(pd.DataFrame(lineage_rows), use_container_width=True, hide_index=True)
+
+    # Company metadata table
+    st.markdown("**Company Metadata**")
+    meta_debug = result.feature_debug
+    meta_rows = [
+        {"Field": "Company Name",          "Value": result.company_name},
+        {"Field": "Jurisdiction Code",     "Value": meta_debug.get("jurisdiction_code", result.jurisdiction)},
+        {"Field": "Jurisdiction Label",    "Value": meta_debug.get("jurisdiction_label", "")},
+        {"Field": "Region Bucket",         "Value": meta_debug.get("region_bucket", "")},
+        {"Field": "Entity Type",           "Value": result.entity_type},
+        {"Field": "Is Sub-national",       "Value": str(meta_debug.get("is_subnational", False))},
+        {"Field": "NAICS Jurisdiction",    "Value": str(meta_debug.get("is_naics_jurisdiction", False))},
+        {"Field": "Overall Risk Score",    "Value": f"{risk_profile.overall_risk_score:.3f}"},
+        {"Field": "Risk Level",            "Value": risk_profile.overall_risk_level},
+        {"Field": "KYB Recommendation",    "Value": risk_profile.kyb_recommendation},
+        {"Field": "Avg Source Confidence", "Value": f"{meta_debug.get('avg_source_confidence', 0):.0%}"},
+        {"Field": "Web↔Registry Distance", "Value": f"{meta_debug.get('web_registry_distance', 0):.3f}"},
+        {"Field": "Temporal Pivot Score",  "Value": f"{meta_debug.get('temporal_pivot_score', 0):.3f}"},
+        {"Field": "Majority Code Agree",   "Value": f"{meta_debug.get('majority_code_agreement', 0):.0%}"},
+    ]
+    if external_registry and external_registry.edgar:
+        meta_rows += [
+            {"Field": "SEC EDGAR CIK",     "Value": external_registry.edgar.cik},
+            {"Field": "SEC EDGAR SIC",     "Value": f"{external_registry.edgar.sic} — {external_registry.edgar.sic_description}"},
+            {"Field": "Incorporated In",   "Value": external_registry.edgar.state_of_incorporation},
+            {"Field": "Ticker",            "Value": external_registry.edgar.ticker or "—"},
+        ]
+    st.dataframe(pd.DataFrame(meta_rows), use_container_width=True, hide_index=True)
+
+    # ── Download buttons ──────────────────────────────────────────────────────
+    def _to_excel_multi(frames: dict) -> bytes:
+        """Write multiple DataFrames to one Excel workbook, one sheet each."""
+        from io import BytesIO
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            for sheet_name, df in frames.items():
+                df.to_excel(writer, sheet_name=sheet_name[:31], index=False)
+        buf.seek(0)
+        return buf.read()
+
+    dl_col1, dl_col2 = st.columns(2)
+
+    with dl_col1:
+        excel_bytes = _to_excel_multi({
+            "Classification Codes": df_results_table,
+            "Risk Signals":         pd.DataFrame(risk_rows) if risk_profile.signals else pd.DataFrame(),
+            "Source Lineage":       pd.DataFrame(lineage_rows),
+            "Company Metadata":     pd.DataFrame(meta_rows),
+        })
+        st.download_button(
+            label="📥 Download Full Results (Excel)",
+            data=excel_bytes,
+            file_name=f"classification_{result.company_name.replace(' ','_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+        )
+
+    with dl_col2:
+        import json as _json
+        out_json = result.to_dict()
+        out_json["consensus_output"]["risk_profile"] = risk_profile.to_dict()
+        if external_registry:
+            out_json["consensus_output"]["external_registry"] = external_registry.to_dict()
+        json_str = _json.dumps(out_json, indent=2)
+        st.download_button(
+            label="📥 Download Full Results (JSON)",
+            data=json_str,
+            file_name=f"classification_{result.company_name.replace(' ','_')}.json",
+            mime="application/json",
+        )
+
     # ── Raw JSON output ───────────────────────────────────────────────────────
     with st.expander("Full JSON Output"):
         out = result.to_dict()
         out["consensus_output"]["risk_profile"] = risk_profile.to_dict()
+        if external_registry:
+            out["consensus_output"]["external_registry"] = external_registry.to_dict()
         st.json(out)
 
 
@@ -774,6 +954,8 @@ Upload a **CSV or Excel (.xlsx)** file. The file must contain at least:
 
             elapsed = time.time() - t0
             df_results = pd.DataFrame(results)
+            # Store in session state so Risk Dashboard can use it
+            st.session_state["batch_results"] = df_results
             status.empty()
             st.success(f"Batch complete in {elapsed:.1f}s")
 
@@ -818,8 +1000,19 @@ Upload a **CSV or Excel (.xlsx)** file. The file must contain at least:
 elif page == "Risk Dashboard":
     st.title("AML / KYB Risk Dashboard")
     st.markdown(
-        "Portfolio-level AML/CTF risk analysis across a simulated set of companies. "
-        "See risk distribution, jurisdiction heatmaps, and high-risk entity details."
+        "Portfolio-level AML/CTF risk analysis. Analyse your uploaded batch file **or** "
+        "generate a synthetic demo portfolio."
+    )
+
+    # ── Explain tab relationships ─────────────────────────────────────────────
+    st.info(
+        "**How this tab relates to the others:**\n\n"
+        "- **If you ran Batch Classification** (Tab 2) and classified a file, those results "
+        "appear automatically here — select **'Use my batch results'** below.\n"
+        "- **Single Company Lookup** (Tab 1) results are NOT shown here — that tab has its "
+        "own risk signals directly on the result page.\n"
+        "- **Generate Synthetic Demo** creates fake companies just for demonstration — "
+        "it has no connection to anything you typed or uploaded."
     )
 
     with st.expander("What this page does — how risk is scored and what each signal means"):
@@ -872,25 +1065,64 @@ real Redshift data (OpenCorporates, Equifax, ZoomInfo, Liberty Data).
 """)
     st.markdown("---")
 
-    n_companies = st.slider("Number of synthetic companies to analyse", 10, 100, 50)
+    # ── Source selector ───────────────────────────────────────────────────────
+    batch_available = "batch_results" in st.session_state and st.session_state["batch_results"] is not None
+
+    if batch_available:
+        mode = st.radio(
+            "Data source for risk analysis",
+            ["Use my batch results (from Batch Classification tab)", "Generate synthetic demo portfolio"],
+            index=0,
+        )
+    else:
+        mode = "Generate synthetic demo portfolio"
+        st.caption("No batch results available yet. Go to **Batch Classification** and classify a file first, "
+                   "or use the synthetic demo below.")
+
+    n_companies = st.slider("Number of synthetic companies (demo mode only)", 10, 100, 50,
+                            disabled=(batch_available and "batch" in mode.lower()))
 
     if st.button("Generate Risk Report", type="primary"):
-        from data_simulator import simulate_training_dataset
 
-        with st.spinner("Simulating vendor data and running risk analysis …"):
-            bundles = simulate_training_dataset(n=n_companies)
+        # ── Mode: use batch results ────────────────────────────────────────────
+        if batch_available and "batch" in mode.lower():
+            df_batch = st.session_state["batch_results"]
+            st.success(f"Loaded {len(df_batch)} companies from your batch classification results.")
+
+            # Map batch columns to risk dashboard format
             risk_rows = []
-            ce_engine = get_consensus_engine()
-            re_e = get_risk_engine()
-
-            for b in bundles:
-                result = ce_engine.predict(b)
-                rp = re_e.evaluate(b, result)
-                result.risk_signals = [s.to_dict() for s in rp.signals]
+            for _, row in df_batch.iterrows():
                 risk_rows.append({
-                    "Company":     b.company_name,
-                    "Jurisdiction":b.jurisdiction,
-                    "Entity Type": b.entity_type,
+                    "Company":        row.get("Org Name", ""),
+                    "Jurisdiction":   row.get("Jurisdiction", ""),
+                    "Entity Type":    row.get("Entity Type", ""),
+                    "Primary Code":   row.get("Primary Code", ""),
+                    "Primary Label":  row.get("Primary Desc", ""),
+                    "Risk Score":     float(row.get("Risk Score", 0)) if row.get("Risk Score", "") != "" else 0.0,
+                    "Risk Level":     row.get("Risk Level", ""),
+                    "KYB Action":     row.get("KYB Recommendation", ""),
+                    "Flags":          str(row.get("Risk Flags", ""))[:80],
+                })
+            df_risk = pd.DataFrame(risk_rows)
+
+        else:
+        # ── Mode: synthetic demo ───────────────────────────────────────────────
+            from data_simulator import simulate_training_dataset
+
+            with st.spinner("Simulating vendor data and running risk analysis …"):
+                bundles = simulate_training_dataset(n=n_companies)
+                risk_rows = []
+                ce_engine = get_consensus_engine()
+                re_e = get_risk_engine()
+
+                for b in bundles:
+                    result = ce_engine.predict(b)
+                    rp = re_e.evaluate(b, result)
+                    result.risk_signals = [s.to_dict() for s in rp.signals]
+                    risk_rows.append({
+                        "Company":     b.company_name,
+                        "Jurisdiction":b.jurisdiction,
+                        "Entity Type": b.entity_type,
                     "Primary Code":result.primary_industry.code,
                     "Primary Label":result.primary_industry.label,
                     "Risk Score":  round(rp.overall_risk_score, 4),
@@ -899,9 +1131,9 @@ real Redshift data (OpenCorporates, Equifax, ZoomInfo, Liberty Data).
                     "Flags":       "; ".join(s.flag for s in rp.signals[:3]),
                 })
 
-        df_risk = pd.DataFrame(risk_rows)
+            df_risk = pd.DataFrame(risk_rows)
 
-        # Summary metrics
+        # ── Charts and tables (shared by both modes) ──────────────────────────
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total Companies", len(df_risk))
         m2.metric("High/Critical Risk",
@@ -953,6 +1185,15 @@ elif page == "Taxonomy Explorer":
     st.markdown(
         "Semantic search engine across all 2,330 industry codes in 6 taxonomy systems. "
         "Type any business description and instantly see cross-taxonomy matches ranked by similarity."
+    )
+
+    st.info(
+        "**How this tab relates to the others:**\n\n"
+        "- This is an **independent search tool** — it does not connect to Single Company Lookup or Batch Classification.\n"
+        "- Use it to **look up what code applies** to a type of business (e.g. 'licensed restaurant', 'software consulting'), "
+        "or to **translate a code from one taxonomy to another** (e.g. what is NAICS 722511 in UK SIC?).\n"
+        "- The codes you find here are the same codes that appear in your company classification results — "
+        "you can use this to verify or understand what a code means."
     )
 
     with st.expander("What this page does — how semantic search works and how to use it"):
