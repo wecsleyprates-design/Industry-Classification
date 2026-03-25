@@ -7,6 +7,9 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.css"/>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/theme/white.min.css"/>
 <style>
+/* ── Base reveal font = 22px. Everything below is relative to this.
+   Reveal.js scales the ENTIRE slide canvas (1600×900) to fit the
+   browser window — so at any zoom level text stays crisp. ── */
 :root {
   --w-blue:   #1565C0;
   --w-dark:   #0D1B2A;
@@ -17,41 +20,43 @@
   --w-gray:   #546E7A;
   --w-light:  #E3F2FD;
 }
-.reveal { font-family:'Segoe UI',system-ui,sans-serif; }
-.reveal h1 { font-size:2em; color:var(--w-dark); font-weight:800; }
-.reveal h2 { font-size:1.45em; color:var(--w-blue); font-weight:700; border-bottom:3px solid var(--w-blue); padding-bottom:6px; }
-.reveal h3 { font-size:1em; color:var(--w-gray); font-weight:600; text-transform:uppercase; letter-spacing:1px; margin-bottom:10px; }
-.reveal p, .reveal li { font-size:0.74em; line-height:1.6; color:#2c2c2c; }
-.reveal ul { list-style:none; padding:0; }
-.reveal ul li::before { content:"›"; color:var(--w-blue); font-weight:bold; margin-right:8px; }
-.reveal table { font-size:0.6em; border-collapse:collapse; width:100%; }
-.reveal table th { background:var(--w-blue); color:white; padding:7px 10px; text-align:left; }
-.reveal table td { padding:5px 10px; border-bottom:1px solid #ddd; }
+html,body { margin:0; padding:0; overflow:hidden; }
+.reveal { font-family:'Segoe UI',system-ui,sans-serif; font-size:22px; }
+.reveal h1 { font-size:1.8em; color:var(--w-dark); font-weight:800; margin:0 0 8px; }
+.reveal h2 { font-size:1.15em; color:var(--w-blue); font-weight:700; border-bottom:3px solid var(--w-blue); padding-bottom:4px; margin:0 0 10px; }
+.reveal h3 { font-size:0.75em; color:var(--w-gray); font-weight:600; text-transform:uppercase; letter-spacing:1px; margin:0 0 6px; }
+.reveal p, .reveal li { font-size:0.62em; line-height:1.5; color:#2c2c2c; margin:2px 0; }
+.reveal ul { list-style:none; padding:0; margin:0; }
+.reveal ul li::before { content:"›"; color:var(--w-blue); font-weight:bold; margin-right:6px; }
+.reveal table { font-size:0.52em; border-collapse:collapse; width:100%; }
+.reveal table th { background:var(--w-blue); color:white; padding:5px 8px; text-align:left; }
+.reveal table td { padding:4px 8px; border-bottom:1px solid #ddd; }
 .reveal table tr:nth-child(even) td { background:#f5f9ff; }
-.reveal code { font-size:0.82em; background:#f0f4f8; padding:1px 5px; border-radius:3px; color:#1565C0; }
-.reveal pre code { background:#0D1B2A; color:#90CAF9; font-size:0.65em; line-height:1.5; }
+.reveal code { font-size:0.8em; background:#f0f4f8; padding:1px 4px; border-radius:3px; color:#1565C0; }
+.reveal pre { margin:4px 0; }
+.reveal pre code { background:#0D1B2A; color:#90CAF9; font-size:0.58em; line-height:1.4; }
 
 /* Section header slides */
 .sec-slide { background:linear-gradient(135deg,#0D1B2A 0%,#1565C0 100%) !important; }
-.sec-slide h2 { color:white !important; border-color:rgba(255,255,255,.3); font-size:1.8em; }
-.sec-slide p  { color:#90CAF9 !important; font-size:0.95em; }
-.sec-num { font-size:5em; font-weight:900; color:rgba(255,255,255,.07); position:absolute; top:10px; right:30px; }
+.sec-slide h2 { color:white !important; border-color:rgba(255,255,255,.3); font-size:1.6em; }
+.sec-slide p  { color:#90CAF9 !important; font-size:0.85em; }
+.sec-num { font-size:4em; font-weight:900; color:rgba(255,255,255,.07); position:absolute; top:10px; right:30px; }
 
 /* Title slide */
 .title-slide { background:linear-gradient(135deg,#0D1B2A 0%,#1565C0 100%) !important; }
-.title-slide h1 { color:white !important; font-size:2em; }
-.title-slide h2 { color:#90CAF9 !important; border-color:rgba(255,255,255,.3); font-size:1em; }
-.title-slide p  { color:#B0BEC5 !important; font-size:0.72em; }
+.title-slide h1 { color:white !important; font-size:1.7em; }
+.title-slide h2 { color:#90CAF9 !important; border-color:rgba(255,255,255,.3); font-size:0.9em; }
+.title-slide p  { color:#B0BEC5 !important; font-size:0.65em; }
 
-/* Utility */
-.two-col { display:grid; grid-template-columns:1fr 1fr; gap:18px; }
-.three-col { display:grid; grid-template-columns:1fr 1fr 1fr; gap:14px; }
-.card { background:white; border-radius:8px; padding:12px 16px; box-shadow:0 2px 10px rgba(0,0,0,.08); border-left:4px solid var(--w-blue); }
+/* Utility layout */
+.two-col   { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+.three-col { display:grid; grid-template-columns:1fr 1fr 1fr; gap:8px; }
+.card { background:white; border-radius:6px; padding:8px 12px; box-shadow:0 2px 8px rgba(0,0,0,.08); border-left:3px solid var(--w-blue); }
 .card-red    { border-left-color:var(--w-red); }
 .card-green  { border-left-color:var(--w-green); }
 .card-orange { border-left-color:var(--w-orange); }
 .card-gold   { border-left-color:var(--w-gold); }
-.chip { display:inline-block; padding:2px 9px; border-radius:10px; font-size:0.55em; font-weight:700; margin:2px; vertical-align:middle; }
+.chip { display:inline-block; padding:1px 7px; border-radius:8px; font-size:0.5em; font-weight:700; margin:1px; vertical-align:middle; }
 .chip-green  { background:#E8F5E9; color:#2E7D32; border:1px solid #A5D6A7; }
 .chip-red    { background:#FFEBEE; color:#C62828; border:1px solid #EF9A9A; }
 .chip-orange { background:#FFF3E0; color:#E65100; border:1px solid #FFCC80; }
@@ -59,12 +64,12 @@
 .chip-gray   { background:#ECEFF1; color:#546E7A; border:1px solid #CFD8DC; }
 .vs-left th { background:#546E7A !important; }
 .vs-right th { background:#1565C0 !important; }
-.stat-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; }
-.stat-box  { text-align:center; background:white; border-radius:8px; padding:14px; box-shadow:0 2px 8px rgba(0,0,0,.08); }
-.stat-num  { font-size:2em; font-weight:900; color:var(--w-blue); display:block; }
-.stat-lbl  { font-size:0.55em; color:var(--w-gray); margin-top:3px; }
-.flow { background:var(--w-light); border:2px solid var(--w-blue); border-radius:6px; padding:7px 12px; font-size:0.62em; font-weight:600; color:var(--w-dark); text-align:center; }
-.arrow { text-align:center; color:var(--w-blue); font-size:1.3em; line-height:1; }
+.stat-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+.stat-box  { text-align:center; background:white; border-radius:6px; padding:10px; box-shadow:0 2px 6px rgba(0,0,0,.08); }
+.stat-num  { font-size:1.7em; font-weight:900; color:var(--w-blue); display:block; }
+.stat-lbl  { font-size:0.5em; color:var(--w-gray); margin-top:2px; }
+.flow { background:var(--w-light); border:2px solid var(--w-blue); border-radius:5px; padding:5px 10px; font-size:0.55em; font-weight:600; color:var(--w-dark); text-align:center; }
+.arrow { text-align:center; color:var(--w-blue); font-size:1.1em; line-height:1; }
 td.yes { color:#2E7D32; font-weight:700; }
 td.no  { color:#C62828; font-weight:700; }
 td.par { color:#E65100; font-weight:700; }
@@ -92,20 +97,20 @@ td.par { color:#E65100; font-weight:700; }
     <div class="card card-orange" style="text-align:center;padding:18px">
       <div style="font-size:1.8em">🔍</div>
       <div style="font-weight:700;font-size:0.8em;color:var(--w-orange);margin:8px 0">Part 1</div>
-      <div style="font-size:0.68em;font-weight:600">The Worth AI Pipeline Today</div>
-      <div style="font-size:0.58em;color:var(--w-gray);margin-top:5px">Sources · Schema · Gaps · AI step · What is lost</div>
+      <div style="font-size:0.54em;font-weight:600">The Worth AI Pipeline Today</div>
+      <div style="font-size:0.52em;color:var(--w-gray);margin-top:5px">Sources · Schema · Gaps · AI step · What is lost</div>
     </div>
     <div class="card" style="text-align:center;padding:18px">
       <div style="font-size:1.8em">⚡</div>
       <div style="font-weight:700;font-size:0.8em;color:var(--w-blue);margin:8px 0">Part 2</div>
-      <div style="font-size:0.68em;font-weight:600">The Global Consensus Engine</div>
-      <div style="font-size:0.58em;color:var(--w-gray);margin-top:5px">XGBoost · 38 features · Registry lookups · 9 AML signals</div>
+      <div style="font-size:0.54em;font-weight:600">The Global Consensus Engine</div>
+      <div style="font-size:0.52em;color:var(--w-gray);margin-top:5px">XGBoost · 38 features · Registry lookups · 9 AML signals</div>
     </div>
     <div class="card card-green" style="text-align:center;padding:18px">
       <div style="font-size:1.8em">📊</div>
       <div style="font-weight:700;font-size:0.8em;color:var(--w-green);margin:8px 0">Part 3</div>
-      <div style="font-size:0.68em;font-weight:600">Comparison &amp; Next Steps</div>
-      <div style="font-size:0.58em;color:var(--w-gray);margin-top:5px">Model diff · Capability table · P0 quick wins</div>
+      <div style="font-size:0.54em;font-weight:600">Comparison &amp; Next Steps</div>
+      <div style="font-size:0.52em;color:var(--w-gray);margin-top:5px">Model diff · Capability table · P0 quick wins</div>
     </div>
   </div>
 </section>
@@ -117,25 +122,25 @@ td.par { color:#E65100; font-weight:700; }
     <div>
       <h3 style="color:var(--w-orange)">Worth AI Today — 3 Key Facts</h3>
       <div class="card card-orange" style="margin-bottom:8px">
-        <div style="font-size:0.7em">❌ <strong>No ML model in classification.</strong> XGBoost only exists in entity matching. The classification decision is a deterministic rule (<code>factWithHighestConfidence()</code>), not a trained model.</div>
+        <div style="font-size:0.56em">❌ <strong>No ML model in classification.</strong> XGBoost only exists in entity matching. The classification decision is a deterministic rule (<code>factWithHighestConfidence()</code>), not a trained model.</div>
       </div>
       <div class="card card-orange" style="margin-bottom:8px">
-        <div style="font-size:0.7em">❌ <strong>UK SIC is silently discarded.</strong> OpenCorporates returns <code>"us_naics-541110|uk_sic-62012"</code>. The loop only reads <code>us_naics</code>. The UK SIC sits in the database, never used.</div>
+        <div style="font-size:0.56em">❌ <strong>UK SIC is silently discarded.</strong> OpenCorporates returns <code>"us_naics-541110|uk_sic-62012"</code>. The loop only reads <code>us_naics</code>. The UK SIC sits in the database, never used.</div>
       </div>
       <div class="card card-orange">
-        <div style="font-size:0.7em">❌ <strong>One taxonomy, one code.</strong> Every company gets US NAICS only. UK/EU/global companies receive an inappropriate US code or <code>naics_id = NULL</code>.</div>
+        <div style="font-size:0.56em">❌ <strong>One taxonomy, one code.</strong> Every company gets US NAICS only. UK/EU/global companies receive an inappropriate US code or <code>naics_id = NULL</code>.</div>
       </div>
     </div>
     <div>
       <h3 style="color:var(--w-green)">Consensus Engine — What Changes</h3>
       <div class="card card-green" style="margin-bottom:8px">
-        <div style="font-size:0.7em">✅ <strong>Real ML for classification.</strong> XGBClassifier with 38 engineered features outputs calibrated probabilities over all codes — not a rule.</div>
+        <div style="font-size:0.56em">✅ <strong>Real ML for classification.</strong> XGBClassifier with 38 engineered features outputs calibrated probabilities over all codes — not a rule.</div>
       </div>
       <div class="card card-green" style="margin-bottom:8px">
-        <div style="font-size:0.7em">✅ <strong>6 taxonomies simultaneously.</strong> NAICS 2022, UK SIC 2007, NACE Rev.2, ISIC Rev.4, US SIC 1987, MCC — correct taxonomy auto-selected per jurisdiction.</div>
+        <div style="font-size:0.56em">✅ <strong>6 taxonomies simultaneously.</strong> NAICS 2022, UK SIC 2007, NACE Rev.2, ISIC Rev.4, US SIC 1987, MCC — correct taxonomy auto-selected per jurisdiction.</div>
       </div>
       <div class="card card-green">
-        <div style="font-size:0.7em">✅ <strong>AML/KYB risk signals.</strong> 9 signal types (shell company, registry discrepancy, temporal pivot, source conflict…). Worth AI produces zero.</div>
+        <div style="font-size:0.56em">✅ <strong>AML/KYB risk signals.</strong> 9 signal types (shell company, registry discrepancy, temporal pivot, source conflict…). Worth AI produces zero.</div>
       </div>
     </div>
   </div>
@@ -154,8 +159,8 @@ td.par { color:#E65100; font-weight:700; }
   <div class="two-col" style="margin-top:14px">
     <div>
       <div class="card card-green" style="margin-bottom:10px">
-        <div style="font-weight:700;font-size:0.75em;color:var(--w-green)">Model 1 ✅ EXISTS — Entity Matching</div>
-        <div style="font-size:0.62em;margin-top:6px">
+        <div style="font-weight:700;font-size:0.66em;color:var(--w-green)">Model 1 ✅ EXISTS — Entity Matching</div>
+        <div style="font-size:0.56em;margin-top:6px">
           <strong>File:</strong> <code>entity_matching/core/matchers/matching_v1.py</code><br/>
           <strong>Model:</strong> <code>entity_matching_20250127</code><br/>
           <strong>Question it answers:</strong> "Is this database record the same company as the input?"<br/>
@@ -169,8 +174,8 @@ td.par { color:#E65100; font-weight:700; }
     </div>
     <div>
       <div class="card card-red">
-        <div style="font-weight:700;font-size:0.75em;color:var(--w-red)">Model 2 ❌ DOES NOT EXIST — Classification</div>
-        <div style="font-size:0.62em;margin-top:6px">
+        <div style="font-weight:700;font-size:0.66em;color:var(--w-red)">Model 2 ❌ DOES NOT EXIST — Classification</div>
+        <div style="font-size:0.56em;margin-top:6px">
           There is <strong>no ML model</strong> for choosing which NAICS code to assign.<br/><br/>
           The classification decision is made by a <strong>deterministic rule</strong>:<br/><br/>
           <code style="font-size:0.9em">factWithHighestConfidence()</code><br/>
@@ -235,7 +240,7 @@ td.par { color:#E65100; font-weight:700; }
   <div class="two-col" style="margin-top:14px">
     <div>
       <div class="card" style="margin-bottom:10px">
-        <div style="font-weight:700;font-size:0.72em;color:var(--w-blue)">How the winner is chosen</div>
+        <div style="font-weight:700;font-size:0.63em;color:var(--w-blue)">How the winner is chosen</div>
         <pre style="font-size:0.55em;background:#0D1B2A;color:#90CAF9;padding:10px;border-radius:6px;margin-top:8px"><code>factWithHighestConfidence():
   winner = argmax(
     source.confidence × source.weight
@@ -246,7 +251,7 @@ td.par { color:#E65100; font-weight:700; }
     )</code></pre>
       </div>
       <div class="card card-red">
-        <div style="font-size:0.65em"><strong>What this cannot do:</strong><br/>
+        <div style="font-size:0.52em"><strong>What this cannot do:</strong><br/>
         • Learn from manual overrides<br/>
         • Output a probability (always 1 winner, no alternatives)<br/>
         • Detect when sources conflict systematically<br/>
@@ -266,7 +271,7 @@ td.par { color:#E65100; font-weight:700; }
         <tr><td>7</td><td>SERP Scrape</td><td>0.30 × match_conf</td></tr>
         <tr><td>8</td><td>AI Enrichment</td><td>0.10 × AI_confidence</td></tr>
       </table>
-      <div style="font-size:0.58em;color:var(--w-gray);margin-top:8px">* Customer self-report has source weight=10 but fact-level override = 0.20</div>
+      <div style="font-size:0.52em;color:var(--w-gray);margin-top:8px">* Customer self-report has source weight=10 but fact-level override = 0.20</div>
     </div>
   </div>
 </section>
@@ -277,23 +282,23 @@ td.par { color:#E65100; font-weight:700; }
   <div class="two-col" style="margin-top:14px">
     <div>
       <h3 style="color:var(--w-green)">Exists ✅</h3>
-      <div class="card card-green" style="margin-bottom:7px;font-size:0.62em"><code>core_naics_code</code><br/>id · code (6-digit, UNIQUE) · label · 1,035 rows</div>
-      <div class="card card-green" style="margin-bottom:7px;font-size:0.62em"><code>core_mcc_code</code><br/>id · code (4-digit, UNIQUE) · label · 125 rows</div>
-      <div class="card card-green" style="margin-bottom:7px;font-size:0.62em"><code>rel_naics_mcc</code><br/>naics_id FK · mcc_id FK · 1,012 mappings</div>
-      <div class="card card-green" style="margin-bottom:7px;font-size:0.62em"><code>data_businesses</code><br/>naics_id FK · mcc_id FK · industry FK</div>
-      <div class="card card-green" style="font-size:0.62em"><code>integration_data.request_response</code><br/>business_id · platform_id · response(JSONB)<br/>ALL raw vendor data lives here</div>
+      <div class="card card-green" style="margin-bottom:7px;font-size:0.56em"><code>core_naics_code</code><br/>id · code (6-digit, UNIQUE) · label · 1,035 rows</div>
+      <div class="card card-green" style="margin-bottom:7px;font-size:0.56em"><code>core_mcc_code</code><br/>id · code (4-digit, UNIQUE) · label · 125 rows</div>
+      <div class="card card-green" style="margin-bottom:7px;font-size:0.56em"><code>rel_naics_mcc</code><br/>naics_id FK · mcc_id FK · 1,012 mappings</div>
+      <div class="card card-green" style="margin-bottom:7px;font-size:0.56em"><code>data_businesses</code><br/>naics_id FK · mcc_id FK · industry FK</div>
+      <div class="card card-green" style="font-size:0.56em"><code>integration_data.request_response</code><br/>business_id · platform_id · response(JSONB)<br/>ALL raw vendor data lives here</div>
     </div>
     <div>
       <h3 style="color:var(--w-red)">Missing ❌ — Critical Gaps</h3>
       <div class="card card-red" style="margin-bottom:10px">
-        <div style="font-weight:700;font-size:0.72em;color:var(--w-red)">core_uk_sic_code — DOES NOT EXIST</div>
-        <div style="font-size:0.62em;margin-top:5px">No reference table for UK SIC codes. Even if UK SIC was correctly extracted from OpenCorporates or Trulioo, there is nowhere to validate or store it.</div>
+        <div style="font-weight:700;font-size:0.63em;color:var(--w-red)">core_uk_sic_code — DOES NOT EXIST</div>
+        <div style="font-size:0.56em;margin-top:5px">No reference table for UK SIC codes. Even if UK SIC was correctly extracted from OpenCorporates or Trulioo, there is nowhere to validate or store it.</div>
       </div>
       <div class="card card-red">
-        <div style="font-weight:700;font-size:0.72em;color:var(--w-red)">uk_sic_id column — DOES NOT EXIST</div>
-        <div style="font-size:0.62em;margin-top:5px">No <code>uk_sic_id</code> column on <code>data_businesses</code>. Zero migrations add it. The UK SIC code from OpenCorporates and Trulioo has literally nowhere to go.</div>
+        <div style="font-weight:700;font-size:0.63em;color:var(--w-red)">uk_sic_id column — DOES NOT EXIST</div>
+        <div style="font-size:0.56em;margin-top:5px">No <code>uk_sic_id</code> column on <code>data_businesses</code>. Zero migrations add it. The UK SIC code from OpenCorporates and Trulioo has literally nowhere to go.</div>
       </div>
-      <div style="margin-top:10px;font-size:0.62em;color:var(--w-gray)">Also missing: <code>core_nace_code</code>, <code>core_isic_code</code>, Canadian NAICS storage</div>
+      <div style="margin-top:10px;font-size:0.56em;color:var(--w-gray)">Also missing: <code>core_nace_code</code>, <code>core_isic_code</code>, Canadian NAICS storage</div>
     </div>
   </div>
 </section>
@@ -339,23 +344,23 @@ td.par { color:#E65100; font-weight:700; }
 <!-- ═══════════════════════ SLIDE 9 — THE 4 UK GAPS ═══════════════════════ -->
 <section>
   <h2>The 4 Confirmed UK Classification Gaps</h2>
-  <p style="margin-bottom:12px;font-size:0.7em"><strong>Result:</strong> Every UK business either gets <code>naics_id = NULL</code> or an inappropriate US NAICS code applied to it.</p>
+  <p style="margin-bottom:12px;font-size:0.56em"><strong>Result:</strong> Every UK business either gets <code>naics_id = NULL</code> or an inappropriate US NAICS code applied to it.</p>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
     <div class="card card-red">
-      <div style="font-weight:700;font-size:0.72em;color:var(--w-red)">Gap 1 — OpenCorporates resolver</div>
-      <div style="font-size:0.62em;margin-top:5px">Returns <code>"us_naics-541110|uk_sic-62012"</code>. Loop filter: <code>codeName.includes("us_naics")</code> — UK SIC parsed into <code>classification_codes</code> fact. That fact has <strong>zero downstream consumers</strong>. Data is in the database, never used.</div>
+      <div style="font-weight:700;font-size:0.63em;color:var(--w-red)">Gap 1 — OpenCorporates resolver</div>
+      <div style="font-size:0.56em;margin-top:5px">Returns <code>"us_naics-541110|uk_sic-62012"</code>. Loop filter: <code>codeName.includes("us_naics")</code> — UK SIC parsed into <code>classification_codes</code> fact. That fact has <strong>zero downstream consumers</strong>. Data is in the database, never used.</div>
     </div>
     <div class="card card-red">
-      <div style="font-weight:700;font-size:0.72em;color:var(--w-red)">Gap 2 — Trulioo .sicCode never read</div>
-      <div style="font-size:0.62em;margin-top:5px">The object <code>{'{ naicsCode: "...", sicCode: "62012" }'}</code> is in the API response. The fact engine reads <code>?.naicsCode</code> and never accesses <code>.sicCode</code>. One missing field access.</div>
+      <div style="font-weight:700;font-size:0.63em;color:var(--w-red)">Gap 2 — Trulioo .sicCode never read</div>
+      <div style="font-size:0.56em;margin-top:5px">The object <code>{'{ naicsCode: "...", sicCode: "62012" }'}</code> is in the API response. The fact engine reads <code>?.naicsCode</code> and never accesses <code>.sicCode</code>. One missing field access.</div>
     </div>
     <div class="card card-red">
-      <div style="font-weight:700;font-size:0.72em;color:var(--w-red)">Gap 3 — No persistence layer</div>
-      <div style="font-size:0.62em;margin-top:5px">Zero migrations create <code>core_uk_sic_code</code> table or add <code>uk_sic_id</code> to <code>data_businesses</code>. Even if both gaps above were fixed, the data has nowhere to go.</div>
+      <div style="font-weight:700;font-size:0.63em;color:var(--w-red)">Gap 3 — No persistence layer</div>
+      <div style="font-size:0.56em;margin-top:5px">Zero migrations create <code>core_uk_sic_code</code> table or add <code>uk_sic_id</code> to <code>data_businesses</code>. Even if both gaps above were fixed, the data has nowhere to go.</div>
     </div>
     <div class="card card-red">
-      <div style="font-weight:700;font-size:0.72em;color:var(--w-red)">Gap 4 — AI enrichment Zod schema</div>
-      <div style="font-size:0.62em;margin-top:5px"><code>uk_sic_code</code> field not in the Zod schema for AI enrichment. Even when the AI returns it for GB companies, it cannot be persisted. Structurally impossible without a schema change AND a new table.</div>
+      <div style="font-weight:700;font-size:0.63em;color:var(--w-red)">Gap 4 — AI enrichment Zod schema</div>
+      <div style="font-size:0.56em;margin-top:5px"><code>uk_sic_code</code> field not in the Zod schema for AI enrichment. Even when the AI returns it for GB companies, it cannot be persisted. Structurally impossible without a schema change AND a new table.</div>
     </div>
   </div>
 </section>
@@ -366,12 +371,12 @@ td.par { color:#E65100; font-weight:700; }
   <div class="two-col" style="margin-top:12px">
     <div>
       <div class="card" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.7em;color:var(--w-blue)">Model: GPT-5-mini (gpt-5-mini)</div>
-        <div style="font-size:0.6em;margin-top:5px">Via <code>openai.responses.create</code> with Zod schema enforcement</div>
+        <div style="font-weight:700;font-size:0.56em;color:var(--w-blue)">Model: GPT-5-mini (gpt-5-mini)</div>
+        <div style="font-size:0.54em;margin-top:5px">Via <code>openai.responses.create</code> with Zod schema enforcement</div>
       </div>
       <div class="card" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.7em;color:var(--w-blue)">When it triggers (conditional)</div>
-        <div style="font-size:0.6em;margin-top:5px">
+        <div style="font-weight:700;font-size:0.56em;color:var(--w-blue)">When it triggers (conditional)</div>
+        <div style="font-size:0.54em;margin-top:5px">
           Runs when: website + name + address resolved AND 1–2 NAICS sources<br/>
           <strong>Skips</strong> when: already ≥ 3 NAICS sources (saves credits)<br/>
           <strong>Defers</strong>: Bull queue, 10 attempts, exponential backoff<br/>
@@ -379,11 +384,11 @@ td.par { color:#E65100; font-weight:700; }
         </div>
       </div>
       <div class="card" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.7em;color:var(--w-blue)">Confidence → fact weight</div>
-        <div style="font-size:0.6em;margin-top:5px">HIGH → 0.20 &nbsp;|&nbsp; MED → 0.15 &nbsp;|&nbsp; LOW → 0.10<br/>Even "HIGH" loses to OpenCorporates (0.90)</div>
+        <div style="font-weight:700;font-size:0.56em;color:var(--w-blue)">Confidence → fact weight</div>
+        <div style="font-size:0.54em;margin-top:5px">HIGH → 0.20 &nbsp;|&nbsp; MED → 0.15 &nbsp;|&nbsp; LOW → 0.10<br/>Even "HIGH" loses to OpenCorporates (0.90)</div>
       </div>
       <div class="card card-orange">
-        <div style="font-size:0.6em"><strong>Last resort:</strong> If NAICS not in <code>core_naics_code</code>, replaced with hardcoded <code>561499</code> (Administrative Services)</div>
+        <div style="font-size:0.54em"><strong>Last resort:</strong> If NAICS not in <code>core_naics_code</code>, replaced with hardcoded <code>561499</code> (Administrative Services)</div>
       </div>
     </div>
     <div>
@@ -404,7 +409,7 @@ previous_naics_code, previous_mcc_code.
 
 If no evidence: return naics_code 561499
 and mcc_code 5614 as last resort.</code></pre>
-      <div style="font-size:0.58em;color:var(--w-gray);margin-top:8px">
+      <div style="font-size:0.52em;color:var(--w-gray);margin-top:8px">
         ⚠️ UK SIC returned by AI but cannot be stored — no table, no column
       </div>
     </div>
@@ -491,8 +496,8 @@ and mcc_code 5614 as last resort.</code></pre>
   <div class="two-col" style="margin-top:14px">
     <div>
       <div class="card card-green" style="margin-bottom:10px">
-        <div style="font-weight:700;font-size:0.72em;color:var(--w-green)">Model 1 — Entity Matching (extended)</div>
-        <div style="font-size:0.62em;margin-top:5px">
+        <div style="font-weight:700;font-size:0.63em;color:var(--w-green)">Model 1 — Entity Matching (extended)</div>
+        <div style="font-size:0.56em;margin-top:5px">
           Same <code>entity_matching_20250127</code> algorithm.<br/>
           <strong>Extended:</strong> Liberty Data added as 4th Redshift source alongside OpenCorporates, Equifax, ZoomInfo.<br/>
           Same 26 name+address similarity features.<br/>
@@ -502,8 +507,8 @@ and mcc_code 5614 as last resort.</code></pre>
     </div>
     <div>
       <div class="card card-green">
-        <div style="font-weight:700;font-size:0.72em;color:var(--w-green)">Model 2 — Classification Consensus (NEW)</div>
-        <div style="font-size:0.62em;margin-top:5px">
+        <div style="font-weight:700;font-size:0.63em;color:var(--w-green)">Model 2 — Classification Consensus (NEW)</div>
+        <div style="font-size:0.56em;margin-top:5px">
           <code>XGBClassifier(objective="multi:softprob")</code><br/>
           <strong>Training:</strong> 2,000+ synthetic multi-vendor samples → replaced by manual override history from <code>rel_business_industry_naics</code> in production<br/>
           <strong>Input:</strong> 38 engineered numeric features<br/>
@@ -514,9 +519,9 @@ and mcc_code 5614 as last resort.</code></pre>
     </div>
   </div>
   <div style="margin-top:14px;text-align:center">
-    <span class="chip chip-red" style="font-size:0.75em;padding:5px 14px">Worth AI: 0 numeric features for classification (deterministic rule)</span>
+    <span class="chip chip-red" style="font-size:0.66em;padding:5px 14px">Worth AI: 0 numeric features for classification (deterministic rule)</span>
     &nbsp;&nbsp;→&nbsp;&nbsp;
-    <span class="chip chip-green" style="font-size:0.75em;padding:5px 14px">Consensus Engine: 38 numeric features → trained probabilistic model</span>
+    <span class="chip chip-green" style="font-size:0.66em;padding:5px 14px">Consensus Engine: 38 numeric features → trained probabilistic model</span>
   </div>
 </section>
 
@@ -526,26 +531,26 @@ and mcc_code 5614 as last resort.</code></pre>
   <div class="three-col" style="margin-top:14px">
     <div>
       <h3 style="color:var(--w-blue)">Group A — Source Quality (12)</h3>
-      <div class="card" style="font-size:0.6em;margin-bottom:6px">Features 0–5: per-source weighted confidence<br/><code>weight × match_confidence</code> for each of 6 sources</div>
-      <div class="card" style="font-size:0.6em;margin-bottom:6px">Features 6–11: MATCHED flag per source<br/>1 = entity confirmed in database</div>
+      <div class="card" style="font-size:0.54em;margin-bottom:6px">Features 0–5: per-source weighted confidence<br/><code>weight × match_confidence</code> for each of 6 sources</div>
+      <div class="card" style="font-size:0.54em;margin-bottom:6px">Features 6–11: MATCHED flag per source<br/>1 = entity confirmed in database</div>
       <h3 style="color:var(--w-blue);margin-top:10px">Group B — Semantic Signals (5)</h3>
-      <div class="card" style="font-size:0.6em;margin-bottom:6px">Feature 12: Trulioo Pollution Flag<br/>4-digit SIC in 6-digit jurisdiction</div>
-      <div class="card" style="font-size:0.6em;margin-bottom:6px">Feature 13: Web↔Registry semantic distance<br/>&gt; 0.55 = shell company indicator</div>
-      <div class="card" style="font-size:0.6em">Feature 14: Temporal Pivot Score<br/>code change rate → AML U-Turn signal</div>
+      <div class="card" style="font-size:0.54em;margin-bottom:6px">Feature 12: Trulioo Pollution Flag<br/>4-digit SIC in 6-digit jurisdiction</div>
+      <div class="card" style="font-size:0.54em;margin-bottom:6px">Feature 13: Web↔Registry semantic distance<br/>&gt; 0.55 = shell company indicator</div>
+      <div class="card" style="font-size:0.54em">Feature 14: Temporal Pivot Score<br/>code change rate → AML U-Turn signal</div>
     </div>
     <div>
       <h3 style="color:var(--w-blue)">Group C — Entity Type (3)</h3>
-      <div class="card" style="font-size:0.6em;margin-bottom:6px">Is Holding: 1 if entity_type = "Holding"</div>
-      <div class="card" style="font-size:0.6em;margin-bottom:6px">Is NGO: 1 if entity_type = "NGO"</div>
-      <div class="card" style="font-size:0.6em;margin-bottom:6px">Is Partnership</div>
+      <div class="card" style="font-size:0.54em;margin-bottom:6px">Is Holding: 1 if entity_type = "Holding"</div>
+      <div class="card" style="font-size:0.54em;margin-bottom:6px">Is NGO: 1 if entity_type = "NGO"</div>
+      <div class="card" style="font-size:0.54em;margin-bottom:6px">Is Partnership</div>
       <h3 style="color:var(--w-blue);margin-top:10px">Group E — Agreement &amp; Risk (7)</h3>
-      <div class="card" style="font-size:0.6em;margin-bottom:6px">Feature 31: Majority code agreement<br/>fraction of sources giving same code</div>
-      <div class="card" style="font-size:0.6em;margin-bottom:6px">Feature 32: High-risk NAICS prefix<br/>AML-elevated sector flag</div>
-      <div class="card" style="font-size:0.6em">Features 33–37: diversity, distance, avg/max confidence, source count</div>
+      <div class="card" style="font-size:0.54em;margin-bottom:6px">Feature 31: Majority code agreement<br/>fraction of sources giving same code</div>
+      <div class="card" style="font-size:0.54em;margin-bottom:6px">Feature 32: High-risk NAICS prefix<br/>AML-elevated sector flag</div>
+      <div class="card" style="font-size:0.54em">Features 33–37: diversity, distance, avg/max confidence, source count</div>
     </div>
     <div>
       <h3 style="color:var(--w-blue)">Group D — Jurisdiction One-Hot (12)</h3>
-      <div style="font-size:0.6em">
+      <div style="font-size:0.54em">
         <div class="card" style="margin-bottom:5px">idx 0: US (federal)<br/>idx 1: US_STATE (us_mo, us_ca, pr…)<br/>idx 2: CA (federal)<br/>idx 3: CA_PROV (ca_bc, ca_qc…)<br/>idx 4: EU (gb, de, fr, nl, pl…)<br/>idx 5: APAC (in, cn, jp, sg, th…)<br/>idx 6: LATAM (mx, br, ar, do…)<br/>idx 7: MENA (ae, ae_az, sa, eg…)<br/>idx 8: AFRICA (za, ng, ke, tz…)<br/>idx 9: OTHER</div>
         <div class="card" style="margin-bottom:5px">Feature 29: Is sub-national?<br/>(us_mo, ca_bc, ae_az…)</div>
         <div class="card">Feature 30: Is NAICS jurisdiction?</div>
@@ -557,11 +562,11 @@ and mcc_code 5614 as last resort.</code></pre>
 <!-- ═══════════════════════ SLIDE 15 — EXTERNAL REGISTRY ═══════════════════════ -->
 <section>
   <h2>External Registry Lookups — New in the Consensus Engine</h2>
-  <p style="font-size:0.7em;margin-bottom:12px">Before the LLM is called, the engine queries free government registries for <strong>authoritative codes the company filed directly with the government</strong>.</p>
+  <p style="font-size:0.56em;margin-bottom:12px">Before the LLM is called, the engine queries free government registries for <strong>authoritative codes the company filed directly with the government</strong>.</p>
   <div class="two-col">
     <div class="card" style="margin-bottom:10px">
-      <div style="font-weight:700;font-size:0.72em;color:var(--w-blue)">SEC EDGAR — US companies</div>
-      <div style="font-size:0.62em;margin-top:6px">
+      <div style="font-weight:700;font-size:0.63em;color:var(--w-blue)">SEC EDGAR — US companies</div>
+      <div style="font-size:0.56em;margin-top:6px">
         <strong>Free — no API key required</strong><br/>
         Endpoint: <code>data.sec.gov/submissions/CIK{cik}.json</code><br/>
         Search: <code>efts.sec.gov/LATEST/search-index</code><br/>
@@ -573,8 +578,8 @@ and mcc_code 5614 as last resort.</code></pre>
       </div>
     </div>
     <div class="card">
-      <div style="font-weight:700;font-size:0.72em;color:var(--w-blue)">Companies House — UK companies</div>
-      <div style="font-size:0.62em;margin-top:6px">
+      <div style="font-weight:700;font-size:0.63em;color:var(--w-blue)">Companies House — UK companies</div>
+      <div style="font-size:0.56em;margin-top:6px">
         <strong>Free API key</strong> from developer.company-information.service.gov.uk<br/>
         Returns: up to 4 SIC codes, company type, status, date of creation<br/>
         Coverage: all UK registered companies<br/><br/>
@@ -585,7 +590,7 @@ and mcc_code 5614 as last resort.</code></pre>
       </div>
     </div>
   </div>
-  <div style="margin-top:10px;text-align:center;font-size:0.65em;color:var(--w-gray)">
+  <div style="margin-top:10px;text-align:center;font-size:0.52em;color:var(--w-gray)">
     ⚠️ Worth AI has NO equivalent — it never queries any government registry directly for classification
   </div>
 </section>
@@ -596,8 +601,8 @@ and mcc_code 5614 as last resort.</code></pre>
   <div class="two-col" style="margin-top:12px">
     <div>
       <h3 style="color:var(--w-red)">Worth AI — Blind Classifier</h3>
-      <div style="font-size:0.62em">LLM receives only:<br/>• Company name + address<br/>• Web search text snippet<br/>• No vendor signal context<br/>• No registry data<br/><br/>LLM guesses from scratch. Even if OpenCorporates already has the answer, the LLM doesn't know.</div>
-      <div class="card card-orange" style="margin-top:10px;font-size:0.6em">
+      <div style="font-size:0.56em">LLM receives only:<br/>• Company name + address<br/>• Web search text snippet<br/>• No vendor signal context<br/>• No registry data<br/><br/>LLM guesses from scratch. Even if OpenCorporates already has the answer, the LLM doesn't know.</div>
+      <div class="card card-orange" style="margin-top:10px;font-size:0.54em">
         Trigger: conditional (1–2 sources, async Bull queue)<br/>
         Weight: 0.10 (always loses to vendors)<br/>
         Last resort: hardcoded <code>561499</code>
@@ -605,19 +610,19 @@ and mcc_code 5614 as last resort.</code></pre>
     </div>
     <div>
       <h3 style="color:var(--w-green)">Consensus Engine — Evidence Referee</h3>
-      <div style="font-size:0.58em">LLM receives 5 evidence blocks:<br/>
+      <div style="font-size:0.52em">LLM receives 5 evidence blocks:<br/>
         <strong>1.</strong> Registry data (SEC EDGAR / Companies House) — ground truth<br/>
         <strong>2.</strong> Vendor signals: what all 6 sources returned with weight + status<br/>
         <strong>3.</strong> Source agreement summary ("4/5 agree on code 334118")<br/>
         <strong>4.</strong> UGO FAISS semantic candidates (top-8 per taxonomy)<br/>
         <strong>5.</strong> 5-step reasoning instruction</div>
-      <div style="font-size:0.58em;margin-top:8px"><strong>Reasoning order:</strong><br/>
+      <div style="font-size:0.52em;margin-top:8px"><strong>Reasoning order:</strong><br/>
         Step 1: Registry first (self-reported, highest authority)<br/>
         Step 2: Vendor consensus (confirm if 3+ agree)<br/>
         Step 3: Adjudicate conflicts (explain divergence)<br/>
         Step 4: Select from UGO candidates<br/>
         Step 5: MCC + AML risk flag</div>
-      <div class="card card-green" style="margin-top:8px;font-size:0.58em">
+      <div class="card card-green" style="margin-top:8px;font-size:0.52em">
         New output fields: <code>source_used</code> (registry/vendor_consensus/semantic/web_inference) · <code>registry_conflict</code> (bool) · <code>mcc_risk_note</code>
       </div>
     </div>
@@ -666,7 +671,7 @@ and mcc_code 5614 as last resort.</code></pre>
       <td>Trulioo returned 4-digit SIC in 5/6-digit jurisdiction</td>
     </tr>
   </table>
-  <div style="margin-top:8px;font-size:0.6em;color:var(--w-gray)">KYB recommendation: APPROVE (&lt;0.25) · REVIEW (0.25–0.50) · ESCALATE (0.50–0.75) · REJECT (≥0.75)</div>
+  <div style="margin-top:8px;font-size:0.54em;color:var(--w-gray)">KYB recommendation: APPROVE (&lt;0.25) · REVIEW (0.25–0.50) · ESCALATE (0.50–0.75) · REJECT (≥0.75)</div>
 </section>
 
 <!-- ═══════════════════════ SLIDE 18 — UGO ═══════════════════════ -->
@@ -674,14 +679,14 @@ and mcc_code 5614 as last resort.</code></pre>
   <h2>The Unified Global Ontology (UGO)</h2>
   <div class="two-col" style="margin-top:14px">
     <div>
-      <p style="font-size:0.68em">A <strong>FAISS cosine vector index</strong> (IndexFlatIP) built from all 2,330 taxonomy codes embedded with <code>all-MiniLM-L6-v2</code> (384-dim). Enables <strong>Cross-Ontology Embedding Alignment</strong> — no hardcoded crosswalk tables needed.</p>
-      <div class="card card-green" style="margin-top:10px;font-size:0.62em">
+      <p style="font-size:0.54em">A <strong>FAISS cosine vector index</strong> (IndexFlatIP) built from all 2,330 taxonomy codes embedded with <code>all-MiniLM-L6-v2</code> (384-dim). Enables <strong>Cross-Ontology Embedding Alignment</strong> — no hardcoded crosswalk tables needed.</p>
+      <div class="card card-green" style="margin-top:10px;font-size:0.56em">
         <strong>Search example:</strong> "licensed restaurant food service"<br/>
         → UK SIC 56101 "Licensed restaurants" (sim: 0.741) ← top result<br/>
         → NAICS 722511 "Full-Service Restaurants" (sim: 0.672)<br/>
         → ISIC 5610 "Restaurant and mobile food" (sim: 0.643)
       </div>
-      <div class="card" style="margin-top:10px;font-size:0.62em">
+      <div class="card" style="margin-top:10px;font-size:0.56em">
         <strong>Cross-taxonomy distance:</strong><br/>
         UK SIC 56101 ↔ NAICS 722511 = 0.09 (nearly identical meaning)<br/>
         Restaurant code ↔ Banking code = 0.89 (completely different)
@@ -698,7 +703,7 @@ and mcc_code 5614 as last resort.</code></pre>
         <tr><td>MCC</td><td>Visa / Mastercard</td><td>305</td></tr>
         <tr style="background:#E3F2FD"><td><strong>Total</strong></td><td></td><td><strong>2,330</strong></td></tr>
       </table>
-      <div style="margin-top:10px;font-size:0.6em;color:var(--w-gray)">Worth AI equivalent: one static Excel file with NAICS codes only. No semantic search — keyword overlap scoring.</div>
+      <div style="margin-top:10px;font-size:0.54em;color:var(--w-gray)">Worth AI equivalent: one static Excel file with NAICS codes only. No semantic search — keyword overlap scoring.</div>
     </div>
   </div>
 </section>
@@ -775,7 +780,7 @@ and mcc_code 5614 as last resort.</code></pre>
 <!-- ═══════════════════════ SLIDE 20 — FULL CAPABILITY ═══════════════════════ -->
 <section>
   <h2>Full Capability Comparison</h2>
-  <table style="margin-top:12px;font-size:0.58em">
+  <table style="margin-top:12px;font-size:0.52em">
     <tr>
       <th>Capability</th>
       <th class="vs-left" style="background:#546E7A">Worth AI</th>
@@ -824,25 +829,25 @@ and mcc_code 5614 as last resort.</code></pre>
 <!-- ═══════════════════════ SLIDE 22 — P0 QUICK WINS ═══════════════════════ -->
 <section>
   <h2>P0 Quick Wins — No New Vendor APIs Needed</h2>
-  <p style="font-size:0.7em;margin-bottom:12px">The UK SIC data is <strong>already in the database</strong>. These fixes require no new APIs — only code and schema changes.</p>
+  <p style="font-size:0.56em;margin-bottom:12px">The UK SIC data is <strong>already in the database</strong>. These fixes require no new APIs — only code and schema changes.</p>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
     <div class="card card-red">
-      <div style="font-weight:700;font-size:0.72em;color:var(--w-red)">P0 · 1 — Add uk_sic_id to data_businesses</div>
-      <div style="font-size:0.6em;margin-top:5px"><strong>Effort:</strong> One migration file<br/><strong>Impact:</strong> UK SIC can now be stored<br/>
+      <div style="font-weight:700;font-size:0.63em;color:var(--w-red)">P0 · 1 — Add uk_sic_id to data_businesses</div>
+      <div style="font-size:0.54em;margin-top:5px"><strong>Effort:</strong> One migration file<br/><strong>Impact:</strong> UK SIC can now be stored<br/>
       <code>ALTER TABLE data_businesses ADD uk_sic_id int NULL REFERENCES core_uk_sic_code(id);</code></div>
     </div>
     <div class="card card-red">
-      <div style="font-weight:700;font-size:0.72em;color:var(--w-red)">P0 · 2 — Read Trulioo .sicCode for GB</div>
-      <div style="font-size:0.6em;margin-top:5px"><strong>Effort:</strong> One line change in <code>businessDetails/index.ts</code><br/><strong>Impact:</strong> 2nd UK SIC source immediately active<br/>
+      <div style="font-weight:700;font-size:0.63em;color:var(--w-red)">P0 · 2 — Read Trulioo .sicCode for GB</div>
+      <div style="font-size:0.54em;margin-top:5px"><strong>Effort:</strong> One line change in <code>businessDetails/index.ts</code><br/><strong>Impact:</strong> 2nd UK SIC source immediately active<br/>
       Add <code>?.sicCode</code> read alongside existing <code>?.naicsCode</code></div>
     </div>
     <div class="card card-orange">
-      <div style="font-weight:700;font-size:0.72em;color:var(--w-orange)">P0 · 3 — Wire classification_codes consumer</div>
-      <div style="font-size:0.6em;margin-top:5px"><strong>Effort:</strong> One Kafka handler + one table<br/><strong>Impact:</strong> Unlocks CA NAICS, NACE, ISIC with zero new API calls<br/>The data is already in <code>integration_data.request_response</code></div>
+      <div style="font-weight:700;font-size:0.63em;color:var(--w-orange)">P0 · 3 — Wire classification_codes consumer</div>
+      <div style="font-size:0.54em;margin-top:5px"><strong>Effort:</strong> One Kafka handler + one table<br/><strong>Impact:</strong> Unlocks CA NAICS, NACE, ISIC with zero new API calls<br/>The data is already in <code>integration_data.request_response</code></div>
     </div>
     <div class="card card-orange">
-      <div style="font-weight:700;font-size:0.72em;color:var(--w-orange)">P0 · 4 — Add Liberty Data to entity matching</div>
-      <div style="font-size:0.6em;margin-top:5px"><strong>Effort:</strong> Add SQL query to <code>build_matching_tables.py</code> SOURCES dict<br/><strong>Impact:</strong> 4th entity-matching source active for US/GB/CA<br/><code>"US": ["open_corporates","equifax","zoominfo","liberty_data"]</code></div>
+      <div style="font-weight:700;font-size:0.63em;color:var(--w-orange)">P0 · 4 — Add Liberty Data to entity matching</div>
+      <div style="font-size:0.54em;margin-top:5px"><strong>Effort:</strong> Add SQL query to <code>build_matching_tables.py</code> SOURCES dict<br/><strong>Impact:</strong> 4th entity-matching source active for US/GB/CA<br/><code>"US": ["open_corporates","equifax","zoominfo","liberty_data"]</code></div>
     </div>
   </div>
 </section>
@@ -867,7 +872,7 @@ and mcc_code 5614 as last resort.</code></pre>
 <!-- ═══════════════════════ SLIDE 24 — APP PAGES ═══════════════════════ -->
 <section>
   <h2>The Application — 6 Pages</h2>
-  <table style="margin-top:14px;font-size:0.6em">
+  <table style="margin-top:14px;font-size:0.54em">
     <tr><th>Page</th><th>What it does</th><th>Inputs</th><th>Key outputs</th></tr>
     <tr>
       <td><strong>Single Company Lookup</strong></td>
@@ -921,7 +926,7 @@ and mcc_code 5614 as last resort.</code></pre>
     &nbsp;&nbsp;2. Read Trulioo <code style="color:#90CAF9">.sicCode</code> field → one line of code</div>
   </div>
   <br/>
-  <p style="font-size:0.6em;color:#546E7A">Full technical details: <code style="color:#90CAF9">TECHNICAL_BRIEFING.md</code> · Live demo: Streamlit app</p>
+  <p style="font-size:0.54em;color:#546E7A">Full technical details: <code style="color:#90CAF9">TECHNICAL_BRIEFING.md</code> · Live demo: Streamlit app</p>
 </section>
 
 </div><!-- /slides -->
@@ -937,9 +942,16 @@ and mcc_code 5614 as last resort.</code></pre>
     controls: true,
     progress: true,
     center: true,
-    width: 1200,
-    height: 700,
-    margin: 0.04,
+    // Large canvas — reveal.js scales it DOWN to fit ANY screen size.
+    // At 1600×900 with minScale=0.1, a laptop at 1440px wide shows
+    // the slide at ~0.9 scale (90%) — perfectly readable, nothing clipped.
+    width: 1600,
+    height: 900,
+    margin: 0.05,
+    minScale: 0.1,
+    maxScale: 2.0,
+    // Always fit the slide to the viewport — no overflow, no scrolling
+    disableLayout: false,
   });
 </script>
 </body>
