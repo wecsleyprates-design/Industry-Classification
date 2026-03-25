@@ -39,6 +39,15 @@ logger = logging.getLogger(__name__)
 
 SEVERITY_ORDER = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1}
 
+# Exported so any module that imports from risk_engine gets consistent colours
+_RISK_COLOURS = {
+    "CRITICAL": "#d32f2f",
+    "HIGH":     "#f57c00",
+    "MEDIUM":   "#fbc02d",
+    "LOW":      "#388e3c",
+    "INFO":     "#1976d2",
+}
+
 
 @dataclass
 class RiskSignal:
