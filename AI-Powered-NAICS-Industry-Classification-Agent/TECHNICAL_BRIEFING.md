@@ -205,19 +205,59 @@ Effective priority for `naics_code`:
 
 ### 1.4 Database Schema — Industry Tables
 
+Worth AI operates across three separate data layers. It is important to distinguish what each layer stores.
+
+#### Layer 1: case-service PostgreSQL (operational case DB)
 ```
-core_naics_code        : id (PK) · code (6-digit UNIQUE) · label  → 1,035 rows
-core_mcc_code          : id (PK) · code (4-digit UNIQUE) · label  → 125 rows
-rel_naics_mcc          : naics_id FK · mcc_id FK                  → 1,012 mappings
-core_business_industries: id · name · code · sector_code          → 20 NAICS sectors
-data_businesses        : naics_id FK · mcc_id FK · industry FK
-rel_business_industry_naics: business_id · platform · naics_id · industry_id (UNIQUE per platform)
-integration_data.request_response: business_id · platform_id · response(JSONB) — ALL vendor raw data
+core_naics_code             : id (PK) · code (6-digit UNIQUE) · label  → 1,035 rows
+core_mcc_code               : id (PK) · code (4-digit UNIQUE) · label  → 125 rows
+rel_naics_mcc               : naics_id FK · mcc_id FK                  → 1,012 mappings
+core_business_industries    : id · name · code · sector_code           → 20 NAICS sectors
+data_businesses             : naics_id FK · mcc_id FK · industry FK
+rel_business_industry_naics : business_id · platform · naics_id · industry_id (UNIQUE per platform)
+integration_data.request_response: business_id · platform_id · response(JSONB) — ALL raw vendor data
+onboarding_schema.core_jurisdictions: jurisdiction_code · flag_code · name · order_index
+onboarding_schema.rel_customer_setup_countries: customer_id · setup_id · jurisdiction_code · is_enabled
 ```
 
-**Missing tables (critical gaps):**
+**What `jurisdiction_code` means in case-service:** The `jurisdiction_code` in `onboarding_schema` is the **applicant's country selection** during onboarding (e.g. "US", "GB") — used to enable/disable countries for a customer's onboarding form. It is **not** the OpenCorporates jurisdiction code of the company.
+
+**Missing in case-service (critical gaps for industry):**
 - `core_uk_sic_code` → does not exist
 - `uk_sic_id` column on `data_businesses` → does not exist
+
+#### Layer 2: integration-service PostgreSQL (raw vendor responses)
+```
+integration_data.request_response: ALL raw vendor JSON (per platform_id)
+integration_data.extended_attributes: SQL function exposing OC JSON fields including
+  registry_match_jurisdiction_code, registry_firm_jurisdiction_code
+```
+The `classification_codes` fact (OC `industry_code_uids` parsed into `{us_naics, uk_sic, ca_naics}`) is computed **in-memory** by the FactEngine and emitted on the Kafka FACTS topic. **It is not written to any dedicated database column.**
+
+#### Layer 3: Redshift warehouse (analytics layer)
+
+This is where `jurisdiction_code` IS stored — but for entity matching, not for the production case classification:
+
+```sql
+-- open_corporate.companies (Redshift — queried by integration-service via executeAndUnwrapRedshiftQuery)
+-- Contains: jurisdiction_code, home_jurisdiction_code, industry_code_uids
+-- This is the SOURCE table used to MATCH companies — not the output of classification
+
+-- datascience.smb_pr_verification_cs (built by warehouse-service procedures)
+-- Contains: jurisdiction_code, home_jurisdiction_code, industry_code_uids (from OC)
+--           efx_primnaicscode, efx_secnaics1-4, efx_primsic, efx_secsic1-4 (from Equifax)
+--           zi_c_naics2/4/6, zi_c_sic2/3/4 (from ZoomInfo)
+-- PURPOSE: analytics/reporting wide table — NOT the production case DB
+
+-- rds_warehouse_public.facts (pivoted facts table — used by customer export)
+-- Contains: naics_code, naics_description, mcc_code, mcc_description as fact rows
+-- The customer S3 export SQL (build-customer-export.sql) reads from here:
+--   CASE WHEN ff.name = 'naics_code' THEN ff.fact_value END AS naics_code
+--   CASE WHEN ff.name = 'mcc_code'   THEN ff.fact_value END AS mcc_code
+--   registry_jurisdiction (from SOS JSON 'state' field — NOT OC jurisdiction_code)
+```
+
+**Important distinction:** The query in the screenshot (`SELECT jurisdiction_code FROM open_corporate.companies GROUP BY jurisdiction_code`) reads from the **Redshift entity-matching source table** — not from a production classification output. This table tells you what jurisdictions OpenCorporates has data for, not what Worth AI has classified and stored in production.
 
 ### 1.5 Inputs and Outputs — Worth AI
 
@@ -227,7 +267,7 @@ integration_data.request_response: business_id · platform_id · response(JSONB)
 |-------|-------|
 | Company name | 9 basic English suffixes stripped only |
 | Address | Used in entity matching |
-| Country | Stored but NOT used for taxonomy routing |
+| Country | Stored as applicant's `jurisdiction_code` in onboarding (for form routing). NOT used to select the correct taxonomy for classification. The `open_corporate.companies` Redshift table has `jurisdiction_code` for millions of companies — this is used for MATCHING, not for routing the output taxonomy. |
 | Industry name (text) | Fuse-matched to 20-sector `core_business_industries` |
 
 **Outputs:**
