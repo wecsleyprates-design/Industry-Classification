@@ -355,14 +355,24 @@ class DataSimulator:
         jc = jurisdiction.lower().strip()
         if force_conflict:
             code, label, taxonomy = "551112", "Offices of Other Holding Companies", "US_NAICS_2022"
+            status, confidence = "MATCHED", _jitter(0.88, 0.05)
         else:
             code, label, taxonomy = self._taxonomy_pool(jc, seed)
+            # For unknown entities, OpenCorporates may not find a registry match
+            # → partial match (company found by name but address differs) or not found
+            r = random.random()
+            if r < 0.35:
+                status, confidence = "INFERRED", _jitter(0.52, 0.12)
+            elif r < 0.55:
+                status, confidence = "CONFLICT",  _jitter(0.63, 0.10)
+            else:
+                status, confidence = "MATCHED",   _jitter(0.71, 0.09)
 
         return SourceSignal(
             source="opencorporates",
             raw_code=code, taxonomy=taxonomy, label=label,
             weight=_jitter(self.weights["opencorporates"], 0.05),
-            status="MATCHED", confidence=_jitter(0.88, 0.07),
+            status=status, confidence=confidence,
             retrieved_at=_ts(0),
         )
 
@@ -375,13 +385,20 @@ class DataSimulator:
             code, label = _pick(_US_SIC_POOL, seed + 2)
             taxonomy = "US_SIC_1987"
 
-        conflict = random.random() < 0.15
+        # Unknown entities: Equifax batch file may not have this company
+        r = random.random()
+        if r < 0.30:
+            status, confidence = "INFERRED", _jitter(0.48, 0.12)
+        elif r < 0.50:
+            status, confidence = "CONFLICT",  _jitter(0.61, 0.10)
+        else:
+            status, confidence = "MATCHED",   _jitter(0.68, 0.09)
+
         return SourceSignal(
             source="equifax",
             raw_code=code, taxonomy=taxonomy, label=label,
             weight=_jitter(self.weights["equifax"], 0.08),
-            status="CONFLICT" if conflict else "MATCHED",
-            confidence=_jitter(0.75, 0.1),
+            status=status, confidence=confidence,
             retrieved_at=_ts(0),
         )
 
@@ -411,22 +428,38 @@ class DataSimulator:
 
     def _call_zoominfo(self, seed: int) -> SourceSignal:
         code, label = _pick(_NAICS_POOL, seed + 4)
+        # Unknown entities: ZoomInfo may not have coverage for small/private companies
+        r = random.random()
+        if r < 0.25:
+            status, confidence = "INFERRED", _jitter(0.55, 0.12)
+        elif r < 0.40:
+            status, confidence = "CONFLICT",  _jitter(0.65, 0.10)
+        else:
+            status, confidence = "MATCHED",   _jitter(0.72, 0.08)
         return SourceSignal(
             source="zoominfo",
             raw_code=code, taxonomy="US_NAICS_2022", label=label,
             weight=_jitter(self.weights["zoominfo"], 0.06),
-            status="MATCHED", confidence=_jitter(0.80, 0.08),
+            status=status, confidence=confidence,
             retrieved_at=_ts(0),
         )
 
     def _call_duns(self, seed: int, jurisdiction: str) -> SourceSignal:
         jc = jurisdiction.lower().strip()
         code, label, taxonomy = self._taxonomy_pool(jc, seed + 5)
+        # Unknown entities: D&B may have limited coverage for small/private companies
+        r = random.random()
+        if r < 0.20:
+            status, confidence = "INFERRED", _jitter(0.50, 0.12)
+        elif r < 0.35:
+            status, confidence = "CONFLICT",  _jitter(0.63, 0.10)
+        else:
+            status, confidence = "MATCHED",   _jitter(0.70, 0.08)
         return SourceSignal(
             source="duns",
             raw_code=code, taxonomy=taxonomy, label=label,
             weight=_jitter(self.weights["duns"], 0.05),
-            status="MATCHED", confidence=_jitter(0.83, 0.07),
+            status=status, confidence=confidence,
             retrieved_at=_ts(0),
         )
 

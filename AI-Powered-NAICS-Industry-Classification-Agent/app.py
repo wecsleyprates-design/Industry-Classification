@@ -206,18 +206,28 @@ def display_consensus_result(
             f"contributed and whether any conflicts exist."
         )
     elif prob < 0.30:
-        st.error(
-            f"**Low consensus probability ({prob:.0%}) — this is expected for well-known multi-sector "
-            f"companies or when the simulator does not yet have entity-matching data for this company.** "
-            f"For well-known companies like Apple, Google, or Microsoft, the low probability indicates "
-            f"that the XGBoost model is trained on synthetic data and has not yet been trained on real "
-            f"ground-truth overrides from your Redshift tables. In production, the entity matching "
-            f"pipeline (matching_v1.py + entity_matching_20250127 XGBoost model) would first look up "
-            f"the company in OpenCorporates, Equifax, and ZoomInfo Redshift tables, return a "
-            f"match_confidence ≥ 0.95, and the consensus model would converge on the correct code with "
-            f"high probability. The CRITICAL risk level reflects the stress-test mode or source conflict "
-            f"— **not a genuine AML concern for Apple Inc**."
-        )
+        src_statuses = [v.get("status","") for v in result.source_lineage.values()]
+        n_matched  = sum(1 for s in src_statuses if s == "MATCHED")
+        n_inferred = sum(1 for s in src_statuses if s == "INFERRED")
+        n_conflict = sum(1 for s in src_statuses if s == "CONFLICT")
+        if n_matched < 2:
+            st.warning(
+                f"**Low consensus probability ({prob:.0%}) — this company was not found in the internal "
+                f"Redshift tables (OpenCorporates, Equifax, ZoomInfo).** "
+                f"Only {n_matched}/6 sources returned a confirmed match. "
+                f"{n_inferred} source(s) returned INFERRED codes (AI-derived, not from a database record) "
+                f"and {n_conflict} showed CONFLICT. "
+                f"The XGBoost model is uncertain because sources disagree. "
+                f"This is expected for private, small, or newly-registered companies. "
+                f"Adding more information (website, full address) or manually reviewing the code is recommended."
+            )
+        else:
+            st.error(
+                f"**Low consensus probability ({prob:.0%}) — sources have high conflict.** "
+                f"{n_matched}/6 sources matched but returned different codes. "
+                f"This can indicate a multi-sector conglomerate, a holding company with diverse subsidiaries, "
+                f"or a data quality issue across vendors. Check the Source Lineage table below."
+            )
     else:
         st.warning(
             f"**Confidence: {prob:.0%}.** Check the Source Lineage and Feature Debug sections below "

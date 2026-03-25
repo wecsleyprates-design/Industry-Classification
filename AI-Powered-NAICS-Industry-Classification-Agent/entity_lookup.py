@@ -205,6 +205,12 @@ _KNOWN_ENTITIES: dict[str, dict] = {
         "zoominfo":        SourceRecord("541715","Research and Development in the Physical Engineering and Life Sciences","US_NAICS_2022", 0.89, "MATCHED"),
     },
     # ── Finance / Banking
+    "JP MORGAN CHASE": {
+        "jurisdiction": "us", "entity_type": "Operating",
+        "opencorporates": SourceRecord("522110","Commercial Banking","US_NAICS_2022", 0.98, "MATCHED"),
+        "equifax":         SourceRecord("522110","Commercial Banking","US_NAICS_2022", 0.96, "MATCHED"),
+        "zoominfo":        SourceRecord("522110","Commercial Banking","US_NAICS_2022", 0.97, "MATCHED"),
+    },
     "JPMORGAN CHASE": {
         "jurisdiction": "us", "entity_type": "Operating",
         "opencorporates": SourceRecord("522110","Commercial Banking","US_NAICS_2022", 0.98, "MATCHED"),
@@ -488,8 +494,26 @@ def lookup_entity(
 
     # Fuzzy fallback: check if any known key is contained in the canonical name
     if not entry:
+        # Fuzzy fallback 1: substring containment
         for key, val in _KNOWN_ENTITIES.items():
             if key in canonical or canonical in key:
+                entry = val
+                break
+
+    if not entry:
+        # Fuzzy fallback 2: first significant word match (for "Apple Inc." → "APPLE")
+        first_word = canonical.split()[0] if canonical.split() else ""
+        if len(first_word) >= 4:  # avoid matching on very short words
+            for key, val in _KNOWN_ENTITIES.items():
+                if key.startswith(first_word) and abs(len(key) - len(canonical)) < 15:
+                    entry = val
+                    break
+
+    if not entry:
+        # Fuzzy fallback 3: remove spaces and compare (JPMORGAN vs JP MORGAN)
+        canonical_nospace = canonical.replace(" ", "")
+        for key, val in _KNOWN_ENTITIES.items():
+            if key.replace(" ", "") == canonical_nospace:
                 entry = val
                 break
 
