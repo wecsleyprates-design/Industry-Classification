@@ -412,6 +412,7 @@ page = st.sidebar.radio(
         "Risk Dashboard",
         "Taxonomy Explorer",
         "Industry Lookup",
+        "Source Architecture",
     ],
     index=0,
 )
@@ -962,3 +963,181 @@ elif page == "Industry Lookup":
                         st.markdown(f"- `{m['code']}` {m['description'][:55]}")
                 else:
                     st.caption("No matches")
+
+
+# ────────────────────────────────────────────────────────────────────────────────
+# PAGE 6 — SOURCE ARCHITECTURE
+# ────────────────────────────────────────────────────────────────────────────────
+
+elif page == "Source Architecture":
+    from source_registry import all_sources, active_sources, planned_sources, SOURCE_REGISTRY
+
+    st.title("Source Architecture — All Classification Data Sources")
+    st.markdown(
+        "Complete map of every data source the Consensus Engine uses or plans to use. "
+        "Shows what each source provides, how it is queried, and its current status."
+    )
+
+    # ── Name matching explanation ─────────────────────────────────────────────
+    st.subheader("How Company Name Matching Works")
+    st.markdown("""
+The entity lookup pipeline handles typos, case differences, suffix variations, and spacing issues
+through a **5-pass matching strategy** (same algorithm as `entity_matching/core/matchers/matching_v1.py`):
+""")
+
+    col_m1, col_m2, col_m3 = st.columns(3)
+    with col_m1:
+        st.markdown("""
+**Pass 1 — Canonical normalisation**
+Handles automatically — no fuzzy needed:
+- `Apple Inc.` → `APPLE`
+- `APPLE INC` → `APPLE`
+- `Apple Incorporated` → `APPLE`
+- `Apple Corp` → `APPLE`
+- `microsoft corporation` → `MICROSOFT`
+- `McDonald's` → `MCDONALDS`
+- `Mc Donalds` → `MCDONALDS`
+- `J.P. Morgan Chase` → `JP MORGAN CHASE`
+- `The Apple Company` → `APPLE`
+- `Microsoft  Corporation` (double space) → `MICROSOFT`
+""")
+    with col_m2:
+        st.markdown("""
+**Pass 2–4 — Structural variations**
+Substring, no-space, prefix matching:
+- `Apple Inc USA` (extra word) → `APPLE` ✅
+- `JPMorgan Chase` → `JP MORGAN CHASE` ✅
+- `Apple Store Technology` → `APPLE` ✅
+
+**Pass 5 — Fuzzy edit-distance (rapidfuzz)**
+Handles real typos (threshold: 84/100):
+- `Mycrosoft` (y→i) → **Microsoft** ✅
+- `Aple Inc` (missing p) → **Apple** ✅
+- `Microsft` (missing o) → **Microsoft** ✅
+- `Amazzon` (double z) → **Amazon** ✅
+- `Googel` (transposed) → **Google** ✅
+- `Teslla` (double l) → **Tesla** ✅
+- `Walmrt` (missing a) → **Walmart** ✅
+""")
+    with col_m3:
+        st.markdown("""
+**What is NOT handled (falls back to unknown):**
+- Names that are too short and ambiguous (`XY Corp`)
+- Names with no overlap to any known entity (`Banana Corp`)
+- Companies not in the known-entity table yet
+
+**In production (real Redshift + Entity Matching XGBoost):**
+The `matching_v1.py` XGBoost model uses Jaccard k-gram similarity,
+overlap coefficient, perfect match on postal code, city, and street
+number — producing a `match_confidence` score per candidate pair.
+Threshold ≥ 0.80 for MATCHED status.
+
+**For unknown companies:** The engine correctly reports `INFERRED`
+or `CONFLICT` status with lower confidence — meaning "we queried the
+databases but could not confirm this entity with high certainty."
+""")
+
+    # ── Source table ──────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("All Data Sources")
+
+    STATUS_CHIP = {
+        "ACTIVE":    "🟢 ACTIVE",
+        "SIMULATED": "🟡 SIMULATED",
+        "PLANNED":   "🔵 PLANNED",
+    }
+    TYPE_CHIP = {
+        "REDSHIFT_TABLE": "🗄️ Redshift",
+        "API_LIVE":       "⚡ Live API",
+        "API_BATCH":      "📦 Batch API",
+        "INTERNAL_FILE":  "📁 Internal File",
+        "AI_INFERENCE":   "🤖 AI Inference",
+    }
+
+    filter_status = st.multiselect(
+        "Filter by status",
+        ["ACTIVE", "SIMULATED", "PLANNED"],
+        default=["ACTIVE", "SIMULATED", "PLANNED"],
+    )
+
+    for src in SOURCE_REGISTRY:
+        if src.status not in filter_status:
+            continue
+        with st.expander(
+            f"{STATUS_CHIP.get(src.status, src.status)}  |  "
+            f"{TYPE_CHIP.get(src.source_type, src.source_type)}  |  "
+            f"**{src.label}**  |  Weight: `{src.default_weight}`"
+        ):
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                st.markdown(f"**Coverage:** {src.coverage}")
+                st.markdown(f"**Freshness:** {src.freshness}")
+                st.markdown(f"**Weight in XGBoost:** `{src.default_weight}` "
+                            f"({'highest priority' if src.default_weight >= 0.90 else 'high' if src.default_weight >= 0.80 else 'medium' if src.default_weight >= 0.70 else 'low'})")
+                if src.notes:
+                    st.info(src.notes)
+            with c2:
+                st.markdown("**Industry fields provided:**")
+                for f in src.industry_fields:
+                    st.markdown(f"- `{f}`")
+            if src.production_query:
+                with st.expander("Production query / endpoint"):
+                    st.code(src.production_query.strip(), language="sql")
+
+    # ── Future architecture ───────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("Future Architecture — Adding New Sources")
+    st.markdown("""
+**Yes, the architecture is fully designed to support new API sources.**
+Adding a new source requires three steps:
+
+**Step 1 — Add to `source_registry.py`**
+```python
+SourceDefinition(
+    id="companies_house",
+    label="Companies House — UK Official Registry",
+    source_type="API_LIVE",
+    status="PLANNED",
+    default_weight=0.95,
+    production_query="GET https://api.company-information.service.gov.uk/...",
+    ...
+)
+```
+
+**Step 2 — Add a connector in `data_simulator.py`**
+```python
+def _call_companies_house(self, company_name: str, jurisdiction: str) -> SourceSignal:
+    # In production: call the real API
+    # response = requests.get(f"https://api.company-information.service.gov.uk/search/companies?q={company_name}")
+    # sic_codes = response.json()["items"][0]["sic_codes"]
+    ...
+```
+
+**Step 3 — The XGBoost model automatically uses the new signal**
+The feature vector gains 2 new features (confidence + status flag) for the new source.
+Re-run `fit_synthetic()` to retrain the model with the expanded feature space.
+
+**Sources that can be added immediately (no new Redshift tables needed):**
+- **Companies House API** (free, no auth for basic search) → best UK SIC source
+- **OpenCorporates Live API** → fresher than Redshift table copy
+- **GLEIF LEI** (free, global) → entity type + parent company detection
+- **D&B Direct+** (paid) → NAICS + NACE + SIC globally
+
+**Sources that need Redshift tables first:**
+- **Liberty Data** → add Redshift table + entry in `build_matching_tables.py` SOURCES dict
+- Any new batch vendor → ingest to Redshift → add SQL query here
+""")
+
+    # ── Liberty Data clarification ────────────────────────────────────────────
+    st.markdown("---")
+    st.info("""
+**Note on Liberty Data:**
+Liberty Data is **not** currently defined in `entity_matching/core/matchers/build_matching_tables.py`.
+The three sources in that file are: `open_corporates`, `equifax`, and `zoominfo`.
+If Liberty Data exists as a Redshift table, it can be added by:
+1. Adding it to the `SOURCES` dict in `build_matching_tables.py` with its Redshift SQL query
+2. Adding it to `COUNTRY_SOURCES` dict for the jurisdictions it covers
+3. Adding a `SourceDefinition` entry in `source_registry.py`
+4. Adding a `_call_liberty_data()` connector in `data_simulator.py`
+The XGBoost consensus model will automatically incorporate it as a new feature.
+""")

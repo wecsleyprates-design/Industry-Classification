@@ -478,44 +478,101 @@ def lookup_entity(
     """
     Simulate the Entity Matching Redshift lookup.
 
-    Steps:
-      1. Canonise the input name (same algorithm as build_matching_tables.py)
-      2. Lookup in known-entity table (in production: query Redshift via
-         matching_v1.py XGBoost model → match_confidence scores)
-      3. Return SourceRecord per vendor with realistic match_confidence
+    Matching strategy (5 passes, mirrors matching_v1.py pipeline):
+    ─────────────────────────────────────────────────────────────
+    Pass 1 — Exact canonical match
+      After suffix stripping, accent removal, and whitespace collapse,
+      many variants resolve identically:
+        "Apple Inc.", "APPLE INC", "Apple Incorporated", "Apple Corp" → "APPLE"
+        "Microsoft Corp.", "Microsoft Corporation", "MICROSOFT" → "MICROSOFT"
+        "McDonald's", "McDonalds", "Mc Donalds" → "MCDONALDS"
 
-    Returns EntityMatchResult with found=True if the entity is recognised,
-    found=False if it should fall back to random simulation.
+    Pass 2 — Substring / superset match
+      "Apple Inc USA" → contains "APPLE" → matches Apple.
+      "The Apple Company" → strips "THE" → "APPLE" → exact match.
+
+    Pass 3 — No-space comparison
+      "JPMORGAN" vs "JP MORGAN" → same after removing spaces.
+
+    Pass 4 — First-word prefix (≥4 chars)
+      "Apple Store Technology Inc" → first word "APPLE" → matches Apple.
+
+    Pass 5 — Fuzzy edit-distance (rapidfuzz Jaro-Winkler + token_set_ratio)
+      Handles typos and character substitutions:
+        "Mycrosoft" (y→i) → 89% similar → matches Microsoft
+        "Aple" (missing p) → 88% similar → matches Apple
+        "Microsft" (missing o) → 94% similar → matches Microsoft
+        "Amazzon" (double z) → 91% similar → matches Amazon
+      Threshold: 82 / 100. Below this, treated as unknown company.
+
+    Returns EntityMatchResult(found=True) when matched,
+            EntityMatchResult(found=False) when unknown → falls back to
+            random-pool simulation with INFERRED/CONFLICT statuses.
     """
-    canonical = _canonize(company_name)
+    try:
+        from rapidfuzz import fuzz, process as rfprocess
+        _FUZZY = True
+    except ImportError:
+        _FUZZY = False
 
-    # Direct lookup
+    FUZZY_THRESHOLD = 84   # 0–100 scale (higher = fewer false positives)
+
+    canonical = _canonize(company_name)
+    if not canonical:
+        return EntityMatchResult(canonical_name=canonical, found=False)
+
+    known_keys = list(_KNOWN_ENTITIES.keys())
+    entry = None
+
+    # ── Pass 1: exact canonical match ─────────────────────────────────────────
     entry = _KNOWN_ENTITIES.get(canonical)
 
-    # Fuzzy fallback: check if any known key is contained in the canonical name
+    # ── Pass 2: substring / superset containment ──────────────────────────────
     if not entry:
-        # Fuzzy fallback 1: substring containment
-        for key, val in _KNOWN_ENTITIES.items():
+        for key in known_keys:
             if key in canonical or canonical in key:
-                entry = val
+                entry = _KNOWN_ENTITIES[key]
                 break
 
+    # ── Pass 3: no-space match (JPMORGAN ↔ JP MORGAN) ─────────────────────────
     if not entry:
-        # Fuzzy fallback 2: first significant word match (for "Apple Inc." → "APPLE")
-        first_word = canonical.split()[0] if canonical.split() else ""
-        if len(first_word) >= 4:  # avoid matching on very short words
-            for key, val in _KNOWN_ENTITIES.items():
-                if key.startswith(first_word) and abs(len(key) - len(canonical)) < 15:
-                    entry = val
+        cn_ns = canonical.replace(" ", "")
+        for key in known_keys:
+            if key.replace(" ", "") == cn_ns:
+                entry = _KNOWN_ENTITIES[key]
+                break
+
+    # ── Pass 4: first-word prefix ─────────────────────────────────────────────
+    if not entry:
+        words = canonical.split()
+        if words and len(words[0]) >= 4:
+            first = words[0]
+            for key in known_keys:
+                if key.startswith(first) and abs(len(key) - len(canonical)) < 20:
+                    entry = _KNOWN_ENTITIES[key]
                     break
 
-    if not entry:
-        # Fuzzy fallback 3: remove spaces and compare (JPMORGAN vs JP MORGAN)
-        canonical_nospace = canonical.replace(" ", "")
-        for key, val in _KNOWN_ENTITIES.items():
-            if key.replace(" ", "") == canonical_nospace:
-                entry = val
-                break
+    # ── Pass 5: fuzzy edit-distance (rapidfuzz) ───────────────────────────────
+    if not entry and _FUZZY and len(canonical) >= 3:
+        # token_set_ratio: ignores word order, handles extra/missing words
+        ts_best_key, ts_score, _ = rfprocess.extractOne(
+            canonical, known_keys, scorer=fuzz.token_set_ratio
+        )
+        # ratio: better for short names with single character differences
+        r_best_key, r_score, _ = rfprocess.extractOne(
+            canonical, known_keys, scorer=fuzz.ratio
+        )
+        # partial_ratio: good for names that are substrings of each other
+        p_best_key, p_score, _ = rfprocess.extractOne(
+            canonical, known_keys, scorer=fuzz.partial_ratio
+        )
+        # Pick whichever scorer was most confident
+        best_key, best_score = max(
+            [(ts_best_key, ts_score), (r_best_key, r_score), (p_best_key, p_score)],
+            key=lambda x: x[1]
+        )
+        if best_score >= FUZZY_THRESHOLD:
+            entry = _KNOWN_ENTITIES[best_key]
 
     if not entry:
         return EntityMatchResult(canonical_name=canonical, found=False)
