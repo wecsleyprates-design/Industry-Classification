@@ -333,10 +333,11 @@ def display_consensus_result(
         with col_g2:
             st.markdown("""
 **Status** — the quality assessment of this source's match:
-- 🟢 `MATCHED` — the entity was found in this source's database with high name/address similarity (entity-matching XGBoost score ≥ 0.80). The industry code comes directly from the source's registry record.
-- 🔵 `INFERRED` — no direct entity match found; code was inferred by AI from web presence or calculated from context.
+- 🟢 `MATCHED` — the entity was found in the **real Redshift table** with high name/address similarity (≥ 0.80 confidence). The industry code comes directly from the live database record.
+- 🔵 `INFERRED` — no direct database match found; code was inferred by AI from web presence or calculated from context.
 - 🟠 `CONFLICT` — the source returned a code but it disagrees significantly with the majority of other sources. Flagged for review.
 - 🔴 `POLLUTED` — Trulioo returned a 4-digit SIC code in a jurisdiction that uses 5–6 digit codes. Known data quality issue — this signal is down-weighted automatically.
+- 🟡 `SIMULATED` — Redshift credentials are not configured. The signal is **simulated** (not from real data). Set `REDSHIFT_HOST`, `REDSHIFT_USER`, `REDSHIFT_PASSWORD`, `REDSHIFT_DB` environment variables to activate live data for OpenCorporates, Equifax, ZoomInfo, and Liberty Data.
 - ⚫ `UNAVAILABLE` — source did not return data for this entity.
 
 **Confidence** — the entity-matching model's certainty (0–100%) that this source's record belongs to the *same real-world company* as the input:
@@ -404,6 +405,20 @@ st.sidebar.title("🌐 Global Classification Engine")
 st.sidebar.caption(
     "Multi-taxonomy · XGBoost Consensus · AML/KYB Risk · Unified Global Ontology"
 )
+
+# ── Redshift connection status ────────────────────────────────────────────────
+from redshift_connector import get_connector as _get_rc
+_rc = _get_rc()
+if _rc.is_connected:
+    st.sidebar.success("🗄️ Redshift: LIVE", icon="✅")
+    st.sidebar.caption("OpenCorporates, Equifax, ZoomInfo, Liberty Data querying real tables.")
+else:
+    st.sidebar.warning("🗄️ Redshift: SIMULATED", icon="⚠️")
+    st.sidebar.caption(
+        "Set REDSHIFT_HOST / REDSHIFT_USER / REDSHIFT_PASSWORD / REDSHIFT_DB "
+        "environment variables to connect to real data. "
+        "Trulioo and AI Semantic always require their own API keys."
+    )
 
 page = st.sidebar.radio(
     "Navigate",
