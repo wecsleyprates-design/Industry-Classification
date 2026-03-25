@@ -343,26 +343,29 @@ td.par { color:#E65100; font-weight:700; }
 
 <!-- ═══════════════════════ SLIDE 9 — THE 4 UK GAPS ═══════════════════════ -->
 <section>
-  <h2>The 4 Confirmed UK Classification Gaps</h2>
-  <p style="margin-bottom:12px;font-size:0.56em"><strong>Result:</strong> Every UK business either gets <code>naics_id = NULL</code> or an inappropriate US NAICS code applied to it.</p>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+  <h2>The 4 UK Classification Gaps — All at the Routing Layer</h2>
+  <div class="card card-gold" style="margin-bottom:10px;font-size:0.54em">
+    <strong>Key finding:</strong> Worth AI <em>already knows</em> a company is in GB. The Redshift <code>open_corporate.companies</code> table has <code>jurisdiction_code</code> for <strong>16M+ GB companies (80% industry code coverage)</strong>. The entity-matching pipeline uses <code>jurisdiction_code</code> to fetch the correct OC record. The <code>truliooPreferredRule</code> even checks <code>country === "GB"</code>. The gap is not data — it is that this knowledge <strong>never reaches the output taxonomy selection</strong>. A GB company matched with <code>jurisdiction_code="gb"</code> still gets US NAICS as its final output.
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
     <div class="card card-red">
-      <div style="font-weight:700;font-size:0.63em;color:var(--w-red)">Gap 1 — OpenCorporates resolver</div>
-      <div style="font-size:0.56em;margin-top:5px">Returns <code>"us_naics-541110|uk_sic-62012"</code>. Loop filter: <code>codeName.includes("us_naics")</code> — UK SIC parsed into <code>classification_codes</code> fact. That fact has <strong>zero downstream consumers</strong>. Data is in the database, never used.</div>
+      <div style="font-weight:700;font-size:0.60em;color:var(--w-red)">Gap 1 — Output routing, not data</div>
+      <div style="font-size:0.52em;margin-top:4px">OC returns <code>"us_naics-541110|uk_sic-62012"</code>. The pipeline has <code>jurisdiction_code="gb"</code> available. Loop still filters to <code>us_naics</code> only. <code>classification_codes</code> fact captures uk_sic — zero downstream consumers.</div>
     </div>
     <div class="card card-red">
-      <div style="font-weight:700;font-size:0.63em;color:var(--w-red)">Gap 2 — Trulioo .sicCode never read</div>
-      <div style="font-size:0.56em;margin-top:5px">The object <code>{'{ naicsCode: "...", sicCode: "62012" }'}</code> is in the API response. The fact engine reads <code>?.naicsCode</code> and never accesses <code>.sicCode</code>. One missing field access.</div>
+      <div style="font-weight:700;font-size:0.60em;color:var(--w-red)">Gap 2 — One missing field access</div>
+      <div style="font-size:0.52em;margin-top:4px">Trulioo applies <code>truliooPreferredRule</code> for GB. For industry it reads <code>?.naicsCode</code> — <code>.sicCode</code> is adjacent in the same object, never accessed. One line of code.</div>
     </div>
     <div class="card card-red">
-      <div style="font-weight:700;font-size:0.63em;color:var(--w-red)">Gap 3 — No persistence layer</div>
-      <div style="font-size:0.56em;margin-top:5px">Zero migrations create <code>core_uk_sic_code</code> table or add <code>uk_sic_id</code> to <code>data_businesses</code>. Even if both gaps above were fixed, the data has nowhere to go.</div>
+      <div style="font-weight:700;font-size:0.60em;color:var(--w-red)">Gap 3 — No output storage</div>
+      <div style="font-size:0.52em;margin-top:4px">Even if gaps 1+2 fixed: no <code>core_uk_sic_code</code> table, no <code>uk_sic_id</code> column on <code>data_businesses</code>. One migration away.</div>
     </div>
     <div class="card card-red">
-      <div style="font-weight:700;font-size:0.63em;color:var(--w-red)">Gap 4 — AI enrichment Zod schema</div>
-      <div style="font-size:0.56em;margin-top:5px"><code>uk_sic_code</code> field not in the Zod schema for AI enrichment. Even when the AI returns it for GB companies, it cannot be persisted. Structurally impossible without a schema change AND a new table.</div>
+      <div style="font-weight:700;font-size:0.60em;color:var(--w-red)">Gap 4 — AI schema structural gap</div>
+      <div style="font-size:0.52em;margin-top:4px"><code>uk_sic_code</code> optional in AI Zod schema (GB only). No persistence path even when returned by GPT.</div>
     </div>
   </div>
+  <p style="margin-top:10px;font-size:0.54em;color:var(--w-red)"><strong>Result:</strong> Every UK business gets US NAICS or NULL — despite the pipeline receiving UK SIC from two vendors and knowing the GB jurisdiction.</p>
 </section>
 
 <!-- ═══════════════════════ SLIDE 10 — AI ENRICHMENT WORTH AI ═══════════════════════ -->
@@ -798,7 +801,7 @@ and mcc_code 5614 as last resort.</code></pre>
     <tr><td>Temporal pivot / code-change</td><td class="no">❌</td><td class="yes">✅ 3-snapshot history → STRUCTURE_CHANGE</td></tr>
     <tr><td>Source lineage (full)</td><td class="par">⚠️ Partial (NAICS per platform only)</td><td class="yes">✅ All 6 sources with weight/status/confidence</td></tr>
     <tr><td>Trulioo pollution detection</td><td class="no">❌</td><td class="yes">✅ TRULIOO_POLLUTION flag</td></tr>
-    <tr><td>200+ jurisdiction codes</td><td class="no">❌</td><td class="yes">✅ us_mo, ca_bc, ae_az, gg, tz…</td></tr>
+    <tr><td>Jurisdiction codes for taxonomy routing</td><td class="par">⚠️ Data EXISTS in Redshift (16M+ GB companies with <code>jurisdiction_code</code>) — used for entity matching, NOT for routing output taxonomy</td><td class="yes">✅ <code>us_mo</code>, <code>ca_bc</code>, <code>ae_az</code>, <code>gg</code>… → correct taxonomy</td></tr>
     <tr><td>Government registry lookup</td><td class="no">❌</td><td class="yes">✅ SEC EDGAR + Companies House</td></tr>
     <tr><td>KYB recommendation</td><td class="no">❌</td><td class="yes">✅ APPROVE/REVIEW/ESCALATE/REJECT</td></tr>
   </table>
@@ -828,26 +831,30 @@ and mcc_code 5614 as last resort.</code></pre>
 
 <!-- ═══════════════════════ SLIDE 22 — P0 QUICK WINS ═══════════════════════ -->
 <section>
-  <h2>P0 Quick Wins — No New Vendor APIs Needed</h2>
-  <p style="font-size:0.56em;margin-bottom:12px">The UK SIC data is <strong>already in the database</strong>. These fixes require no new APIs — only code and schema changes.</p>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+  <h2>P0 Quick Wins — Routing Fixes, Not Data Problems</h2>
+  <div class="card card-gold" style="margin-bottom:10px;font-size:0.54em">
+    <strong>The data is already there.</strong> OpenCorporates Redshift has <code>jurisdiction_code</code> for 16M+ GB companies with 80%+ industry code coverage. Two vendors already return UK SIC. The pipeline knows the jurisdiction. These are <strong>routing and storage fixes</strong> — zero new vendor contracts or API calls.
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
     <div class="card card-red">
-      <div style="font-weight:700;font-size:0.63em;color:var(--w-red)">P0 · 1 — Add uk_sic_id to data_businesses</div>
-      <div style="font-size:0.54em;margin-top:5px"><strong>Effort:</strong> One migration file<br/><strong>Impact:</strong> UK SIC can now be stored<br/>
-      <code>ALTER TABLE data_businesses ADD uk_sic_id int NULL REFERENCES core_uk_sic_code(id);</code></div>
+      <div style="font-weight:700;font-size:0.60em;color:var(--w-red)">P0 · 1 — Route OC uk_sic to output</div>
+      <div style="font-size:0.52em;margin-top:4px"><strong>Effort:</strong> Change one loop filter in <code>businessDetails/index.ts</code><br/>
+      Also extract <code>gb_sic</code> entries alongside <code>us_naics</code> from <code>industry_code_uids</code></div>
     </div>
     <div class="card card-red">
-      <div style="font-weight:700;font-size:0.63em;color:var(--w-red)">P0 · 2 — Read Trulioo .sicCode for GB</div>
-      <div style="font-size:0.54em;margin-top:5px"><strong>Effort:</strong> One line change in <code>businessDetails/index.ts</code><br/><strong>Impact:</strong> 2nd UK SIC source immediately active<br/>
-      Add <code>?.sicCode</code> read alongside existing <code>?.naicsCode</code></div>
+      <div style="font-weight:700;font-size:0.60em;color:var(--w-red)">P0 · 2 — Read Trulioo .sicCode (one line)</div>
+      <div style="font-size:0.52em;margin-top:4px"><strong>Effort:</strong> One field access<br/>
+      <code>?.sicCode</code> next to existing <code>?.naicsCode</code> — 2nd UK SIC source immediately active</div>
+    </div>
+    <div class="card card-red">
+      <div style="font-weight:700;font-size:0.60em;color:var(--w-red)">P0 · 3 — Add persistence layer</div>
+      <div style="font-size:0.52em;margin-top:4px"><strong>Effort:</strong> One migration<br/>
+      <code>CREATE TABLE core_uk_sic_code</code> + <code>ALTER TABLE data_businesses ADD uk_sic_id</code></div>
     </div>
     <div class="card card-orange">
-      <div style="font-weight:700;font-size:0.63em;color:var(--w-orange)">P0 · 3 — Wire classification_codes consumer</div>
-      <div style="font-size:0.54em;margin-top:5px"><strong>Effort:</strong> One Kafka handler + one table<br/><strong>Impact:</strong> Unlocks CA NAICS, NACE, ISIC with zero new API calls<br/>The data is already in <code>integration_data.request_response</code></div>
-    </div>
-    <div class="card card-orange">
-      <div style="font-weight:700;font-size:0.63em;color:var(--w-orange)">P0 · 4 — Add Liberty Data to entity matching</div>
-      <div style="font-size:0.54em;margin-top:5px"><strong>Effort:</strong> Add SQL query to <code>build_matching_tables.py</code> SOURCES dict<br/><strong>Impact:</strong> 4th entity-matching source active for US/GB/CA<br/><code>"US": ["open_corporates","equifax","zoominfo","liberty_data"]</code></div>
+      <div style="font-weight:700;font-size:0.60em;color:var(--w-orange)">P0 · 4 — Use jurisdiction_code for taxonomy routing</div>
+      <div style="font-size:0.52em;margin-top:4px"><strong>Effort:</strong> Low–Medium<br/>
+      <code>jurisdiction_code</code> already in Redshift OC + entity matching. Wire it to select output taxonomy: GB→UK SIC, EU→NACE, global→ISIC</div>
     </div>
   </div>
 </section>

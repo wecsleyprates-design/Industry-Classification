@@ -9,7 +9,7 @@
 
 ## Executive Summary
 
-Worth AI currently classifies businesses through a **FactEngine** that aggregates signals from seven sources using a confidence-weighted maximum rule, with **no ML model** in the classification decision itself — only in entity matching. The output is a single NAICS code and a manually-derived MCC. UK SIC 2007 data is present in vendor responses but silently discarded due to four sequential gaps. Non-US businesses receive either an inappropriate US NAICS code or `naics_id = NULL`.
+Worth AI currently classifies businesses through a **FactEngine** that aggregates signals from seven sources using a confidence-weighted maximum rule, with **no ML model** in the classification decision itself — only in entity matching. The output is a single NAICS code and a manually-derived MCC. UK SIC 2007 data is present in two vendor responses (OpenCorporates and Trulioo) and the `jurisdiction_code` of companies is known in Redshift — but neither piece of information is used to change the output taxonomy. The pipeline knows a company is in GB; it still outputs US NAICS. Non-US businesses receive either an inappropriate US NAICS code or `naics_id = NULL`.
 
 The new **Global Industry Classification Consensus Engine** replaces this with a three-level XGBoost stacking ensemble that outputs six taxonomy codes simultaneously, assigns calibrated probabilities, surfaces nine AML/KYB risk signals, supports 200+ jurisdictions, and uses Liberty Data as a fourth entity-matching source alongside OpenCorporates, Equifax, and ZoomInfo.
 
@@ -286,12 +286,19 @@ This is where `jurisdiction_code` IS stored — but for entity matching, not for
 
 ### 1.6 The 4 Confirmed Gaps for UK Businesses
 
-1. **OpenCorporates resolver**: loop only extracts `us_naics` entries → UK SIC (`gb_sic`) passed to `classification_codes` fact which has no consumer
-2. **Trulioo `.sicCode`**: field exists in the same object as `.naicsCode`, never read
-3. **No persistence layer**: no `core_uk_sic_code` table, no `uk_sic_id` column in any migration
-4. **AI enrichment Zod schema**: structurally cannot return UK SIC — field not in schema
+**Critical context first:** Worth AI's data layer *already knows* a company is in GB. The `open_corporate.companies` Redshift table has `jurisdiction_code` for 16+ million GB companies (80.52% industry code coverage confirmed in production). The entity-matching pipeline uses `jurisdiction_code` to fetch the right OC record. The `truliooPreferredRule` even checks `country === "GB"` before giving Trulioo preference for address facts. **The gap is not that Worth AI doesn't know the jurisdiction — it does. The gap is that this knowledge never reaches the output taxonomy selection.**
 
-**Result:** Every UK business either gets `naics_id = NULL` or an inappropriate US NAICS code applied to it.
+All four gaps are at the **output routing and storage layer**, not the data acquisition layer:
+
+1. **OpenCorporates resolver — routing gap**: The resolver receives `"us_naics-541110|uk_sic-62012|ca_naics-541110"` and the loop filters to `us_naics` only — despite having `jurisdiction_code = "gb"` available in the same OC record. The pipeline knows this is GB but routes the output to NAICS anyway.
+
+2. **Trulioo `.sicCode` — one missing field access**: Trulioo already applies `truliooPreferredRule` for GB/CA. For industry, it reads only `.naicsCode`. The `.sicCode` field is in the same `StandardizedIndustries` object, adjacent, never read.
+
+3. **No persistence layer — output storage gap**: Even if gaps 1 and 2 were fixed today, UK SIC has nowhere to go. No `core_uk_sic_code` table. No `uk_sic_id` column on `data_businesses`. One migration away.
+
+4. **AI enrichment Zod schema — structural gap**: `uk_sic_code` is an optional output field (only requested for GB), but has no persistence path even when returned.
+
+**Result:** Every UK business either gets `naics_id = NULL` or an inappropriate US NAICS code — despite the pipeline receiving UK SIC codes from two vendors and having GB `jurisdiction_code` in Redshift for millions of UK companies.
 
 ### 1.7 The AI Enrichment Step — How It Works in Worth AI
 
@@ -881,7 +888,7 @@ Embedding model: `all-MiniLM-L6-v2` (384-dim). Each description encoded as `"{ta
 | Full source lineage | Partial | ✅ All 6 sources |
 | Data quality detection | ❌ | ✅ Trulioo pollution, conflict |
 | Liberty Data as 4th source | ❌ (planned) | ✅ Simulated |
-| 200+ jurisdiction codes | ❌ | ✅ us_mo, ca_bc, ae_az, gg… |
+| 200+ jurisdiction codes for taxonomy routing | ⚠️ Jurisdiction data EXISTS in Redshift (OC has 16M+ GB companies with `jurisdiction_code`). It is used for **entity matching** and onboarding form routing — but **never used to route the output to a different taxonomy**. A GB company matched in Redshift still gets US NAICS as output. | ✅ `us_mo`, `ca_bc`, `ae_az`, `gg`… → correct taxonomy auto-selected |
 | Typo-tolerant name matching | ❌ (9 suffixes only) | ✅ 5-pass + rapidfuzz |
 | KYB recommendation | ❌ | ✅ APPROVE/REVIEW/ESCALATE/REJECT |
 | Taxonomy explorer (UGO) | ❌ | ✅ 2,330 codes, semantic search |
@@ -961,7 +968,7 @@ Embedding model: `all-MiniLM-L6-v2` (384-dim). Each description encoded as `"{ta
 | **P1** | Train XGBoost consensus on real manual overrides from `rel_business_industry_naics` | Medium | Ground-truth model replaces synthetic training |
 | **P1** | Add Companies House API connector (free, no auth) | Low | Best UK SIC source — weight 0.95 |
 | **P2** | Wire Equifax secondary NAICS + SIC into fact engine | Low | 24 industry columns currently discarded |
-| **P2** | Add `jurisdiction_code` field to integration-service FactEngine | Medium | Enables correct taxonomy routing per country |
+| **P1** | Use `jurisdiction_code` already in Redshift OC + entity matching to route output taxonomy: GB→UK SIC, EU→NACE, global→ISIC. The data layer already knows the jurisdiction — the gap is purely at the routing/output layer, not a data acquisition problem. | Low–Medium | Highest-leverage change: jurisdiction_code for millions of GB/EU/global companies already exists in `open_corporate.companies`. Zero new APIs. |
 | **P3** | Add GLEIF LEI as 5th entity-matching source | Medium | Global entity type + parent detection |
 
 ---
