@@ -431,18 +431,113 @@ XGBClassifier(
 
 **Output:** `predict_proba(X)` → softmax probability distribution over all codes → Top-5 codes with calibrated probabilities.
 
-### 2.2 The AI Enrichment Step — How It Works in the Consensus Engine
+### 2.2 External Registry Lookups — New in the Consensus Engine
+
+Before the LLM is called, the Consensus Engine queries **free public government registries** to retrieve authoritative, self-reported industry codes. These are codes the company filed directly with the government — the highest possible authority.
+
+#### Source 1: SEC EDGAR (US companies — free, no API key)
+
+| Attribute | Value |
+|-----------|-------|
+| Endpoint | `https://data.sec.gov/submissions/CIK{cik}.json` |
+| Search | `https://efts.sec.gov/LATEST/search-index?q="{name}"&forms=10-K` |
+| Coverage | All US public companies that file with the SEC |
+| Rate limit | 10 requests/sec (we use 0.15s sleep between calls) |
+| Fields returned | `sic` (4-digit), `sicDescription`, `entityType`, `stateOfIncorporation`, `tickers`, `formerNames` |
+| API key required | **No** |
+
+**Example — Apple Inc:**
+```
+SEC EDGAR filing (AAPL): SIC 3571 — Electronic Computers, incorporated in CA. Entity type: operating.
+```
+This is the SIC code Apple itself reported to the SEC. It is ground truth.
+
+**Limitations:** Only covers US public companies (SEC filers). Private companies, small businesses, and non-US companies are not in EDGAR.
+
+#### Source 2: Companies House (UK companies — free, optional API key)
+
+| Attribute | Value |
+|-----------|-------|
+| Endpoint | `https://api.company-information.service.gov.uk/search/companies?q={name}` |
+| Coverage | All UK registered companies |
+| Fields returned | `sic_codes[]` (up to 4 SIC codes), `type`, `company_status`, `date_of_creation` |
+| API key required | **Yes — free** from [developer.company-information.service.gov.uk](https://developer.company-information.service.gov.uk/) |
+
+**Example — Barclays Bank PLC:**
+```
+Companies House UK filing: SIC codes [64191 — Banks, 64992 — Factoring]. Company type: plc, Status: active.
+```
+
+**Env var:** Set `COMPANIES_HOUSE_API_KEY` to activate. Degrades gracefully without it.
+
+### 2.3 The AI Enrichment Step — How It Works in the Consensus Engine (Improved)
 
 The Consensus Engine AI enrichment is fundamentally different from Worth AI's in architecture, trigger logic, prompt, model, and output.
 
 #### When is it triggered?
-The AI enrichment in the Consensus Engine runs **always as step 4** in the pipeline — not conditionally. There is no Bull queue, no deferrable task manager, no fact-source counting. It runs synchronously on every classification request:
+The AI enrichment in the Consensus Engine runs **always as step 5b** in the pipeline — not conditionally. It runs synchronously on every classification request, but now with far richer inputs:
 
 ```
-Every request → Entity Resolver → 6-source signals → XGBoost consensus → LLM enrichment (always) → Risk Engine
+Every request →
+  Entity Resolver →
+  External Registry Lookup (SEC EDGAR / Companies House) →  ← NEW
+  6-source vendor signals (OC/Equifax/ZoomInfo/Liberty/Trulioo/AI) →  ← NOW PASSED TO LLM
+  UGO FAISS semantic search →
+  LLM Classification (with all evidence) →  ← IMPROVED PROMPT
+  XGBoost Consensus →
+  Risk Engine
 ```
 
-**Why always?** Because AI is used for a different purpose: not to fill a gap when vendors don't respond, but to **select among UGO semantic search candidates** and produce **multi-taxonomy codes** (NAICS + UK SIC + NACE + ISIC simultaneously) that no single vendor can provide.
+**Why the improvement matters:** The LLM previously classified blindly from web text. Now it acts as a **referee and reasoner** with full evidence: official government filings, what 4 Redshift databases say, and semantic similarity candidates. It confirms when sources agree and adjudicates when they conflict.
+
+#### The improved prompt structure
+
+The classification prompt is now structured in 5 evidence blocks, processed in priority order:
+
+```
+═══════════════════════════════════════════════════════════════════
+AUTHORITATIVE REGISTRY DATA (official government filings)
+═══════════════════════════════════════════════════════════════════
+  • SEC EDGAR filing (AAPL): SIC 3571 — Electronic Computers,
+    incorporated in CA. Entity type: operating.
+  • [or Companies House SIC codes for UK companies]
+
+═══════════════════════════════════════════════════════════════════
+VENDOR SOURCE SIGNALS (what our internal databases returned)
+═══════════════════════════════════════════════════════════════════
+  • opencorporates   weight=0.90  ✅ MATCHED (97% confidence)
+    → 334118 (US NAICS 2022): Computer Terminal Manufacturing
+  • equifax          weight=0.70  ✅ MATCHED (91% confidence)
+    → 334118 (US NAICS 2022): Computer Terminal Manufacturing
+  • trulioo          weight=0.80  ⚠️  CONFLICT (62% confidence)
+    → 541511 (US NAICS 2022): Computer Programming Services
+  • zoominfo         weight=0.80  ✅ MATCHED (94% confidence)
+    → 334118 (US NAICS 2022): Computer Terminal Manufacturing
+  • liberty_data     weight=0.78  ✅ MATCHED (88% confidence)
+    → 334118 (US NAICS 2022): Computer Terminal Manufacturing
+
+  Source agreement: 4/5 sources agree on code 334118
+
+═══════════════════════════════════════════════════════════════════
+UGO SEMANTIC SEARCH CANDIDATES (top-8 per taxonomy by cosine similarity)
+═══════════════════════════════════════════════════════════════════
+  [FAISS results per taxonomy]
+
+═══════════════════════════════════════════════════════════════════
+CLASSIFICATION TASK (5-step reasoning order)
+═══════════════════════════════════════════════════════════════════
+STEP 1 — Registry data first (highest authority — company self-reported)
+STEP 2 — Vendor consensus (confirm if 3+ agree; adjudicate if conflict)
+STEP 3 — Resolve discrepancies (flag registry vs web divergence)
+STEP 4 — Select from UGO candidates (semantic alignment)
+STEP 5 — Select MCC (flag if high-risk sector)
+```
+
+The LLM returns additional fields not present in the old prompt:
+- `source_used`: `registry | vendor_consensus | semantic_search | web_inference`
+- `registry_conflict`: boolean — did registry codes conflict with web presence?
+- `registry_conflict_note`: explanation of the conflict
+- `mcc_risk_note`: `normal | high_risk (reason)` — AML significance of MCC
 
 #### The two AI calls in the Consensus Engine
 

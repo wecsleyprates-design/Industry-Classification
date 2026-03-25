@@ -138,24 +138,64 @@ def run_full_pipeline(
             {"code": rec.code, "description": rec.description, "score": round(float(score), 4)}
         )
 
-    # 4. LLM multi-taxonomy classification
+    # 4a. External registry lookup (SEC EDGAR / Companies House — free, no key needed for EDGAR)
+    from external_lookup import lookup_all as _ext_lookup
+    external_registry = _ext_lookup(company_name, entity.jurisdiction_code)
+
+    # 4b. LLM multi-taxonomy classification — now acts as referee with full context
+    # Prepare vendor signals for prompt injection
+    vendor_signals_for_llm = []
+    # We don't have bundle yet (it's built in step 5), so we pass None here
+    # and the prompt will use the external registry + UGO candidates as anchors.
+    # After bundle is built we could re-call, but one LLM call is sufficient.
+
     llm_result = llm_classify(
         company_name=company_name,
         business_description=llm_profile.primary_business_description,
-        jurisdiction=entity.detected_jurisdiction,
+        jurisdiction=entity.jurisdiction_code,
         candidates_by_taxonomy=candidates_by_taxonomy,
         web_summary=llm_profile.web_summary,
+        vendor_signals=None,             # populated post-bundle in display
+        external_registry=external_registry,
+        entity_type=llm_profile.probable_entity_type,
     )
 
-    # 5. Vendor simulation (OpenCorporates + Equifax + Trulioo + ZoomInfo + D&B + AI)
+    # 5. Vendor simulation (OpenCorporates + Equifax + Trulioo + ZoomInfo + Liberty Data + AI)
     bundle = sim.fetch(
         company_name=company_name,
         address=address,
         country=country,
-        jurisdiction=entity.detected_jurisdiction,
+        jurisdiction=entity.jurisdiction_code,
         entity_type=llm_profile.probable_entity_type,
         web_summary=llm_profile.primary_business_description,
         force_conflict=force_conflict,
+    )
+
+    # 5a. Re-run LLM classification with vendor signals now available
+    # This gives the LLM the full picture: registry + vendor consensus + UGO candidates
+    vendor_signals_for_llm = [
+        {
+            "source":     s.source,
+            "raw_code":   s.raw_code,
+            "taxonomy":   s.taxonomy,
+            "label":      s.label,
+            "weight":     s.weight,
+            "status":     s.status,
+            "confidence": s.confidence,
+        }
+        for s in bundle.signals
+        if s.raw_code  # skip UNAVAILABLE signals
+    ]
+
+    llm_result = llm_classify(
+        company_name=company_name,
+        business_description=llm_profile.primary_business_description,
+        jurisdiction=entity.jurisdiction_code,
+        candidates_by_taxonomy=candidates_by_taxonomy,
+        web_summary=llm_profile.web_summary,
+        vendor_signals=vendor_signals_for_llm,
+        external_registry=external_registry,
+        entity_type=llm_profile.probable_entity_type,
     )
 
     # 6. Consensus model
@@ -165,11 +205,11 @@ def run_full_pipeline(
     risk_profile = re.evaluate(bundle, consensus_result)
     consensus_result.risk_signals = [s.to_dict() for s in risk_profile.signals]
 
-    return entity, bundle, consensus_result, risk_profile, llm_result
+    return entity, bundle, consensus_result, risk_profile, llm_result, external_registry
 
 
 def display_consensus_result(
-    entity, bundle, result, risk_profile, llm_result
+    entity, bundle, result, risk_profile, llm_result, external_registry=None
 ) -> None:
     """Render the full consensus output in the Streamlit UI."""
     col1, col2, col3, col4 = st.columns(4)
@@ -234,12 +274,80 @@ def display_consensus_result(
             f"to understand what is driving uncertainty."
         )
 
+    # ── External Registry Data ────────────────────────────────────────────────
+    if external_registry and external_registry.found_anything:
+        with st.expander("External Registry Data — Authoritative Government Sources"):
+            ext_dict = external_registry.to_dict()
+            if "sec_edgar" in ext_dict:
+                ed = ext_dict["sec_edgar"]
+                st.markdown(f"**SEC EDGAR (US)**  [{ed.get('name','')}]({ed.get('url','')})")
+                col_e1, col_e2, col_e3 = st.columns(3)
+                col_e1.metric("SIC Code", ed.get("sic", ""))
+                col_e2.metric("SIC Description", ed.get("sic_description", ""))
+                col_e3.metric("State / Entity Type", f"{ed.get('state','')} · {ed.get('entity_type','')}")
+                if ed.get("ticker"):
+                    st.markdown(f"**Ticker:** `{ed['ticker']}` | **CIK:** `{ed['cik']}`")
+                if ed.get("former_names"):
+                    st.markdown(f"**Former names:** {', '.join(ed['former_names'][:3])}")
+            if "companies_house" in ext_dict:
+                ch = ext_dict["companies_house"]
+                st.markdown(f"**Companies House (UK)**  [{ch.get('name','')}]({ch.get('url','')})")
+                col_c1, col_c2 = st.columns(2)
+                col_c1.markdown(f"**SIC Codes:** {', '.join(ch.get('sic_codes', []))}")
+                col_c1.markdown(f"**Descriptions:** {' | '.join(ch.get('sic_descriptions', []))}")
+                col_c2.markdown(f"**Type:** {ch.get('type','')} | **Status:** {ch.get('status','')}")
+                if ch.get("incorporated"):
+                    col_c2.markdown(f"**Incorporated:** {ch['incorporated']}")
+            st.caption(
+                "These codes were filed directly by the company with the government registry. "
+                "They are the highest-authority source for classification."
+            )
+    elif external_registry is not None:
+        with st.expander("External Registry Data"):
+            st.info(
+                "No external registry record found for this company. "
+                "SEC EDGAR covers US public companies (SEC filers). "
+                "Companies House covers UK registered companies (requires COMPANIES_HOUSE_API_KEY). "
+                "Classification is based on vendor signals and UGO semantic search."
+            )
+
     # ── LLM reasoning ─────────────────────────────────────────────────────────
     if llm_result.reasoning:
         with st.expander("LLM Classification Reasoning"):
+            # Source used badge
+            src_used = getattr(llm_result, "source_used", "")
+            if src_used:
+                src_colour = {
+                    "registry":          "#2E7D32",
+                    "vendor_consensus":  "#1565C0",
+                    "semantic_search":   "#6A1B9A",
+                    "web_inference":     "#E65100",
+                }.get(src_used, "#546E7A")
+                st.markdown(
+                    f"**Evidence source used:** "
+                    f'<span style="background:{src_colour};color:white;padding:3px 10px;'
+                    f'border-radius:4px;font-size:12px">{src_used.replace("_"," ").upper()}</span>',
+                    unsafe_allow_html=True,
+                )
+
             st.write(llm_result.reasoning)
+
+            # Registry conflict alert
+            if getattr(llm_result, "registry_conflict", False):
+                st.warning(
+                    f"⚠️ **Registry conflict detected:** {getattr(llm_result, 'registry_conflict_note', '')}"
+                )
+
+            # MCC
             if llm_result.mcc_code:
-                st.write(f"**MCC Code:** {llm_result.mcc_code} — {llm_result.mcc_label}")
+                mcc_risk = getattr(llm_result, "mcc_risk_note", None) or "normal"
+                mcc_colour = "#C62828" if "high_risk" in mcc_risk else "#2E7D32"
+                st.markdown(
+                    f"**MCC Code:** `{llm_result.mcc_code}` — {llm_result.mcc_label}  "
+                    f'<span style="background:{mcc_colour};color:white;padding:2px 8px;'
+                    f'border-radius:3px;font-size:11px">{mcc_risk.upper()}</span>',
+                    unsafe_allow_html=True,
+                )
 
     # ── Secondary codes ───────────────────────────────────────────────────────
     if result.secondary_industries:
@@ -513,7 +621,7 @@ checkbox is enabled.
     if submitted and company_name.strip():
         with st.spinner("Running full pipeline …"):
             t0 = time.time()
-            entity, bundle, result, risk, llm = run_full_pipeline(
+            entity, bundle, result, risk, llm, ext_reg = run_full_pipeline(
                 company_name=company_name.strip(),
                 address=address.strip(),
                 country=country.strip(),
@@ -523,7 +631,7 @@ checkbox is enabled.
             elapsed = time.time() - t0
 
         st.success(f"Pipeline completed in {elapsed:.2f}s")
-        display_consensus_result(entity, bundle, result, risk, llm)
+        display_consensus_result(entity, bundle, result, risk, llm, ext_reg)
 
     elif submitted:
         st.warning("Please enter a company name.")
@@ -624,7 +732,7 @@ Upload a **CSV or Excel (.xlsx)** file. The file must contain at least:
             for i, row in df_input.iterrows():
                 status.text(f"Processing {i+1}/{len(df_input)}: {row['Org Name']}")
                 try:
-                    entity, bundle, result, risk, llm = run_full_pipeline(
+                    entity, bundle, result, risk, llm, ext_reg = run_full_pipeline(
                         company_name=str(row["Org Name"]),
                         address=str(row.get("Address", "")),
                         country=str(row.get("Country", "")),
@@ -643,7 +751,13 @@ Upload a **CSV or Excel (.xlsx)** file. The file must contain at least:
                         "LLM Taxonomy":        llm.primary_taxonomy,
                         "LLM Label":           llm.primary_label,
                         "LLM Confidence":      llm.primary_confidence,
+                        "LLM Source Used":     getattr(llm, "source_used", ""),
+                        "Registry Conflict":   getattr(llm, "registry_conflict", False),
                         "MCC Code":            llm.mcc_code or "",
+                        "MCC Risk":            getattr(llm, "mcc_risk_note", "") or "",
+                        "SEC EDGAR SIC":       ext_reg.edgar.sic if ext_reg and ext_reg.edgar else "",
+                        "SEC EDGAR SIC Desc":  ext_reg.edgar.sic_description if ext_reg and ext_reg.edgar else "",
+                        "CH SIC Codes":        ", ".join(ext_reg.companies_house.sic_codes) if ext_reg and ext_reg.companies_house else "",
                         "Risk Level":          risk.overall_risk_level,
                         "Risk Score":          round(risk.overall_risk_score, 4),
                         "KYB Recommendation":  risk.kyb_recommendation,
