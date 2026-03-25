@@ -9,8 +9,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # ── OpenAI ───────────────────────────────────────────────────────────────────
-# Set OPENAI_API_KEY in your .env file (see .env.example) or as an environment variable.
-OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+# Priority order:
+#   1. Streamlit Community Cloud secrets (st.secrets)
+#   2. Environment variable / .env file
+def _get_openai_key() -> str:
+    try:
+        import streamlit as st
+        return st.secrets.get("OPENAI_API_KEY", "") or os.getenv("OPENAI_API_KEY", "")
+    except Exception:
+        return os.getenv("OPENAI_API_KEY", "")
+
+OPENAI_API_KEY: str = _get_openai_key()
 OPENAI_CHAT_MODEL: str = "gpt-4o-mini"
 OPENAI_EMBED_MODEL: str = "text-embedding-3-small"  # 1536-dim, cost-efficient
 
@@ -43,7 +52,7 @@ SOURCE_WEIGHTS = {
 
 # ── XGBoost consensus model ───────────────────────────────────────────────────
 XGBOOST_MODEL_PATH: str = os.path.join(DATA_DIR, "consensus_model.ubj")
-N_SYNTHETIC_TRAINING_SAMPLES: int = 8_000
+N_SYNTHETIC_TRAINING_SAMPLES: int = 2_000   # kept low for fast cloud cold-start
 CONSENSUS_TOP_K: int = 5            # top-K codes returned in output
 
 # ── FAISS / UGO ───────────────────────────────────────────────────────────────
