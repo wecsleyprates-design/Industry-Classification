@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Industry Classification — Worth AI vs. Global Consensus Engine</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.css" />
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/theme/white.min.css" />
+<style>
+  :root {
+    --worth-blue:   #1565C0;
+    --worth-dark:   #0D1B2A;
+    --worth-accent: #1976D2;
+    --worth-green:  #2E7D32;
+    --worth-orange: #E65100;
+    --worth-red:    #C62828;
+    --worth-gray:   #546E7A;
+    --worth-light:  #E3F2FD;
+    --worth-gold:   #F57F17;
+  }
+
+  .reveal { font-family: 'Segoe UI', system-ui, sans-serif; }
+  .reveal h1 { font-size: 2.0em; color: var(--worth-dark); font-weight: 700; }
+  .reveal h2 { font-size: 1.5em; color: var(--worth-blue); font-weight: 700; border-bottom: 3px solid var(--worth-accent); padding-bottom: 8px; }
+  .reveal h3 { font-size: 1.1em; color: var(--worth-gray); font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
+  .reveal p, .reveal li { font-size: 0.78em; line-height: 1.6; color: #2c2c2c; }
+  .reveal ul { list-style: none; padding: 0; }
+  .reveal ul li::before { content: "›"; color: var(--worth-accent); font-weight: bold; margin-right: 8px; }
+  .reveal table { font-size: 0.65em; border-collapse: collapse; width: 100%; }
+  .reveal table th { background: var(--worth-blue); color: white; padding: 8px 10px; text-align: left; }
+  .reveal table td { padding: 6px 10px; border-bottom: 1px solid #ddd; }
+  .reveal table tr:nth-child(even) td { background: #f5f9ff; }
+
+  /* ── Custom classes ── */
+  .title-slide { background: linear-gradient(135deg, #0D1B2A 0%, #1565C0 100%) !important; }
+  .title-slide h1 { color: white !important; font-size: 2.2em; }
+  .title-slide h2 { color: #90CAF9 !important; border-color: #42A5F5; font-size: 1.1em; }
+  .title-slide p  { color: #B0BEC5 !important; }
+
+  .section-slide { background: var(--worth-blue) !important; }
+  .section-slide h2 { color: white !important; border-color: rgba(255,255,255,0.3); font-size: 1.8em; }
+  .section-slide p  { color: #B0BEC5 !important; font-size: 0.9em; }
+  .section-slide .section-num { font-size: 5em; color: rgba(255,255,255,0.08); font-weight: 900; position: absolute; top: 10px; right: 30px; }
+
+  .chip {
+    display: inline-block; padding: 3px 10px; border-radius: 12px;
+    font-size: 0.6em; font-weight: 700; margin: 2px;
+    vertical-align: middle;
+  }
+  .chip-green  { background: #E8F5E9; color: #2E7D32; border: 1px solid #A5D6A7; }
+  .chip-red    { background: #FFEBEE; color: #C62828; border: 1px solid #EF9A9A; }
+  .chip-orange { background: #FFF3E0; color: #E65100; border: 1px solid #FFCC80; }
+  .chip-blue   { background: #E3F2FD; color: #1565C0; border: 1px solid #90CAF9; }
+  .chip-gray   { background: #ECEFF1; color: #546E7A; border: 1px solid #CFD8DC; }
+
+  .card {
+    background: white; border-radius: 10px; padding: 14px 18px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08); margin: 6px 0;
+    border-left: 4px solid var(--worth-accent);
+  }
+  .card-red   { border-left-color: var(--worth-red); }
+  .card-green { border-left-color: var(--worth-green); }
+  .card-orange{ border-left-color: var(--worth-orange); }
+  .card-gold  { border-left-color: var(--worth-gold); }
+
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+
+  .flow-box {
+    background: var(--worth-light); border: 2px solid var(--worth-accent);
+    border-radius: 8px; padding: 8px 14px; font-size: 0.64em;
+    font-weight: 600; color: var(--worth-dark); text-align: center;
+  }
+  .flow-arrow { font-size: 1.4em; color: var(--worth-accent); text-align: center; line-height: 1; }
+
+  .stat-box {
+    text-align: center; padding: 16px;
+    background: white; border-radius: 10px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+  }
+  .stat-num { font-size: 2.2em; font-weight: 900; color: var(--worth-blue); display: block; }
+  .stat-label { font-size: 0.58em; color: var(--worth-gray); margin-top: 4px; }
+
+  .vs-table th.old { background: #546E7A; }
+  .vs-table th.new { background: #1565C0; }
+  .vs-table td.yes { color: #2E7D32; font-weight: 700; }
+  .vs-table td.no  { color: #C62828; font-weight: 700; }
+  .vs-table td.partial { color: #E65100; font-weight: 700; }
+
+  .quote {
+    font-style: italic; color: var(--worth-gray); font-size: 0.72em;
+    border-left: 3px solid var(--worth-accent); padding-left: 14px; margin: 10px 0;
+  }
+
+  .priority-badge {
+    display: inline-block; width: 26px; height: 26px; border-radius: 50%;
+    text-align: center; line-height: 26px; font-weight: 900; font-size: 0.65em;
+    margin-right: 8px; color: white;
+  }
+  .p0 { background: var(--worth-red); }
+  .p1 { background: var(--worth-orange); }
+  .p2 { background: var(--worth-gold); }
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE 1 — TITLE
+══════════════════════════════════════════════════════════════ -->
+<section class="title-slide" data-background-color="#0D1B2A">
+  <h1>Industry Classification</h1>
+  <h2>Worth AI Current Pipeline &nbsp;→&nbsp; Global Consensus Engine</h2>
+  <br/>
+  <p>How we classify industries today, what the market leaders do,<br/>
+     and how the new Consensus Engine closes the gap.</p>
+  <br/>
+  <p style="font-size:0.6em; color:#607D8B;">
+    Engineering &amp; Product — March 2026
+  </p>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE 2 — AGENDA
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>Agenda</h2>
+  <div class="three-col" style="margin-top:20px">
+    <div class="card card-orange" style="text-align:center; padding:20px">
+      <div style="font-size:2em;">🔍</div>
+      <div style="font-weight:700; color:var(--worth-orange); font-size:0.8em; margin:8px 0">Part 1</div>
+      <div style="font-size:0.7em; font-weight:600">How Worth AI Classifies Industries Today</div>
+      <div style="font-size:0.58em; color:var(--worth-gray); margin-top:6px">Sources · Schema · Gaps · What is lost</div>
+    </div>
+    <div class="card card-gold" style="text-align:center; padding:20px">
+      <div style="font-size:2em;">🌐</div>
+      <div style="font-weight:700; color:var(--worth-gold); font-size:0.8em; margin:8px 0">Part 2</div>
+      <div style="font-size:0.7em; font-weight:600">What the Market Leaders Do</div>
+      <div style="font-size:0.58em; color:var(--worth-gray); margin-top:6px">Refinitiv · LexisNexis · Dun &amp; Bradstreet · LSEG</div>
+    </div>
+    <div class="card card-green" style="text-align:center; padding:20px">
+      <div style="font-size:2em;">⚡</div>
+      <div style="font-weight:700; color:var(--worth-green); font-size:0.8em; margin:8px 0">Part 3</div>
+      <div style="font-size:0.7em; font-weight:600">The New Consensus Engine</div>
+      <div style="font-size:0.58em; color:var(--worth-gray); margin-top:6px">XGBoost · 6 Taxonomies · AML Signals · Demo</div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SECTION 1 HEADER
+══════════════════════════════════════════════════════════════ -->
+<section class="section-slide" data-background-color="#1565C0">
+  <div class="section-num">1</div>
+  <h2>Part 1</h2>
+  <p>The Worth AI Pipeline — How It Actually Works Today</p>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — WHY INDUSTRY CLASSIFICATION MATTERS
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>Why Industry Classification Matters</h2>
+  <div class="two-col" style="margin-top:16px">
+    <div>
+      <div class="card" style="margin-bottom:10px">
+        <div style="font-weight:700; font-size:0.75em; color:var(--worth-blue)">💳 Payment Compliance</div>
+        <div style="font-size:0.65em; margin-top:4px">MCC drives interchange rates, BSA/AML screening, and corporate card spending limits. Wrong MCC = compliance exposure.</div>
+      </div>
+      <div class="card" style="margin-bottom:10px">
+        <div style="font-weight:700; font-size:0.75em; color:var(--worth-blue)">⚖️ Risk Underwriting</div>
+        <div style="font-size:0.65em; margin-top:4px">Industry code is the primary denominator for default rate, fraud rate, and credit eligibility. Some lenders never touch cannabis, firearms, or crypto.</div>
+      </div>
+    </div>
+    <div>
+      <div class="card" style="margin-bottom:10px">
+        <div style="font-weight:700; font-size:0.75em; color:var(--worth-blue)">🏛️ Regulatory Reporting</div>
+        <div style="font-size:0.65em; margin-top:4px">UK FCA, EU EBA, and FinCEN require sector-specific classification. NAICS doesn't satisfy Companies House — UK SIC 2007 does.</div>
+      </div>
+      <div class="card">
+        <div style="font-weight:700; font-size:0.75em; color:var(--worth-blue)">🔍 KYB &amp; AML</div>
+        <div style="font-size:0.65em; margin-top:4px">Industry type is a primary AML/CTF signal. A "Holding Company" registered + "Electronics Wholesale" web presence = high-risk discrepancy.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — THE 7 SOURCES
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>Worth AI — The 7 Classification Sources</h2>
+  <table style="margin-top:14px">
+    <tr>
+      <th>Source</th><th>Type</th><th>Weight</th><th>What it returns</th><th>Int / Ext</th>
+    </tr>
+    <tr>
+      <td><strong>OpenCorporates</strong></td><td>Live API</td><td>0.9 ★</td>
+      <td>pipe-delimited <code>scheme-code</code> pairs (us_naics, uk_sic, ca_naics…)</td>
+      <td><span class="chip chip-blue">External</span></td>
+    </tr>
+    <tr>
+      <td><strong>ZoomInfo</strong></td><td>Live API</td><td>0.8</td>
+      <td><code>zi_c_naics6</code> (6-digit NAICS), <code>zi_c_sic4</code> (unused)</td>
+      <td><span class="chip chip-blue">External</span></td>
+    </tr>
+    <tr>
+      <td><strong>Trulioo</strong></td><td>Live API</td><td>0.8</td>
+      <td><code>.naicsCode</code>, <code>.sicCode</code> (unused), <code>.industryName</code></td>
+      <td><span class="chip chip-blue">External</span></td>
+    </tr>
+    <tr>
+      <td><strong>Equifax</strong></td><td>Batch / File</td><td>0.7</td>
+      <td><code>primnaicscode</code> + 24 other fields (all dropped)</td>
+      <td><span class="chip chip-green">Internal</span></td>
+    </tr>
+    <tr>
+      <td><strong>SERP Scrape</strong></td><td>Web scrape</td><td>0.3</td>
+      <td><code>businessLegitimacyClassification.naics_code</code></td>
+      <td><span class="chip chip-blue">External</span></td>
+    </tr>
+    <tr>
+      <td><strong>Customer</strong></td><td>Form input</td><td>0.2*</td>
+      <td>Self-reported NAICS (source weight=10, overridden to 0.2)</td>
+      <td><span class="chip chip-green">Internal</span></td>
+    </tr>
+    <tr>
+      <td><strong>AI Enrichment</strong></td><td>GPT fallback</td><td>0.1</td>
+      <td><code>naics_code</code>, <code>mcc_code</code>, reasoning (NAICS only)</td>
+      <td><span class="chip chip-blue">External</span></td>
+    </tr>
+  </table>
+  <p style="font-size:0.55em; color:var(--worth-gray); margin-top:10px">* Customer source weight = 10 but fact-level override = 0.2 (self-reporting is unreliable)</p>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — THE PIPELINE FLOW
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>The Worth AI Pipeline — Step by Step</h2>
+  <div style="margin-top:14px; display:grid; grid-template-columns: 1fr; gap:6px">
+    <div class="flow-box">① Applicant submits onboarding form → <code>data_businesses</code> row created, industry name fuzzy-matched to 20 NAICS sectors</div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-box">② Integration tasks triggered asynchronously → Trulioo, ZoomInfo, OpenCorporates, SERP, Equifax each write raw JSON to <code>integration_data.request_response</code></div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-box">③ FactEngine runs on demand → each source's getter queries <code>request_response WHERE platform_id = X</code> → extracts candidate code → <code>factWithHighestConfidence()</code> picks winner</div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-box">④ Kafka <code>UPDATE_NAICS_CODE</code> event: <code>{ business_id, naics_code, naics_title, platform }</code></div>
+    <div class="flow-arrow">↓</div>
+    <div class="flow-box">⑤ <code>handleNaicsData()</code> → looks up <code>core_naics_code.id</code> → derives <code>mcc_id</code> from <code>rel_naics_mcc</code> → <code>UPDATE data_businesses SET naics_id=X, mcc_id=Y</code></div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — THE DATABASE SCHEMA
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>The Database Schema — Industry Tables</h2>
+  <div class="two-col" style="margin-top:14px">
+    <div>
+      <div class="card" style="margin-bottom:8px">
+        <div style="font-weight:700; font-size:0.72em; color:var(--worth-blue)">core_naics_code</div>
+        <div style="font-size:0.6em; margin-top:4px; font-family:monospace; color:#555">id (PK) · code (6-digit, UNIQUE) · label<br/>1,035 rows — US NAICS 2022</div>
+      </div>
+      <div class="card" style="margin-bottom:8px">
+        <div style="font-weight:700; font-size:0.72em; color:var(--worth-blue)">core_mcc_code</div>
+        <div style="font-size:0.6em; margin-top:4px; font-family:monospace; color:#555">id (PK) · code (4-digit, UNIQUE) · label<br/>125 rows (Visa/Mastercard MCCs)</div>
+      </div>
+      <div class="card" style="margin-bottom:8px">
+        <div style="font-weight:700; font-size:0.72em; color:var(--worth-blue)">rel_naics_mcc</div>
+        <div style="font-size:0.6em; margin-top:4px; font-family:monospace; color:#555">naics_id FK → core_naics_code<br/>mcc_id FK → core_mcc_code<br/>1,012 mapping rows</div>
+      </div>
+    </div>
+    <div>
+      <div class="card" style="margin-bottom:8px">
+        <div style="font-weight:700; font-size:0.72em; color:var(--worth-blue)">data_businesses (industry columns)</div>
+        <div style="font-size:0.6em; margin-top:4px; font-family:monospace; color:#555">naics_id FK → core_naics_code ✅<br/>mcc_id FK → core_mcc_code ✅<br/>industry FK → core_business_industries ✅<br/><span style="color:var(--worth-red)">uk_sic_id → ❌ DOES NOT EXIST</span></div>
+      </div>
+      <div class="card" style="margin-bottom:8px">
+        <div style="font-weight:700; font-size:0.72em; color:var(--worth-blue)">rel_business_industry_naics (audit)</div>
+        <div style="font-size:0.6em; margin-top:4px; font-family:monospace; color:#555">business_id + platform (varchar) UNIQUE<br/>One row per vendor per business<br/>Priority: manual &gt; serp &gt; tax &gt; equifax</div>
+      </div>
+      <div class="card card-red">
+        <div style="font-weight:700; font-size:0.72em; color:var(--worth-red)">⚠️ Missing tables</div>
+        <div style="font-size:0.6em; margin-top:4px; color:#555">core_uk_sic_code &nbsp;→ ❌ Not created<br/>core_nace_code &nbsp;→ ❌ Not created<br/>core_isic_code &nbsp;→ ❌ Not created</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — WHAT IS SILENTLY DROPPED
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>What Each Source Returns vs. What Is Used</h2>
+  <table style="margin-top:12px">
+    <tr><th>Source</th><th>Available in raw response</th><th>Used ✅</th><th>Silently dropped ⚠️</th></tr>
+    <tr>
+      <td><strong>OpenCorporates</strong></td>
+      <td>us_naics, <strong>uk_sic</strong>, ca_naics (pipe-delimited)</td>
+      <td class="yes">us_naics only</td>
+      <td class="no">uk_sic, ca_naics</td>
+    </tr>
+    <tr>
+      <td><strong>Trulioo</strong></td>
+      <td>.naicsCode, <strong>.sicCode</strong>, .industryName</td>
+      <td class="yes">.naicsCode, .industryName</td>
+      <td class="no">.sicCode (adjacent field, never read)</td>
+    </tr>
+    <tr>
+      <td><strong>Equifax</strong></td>
+      <td>primnaicscode + 24 columns (hierarchy, 4× secondary, 5× SIC)</td>
+      <td class="yes">primnaicscode only</td>
+      <td class="no">24 of 25 industry columns</td>
+    </tr>
+    <tr>
+      <td><strong>ZoomInfo</strong></td>
+      <td>zi_c_naics6, <strong>zi_c_sic4</strong></td>
+      <td class="yes">zi_c_naics6 only</td>
+      <td class="no">zi_c_sic4</td>
+    </tr>
+    <tr>
+      <td><strong>AI Enrichment</strong></td>
+      <td>naics_code, mcc_code, reasoning</td>
+      <td class="yes">naics_code, mcc_code</td>
+      <td class="no">UK SIC structurally impossible (Zod schema)</td>
+    </tr>
+    <tr>
+      <td><strong>SERP Scrape</strong></td>
+      <td>naics_code, sic_code, secondary codes</td>
+      <td class="yes">naics_code only</td>
+      <td class="no">sic_code, secondary_naics</td>
+    </tr>
+  </table>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — THE 4 CRITICAL GAPS
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>The 4 Critical Gaps — UK Business Gets NULL</h2>
+  <div style="margin-top:14px; display:grid; grid-template-columns: 1fr 1fr; gap:12px">
+    <div class="card card-red">
+      <div style="font-weight:700; font-size:0.75em; color:var(--worth-red)">Gap 1 — Resolver loop filters to US only</div>
+      <div style="font-size:0.6em; margin-top:6px">OpenCorporates returns <code>"uk_sic-62012"</code> but the resolver loop only passes entries where <code>codeName.includes("us_naics")</code>. UK SIC is parsed, then discarded.</div>
+    </div>
+    <div class="card card-red">
+      <div style="font-weight:700; font-size:0.75em; color:var(--worth-red)">Gap 2 — Trulioo .sicCode never read</div>
+      <div style="font-size:0.6em; margin-top:6px">Trulioo returns <code>{ naicsCode: "…", sicCode: "62012" }</code> in the same object. The fact engine reads <code>?.naicsCode</code>. <code>.sicCode</code> is adjacent but never accessed — one missing line of code.</div>
+    </div>
+    <div class="card card-red">
+      <div style="font-weight:700; font-size:0.75em; color:var(--worth-red)">Gap 3 — classification_codes has no consumer</div>
+      <div style="font-size:0.6em; margin-top:6px">The <code>classification_codes</code> fact correctly captures all jurisdiction codes (uk_sic, ca_naics…) as a Record. But no report, scorer, or Kafka handler ever reads it. It is dead code.</div>
+    </div>
+    <div class="card card-red">
+      <div style="font-weight:700; font-size:0.75em; color:var(--worth-red)">Gap 4 — No persistence layer for UK SIC</div>
+      <div style="font-size:0.6em; margin-top:6px">Even if the code were extracted, there is no <code>core_uk_sic_code</code> table, no <code>uk_sic_id</code> column on <code>data_businesses</code>, and no migration that adds them. The data has nowhere to go.</div>
+    </div>
+  </div>
+  <div class="card card-orange" style="margin-top:12px; text-align:center">
+    <div style="font-size:0.7em"><strong>Result:</strong> Every UK business gets <code>naics_id = NULL</code> or an inappropriate US NAICS code. The UK SIC data sits in <code>integration_data.request_response</code> — already there, just never used.</div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — WHAT WORTH AI OUTPUTS TODAY
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>Worth AI Output Today</h2>
+  <div class="two-col" style="margin-top:14px">
+    <div>
+      <h3 style="color:var(--worth-green)">What IS produced</h3>
+      <div class="card card-green" style="margin-bottom:8px">
+        <div style="font-size:0.68em">✅ <strong>US NAICS 2022</strong> code (6-digit) stored in <code>data_businesses.naics_id</code></div>
+      </div>
+      <div class="card card-green" style="margin-bottom:8px">
+        <div style="font-size:0.68em">✅ <strong>MCC code</strong> derived via <code>rel_naics_mcc</code> JOIN</div>
+      </div>
+      <div class="card card-green" style="margin-bottom:8px">
+        <div style="font-size:0.68em">✅ <strong>Industry sector</strong> (1 of 20 NAICS buckets) in <code>core_business_industries</code></div>
+      </div>
+      <div class="card card-green">
+        <div style="font-size:0.68em">✅ <strong>Per-platform audit row</strong> in <code>rel_business_industry_naics</code></div>
+      </div>
+    </div>
+    <div>
+      <h3 style="color:var(--worth-red)">What is NOT produced</h3>
+      <div class="card card-red" style="margin-bottom:8px">
+        <div style="font-size:0.68em">❌ UK SIC 2007 (despite being in vendor responses)</div>
+      </div>
+      <div class="card card-red" style="margin-bottom:8px">
+        <div style="font-size:0.68em">❌ NACE Rev.2 (required for EU regulatory reporting)</div>
+      </div>
+      <div class="card card-red" style="margin-bottom:8px">
+        <div style="font-size:0.68em">❌ ISIC Rev.4 (UN/World Bank global standard)</div>
+      </div>
+      <div class="card card-red" style="margin-bottom:8px">
+        <div style="font-size:0.68em">❌ Calibrated probability (only text: HIGH / MED / LOW)</div>
+      </div>
+      <div class="card card-red" style="margin-bottom:8px">
+        <div style="font-size:0.68em">❌ AML/KYB risk signals</div>
+      </div>
+      <div class="card card-red">
+        <div style="font-size:0.68em">❌ Shell company detection</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SECTION 2 HEADER
+══════════════════════════════════════════════════════════════ -->
+<section class="section-slide" data-background-color="#1565C0">
+  <div class="section-num">2</div>
+  <h2>Part 2</h2>
+  <p>What the Market Leaders Do — Industry Classification in 2026</p>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — MARKET LEADERS OVERVIEW
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>How Top-Tier KYB Providers Classify Industries</h2>
+  <table style="margin-top:12px">
+    <tr><th>Provider</th><th>Taxonomies output</th><th>Model approach</th><th>Key differentiator</th></tr>
+    <tr>
+      <td><strong>Refinitiv / LSEG</strong></td>
+      <td>NAICS, NACE, ISIC, UK SIC, TRBC (proprietary)</td>
+      <td>Ensemble + entity graph</td>
+      <td>Proprietary TRBC (10,000+ codes) cross-walked to all standards</td>
+    </tr>
+    <tr>
+      <td><strong>Dun &amp; Bradstreet</strong></td>
+      <td>NAICS, SIC, NACE, ISIC, D-U-N-S sector</td>
+      <td>Probabilistic + entity resolution</td>
+      <td>460M+ company records; GLEIF LEI integration</td>
+    </tr>
+    <tr>
+      <td><strong>LexisNexis Risk</strong></td>
+      <td>NAICS, SIC, UK SIC, NACE + AML risk overlay</td>
+      <td>ML ensemble + rules engine</td>
+      <td>Industry type linked directly to AML risk score</td>
+    </tr>
+    <tr>
+      <td><strong>Equifax Commercial</strong></td>
+      <td>NAICS + 4-level hierarchy, SIC</td>
+      <td>Batch file matching + ML</td>
+      <td>Primary + 4 secondary codes with full sector hierarchy</td>
+    </tr>
+    <tr>
+      <td><strong>OpenCorporates</strong></td>
+      <td>All native registry codes (us_naics, uk_sic, ca_naics, NACE…)</td>
+      <td>Direct registry pull</td>
+      <td>200+ jurisdictions; pipe-delimited multi-taxonomy per company</td>
+    </tr>
+  </table>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — WHAT SOTA LOOKS LIKE
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>State-of-the-Art (SOTA) — The 5 Pillars</h2>
+  <div class="three-col" style="margin-top:16px">
+    <div class="card" style="text-align:center">
+      <div style="font-size:1.8em">🗺️</div>
+      <div style="font-weight:700; font-size:0.72em; color:var(--worth-blue); margin:8px 0">Unified Global Ontology</div>
+      <div style="font-size:0.6em">All taxonomy systems (NAICS, UK SIC, NACE, ISIC) mapped into a shared high-dimensional vector space. Cross-ontology semantic alignment without hardcoded crosswalks.</div>
+    </div>
+    <div class="card" style="text-align:center">
+      <div style="font-size:1.8em">📊</div>
+      <div style="font-weight:700; font-size:0.72em; color:var(--worth-blue); margin:8px 0">Multi-Source Consensus</div>
+      <div style="font-size:0.6em">6–10 vendor signals aggregated with reliability-weighted voting. No single source of failure. Conflicts detected and scored rather than silently resolved.</div>
+    </div>
+    <div class="card" style="text-align:center">
+      <div style="font-size:1.8em">🎯</div>
+      <div style="font-weight:700; font-size:0.72em; color:var(--worth-blue); margin:8px 0">Probabilistic Output</div>
+      <div style="font-size:0.6em">Top-K codes with calibrated probabilities (not text strings). Enables downstream risk scoring, portfolio analytics, and model uncertainty quantification.</div>
+    </div>
+    <div class="card" style="text-align:center">
+      <div style="font-size:1.8em">⚠️</div>
+      <div style="font-weight:700; font-size:0.72em; color:var(--worth-blue); margin:8px 0">Industry as Risk Vector</div>
+      <div style="font-size:0.6em">Industry code is not just a label — it is a primary AML/CTF signal. Registry vs. web discrepancy, code change history, and sector risk all feed a risk score.</div>
+    </div>
+    <div class="card" style="text-align:center">
+      <div style="font-size:1.8em">🌍</div>
+      <div style="font-weight:700; font-size:0.72em; color:var(--worth-blue); margin:8px 0">Jurisdiction-Native Taxonomy</div>
+      <div style="font-size:0.6em">UK business → UK SIC 2007. German company → NACE Rev.2. Tanzanian business → ISIC Rev.4. Automatic routing; never applying US NAICS to non-US entities.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — REFINITIV EXAMPLE
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>How LSEG / Refinitiv Does It</h2>
+  <div class="two-col" style="margin-top:14px">
+    <div>
+      <div class="card" style="margin-bottom:10px">
+        <div style="font-weight:700; font-size:0.72em; color:var(--worth-blue)">Refinitiv Business Classification (TRBC)</div>
+        <div style="font-size:0.6em; margin-top:6px">Proprietary 5-level taxonomy with 10,000+ codes. Automatically cross-walked to NAICS, NACE, UK SIC, ISIC. A UK restaurant gets UK SIC 56101 as primary output, NAICS 722511 as secondary — preserving the "Licensed" status that NAICS merges away.</div>
+      </div>
+      <div class="card" style="margin-bottom:10px">
+        <div style="font-weight:700; font-size:0.72em; color:var(--worth-blue)">Semantic Discrepancy Flagging</div>
+        <div style="font-size:0.6em; margin-top:6px">If a company is registered as "Investment Holding" (low risk) but web presence shows "Electronics Wholesaling" (high risk for dual-use goods), the system triggers a Semantic Discrepancy Flag — not just a classification mismatch.</div>
+      </div>
+    </div>
+    <div>
+      <div class="card" style="margin-bottom:10px">
+        <div style="font-weight:700; font-size:0.72em; color:var(--worth-blue)">AML / Structure Change Signal</div>
+        <div style="font-size:0.6em; margin-top:6px">Frequent changes in industry codes within 12 months are treated as "Structure Change" risk — indicative of money laundering or U-Turn fraud. The classification history IS the risk signal.</div>
+      </div>
+      <div class="card">
+        <div style="font-weight:700; font-size:0.72em; color:var(--worth-blue)">Entity Resolution at Scale</div>
+        <div style="font-size:0.6em; margin-top:6px">Cross-references GLEIF LEI, company registry filings, beneficial ownership data, and web presence to build a 360° entity profile before classifying. Classification is a derived attribute, not the primary one.</div>
+      </div>
+    </div>
+  </div>
+  <div class="quote" style="margin-top:14px">
+    "Top-tier providers no longer treat NAICS and UK SIC as separate buckets. They use a unified vector space where every code maps to a semantic cluster — a UK SIC 56101 is instantly comparable to a US NAICS 722511."
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SECTION 3 HEADER
+══════════════════════════════════════════════════════════════ -->
+<section class="section-slide" data-background-color="#1565C0">
+  <div class="section-num">3</div>
+  <h2>Part 3</h2>
+  <p>The New Global Industry Classification Consensus Engine</p>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — THE CONSENSUS ENGINE ARCHITECTURE
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>The Consensus Engine — 3-Level Architecture</h2>
+  <div style="margin-top:12px; display:grid; grid-template-columns: 1fr; gap:6px">
+    <div style="display:grid; grid-template-columns: 60px 1fr; gap:10px; align-items:center">
+      <div style="text-align:center; font-weight:900; color:var(--worth-gray); font-size:0.7em">INPUT</div>
+      <div class="flow-box">Company Name · Address · Jurisdiction Code (us_mo / ca_bc / ae_az / gb / tz …)</div>
+    </div>
+    <div class="flow-arrow">↓ Entity Resolver — 100+ global suffixes · 200+ jurisdiction codes → clean name, entity type, taxonomy route</div>
+    <div style="display:grid; grid-template-columns: 60px 1fr; gap:10px; align-items:center">
+      <div style="text-align:center; font-weight:900; color:var(--worth-orange); font-size:0.65em; background:#FFF3E0; padding:8px; border-radius:6px">Level 0</div>
+      <div class="flow-box" style="border-color:var(--worth-orange); background:#FFF8F1">Signal Layer — 6 sources: OpenCorporates · Equifax · Trulioo · ZoomInfo · D&amp;B · AI Semantic<br/>Each returns: raw_code · taxonomy · label · weight · status (MATCHED/POLLUTED/CONFLICT) · confidence + 3-snapshot history</div>
+    </div>
+    <div class="flow-arrow">↓</div>
+    <div style="display:grid; grid-template-columns: 60px 1fr; gap:10px; align-items:center">
+      <div style="text-align:center; font-weight:900; color:var(--worth-gold); font-size:0.65em; background:#FFFDE7; padding:8px; border-radius:6px">Level 1</div>
+      <div class="flow-box" style="border-color:var(--worth-gold); background:#FFFEF5"><strong>38-Feature Engineering</strong> — source confidences · data quality flags · semantic distances · temporal pivot score · jurisdiction one-hot (10 buckets) · entity type · AML prefix flags</div>
+    </div>
+    <div class="flow-arrow">↓</div>
+    <div style="display:grid; grid-template-columns: 60px 1fr; gap:10px; align-items:center">
+      <div style="text-align:center; font-weight:900; color:var(--worth-blue); font-size:0.65em; background:#E3F2FD; padding:8px; border-radius:6px">Level 2</div>
+      <div class="flow-box" style="border-color:var(--worth-blue)"><strong>XGBoost Consensus</strong> → Top-5 codes with calibrated probabilities → LLM enrichment (GPT-4o-mini JSON mode) → Risk Engine (9 AML/KYB signals)</div>
+    </div>
+    <div class="flow-arrow">↓ Structured JSON Output — 6 taxonomy codes · probabilities · risk score · source lineage</div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — THE UNIFIED GLOBAL ONTOLOGY
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>The Unified Global Ontology (UGO)</h2>
+  <div class="two-col" style="margin-top:14px">
+    <div>
+      <p style="font-size:0.68em">A <strong>FAISS vector index</strong> built from all 2,330 taxonomy codes across 6 classification systems. Each code is embedded using sentence-transformers and stored in a shared high-dimensional space.</p>
+      <p style="font-size:0.68em; margin-top:8px">This enables <strong>Cross-Ontology Embedding Alignment</strong>: searching "licensed restaurant" returns UK SIC 56101 as the top hit, with NAICS 722511 and ISIC 5610 as semantic neighbours — without hardcoded crosswalk tables.</p>
+      <div class="card card-green" style="margin-top:10px">
+        <div style="font-size:0.65em">🔍 <strong>Example:</strong> Query "software development consulting"<br/>
+        → UK SIC 62012 (sim: 0.88) · NAICS 541512 (0.83) · NACE J62 (0.81) · ISIC 6201 (0.79)</div>
+      </div>
+    </div>
+    <div>
+      <table>
+        <tr><th>Taxonomy</th><th>Authority</th><th>Codes</th></tr>
+        <tr><td>NAICS 2022</td><td>US Census</td><td>1,033</td></tr>
+        <tr><td>UK SIC 2007</td><td>Companies House / ONS</td><td>386</td></tr>
+        <tr><td>ISIC Rev.4</td><td>United Nations</td><td>439</td></tr>
+        <tr><td>NACE Rev.2</td><td>Eurostat</td><td>88</td></tr>
+        <tr><td>US SIC 1987</td><td>SEC / US Gov</td><td>79</td></tr>
+        <tr><td>MCC</td><td>Visa / Mastercard</td><td>305</td></tr>
+        <tr style="background:#E3F2FD"><td><strong>Total</strong></td><td></td><td><strong>2,330</strong></td></tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — 38 FEATURES vs 0
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>Feature Engineering — 38 vs. 0</h2>
+  <div class="three-col" style="margin-top:14px">
+    <div>
+      <h3 style="color:var(--worth-blue)">Source Quality</h3>
+      <div class="card" style="font-size:0.6em; margin-bottom:6px">Features 0–5: Per-source weighted confidence × reliability weight</div>
+      <div class="card" style="font-size:0.6em; margin-bottom:6px">Features 6–11: Source status flags (MATCHED / POLLUTED / CONFLICT)</div>
+      <div class="card" style="font-size:0.6em; margin-bottom:6px">Feature 12: Trulioo Pollution Flag — 4-digit SIC in 6-digit jurisdiction</div>
+      <div class="card" style="font-size:0.6em">Feature 15: Cross-taxonomy agreement score</div>
+    </div>
+    <div>
+      <h3 style="color:var(--worth-blue)">Semantic Signals</h3>
+      <div class="card" style="font-size:0.6em; margin-bottom:6px">Feature 13: Web-to-Registry cosine distance → shell company indicator</div>
+      <div class="card" style="font-size:0.6em; margin-bottom:6px">Feature 14: Temporal Pivot Score — code-change rate across 3 snapshots</div>
+      <div class="card" style="font-size:0.6em; margin-bottom:6px">Feature 31: Majority code agreement across sources</div>
+      <div class="card" style="font-size:0.6em">Feature 32: High-risk NAICS prefix flag (AML sectors)</div>
+    </div>
+    <div>
+      <h3 style="color:var(--worth-blue)">Jurisdiction</h3>
+      <div class="card" style="font-size:0.6em; margin-bottom:6px">Features 19–28: 10-bucket region one-hot<br/>US · US_STATE · CA · CA_PROV · EU · APAC · LATAM · MENA · AFRICA · OTHER</div>
+      <div class="card" style="font-size:0.6em; margin-bottom:6px">Feature 29: Is sub-national? (state / province / emirate)</div>
+      <div class="card" style="font-size:0.6em">Feature 30: Is NAICS jurisdiction? → routes to correct taxonomy</div>
+    </div>
+  </div>
+  <div style="text-align:center; margin-top:14px">
+    <span class="chip chip-red" style="font-size:0.8em; padding:6px 16px">Worth AI today: 0 numeric features</span>
+    &nbsp;&nbsp;→&nbsp;&nbsp;
+    <span class="chip chip-green" style="font-size:0.8em; padding:6px 16px">Consensus Engine: 38 numeric features</span>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — THE MODEL COMPARISON
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>Model Comparison — Worth AI vs. Consensus Engine</h2>
+  <table class="vs-table" style="margin-top:14px">
+    <tr>
+      <th>Aspect</th>
+      <th class="old">Worth AI (FactEngine + AI)</th>
+      <th class="new">New Consensus Engine</th>
+    </tr>
+    <tr>
+      <td>Core algorithm</td>
+      <td class="partial">Confidence-weighted max rule + LLM zero-shot</td>
+      <td class="yes">3-level XGBoost stacking ensemble</td>
+    </tr>
+    <tr>
+      <td>Training data</td>
+      <td class="no">None — rule-based + pre-training</td>
+      <td class="yes">2,000 synthetic samples → real overrides</td>
+    </tr>
+    <tr>
+      <td>Input representation</td>
+      <td class="no">Scalar weight × confidence per source</td>
+      <td class="yes">38-feature numeric vector</td>
+    </tr>
+    <tr>
+      <td>Candidate retrieval</td>
+      <td class="no">None — raw code from highest-confidence source</td>
+      <td class="yes">FAISS cosine search across 2,330 UGO codes</td>
+    </tr>
+    <tr>
+      <td>Output</td>
+      <td class="no">Single NAICS code (string)</td>
+      <td class="yes">Top-5 codes with calibrated probabilities</td>
+    </tr>
+    <tr>
+      <td>Confidence</td>
+      <td class="no">Text: HIGH / MEDIUM / LOW (self-reported)</td>
+      <td class="yes">Float 0.0–1.0 (XGBoost softmax)</td>
+    </tr>
+    <tr>
+      <td>Taxonomies</td>
+      <td class="no">NAICS 2022 only</td>
+      <td class="yes">6 taxonomies simultaneously</td>
+    </tr>
+    <tr>
+      <td>AML / KYB signals</td>
+      <td class="no">None</td>
+      <td class="yes">9 signal types with severity + score</td>
+    </tr>
+    <tr>
+      <td>Jurisdiction routing</td>
+      <td class="no">None — all entities → NAICS</td>
+      <td class="yes">200+ codes → correct taxonomy auto-selected</td>
+    </tr>
+  </table>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — THE 9 RISK SIGNALS
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>9 AML / KYB Risk Signals — Worth AI Has Zero</h2>
+  <div class="two-col" style="margin-top:14px">
+    <div>
+      <div class="card card-red" style="margin-bottom:8px">
+        <div style="font-size:0.68em"><span class="chip chip-red">CRITICAL/HIGH</span> <strong>SHELL_COMPANY_SIGNAL</strong></div>
+        <div style="font-size:0.58em; margin-top:4px">Holding company registered + operating sector web presence → U-Turn fraud pattern</div>
+      </div>
+      <div class="card card-red" style="margin-bottom:8px">
+        <div style="font-size:0.68em"><span class="chip chip-red">HIGH</span> <strong>REGISTRY_DISCREPANCY</strong></div>
+        <div style="font-size:0.58em; margin-top:4px">Official filing conflicts with web-inferred classification — semantic distance above threshold</div>
+      </div>
+      <div class="card card-red" style="margin-bottom:8px">
+        <div style="font-size:0.68em"><span class="chip chip-red">HIGH</span> <strong>HIGH_RISK_SECTOR</strong></div>
+        <div style="font-size:0.58em; margin-top:4px">Primary code in AML/CTF elevated sector (finance, electronics wholesale, holding companies)</div>
+      </div>
+      <div class="card card-red" style="margin-bottom:8px">
+        <div style="font-size:0.68em"><span class="chip chip-red">HIGH</span> <strong>STRUCTURE_CHANGE</strong></div>
+        <div style="font-size:0.58em; margin-top:4px">Industry code changed in every historical snapshot → money laundering pivot signal</div>
+      </div>
+      <div class="card card-red">
+        <div style="font-size:0.68em"><span class="chip chip-red">HIGH</span> <strong>SOURCE_CONFLICT</strong></div>
+        <div style="font-size:0.58em; margin-top:4px">≥60% of sources disagree on primary code — data quality or ambiguous entity</div>
+      </div>
+    </div>
+    <div>
+      <div class="card card-orange" style="margin-bottom:8px">
+        <div style="font-size:0.68em"><span class="chip chip-orange">MEDIUM</span> <strong>TEMPORAL_PIVOT</strong></div>
+        <div style="font-size:0.58em; margin-top:4px">Code changed 2+ times in recent history — monitor for business pivot fraud</div>
+      </div>
+      <div class="card card-orange" style="margin-bottom:8px">
+        <div style="font-size:0.68em"><span class="chip chip-orange">MEDIUM</span> <strong>HOLDING_MISMATCH</strong></div>
+        <div style="font-size:0.58em; margin-top:4px">Entity type = Holding but classified in an operating sector</div>
+      </div>
+      <div class="card card-orange" style="margin-bottom:8px">
+        <div style="font-size:0.68em"><span class="chip chip-orange">MEDIUM</span> <strong>LOW_CONSENSUS_PROBABILITY</strong></div>
+        <div style="font-size:0.58em; margin-top:4px">XGBoost confidence &lt;40% — insufficient data, or genuinely ambiguous entity</div>
+      </div>
+      <div class="card" style="margin-bottom:8px">
+        <div style="font-size:0.68em"><span class="chip chip-gray">LOW</span> <strong>TRULIOO_POLLUTION</strong></div>
+        <div style="font-size:0.58em; margin-top:4px">Trulioo returned 4-digit SIC for 5/6-digit jurisdiction — auto-detected data quality issue</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — THE OUTPUT SCHEMA
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>The Output — What the Consensus Engine Returns</h2>
+  <div class="two-col" style="margin-top:12px">
+    <div>
+<pre style="font-size:0.44em; background:#0D1B2A; color:#90CAF9; padding:14px; border-radius:8px; text-align:left; line-height:1.5">{
+  "primary_industry": {
+    "taxonomy": "<span style="color:#A5D6A7">UK_SIC_2007</span>",
+    "code":     "<span style="color:#A5D6A7">56101</span>",
+    "label":    "Licensed restaurants",
+    "consensus_probability": <span style="color:#FFD54F">0.85</span>
+  },
+  "secondary_industries": [
+    { "taxonomy": "US_NAICS_2022",
+      "code": "722511", "prob": <span style="color:#FFD54F">0.10</span> },
+    { "taxonomy": "NACE_REV2",
+      "code": "I56",    "prob": <span style="color:#FFD54F">0.04</span> }
+  ],
+  "risk_signals": [
+    { "flag": "<span style="color:#EF9A9A">REGISTRY_DISCREPANCY</span>",
+      "severity": "HIGH", "score": 0.30 }
+  ],
+  "source_lineage": {
+    "opencorporates": { "status": "<span style="color:#A5D6A7">MATCHED</span>", "weight": 0.90 },
+    "trulioo":        { "status": "<span style="color:#EF9A9A">POLLUTED</span>", "weight": 0.70 }
+  },
+  "risk_profile": {
+    "overall_risk_score": 0.35,
+    "kyb_recommendation": "<span style="color:#FFD54F">REVIEW</span>"
+  }
+}</pre>
+    </div>
+    <div>
+      <h3 style="color:var(--worth-blue)">What you get per company</h3>
+      <div class="card" style="margin-bottom:6px; font-size:0.62em">🏷️ <strong>Primary code</strong> — correct taxonomy for that jurisdiction with probability</div>
+      <div class="card" style="margin-bottom:6px; font-size:0.62em">🏷️ <strong>Up to 4 secondary codes</strong> — cross-taxonomy coverage</div>
+      <div class="card" style="margin-bottom:6px; font-size:0.62em">⚠️ <strong>Risk signals</strong> — shell company, pivot, high-risk sector…</div>
+      <div class="card" style="margin-bottom:6px; font-size:0.62em">🔍 <strong>Source lineage</strong> — which vendor said what, with what quality</div>
+      <div class="card" style="margin-bottom:6px; font-size:0.62em">✅ <strong>KYB recommendation</strong> — APPROVE / REVIEW / ESCALATE / REJECT</div>
+      <div class="card" style="font-size:0.62em">🌍 <strong>Jurisdiction metadata</strong> — code, label, region, sovereign ISO-2</div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — FULL CAPABILITY COMPARISON
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>Full Capability Comparison</h2>
+  <table class="vs-table" style="margin-top:12px; font-size:0.6em">
+    <tr>
+      <th>Capability</th>
+      <th class="old">Worth AI Today</th>
+      <th class="new">Consensus Engine</th>
+    </tr>
+    <tr><td>US NAICS 2022</td><td class="yes">✅ Stored</td><td class="yes">✅</td></tr>
+    <tr><td>UK SIC 2007</td><td class="no">❌ Not stored</td><td class="yes">✅ Auto-selected for GB/GG/JE</td></tr>
+    <tr><td>NACE Rev.2 (EU)</td><td class="no">❌ Not present</td><td class="yes">✅ Auto-selected for EU</td></tr>
+    <tr><td>ISIC Rev.4 (Global)</td><td class="no">❌ Not present</td><td class="yes">✅ Auto-selected for APAC/LATAM/MENA</td></tr>
+    <tr><td>MCC code</td><td class="yes">✅ Derived via JOIN</td><td class="yes">✅ Direct per jurisdiction</td></tr>
+    <tr><td>Secondary industry codes</td><td class="no">❌</td><td class="yes">✅ Up to 4 cross-taxonomy</td></tr>
+    <tr><td>Calibrated probability</td><td class="no">❌ Text only</td><td class="yes">✅ Float 0–1 (XGBoost)</td></tr>
+    <tr><td>AML / KYB risk signals</td><td class="no">❌</td><td class="yes">✅ 9 signal types</td></tr>
+    <tr><td>Shell company detection</td><td class="no">❌</td><td class="yes">✅</td></tr>
+    <tr><td>Temporal pivot / code-change</td><td class="no">❌</td><td class="yes">✅</td></tr>
+    <tr><td>Source lineage (full)</td><td class="partial">⚠️ Partial (NAICS only)</td><td class="yes">✅ All 6 sources with weight + status</td></tr>
+    <tr><td>Data quality detection (Trulioo pollution)</td><td class="no">❌</td><td class="yes">✅</td></tr>
+    <tr><td>200+ jurisdiction codes</td><td class="no">❌</td><td class="yes">✅ us_mo, ca_bc, ae_az, gg, tz…</td></tr>
+    <tr><td>KYB recommendation</td><td class="no">❌</td><td class="yes">✅ APPROVE / REVIEW / ESCALATE / REJECT</td></tr>
+  </table>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — STATS
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>By the Numbers</h2>
+  <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:14px; margin-top:20px">
+    <div class="stat-box">
+      <span class="stat-num">2,330</span>
+      <div class="stat-label">Industry codes indexed in the Unified Global Ontology</div>
+    </div>
+    <div class="stat-box">
+      <span class="stat-num">6</span>
+      <div class="stat-label">Taxonomy systems (NAICS · UK SIC · NACE · ISIC · SIC · MCC)</div>
+    </div>
+    <div class="stat-box">
+      <span class="stat-num">200+</span>
+      <div class="stat-label">Jurisdiction codes (every US state, CA province, UAE emirate, country)</div>
+    </div>
+    <div class="stat-box">
+      <span class="stat-num">38</span>
+      <div class="stat-label">Engineered features fed to XGBoost (vs. 0 in current pipeline)</div>
+    </div>
+  </div>
+  <div style="display:grid; grid-template-columns: repeat(4, 1fr); gap:14px; margin-top:14px">
+    <div class="stat-box">
+      <span class="stat-num">9</span>
+      <div class="stat-label">AML / KYB risk signal types produced</div>
+    </div>
+    <div class="stat-box">
+      <span class="stat-num">6</span>
+      <div class="stat-label">Vendor sources aggregated (vs. 1 winner in current pipeline)</div>
+    </div>
+    <div class="stat-box">
+      <span class="stat-num">100+</span>
+      <div class="stat-label">Global legal entity suffixes recognised (LLC · GmbH · SAS · KK · Ltda…)</div>
+    </div>
+    <div class="stat-box">
+      <span class="stat-num">0</span>
+      <div class="stat-label">New vendor APIs needed for P0 fix — UK SIC data already in Redshift</div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — THE P0 QUICK WINS
+══════════════════════════════════════════════════════════════ -->
+<section>
+  <h2>Recommended Next Steps</h2>
+  <div style="margin-top:14px">
+    <div class="card card-red" style="margin-bottom:10px">
+      <div style="display:flex; align-items:center">
+        <span class="priority-badge p0">P0</span>
+        <div>
+          <div style="font-weight:700; font-size:0.72em">Add <code>core_uk_sic_code</code> table + <code>uk_sic_id</code> column — one migration</div>
+          <div style="font-size:0.6em; margin-top:4px; color:var(--worth-gray)">Zero new API calls. UK SIC data is already in <code>integration_data.request_response</code>. Just needs a destination table.</div>
+        </div>
+      </div>
+    </div>
+    <div class="card card-red" style="margin-bottom:10px">
+      <div style="display:flex; align-items:center">
+        <span class="priority-badge p0">P0</span>
+        <div>
+          <div style="font-weight:700; font-size:0.72em">Read Trulioo <code>.sicCode</code> for GB businesses — one line of code</div>
+          <div style="font-size:0.6em; margin-top:4px; color:var(--worth-gray)"><code>?.naicsCode</code> → also read <code>?.sicCode</code> when country = "GB". Already in the same response object.</div>
+        </div>
+      </div>
+    </div>
+    <div class="card card-orange" style="margin-bottom:10px">
+      <div style="display:flex; align-items:center">
+        <span class="priority-badge p1">P1</span>
+        <div>
+          <div style="font-weight:700; font-size:0.72em">Replace AI NAICS enrichment prompt with the full Consensus Engine pipeline</div>
+          <div style="font-size:0.6em; margin-top:4px; color:var(--worth-gray)">Multi-taxonomy output, calibrated XGBoost confidence, 9 AML signals, full source lineage.</div>
+        </div>
+      </div>
+    </div>
+    <div class="card card-orange" style="margin-bottom:10px">
+      <div style="display:flex; align-items:center">
+        <span class="priority-badge p1">P1</span>
+        <div>
+          <div style="font-weight:700; font-size:0.72em">Add <code>classification_codes</code> downstream consumer — persist all jurisdiction codes</div>
+          <div style="font-size:0.6em; margin-top:4px; color:var(--worth-gray)">The fact is already resolved. It just needs a Kafka handler and a destination table. Unlocks CA NAICS, NACE, ISIC at no cost.</div>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:10px">
+      <div style="display:flex; align-items:center">
+        <span class="priority-badge p2">P2</span>
+        <div>
+          <div style="font-weight:700; font-size:0.72em">Train XGBoost on real manual override history from <code>rel_business_industry_naics</code></div>
+          <div style="font-size:0.6em; margin-top:4px; color:var(--worth-gray)">Replace synthetic training samples with ground truth. Model improves continuously with each manual correction.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════
+     SLIDE — CLOSING
+══════════════════════════════════════════════════════════════ -->
+<section class="title-slide" data-background-color="#0D1B2A">
+  <h1>Summary</h1>
+  <br/>
+  <div style="text-align:left; max-width:700px; margin:0 auto">
+    <div style="color:#90CAF9; font-size:0.78em; margin-bottom:12px">🔴 &nbsp;<strong style="color:white">Today:</strong> US NAICS only · UK SIC silently dropped · 0 risk signals · no calibrated confidence</div>
+    <div style="color:#90CAF9; font-size:0.78em; margin-bottom:12px">🌐 &nbsp;<strong style="color:white">Market standard:</strong> Multi-taxonomy · probabilistic · jurisdiction-aware · AML-linked</div>
+    <div style="color:#90CAF9; font-size:0.78em; margin-bottom:12px">⚡ &nbsp;<strong style="color:white">New engine:</strong> 6 taxonomies · 38 features · XGBoost + GPT-4o-mini · 9 risk signals · 200+ jurisdictions</div>
+    <div style="color:#90CAF9; font-size:0.78em">🚀 &nbsp;<strong style="color:white">P0 quick win:</strong> UK SIC data already in Redshift — one migration + one line of code = UK businesses fixed</div>
+  </div>
+  <br/><br/>
+  <p style="font-size:0.6em; color:#546E7A">
+    Full technical details: <code style="color:#90CAF9">TECHNICAL_BRIEFING.md</code> in the repo<br/>
+    Live demo: Streamlit app · Industry Lookup · Risk Dashboard · Taxonomy Explorer
+  </p>
+</section>
+
+</div><!-- /slides -->
+</div><!-- /reveal -->
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.js"></script>
+<script>
+  Reveal.initialize({
+    hash: true,
+    slideNumber: 'c/t',
+    transition: 'slide',
+    transitionSpeed: 'fast',
+    controls: true,
+    progress: true,
+    center: true,
+    width: 1200,
+    height: 700,
+    margin: 0.04,
+    plugins: []
+  });
+</script>
+</body>
+</html>
