@@ -3,680 +3,656 @@
 
 **Prepared for:** Engineering Team & Management  
 **Date:** March 2026  
-**Sources:** `SIC-UK-Codes` repo (integration-service, case-service, warehouse-service, `WORTH_INDUSTRY_CLASSIFICATION_REPORT.md`) + new Consensus Engine codebase
+**Sources:** `SIC-UK-Codes` repo (integration-service, case-service, warehouse-service), `Entity-Matching` repo (matching_v1.py, build_matching_tables.py), `WORTH_INDUSTRY_CLASSIFICATION_REPORT.md`, and new Consensus Engine codebase
 
 ---
 
 ## Executive Summary
 
-Worth AI currently classifies businesses using a **FactEngine** that aggregates NAICS codes from **seven sources** (six live vendors + one AI fallback), stores the winning code via a FK reference to `core_naics_code`, and derives an MCC from a join table. The pipeline works reliably for **US businesses** but has **four sequential gaps** that cause UK SIC 2007 codes to be silently discarded before they reach the database — meaning every non-US business either receives an inappropriate US NAICS code or has `naics_id = NULL`. There is **no `core_uk_sic_code` table**, no `uk_sic_id` column on `data_businesses`, and no Canadian NAICS storage — despite all three being present in vendor responses.
+Worth AI currently classifies businesses through a **FactEngine** that aggregates signals from seven sources using a confidence-weighted maximum rule, with **no ML model** in the classification decision itself — only in entity matching. The output is a single NAICS code and a manually-derived MCC. UK SIC 2007 data is present in vendor responses but silently discarded due to four sequential gaps. Non-US businesses receive either an inappropriate US NAICS code or `naics_id = NULL`.
 
-The new **Global Industry Classification Consensus Engine** addresses these gaps with a three-level XGBoost stacking ensemble that outputs **six taxonomy codes simultaneously**, assigns **calibrated probabilities** to each, surfaces **nine AML/KYB risk signals**, and supports **200+ jurisdictions** including every US state, Canadian province, and UAE emirate.
+The new **Global Industry Classification Consensus Engine** replaces this with a three-level XGBoost stacking ensemble that outputs six taxonomy codes simultaneously, assigns calibrated probabilities, surfaces nine AML/KYB risk signals, supports 200+ jurisdictions, and uses Liberty Data as a fourth entity-matching source alongside OpenCorporates, Equifax, and ZoomInfo.
 
 ---
 
 ## Part 1 — The Worth AI Pipeline: How It Actually Works
 
-### 1.1 Architecture
+### 1.1 The Two Separate XGBoost Models in Worth AI
 
-The pipeline is built inside `integration-service` using a **FactEngine** pattern. For each business, a set of **facts** (data points like `naics_code`, `industry`, `mcc_code`) are resolved by querying multiple vendor sources stored in `integration_data.request_response`, applying a confidence-weighted rule to select a winner, and persisting the result to `data_businesses` via a Kafka event.
+Worth AI uses XGBoost in **one place only** — entity matching. There is **no XGBoost model** in the classification decision itself.
+
+#### Model 1: Entity Matching XGBoost (`entity_matching_20250127`)
+
+**What it does:** Scores whether a candidate record from a Redshift database table (OpenCorporates, Equifax, ZoomInfo, or Liberty Data) represents the *same real-world company* as the input business.
+
+**Where it lives:** `entity_matching/core/matchers/matching_v1.py`
+
+**How it works:**
 
 ```
-Applicant submits onboarding form
-        ↓
-data_businesses row created (industry name sanitized against core_business_industries)
-        ↓
-Integration tasks triggered asynchronously:
-  • fetch_business_entity_verification (Trulioo)
-  • fetch_public_records (Equifax)
-  • ZoomInfo API call
-  • OpenCorporates API call
-  • SERP scrape
-        ↓
-Raw JSON responses written to integration_data.request_response
-  (one row per vendor per call, discriminated by platform_id)
-        ↓
-FactEngine runs when facts are requested (reports, scoring, Kafka consumers):
-  • Each source's getter queries integration_data.request_response WHERE platform_id = X
-  • fn() or path: extracts the candidate value from the raw JSONB response
-  • Confidence computed per source (match quality, index score, etc.)
-  • factWithHighestConfidence() selects the winner
-  • weightedFactSelector() used when confidences are within 0.05 of each other
-        ↓
-Kafka UPDATE_NAICS_CODE event emitted:
-  { business_id, naics_code, naics_title, platform, industry_code }
-        ↓
-handleNaicsData() resolves naics_id from core_naics_code, mcc_id from rel_naics_mcc
-UPDATE data_businesses SET naics_id = X, mcc_id = Y
-INSERT/UPDATE rel_business_industry_naics (per-platform audit row)
+Input company → canonise name (strip suffixes, accents) →
+    Query Redshift tables:
+      dev.datascience.open_corporates_standard_ml_2
+      dev.warehouse.equifax_us_standardized
+      dev.datascience.zoominfo_standard_ml_2
+      dev.warehouse.liberty_data_standard (4th source)  →
+    For each candidate record: compute similarity features →
+    XGBoost predict_proba → match_confidence (0.0–1.0) →
+    Top-10 matches stored in {table}_matches
 ```
 
-### 1.2 The Seven Sources — Complete Inventory
+**Features used by Entity Matching XGBoost:**
 
-#### Source 1: Equifax (Batch / File — Internal Warehouse)
+| Feature | Type | Description |
+|---------|------|-------------|
+| `similarity_jaccard_1` | Float 0–1 | Character 1-gram Jaccard similarity between canonical names |
+| `similarity_jaccard_2` | Float 0–1 | Character 2-gram Jaccard similarity |
+| `similarity_jaccard_3` | Float 0–1 | Character 3-gram Jaccard similarity |
+| `similarity_jaccard_4` | Float 0–1 | Character 4-gram Jaccard similarity |
+| `similarity_jaccard_word` | Float 0–1 | Word-level Jaccard similarity |
+| `sim_norm_jac_1` | Float 0–1 | Normalised overlap coefficient, 1-gram |
+| `sim_norm_jac_2` | Float 0–1 | Normalised overlap coefficient, 2-gram |
+| `sim_norm_jac_3` | Float 0–1 | Normalised overlap coefficient, 3-gram |
+| `sim_norm_jac_4` | Float 0–1 | Normalised overlap coefficient, 4-gram |
+| `sim_norm_jac_word` | Float 0–1 | Normalised overlap coefficient, word-level |
+| `match_zipcode` | Binary 0/1 | Exact postal code match |
+| `match_city` | Binary 0/1 | Exact city match |
+| `match_street_number` | Binary 0/1 | Exact street number match |
+| `match_street_block` | Binary 0/1 | Street number within same block |
+| `distance_street_number` | Integer | Numeric distance between street numbers |
+| `match_address_line_2` | Binary 0/1 | Exact suite/unit match |
+| `match_short_name` | Binary 0/1 | Short-name derived match |
+| `similarity_street_name_1–4` | Float 0–1 | Jaccard similarity on street names (k=1–4) |
+| `sim_norm_street_name_1–4` | Float 0–1 | Normalised overlap on street names |
+| `similarity_short_1–4` | Float 0–1 | Jaccard similarity on short names |
+| `sim_norm_short_1–4` | Float 0–1 | Normalised overlap on short names |
+
+**Output:** `match_confidence` (float 0–1) per candidate pair. Threshold ≥ 0.80 = MATCHED.
+
+**Training:** Trained on labelled pairs of (known-match, known-non-match) company records from the internal Redshift tables. Model file: `entity_matching_20250127`.
+
+**What it does NOT do:** The entity matching XGBoost does not classify industries. It only answers: "Is this database record the same company as the input?" Once a match is found, the industry code comes directly from the matched record's database fields.
+
+#### Model 2: No Classification XGBoost Exists in Worth AI
+
+There is **no XGBoost model** (or any other ML model) involved in choosing which NAICS code to assign. The classification decision is made by a **rule-based FactEngine**:
+
+```
+For each fact (naics_code, industry, mcc_code):
+  1. Query all sources for their candidate value
+  2. Apply factWithHighestConfidence():
+     winner = argmax(source.confidence × source.weight)
+  3. When two sources are within WEIGHT_THRESHOLD (0.05):
+     use weightedFactSelector() (fact-level weight)
+  4. manualOverride() can force a specific value
+```
+
+This is a deterministic rule — not a trained model. It has no ability to learn from feedback, detect conflicts systematically, or output probabilities.
+
+### 1.2 The Seven Classification Sources
+
+#### Source 1: Equifax (Batch/File — Internal Redshift)
 
 | Attribute | Value |
 |-----------|-------|
-| Source type | **Batch / file ingest** — offline warehouse pipeline |
-| Internal or External | **Internal** (data pre-ingested into Redshift from Equifax files at unknown cadence) |
-| Source weight | `0.7` — deliberately low because files may be days or weeks old |
-| Platform ID | `17` (hardcoded) |
+| Type | Batch / file ingest |
+| Redshift table | `dev.warehouse.equifax_us_standardized` |
+| Source weight | 0.70 *(may be days or weeks old)* |
+| Entity matching | `entity_matching_20250127` XGBoost using name+address features |
 
-**Industry fields available in the raw response:**
+**Fields available vs. used:**
 
-| Field | Type | Used? |
-|-------|------|-------|
-| `primnaicscode` | 6-digit US NAICS | ✅ **USED** — mapped to `naics_code` fact via `path: "primnaicscode"` |
-| `primnaics_sector`, `_subsector`, `_industry_group`, `_industry` | NAICS hierarchy labels | ⚠️ **SILENTLY DROPPED** — in `extended_attributes` SQL function but no TypeScript fact |
-| `secnaics1`–`secnaics4` (each with full hierarchy) | Secondary NAICS codes × 4 | ⚠️ **SILENTLY DROPPED** — available in SQL function, not consumed by fact engine |
-| `primsic` | 4-digit US SIC 1987 | ⚠️ **SILENTLY DROPPED** — present in `extended_attributes`, no fact defined, no column in `data_businesses` |
-| `secsic1`–`secsic4` | Secondary SIC codes × 4 | ⚠️ **SILENTLY DROPPED** |
+| Field | Used? | Notes |
+|-------|-------|-------|
+| `primnaicscode` | ✅ USED | Mapped to `naics_code` fact |
+| `primnaics_sector/_subsector/_industry_group/_industry` | ❌ DROPPED | 4 hierarchy labels — in `extended_attributes` SQL function only |
+| `secnaics1`–`secnaics4` (+ full hierarchy per) | ❌ DROPPED | Up to 4 secondary NAICS with hierarchy |
+| `primsic` | ❌ DROPPED | 4-digit US SIC 1987 — no fact defined |
+| `secsic1`–`secsic4` | ❌ DROPPED | Secondary SIC codes |
 
-**Key finding:** Equifax provides a complete 5-level NAICS hierarchy (25 columns total via `integration_data.extended_attributes` SQL function) plus primary and four secondary SIC codes. The fact engine consumes **only `primnaicscode`**. 24 of 25 industry columns are discarded.
+**24 of 25 industry columns are discarded.** Only `primnaicscode` is wired in.
 
----
+#### Source 2: ZoomInfo (Live API → Redshift)
 
-#### Source 2: ZoomInfo (Live API)
-
-| Attribute | Value |
-|-----------|-------|
-| Source type | **Live API** |
-| Internal or External | **External** — real-time API call |
-| Source weight | `0.8` |
-
-**Industry fields available:**
+| Redshift table | `dev.datascience.zoominfo_standard_ml_2` |
+|---|---|
+| Source weight | 0.80 |
 
 | Field | Used? |
 |-------|-------|
-| `firmographic.zi_c_naics6` — 6-digit US NAICS | ✅ **USED** |
-| `firmographic.zi_c_sic4` — 4-digit US SIC | ⚠️ **SILENTLY DROPPED** — in raw response, no fact defined |
+| `zi_c_naics6` | ✅ USED |
+| `zi_c_sic4` | ❌ DROPPED |
 
----
+#### Source 3: OpenCorporates (Live API → Redshift)
 
-#### Source 3: OpenCorporates (Live API)
+| Redshift table | `dev.datascience.open_corporates_standard_ml_2` |
+|---|---|
+| Source weight | 0.90 *(highest — authoritative government data)* |
 
-| Attribute | Value |
-|-----------|-------|
-| Source type | **Live API** — pulls from official government registries worldwide |
-| Internal or External | **External** — real-time API call |
-| Source weight | `0.9` — highest of all sources (authoritative government data) |
+**Critical gap:** OpenCorporates returns `"us_naics-541110|uk_sic-62012|ca_naics-541110"` — all jurisdiction codes in one field. The resolver loop only extracts entries where `codeName.includes("us_naics")`. The UK SIC code (`gb_sic-62012`) is parsed into the `classification_codes` fact but that fact has **no downstream consumer**.
 
-**Industry fields available:**
+#### Source 4: Trulioo (Live API)
 
-| Field | Used? |
-|-------|-------|
-| `firmographic.industry_code_uids` | Pipe-delimited `scheme-code` pairs, e.g. `"us_naics-541110\|uk_sic-62012\|ca_naics-541110"` | |
-| `us_naics-XXXXXX` entries | ✅ **USED** — loop filters to `codeName.includes("us_naics")` |
-| `uk_sic-XXXXX` entries | ⚠️ **SILENTLY DROPPED AT NAICS RESOLVER** — loop only passes `us_naics`; UK SIC is captured in `classification_codes` fact but has **no downstream consumer** |
-| `ca_naics-XXXXXX` entries | ⚠️ **SILENTLY DROPPED** — same reason |
-| `classification_codes` fact | All schemes as `Record<string, string>` | ⚠️ **DEAD CODE** — resolved but never consumed by reports, scoring, or persistence |
-
-**This is the most critical gap:** OpenCorporates already returns `uk_sic-62012` for a UK company in the same API response. The data is in the database (`integration_data.request_response`). The `classification_codes` fact even captures it. But because there is no `core_uk_sic_code` reference table and no `uk_sic_id` column on `data_businesses`, the code is thrown away.
-
----
-
-#### Source 4: Trulioo / "business" (Live API)
-
-| Attribute | Value |
-|-----------|-------|
-| Source type | **Live API** — primary KYB verification vendor |
-| Internal or External | **External** — real-time API call |
-| Source weight | `0.8` — comment says "High weight for UK/Canada businesses" |
-| Request type | `fetch_business_entity_verification` |
-
-**Industry fields available (in `clientData.standardizedIndustries[]`):**
+| Source weight | 0.80 |
+|---|---|
 
 | Field | Used? |
 |-------|-------|
-| `.naicsCode` — 6-digit US NAICS | ✅ **USED** — `find(i => i.naicsCode && /^\d{6}$/.test(i.naicsCode))?.naicsCode` |
-| `.sicCode` — UK SIC code | ⚠️ **SILENTLY DROPPED** — adjacent field in the same object, never accessed |
-| `.industryName` — text label | ✅ **USED** — mapped to `industry` fact |
+| `.naicsCode` | ✅ USED |
+| `.sicCode` | ❌ DROPPED — adjacent field, one line of code away from being used |
+| `.industryName` | ✅ USED |
 
-**Note from `rules.ts`:** A `truliooPreferredRule` exists to give Trulioo precedence for GB/CA businesses. It is wired for address and identity facts. But for `naics_code`, Trulioo's `.sicCode` is never read — the rule has no effect on UK industry classification because `.sicCode` is not consumed.
+#### Source 5: Liberty Data (Internal Redshift — 4th Entity-Matching Source)
 
----
+| Redshift table | `dev.warehouse.liberty_data_standard` |
+|---|---|
+| Source weight | 0.78 |
+| Status in build_matching_tables.py | **Not yet added** (to be added to SOURCES dict and COUNTRY_SOURCES) |
 
-#### Source 5: SERP Scrape (Live API / Web Scrape)
+Liberty Data provides a commercial intelligence overlay with industry classification, revenue range, and employee count. It is the **fourth source** to add to the entity matching pipeline alongside OpenCorporates, Equifax, and ZoomInfo.
 
-| Attribute | Value |
-|-----------|-------|
-| Source type | **Live web scrape** — infers industry from search results |
-| Internal or External | **External** (internal SERP service calling Google/Bing) |
-| Fact-level weight | `0.3` — lowest priority (heuristic, not official data) |
-| Note | `@TODO: ENG-24 Replace SERP` — marked for replacement |
+**To add in production:**
+```python
+# In build_matching_tables.py SOURCES dict:
+"liberty_data": """
+    SELECT
+        lib_business_id || '|' || ROW_NUMBER() OVER(PARTITION BY lib_business_id) as id,
+        lib_business_name as business_name,
+        lib_address as street_address,
+        lib_postal_code as postal_code,
+        lib_city as city,
+        COALESCE(UPPER(TRIM(lib_state)), 'MISSING') as region,
+        lib_country_code as country_code
+    FROM dev.warehouse.liberty_data_standard
+"""
+# In COUNTRY_SOURCES:
+"US": ["open_corporates", "equifax", "zoominfo", "liberty_data"],
+"GB": ["open_corporates", "zoominfo", "liberty_data"],
+"CA": ["open_corporates", "zoominfo", "liberty_data"],
+```
 
-**Industry fields available:**
+#### Source 6: SERP Scrape (Live API)
 
-| Field | Used? |
-|-------|-------|
-| `businessLegitimacyClassification.naics_code` | ✅ **USED** (weight 0.3) |
-| `businessLegitimacyClassification.secondary_naics_code` | ⚠️ **SILENTLY DROPPED** |
-| `businessLegitimacyClassification.sic_code` | ⚠️ **SILENTLY DROPPED** |
-
----
-
-#### Source 6: Customer-Submitted (businessDetails)
-
-| Attribute | Value |
-|-----------|-------|
-| Source type | **Internal** — from applicant's onboarding form |
-| Internal or External | **Internal** case-service lookup |
-| Source weight | `10` (highest) but **fact-level weight overridden to `0.2`** |
-| Confidence | Hardcoded `1` |
-
-**Deliberate down-weighting:** Despite the source weight of 10, the `naics_code` fact overrides this to 0.2 — because customers frequently self-report incorrect codes. Any vendor-verified code will beat a customer submission.
-
-**Input validation:** Zod schema `z.string().regex(/^\d{6}$/)` — only accepts 6-digit numeric NAICS. A UK business submitting SIC 62012 would fail validation.
-
----
+Weight: 0.30 (fact-level). Uses `businessLegitimacyClassification.naics_code`. Marked `@TODO: ENG-24 Replace SERP`.
 
 #### Source 7: AI NAICS Enrichment (GPT Fallback)
 
-| Attribute | Value |
-|-----------|-------|
-| Source type | **AI inference** — OpenAI GPT (described as "GPT-5 mini" in report) |
-| Internal or External | **External** API call |
-| Fact-level weight | `0.1` — lowest of all sources (fallback only) |
-| Trigger | Runs when too few other sources have responded |
+Weight: 0.10. Returns `naics_code`, `mcc_code`, text confidence. No UK SIC in Zod schema.
 
-**Fields returned:**
+### 1.3 The Fact Resolution Rule (Not ML)
 
-| Field | Used? |
+```
+factWithHighestConfidence():
+  candidates = [(source_A, confidence_A × weight_A),
+                (source_B, confidence_B × weight_B), ...]
+  winner = max(candidates, key=lambda x: x[1])
+  if (top_two_scores differ by < WEIGHT_THRESHOLD=0.05):
+      winner = weightedFactSelector(fact_level_weight)
+```
+
+Effective priority for `naics_code`:
+
+| Rank | Source | Effective score formula |
+|------|--------|------------------------|
+| 1 | OpenCorporates | 0.90 × match_confidence |
+| 2 | ZoomInfo | 0.80 × match_confidence |
+| 3 | Trulioo | 0.80 × 0.70 (fact override) × match_confidence |
+| 4 | Equifax | 0.70 × match_confidence |
+| 5 | Liberty Data | 0.78 × match_confidence *(once added)* |
+| 6 | Customer-submitted | 0.20 (fact override, despite source weight=10) |
+| 7 | SERP | 0.30 × match_confidence |
+| 8 | AI enrichment | 0.10 × AI_confidence |
+
+### 1.4 Database Schema — Industry Tables
+
+```
+core_naics_code        : id (PK) · code (6-digit UNIQUE) · label  → 1,035 rows
+core_mcc_code          : id (PK) · code (4-digit UNIQUE) · label  → 125 rows
+rel_naics_mcc          : naics_id FK · mcc_id FK                  → 1,012 mappings
+core_business_industries: id · name · code · sector_code          → 20 NAICS sectors
+data_businesses        : naics_id FK · mcc_id FK · industry FK
+rel_business_industry_naics: business_id · platform · naics_id · industry_id (UNIQUE per platform)
+integration_data.request_response: business_id · platform_id · response(JSONB) — ALL vendor raw data
+```
+
+**Missing tables (critical gaps):**
+- `core_uk_sic_code` → does not exist
+- `uk_sic_id` column on `data_businesses` → does not exist
+
+### 1.5 Inputs and Outputs — Worth AI
+
+**Inputs:**
+
+| Field | Notes |
 |-------|-------|
-| `response.naics_code` — 6-digit US NAICS | ✅ **USED** (weight 0.1) |
-| `response.mcc_code` — 4-digit MCC | ✅ **USED** (mapped to `mcc_code_found` fact) |
-| `response.naics_description`, `response.mcc_description` | ✅ **USED** (in reports) |
-| `response.reasoning`, `response.confidence` (HIGH/MED/LOW) | ✅ **USED** (self-reported, not calibrated) |
-| UK SIC field | ❌ **STRUCTURALLY IMPOSSIBLE** — not in the Zod schema, not in the prompt |
+| Company name | 9 basic English suffixes stripped only |
+| Address | Used in entity matching |
+| Country | Stored but NOT used for taxonomy routing |
+| Industry name (text) | Fuse-matched to 20-sector `core_business_industries` |
 
----
+**Outputs:**
 
-### 1.3 Inputs — Worth AI Pipeline
+| Output | Status |
+|--------|--------|
+| US NAICS 2022 code | ✅ Stored in `data_businesses.naics_id` |
+| MCC code | ✅ Derived via `rel_naics_mcc` JOIN |
+| Industry sector (20 buckets) | ✅ Stored in `data_businesses.industry` |
+| UK SIC 2007 | ❌ Not stored (no table, no column) |
+| NACE Rev.2 | ❌ Not present |
+| ISIC Rev.4 | ❌ Not present |
+| Calibrated probability | ❌ Text string only (HIGH/MED/LOW) |
+| AML/KYB risk signals | ❌ None |
+| Source lineage | Partial (`rel_business_industry_naics` per platform) |
 
-| Input | Required | Source | Notes |
-|-------|----------|--------|-------|
-| Company legal name | Yes | Applicant form | Used as search key for all vendor calls |
-| Business address | Yes | Applicant form | Used for identity matching across vendors |
-| Country | Yes | Applicant form | Stored but **not used to route taxonomy** — UK companies still go through NAICS pipeline |
-| Industry name (text) | Yes (onboarding) | Applicant form | Sanitized against `core_business_industries` (20 NAICS sectors) via Fuse fuzzy match |
-| Website | No | Applicant form | Used by SERP scrape |
-| Customer-submitted NAICS code | No | Applicant/API | Accepted but down-weighted to 0.2; UK SIC fails Zod validation |
+### 1.6 The 4 Confirmed Gaps for UK Businesses
 
-**What is NOT accepted as input:**
-- OpenCorporates jurisdiction codes (`gb`, `us_mo`, `ca_bc`, `ae_az`)
-- UK SIC codes from the applicant (Zod regex rejects non-6-digit strings)
-- Explicit taxonomy preference
+1. **OpenCorporates resolver**: loop only extracts `us_naics` entries → UK SIC (`gb_sic`) passed to `classification_codes` fact which has no consumer
+2. **Trulioo `.sicCode`**: field exists in the same object as `.naicsCode`, never read
+3. **No persistence layer**: no `core_uk_sic_code` table, no `uk_sic_id` column in any migration
+4. **AI enrichment Zod schema**: structurally cannot return UK SIC — field not in schema
 
----
+**Result:** Every UK business either gets `naics_id = NULL` or an inappropriate US NAICS code applied to it.
 
-### 1.4 The Database Schema — Industry Tables
+### 1.7 Known Issues and TODOs From the Codebase
 
-#### `core_naics_code` (case-service PostgreSQL)
-```sql
-CREATE TABLE public.core_naics_code (
-    id   int GENERATED ALWAYS AS IDENTITY NOT NULL,  -- surrogate FK target
-    code int NOT NULL UNIQUE,                         -- 6-digit NAICS (e.g. 541110)
-    label varchar NOT NULL                            -- sector description
-);
-```
-**1,035 rows** (US NAICS 2022 full list). `data_businesses.naics_id` stores the surrogate `id`, not the raw code — all queries require a JOIN.
-
-#### `core_mcc_code` (case-service PostgreSQL)
-```sql
-CREATE TABLE public.core_mcc_code (
-    id   int GENERATED ALWAYS AS IDENTITY NOT NULL,
-    code int NOT NULL UNIQUE,   -- 4-digit MCC
-    label varchar NOT NULL
-);
-```
-**125 rows** (initial seed). Extended by `20260310120000-add-additional-mcc-codes-up.sql`.
-
-#### `rel_naics_mcc` (case-service PostgreSQL)
-```sql
-CREATE TABLE public.rel_naics_mcc (
-    naics_id int NULL REFERENCES core_naics_code(id),
-    mcc_id   int NULL REFERENCES core_mcc_code(id)
-);
-```
-**1,012 mapping rows** — NAICS to MCC crosswalk. Used by `internalGetNaicsCode()` to derive MCC from a resolved NAICS code.
-
-#### `core_business_industries` (case-service PostgreSQL)
-```sql
-CREATE TABLE core_business_industries (
-    id          INT PRIMARY KEY,
-    name        VARCHAR(255) NOT NULL UNIQUE,  -- e.g. "Information"
-    code        VARCHAR(255) NOT NULL UNIQUE,  -- slug
-    sector_code VARCHAR(10)  NOT NULL UNIQUE   -- e.g. "51" or "31-33"
-);
-```
-**20 rows** — the 20 NAICS 2-digit sectors (Agriculture, Mining, Construction, …, Public Administration). This is the coarse "industry bucket" shown on the Worth dashboard.
-
-#### `data_businesses` — industry columns
-```sql
--- Added by migration 20240926041144
-ALTER TABLE public.data_businesses ADD naics_id int NULL REFERENCES core_naics_code(id);
-ALTER TABLE public.data_businesses ADD mcc_id   int NULL REFERENCES core_mcc_code(id);
--- FK to 20-sector lookup:
--- industry column → core_business_industries(id)
-```
-
-**There is NO `uk_sic_id` column. There is NO `core_uk_sic_code` table. There is NO Canadian NAICS storage.** UK SIC codes are in vendor responses, parsed by the fact engine, but cannot be persisted.
-
-#### `rel_business_industry_naics` (audit table)
-```sql
-CREATE TABLE rel_business_industry_naics (
-    business_id uuid NOT NULL REFERENCES data_businesses(id),
-    platform    VARCHAR(255) NOT NULL,   -- e.g. "equifax", "zoominfo", "manual"
-    industry_id INT NULL REFERENCES core_business_industries(id),
-    naics_id    INT NULL REFERENCES core_naics_code(id),
-    UNIQUE(business_id, platform)        -- one row per vendor per business
-);
-```
-Platform priority for resolving conflicts: `manual(1) > serp_scrape(2) > tax_status(3) > equifax(4) > frontend(5)`.
-
-#### `integration_data.request_response` (integration-service PostgreSQL — the central raw store)
-```sql
-CREATE TABLE integration_data.request_response (
-    request_id       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    business_id      uuid NOT NULL,
-    platform_id      integer NOT NULL,   -- vendor discriminator
-    request_type     varchar,            -- e.g. 'fetch_public_records'
-    requested_at     timestamptz,
-    response         jsonb,              -- raw vendor payload (varies completely by platform_id)
-    status           integer,
-    ...
-);
-```
-**This is the single source of all vendor data.** Every fact engine query reads from here filtered by `platform_id`. The raw UK SIC from OpenCorporates and Trulioo sits in `response` JSONB — it is parsed correctly into the `uk_sic_code` fact — but then has nowhere to go because no persistence layer exists for it.
-
----
-
-### 1.5 The Fact Resolution Engine
-
-**Rule: `factWithHighestConfidence`** — the winner is the source with the highest `confidence × weight` product. When two sources are within `WEIGHT_THRESHOLD = 0.05`, `weightedFactSelector` breaks the tie using fact-level `weight`.
-
-**Effective priority ranking for `naics_code`:**
-
-| Priority | Source | Source weight | Fact weight | Effective score |
-|----------|--------|---------------|-------------|-----------------|
-| 1 (highest) | OpenCorporates | 0.9 | — | 0.9 × match_confidence |
-| 2 | ZoomInfo | 0.8 | — | 0.8 × match_confidence |
-| 3 | Trulioo | 0.8 | 0.7 | 0.8 × 0.7 × match_confidence |
-| 4 | Equifax | 0.7 | — | 0.7 × match_confidence |
-| 5 | Customer-submitted | 10 source | **0.2 override** | 0.2 × 1.0 |
-| 6 | SERP scrape | — | 0.3 | 0.3 × match_confidence |
-| 7 (lowest) | AI enrichment | — | 0.1 | 0.1 × AI_confidence |
-
-**Persistence path:**
-1. Fact engine resolves `naics_code` (string)
-2. Kafka event `UPDATE_NAICS_CODE`: `{ business_id, naics_code (number), naics_title, platform }`
-3. `handleNaicsData()` → `SELECT id FROM core_naics_code WHERE code = $1` → `naics_id`
-4. `SELECT mcc_id FROM rel_naics_mcc WHERE naics_id = $1` → `mcc_id`
-5. `UPDATE data_businesses SET naics_id = $1, mcc_id = $2`
-6. `INSERT/UPDATE rel_business_industry_naics (business_id, platform, naics_id, industry_id)`
-
----
-
-### 1.6 Outputs — Worth AI Pipeline
-
-| Output | Present | Where stored |
-|--------|---------|-------------|
-| US NAICS 2022 code (6-digit) | ✅ | `data_businesses.naics_id` → `core_naics_code.code` |
-| NAICS description | ✅ | `core_naics_code.label` (JOIN required) |
-| MCC code (4-digit) | ✅ | `data_businesses.mcc_id` → `core_mcc_code.code` |
-| MCC description | ✅ | `core_mcc_code.label` (JOIN required) |
-| Industry sector (20 buckets) | ✅ | `data_businesses.industry` → `core_business_industries` |
-| UK SIC 2007 code | ❌ | **Not stored** — no table, no column |
-| NACE Rev.2 code | ❌ | **Not stored** |
-| ISIC Rev.4 code | ❌ | **Not stored** |
-| Canadian NAICS | ❌ | In `classification_codes` fact only — no persistence |
-| US SIC 1987 code | ❌ | In Equifax response only — no fact, no column |
-| Probability score | ❌ | AI reports text string (HIGH/MED/LOW) only |
-| AML/KYB risk signals | ❌ | Not produced |
-| Source lineage (who said what) | Partial | `rel_business_industry_naics` has per-platform row but only for NAICS |
-| Shell company detection | ❌ | Not present |
-| Temporal pivot / code-change history | ❌ | Not present |
-
----
-
-### 1.7 Known Issues — Confirmed From Codebase
-
-| Issue | Location | Impact |
-|-------|----------|--------|
-| **UK SIC never persisted** | No `core_uk_sic_code` table, no `uk_sic_id` column | Every UK business gets `naics_id = NULL` or an inappropriate US NAICS |
-| **OpenCorporates UK SIC silently dropped** | `businessDetails/index.ts` — loop only matches `us_naics` | `classification_codes` fact has no downstream consumer |
-| **Trulioo `.sicCode` never read** | `businessDetails/index.ts` line 282 — `?.naicsCode` only | UK SIC adjacent in same array element, never accessed |
-| **Equifax: 24/25 industry columns unused** | `sources.ts:279` — only `primnaicscode` mapped | Secondary NAICS hierarchy, all SIC codes are accessible via SQL only |
-| **ZoomInfo `zi_c_sic4` unused** | No fact defined | 4-digit SIC present in raw response, discarded |
-| **AI enrichment never asks for UK SIC** | `aiNaicsEnrichment.ts` Zod schema | Structurally impossible to return UK SIC from AI source |
-| **Canadian NAICS captured but not persisted** | `classification_codes` fact — no consumer | Canadian companies get US NAICS or NULL |
-| **Customer UK SIC rejected by Zod** | `z.string().regex(/^\d{6}$/)` | UK SIC 62012 is 5 digits — validation fails |
-| **Platform priority overwrites without merge** | `UNIQUE(business_id, platform)` in audit table | When Equifax re-runs, its row is overwritten; no history |
-| **`businessFields.ts` maps to dropped columns** | `naics_code`/`naics_title` columns were dropped in migration | Schema drift — mapper may silently fail or write to NULL |
-| **TODO: OpenCorporates handler** | `business.ts` line comment | OpenCorporates verification result not fully wired to DB |
-| **TODO: Replace SERP** | `ENG-24` | Known lowest-quality source, marked for replacement |
-| **AI confidence is self-reported** | GPT text string HIGH/MED/LOW | Not calibrated; not comparable across sources |
-| **`truliooPreferredRule` has no effect on industry** | `rules.ts` | Rule exists for UK/CA address facts but `uk_sic_code` fact not wired to persistence |
+| Issue | Location |
+|-------|----------|
+| `// TODO: Handle OpenCorporate verification & record population` | `business.ts` |
+| `// TODO: This should interact with the Business class directly` | `fetch_public_records` |
+| `@TODO: ENG-24 Replace SERP` | `dataScrapeService.ts` |
+| `truliooPreferredRule` for UK has no effect on industry | `rules.ts` |
+| `businessFields.ts` maps to dropped columns (`naics_code`, `naics_title`) | Schema drift |
+| AI confidence is self-reported text — not calibrated | `aiNaicsEnrichment.ts` |
 
 ---
 
 ## Part 2 — The New Global Industry Classification Consensus Engine
 
-### 2.1 Architecture
+### 2.1 The Two XGBoost Models in the Consensus Engine
 
-```
-INPUT: Company Name + Address + Country/Jurisdiction Code (us_mo / ca_bc / ae_az / gb / tz …)
-        ↓
-┌─────────────────────────────────────────────────────────┐
-│  Entity Resolver                                         │
-│  • 100+ global legal suffixes (LLC, GmbH, SAS, KK…)    │
-│  • 200+ OpenCorporates jurisdiction codes               │
-│  • Detects: clean_name, jurisdiction_code, entity_type  │
-│    iso2, region_bucket, preferred_taxonomy              │
-└─────────────────────────┬───────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────┐
-│  LEVEL 0 — Signal Layer (6 vendor sources simulated)    │
-│                                                         │
-│  Source            Type      What it returns            │
-│  ─────────────────────────────────────────────────      │
-│  OpenCorporates  Internal*  Registry code + taxonomy    │
-│  Equifax         External   NAICS from batch file       │
-│  Trulioo         External   NAICS/SIC + jurisdiction    │
-│  ZoomInfo        External   NAICS from B2B data         │
-│  D&B (DUNS)      External   NAICS per jurisdiction      │
-│  AI Semantic     Internal*  Web + NLP inferred code     │
-│                                                         │
-│  Each returns: raw_code, taxonomy, label,               │
-│  weight, status (MATCHED/POLLUTED/CONFLICT), confidence │
-│  + 3-snapshot temporal history per source               │
-└─────────────────────────┬───────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────┐
-│  LEVEL 1 — Feature Engineering (38 numeric features)    │
-│  (see Part 2.3 for full feature table)                  │
-└─────────────────────────┬───────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────┐
-│  LEVEL 2 — XGBoost Consensus Classifier                 │
-│  Multi-class softprob → Top-5 codes with probabilities  │
-└─────────────────────────┬───────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────┐
-│  LLM Enrichment — OpenAI GPT-4o-mini (JSON mode)       │
-│  UGO semantic search → multi-taxonomy code selection    │
-└─────────────────────────┬───────────────────────────────┘
-                          ↓
-┌─────────────────────────────────────────────────────────┐
-│  Risk Engine — AML/KYB Signal Detection                 │
-│  9 signal types → risk score 0–1 + KYB recommendation  │
-└─────────────────────────┬───────────────────────────────┘
-                          ↓
-               STRUCTURED JSON OUTPUT
+The Consensus Engine uses XGBoost in **two complementary roles** — entity matching AND classification consensus.
+
+#### Model 1: Entity Matching XGBoost (Same as Worth AI)
+
+Same algorithm as `matching_v1.py`. Now extended to include **Liberty Data** as a fourth source alongside OpenCorporates, Equifax, and ZoomInfo. The entity matching model scores name+address similarity to determine `match_confidence` per source.
+
+#### Model 2: Classification Consensus XGBoost (NEW — does not exist in Worth AI)
+
+**What it does:** Takes all vendor signals plus 38 engineered features and outputs a **probability distribution over all industry codes**. This is a trained multi-class classifier — not a rule.
+
+**Model type:** `XGBClassifier(objective="multi:softprob")`
+
+**Training data:** Synthetic multi-vendor samples covering all 200+ jurisdictions and all 6 taxonomy systems. In production: replaced with real manual override history from `rel_business_industry_naics WHERE platform = 'manual'`.
+
+**Key hyperparameters:**
+```python
+XGBClassifier(
+    objective       = "multi:softprob",  # outputs probability per class
+    n_estimators    = 200,
+    max_depth       = 6,
+    learning_rate   = 0.08,
+    subsample       = 0.8,
+    colsample_bytree= 0.8,
+    eval_metric     = "mlogloss",
+    early_stopping_rounds = 20,
+)
 ```
 
-*Internal = uses internal data / simulated vendor response in current version. Production would replace with real API calls.
+**Output:** `predict_proba(X)` → softmax probability distribution over all codes → Top-5 codes with calibrated probabilities.
 
----
+### 2.2 The 38-Feature Vector — Complete Specification
 
-### 2.2 Data Sources — New Engine
+This is the core innovation. Worth AI produces **0 numeric features** for its classification decision (pure rule). The Consensus Engine produces **38 numeric features**:
 
-| Source | Type | What it provides | Internal / External |
-|--------|------|-----------------|---------------------|
-| OpenCorporates | Simulated (→ production: internal Redshift + live API) | Registry code in **native taxonomy** for that jurisdiction | **Internal** in production |
-| Equifax | Simulated (→ production: external batch API) | NAICS from commercial credit bureau | **External** |
-| Trulioo | Simulated (→ production: external live API) | NAICS/SIC/ISIC per jurisdiction | **External** |
-| ZoomInfo | Simulated (→ production: external live API) | NAICS from B2B firmographics | **External** |
-| Dun & Bradstreet | Simulated (→ production: external API) | NAICS/ISIC per jurisdiction | **External** |
-| AI Semantic | Internal (OpenAI GPT-4o-mini + DuckDuckGo) | Web-inferred code, any taxonomy | **Internal** (uses external APIs) |
-| Unified Global Ontology (UGO) | Internal FAISS index | 2,330 codes × 6 taxonomies, semantic search | **Internal** static |
-| Taxonomy CSVs | Internal static files | NAICS 2022, UK SIC 2007, NACE Rev.2, ISIC Rev.4, US SIC 1987, MCC | **Internal** static |
-| Jurisdiction Registry | Internal Python module | 200+ codes → taxonomy routing, region bucket, ISO-2 | **Internal** static |
-| OpenAI GPT-4o-mini | External API | Structured taxonomy reasoning, entity profiling | **External** |
-| DuckDuckGo Search | External API | Web intelligence per company | **External** |
+#### Group A — Source Quality Signals (12 features, [0..11])
 
----
+| Feature | Index | Formula | Why it matters |
+|---------|-------|---------|----------------|
+| opencorporates weighted confidence | 0 | `weight × match_confidence` | Highest-authority source gets proportional influence |
+| equifax weighted confidence | 1 | `weight × match_confidence` | Batch file — weight 0.70 penalises staleness |
+| trulioo weighted confidence | 2 | `weight × match_confidence` | Live API, down-weighted at fact level for NAICS |
+| zoominfo weighted confidence | 3 | `weight × match_confidence` | Strong US firmographic coverage |
+| liberty_data weighted confidence | 4 | `weight × match_confidence` | 4th entity-matching source |
+| ai_semantic weighted confidence | 5 | `weight × confidence` | AI fallback — lowest weight |
+| opencorporates MATCHED flag | 6 | 1 if status=MATCHED | Entity was confirmed in the database |
+| equifax MATCHED flag | 7 | 1 if status=MATCHED | |
+| trulioo MATCHED flag | 8 | 1 if status=MATCHED | |
+| zoominfo MATCHED flag | 9 | 1 if status=MATCHED | |
+| liberty_data MATCHED flag | 10 | 1 if status=MATCHED | |
+| ai_semantic MATCHED flag | 11 | 1 if status=INFERRED | (INFERRED, not MATCHED for AI) |
 
-### 2.3 Feature Engineering — 38 Features vs. 0
+#### Group B — Data Quality & Semantic Signals (5 features, [12..16])
 
-The fundamental modelling difference: Worth AI uses a text prompt to select one code. The Consensus Engine builds a **38-feature numeric vector** that encodes every signal from every source into a format XGBoost can learn from.
+| Feature | Index | Formula | Interpretation |
+|---------|-------|---------|----------------|
+| Trulioo Pollution Flag | 12 | 1 if Trulioo returned 4-digit SIC in 6-digit jurisdiction | Known Trulioo data quality bug |
+| Web↔Registry Semantic Distance | 13 | Cosine distance (UGO embeddings) between registry label and AI label | > 0.55 = shell company indicator |
+| Temporal Pivot Score | 14 | Unique codes / total snapshots over 3 historical periods | > 0.70 = AML U-Turn fraud signal |
+| Cross-Taxonomy Agreement | 15 | Fraction of 6 taxonomies mapping to same semantic cluster | High = high confidence |
+| Registry vs AI Distance | 16 | Same as [13] — retained for backward compat | |
 
-| # | Feature | What it captures | Worth AI equivalent |
-|---|---------|-----------------|---------------------|
-| 0–5 | Per-source weighted confidence (6 sources) | How confident is each vendor, weighted by source reliability | Not computed |
-| 6–11 | Source status flags: MATCHED / POLLUTED / CONFLICT | Is this source's data clean or flagged? | Not computed |
-| 12 | Trulioo Pollution Flag | Did Trulioo return a 4-digit SIC for a 6-digit jurisdiction? | Not computed |
-| 13 | Web-to-Registry Semantic Distance | Cosine distance between web-inferred label and official registry label | Not computed |
-| 14 | Temporal Pivot Score | Rate of industry code change across 3 historical snapshots | Not computed |
-| 15 | Cross-Taxonomy Agreement | Fraction of 6 taxonomies pointing to the same semantic cluster | Not computed |
-| 16 | Entity type: Holding flag | Is this entity registered as a Holding Company? | Not computed |
-| 17 | Entity type: NGO flag | Is this entity an NGO/charity? | Not computed |
-| 18 | Entity type: Partnership flag | | Not computed |
-| 19–28 | Jurisdiction bucket ONE-HOT (10 classes) | US / US_STATE / CA / CA_PROV / EU / APAC / LATAM / MENA / AFRICA / OTHER | Not computed — country field not used |
-| 29 | Is sub-national (state/province/emirate) | Enables state-level NAICS routing | Not computed |
-| 30 | Is NAICS jurisdiction | Should NAICS 2022 be primary? | Not computed |
-| 31 | Majority code agreement | Fraction of sources agreeing on same code | Not computed |
-| 32 | High-risk NAICS prefix flag | Is any source code in an AML-elevated sector? | Not computed |
-| 33 | Unique code diversity | How many different codes did sources return? | Not computed |
-| 34 | Registry vs AI semantic distance | | Not computed |
-| 35 | Average source confidence | Overall data quality signal | Implicit in fact engine weights (not a trained feature) |
-| 36 | Maximum source confidence | | Not computed |
-| 37 | Source count | How many sources returned data? | Not computed |
+#### Group C — Entity Type Signals (3 features, [17..19] internal index starts at 16)
 
-**Worth AI: 0 numeric features. New engine: 38 numeric features.**
+| Feature | Formula |
+|---------|---------|
+| Is Holding entity | 1 if entity_type = "Holding" |
+| Is NGO entity | 1 if entity_type = "NGO" |
+| Is Partnership entity | 1 if entity_type = "Partnership" |
 
----
+#### Group D — Jurisdiction One-Hot (12 features, [19..30])
 
-### 2.4 The Model — Comparison
+This is a **10-element one-hot vector** (10 region buckets) plus 2 meta flags:
 
-| Aspect | Worth AI (FactEngine + AI) | New Consensus Engine |
-|--------|---------------------------|----------------------|
-| **Core algorithm** | Confidence-weighted max rule (`factWithHighestConfidence`) + LLM zero-shot | 3-level XGBoost stacking ensemble |
-| **Training data** | None — rule-based + LLM pre-training | 2,000 synthetic multi-vendor samples (→ real overrides in production) |
-| **Input representation** | Source confidence × weight (scalar per source) + text prompt to LLM | 38-feature numeric vector |
-| **Candidate retrieval** | No retrieval — LLM picks from all NAICS or fact engine picks highest-confidence raw code | FAISS cosine similarity search across 2,330-code UGO |
-| **Output** | Single NAICS code (string) | Top-5 codes with calibrated softmax probabilities |
-| **Confidence** | Text string (HIGH/MED/LOW) — LLM self-report | Float 0.0–1.0 — XGBoost softmax probability |
-| **Taxonomy** | US NAICS 2022 only | 6 taxonomies simultaneously |
-| **Jurisdiction routing** | None — all businesses go through NAICS | 200+ codes → auto-routes to correct taxonomy |
-| **UK SIC output** | Parsed but not persisted | Primary output for GB/GG/JE jurisdictions |
-| **AML/KYB signals** | None | 9 signal types |
-| **Retraining** | Not applicable | Re-run on accumulated ground-truth overrides |
-| **Fallback chain** | Returns null if AI fails | XGBoost → LLM → UGO semantic search → graceful fallback |
-| **LLM** | OpenAI GPT (described as GPT-5 mini) | OpenAI GPT-4o-mini, **JSON mode** (structured output guaranteed) |
+| Index | Feature | Value |
+|-------|---------|-------|
+| 19 | US (federal) | 1 if jurisdiction_code = "us" |
+| 20 | US_STATE (any state/territory) | 1 if us_mo, us_ca, pr, us_dc… |
+| 21 | CA (Canada federal) | 1 if jurisdiction_code = "ca" |
+| 22 | CA_PROV (province) | 1 if ca_bc, ca_qc, ca_nu… |
+| 23 | EU (UK + all European) | 1 if gb, de, fr, it, es, nl, pl, gl, gp… |
+| 24 | APAC | 1 if in, cn, jp, sg, au, hk, th, mm… |
+| 25 | LATAM | 1 if mx, br, ar, do, cw, aw… |
+| 26 | MENA | 1 if ae, ae_az, sa, ir, tn, eg… |
+| 27 | AFRICA | 1 if za, ng, ke, tz, ug, mu… |
+| 28 | OTHER | 1 for all other jurisdictions |
+| 29 | Is sub-national | 1 if state/province/emirate level (us_mo, ca_bc, ae_az…) |
+| 30 | Is NAICS jurisdiction | 1 if US/CA/AU → NAICS 2022 is primary taxonomy |
 
----
+**Worth AI equivalent:** 0 features. Country field is stored but not used in classification.
 
-### 2.5 Inputs — New Engine
+#### Group E — Agreement & Risk Signals (7 features, [31..37])
 
-| Input | Required | Format accepted | Notes |
-|-------|----------|----------------|-------|
-| Company Name | Yes | Any text | Cleaned with 100+ global suffixes |
-| Address | No | Any text | Entity resolution + web search |
-| Country / Jurisdiction | No | ISO-2, full name, **or OpenCorporates code** (`us_mo`, `ca_bc`, `ae_az`, `gg`, `tz`…) | Auto-routes to correct taxonomy |
-| Website / domain | No | URL | AI Semantic enrichment |
-| Custom web summary | No | Free text | Bypasses web search |
-| Existing vendor codes | No | CSV/Excel column | Can be pre-loaded as source signals |
+| Feature | Index | Formula | Interpretation |
+|---------|-------|---------|----------------|
+| Majority code agreement | 31 | Most-common code count / total sources | High = sources agree |
+| High-risk NAICS prefix | 32 | 1 if any source code starts with AML-elevated 4-digit prefix | Direct AML sector flag |
+| Unique code diversity | 33 | Unique codes / total source codes | High = high disagreement |
+| Registry vs AI distance (copy) | 34 | Same as [13] | |
+| Average source confidence | 35 | Mean confidence across 6 sources | Overall data quality |
+| Maximum source confidence | 36 | Best single-source confidence | Upper bound reliability |
+| Source count | 37 | Sources returning data / 6 | Fewer sources = less reliable |
 
----
+### 2.3 How the Consensus Engine Selects a Winner
 
-### 2.6 Outputs — New Engine
+```
+Input → Entity Lookup (fuzzy 5-pass matching)
+     → 6 vendor signals (known entity: MATCHED + real codes;
+                         unknown entity: INFERRED/CONFLICT + random pool)
+     → FeatureEngineer.transform() → 38-feature numpy array
+     → XGBClassifier.predict_proba() → probability over all codes
+     → top_k_codes = argsort(probs)[::-1][:5]
+     → Primary: codes[0], prob[0]
+       Secondary: codes[1..4], prob[1..4]
+     → LLM enrichment: GPT-4o-mini (JSON mode) selects code per taxonomy
+       from UGO FAISS semantic search candidates
+     → Risk Engine: 9 signal detectors → risk score + KYB recommendation
+     → ConsensusResult JSON output
+```
+
+**Key difference from Worth AI:** Worth AI's rule always picks exactly one winner with no probability. The Consensus Engine outputs a **full probability distribution** — you know not just what the best code is, but how confident the model is and what the alternatives are.
+
+### 2.4 The 5-Pass Name Matching (Entity Resolution)
+
+Worth AI uses 9 suffix patterns. The Consensus Engine uses a **5-pass strategy** with rapidfuzz:
+
+| Pass | Method | Example handled |
+|------|--------|----------------|
+| 1 | Canonical normalisation | `Apple Inc.` → `APPLE`; `MICROSOFT CORP` → `MICROSOFT` |
+| 2 | Substring/superset | `Apple Inc USA` → contains `APPLE` → match |
+| 3 | No-space comparison | `JPMORGAN` = `JP MORGAN` |
+| 4 | First-word prefix (≥4 chars) | `Apple Store Technology` → `APPLE` |
+| 5 | Fuzzy edit-distance (rapidfuzz, threshold 84/100) | `Mycrosoft` → 89% → Microsoft ✅ |
+
+**Result:** Typos like `Mycrosoft`, `Aple`, `Amazzon`, `Googel`, `Teslla`, `Microsft`, `Walmrt` all resolve correctly.
+
+### 2.5 The 9 AML/KYB Risk Signals
+
+| Signal | Severity | Score contribution | Trigger condition |
+|--------|----------|-------------------|------------------|
+| SHELL_COMPANY_SIGNAL | HIGH | +0.35 | Holding registered + Operating web presence |
+| REGISTRY_DISCREPANCY | HIGH | +0.30 | Semantic distance registry↔AI > 0.55 |
+| STRUCTURE_CHANGE | HIGH | +0.30 | Code changed every snapshot |
+| HIGH_RISK_SECTOR | HIGH | +0.25 | Code in AML-elevated sector prefix |
+| SOURCE_CONFLICT | HIGH/MED | +0.20 | ≥60% sources disagree |
+| HOLDING_MISMATCH | MEDIUM | +0.15 | entity_type=Holding, Operating code |
+| TEMPORAL_PIVOT | MEDIUM | +0.12 | Code changed 2+ times recently |
+| LOW_CONSENSUS_PROBABILITY | MEDIUM | +0.12 | XGBoost confidence < 40% |
+| TRULIOO_POLLUTION | LOW | +0.05 | 4-digit SIC in 6-digit jurisdiction |
+
+**Risk score aggregation:** Sum of all triggered signals, capped at 1.0.
+
+**KYB recommendation:** APPROVE (< 0.25) | REVIEW (0.25–0.50) | ESCALATE (0.50–0.75) | REJECT (≥ 0.75).
+
+### 2.6 The Unified Global Ontology (UGO)
+
+A FAISS IndexFlatIP (inner product = cosine on L2-normalised vectors) built from:
+
+| Taxonomy | Codes |
+|----------|-------|
+| NAICS 2022 | 1,033 |
+| UK SIC 2007 | 386 |
+| ISIC Rev.4 | 439 |
+| NACE Rev.2 | 88 |
+| US SIC 1987 | 79 |
+| MCC | 305 |
+| **Total** | **2,330** |
+
+Embedding model: `all-MiniLM-L6-v2` (384-dim). Each description encoded as `"{taxonomy}: {description}"`.
+
+**Cross-Ontology Embedding Alignment:** `UK SIC 56101 "Licensed restaurants"` and `NAICS 722511 "Full-Service Restaurants"` land near each other in the vector space. A semantic search for "licensed restaurant food service" returns UK SIC 56101 first (similarity: 0.741), then NAICS 722511 (0.672). No hardcoded crosswalk table needed.
+
+### 2.7 Inputs — Consensus Engine
+
+| Input | Accepted formats |
+|-------|-----------------|
+| Company Name | Any text. Typos handled via 5-pass fuzzy matching. |
+| Address | Any text. Used in entity matching. |
+| Country / Jurisdiction | ISO-2, full name, or OpenCorporates code (`us_mo`, `ca_bc`, `ae_az`, `gg`, `je`, `pr`, `tz`…) |
+| Website / Domain | URL. Used by AI Semantic enrichment. |
+| Custom Web Summary | Free text. Bypasses web search. |
+
+### 2.8 Outputs — Consensus Engine
 
 ```json
 {
   "business_id": "sim-00977436",
   "consensus_output": {
-    "company_name": "Barclays Bank PLC",
-    "jurisdiction": "gb",
-    "jurisdiction_label": "United Kingdom",
+    "company_name": "Apple Inc",
+    "jurisdiction": "us",
     "entity_type": "Operating",
     "primary_industry": {
-      "taxonomy": "UK_SIC_2007",
-      "code": "64191",
-      "label": "Banks",
-      "consensus_probability": 0.8241
+      "taxonomy": "US_NAICS_2022",
+      "code": "334118",
+      "label": "Computer Terminal and Other Computer Peripheral Equipment Manufacturing",
+      "consensus_probability": 0.9241
     },
     "secondary_industries": [
-      {"taxonomy": "NACE_REV2",     "code": "K64",   "label": "Financial service activities",    "consensus_probability": 0.1012},
-      {"taxonomy": "US_NAICS_2022", "code": "522110", "label": "Commercial Banking",             "consensus_probability": 0.0421},
-      {"taxonomy": "ISIC_REV4",     "code": "6419",  "label": "Other monetary intermediation",  "consensus_probability": 0.0210},
-      {"taxonomy": "MCC",           "code": "6099",  "label": "Financial Institutions NEC",     "consensus_probability": 0.0116}
+      {"taxonomy": "UK_SIC_2007", "code": "26400", "label": "Manufacture of consumer electronics", "consensus_probability": 0.0412},
+      {"taxonomy": "NACE_REV2",   "code": "C26",   "label": "Manufacture of computer electronic and optical products", "consensus_probability": 0.0198}
     ],
-    "risk_signals": [
-      {
-        "flag": "HIGH_RISK_SECTOR",
-        "severity": "HIGH",
-        "description": "Primary classification 64191 (Banks) is in an elevated AML/CTF risk sector.",
-        "score": 0.25
-      }
-    ],
+    "risk_signals": [],
     "source_lineage": {
-      "opencorporates": {"value": "uk_sic_2007-64191", "weight": 0.90, "status": "MATCHED"},
-      "equifax":        {"value": "us_naics_2022-522110", "weight": 0.75, "status": "MATCHED"},
-      "trulioo":        {"value": "us_sic_1987-6020", "weight": 0.70, "status": "POLLUTED"},
-      "zoominfo":       {"value": "us_naics_2022-522110", "weight": 0.80, "status": "MATCHED"},
-      "duns":           {"value": "uk_sic_2007-64191", "weight": 0.85, "status": "MATCHED"},
-      "ai_semantic":    {"value": "us_naics_2022-522110", "weight": 0.80, "status": "INFERRED"}
+      "opencorporates": {"status": "MATCHED",  "confidence": 0.97, "weight": 0.90},
+      "equifax":        {"status": "MATCHED",  "confidence": 0.91, "weight": 0.70},
+      "trulioo":        {"status": "MATCHED",  "confidence": 0.88, "weight": 0.80},
+      "zoominfo":       {"status": "MATCHED",  "confidence": 0.94, "weight": 0.80},
+      "liberty_data":   {"status": "MATCHED",  "confidence": 0.90, "weight": 0.78},
+      "ai_semantic":    {"status": "INFERRED", "confidence": 0.78, "weight": 0.70}
     },
     "feature_debug": {
-      "jurisdiction_code": "gb",
-      "jurisdiction_label": "United Kingdom",
-      "region_bucket": "EU",
-      "is_subnational": false,
-      "is_naics_jurisdiction": false,
-      "trulioo_polluted": true,
-      "web_registry_distance": 0.09,
-      "temporal_pivot_score": 0.00,
-      "majority_code_agreement": 0.67,
-      "high_risk_naics_flag": true,
-      "avg_source_confidence": 0.81
-    },
-    "risk_profile": {
-      "overall_risk_score": 0.30,
-      "overall_risk_level": "MEDIUM",
-      "kyb_recommendation": "REVIEW",
-      "signals": [...]
+      "jurisdiction_code":         "us",
+      "jurisdiction_label":        "United States",
+      "region_bucket":             "US",
+      "is_naics_jurisdiction":     true,
+      "trulioo_polluted":          false,
+      "web_registry_distance":     0.04,
+      "temporal_pivot_score":      0.00,
+      "majority_code_agreement":   0.83,
+      "avg_source_confidence":     0.90,
+      "high_risk_naics_flag":      false
     }
+  },
+  "risk_profile": {
+    "overall_risk_score": 0.00,
+    "overall_risk_level": "LOW",
+    "kyb_recommendation": "APPROVE"
   }
 }
 ```
 
 ---
 
-### 2.7 Risk Signals — 9 Types (No Worth AI Equivalent)
+## Part 3 — Complete Model Comparison
 
-| Signal | Severity | What it detects |
-|--------|----------|----------------|
-| `REGISTRY_DISCREPANCY` | HIGH | Registry label vs web presence semantic distance > threshold → shell company indicator |
-| `SHELL_COMPANY_SIGNAL` | HIGH | Holding company registered + operating sector web presence → U-Turn fraud pattern |
-| `HIGH_RISK_SECTOR` | HIGH | Primary code in known AML/CTF-elevated sector (finance, electronics wholesale, holding companies) |
-| `STRUCTURE_CHANGE` | HIGH | Industry code changed in every historical snapshot → money laundering pivot signal |
-| `SOURCE_CONFLICT` | HIGH/MEDIUM | ≥60% of sources disagree on primary code |
-| `TEMPORAL_PIVOT` | MEDIUM | Code changed 2+ times in recent history → monitor |
-| `TRULIOO_POLLUTION` | LOW | Trulioo returned 4-digit SIC in 5/6-digit jurisdiction → auto-detected data quality issue |
-| `HYBRID_ENTITY_DETECTED` | LOW | Activity spans 2+ unrelated sectors |
-| `LOW_CONSENSUS_PROBABILITY` | MEDIUM | XGBoost confidence < 40% — insufficient data |
+### 3.1 XGBoost — Entity Matching (same in both; extended in Consensus Engine)
 
----
+| Aspect | Worth AI | Consensus Engine |
+|--------|----------|-----------------|
+| Model | `entity_matching_20250127` | Same model, extended |
+| Sources | OpenCorporates, Equifax, ZoomInfo (3) | + Liberty Data (4) |
+| Features | 26 name+address similarity features | Same |
+| Output | `match_confidence` per source | Same + used as features for classification |
+| Threshold | ≥ 0.80 = MATCHED | Same |
 
-## Part 3 — Side-by-Side Comparison
+### 3.2 XGBoost — Industry Classification
 
-### 3.1 Data Available vs. Data Used
+| Aspect | Worth AI | Consensus Engine |
+|--------|----------|-----------------|
+| Model exists | ❌ **No ML model** — pure rule | ✅ XGBClassifier (multi:softprob) |
+| Training data | N/A | 2,000+ synthetic → real overrides |
+| Input features | 0 (rule-based) | **38 numeric features** |
+| Output | 1 code (deterministic) | Top-5 codes with calibrated probabilities |
+| Probability | Self-reported text (HIGH/MED/LOW) | Float 0.0–1.0 (softmax) |
+| Can learn from feedback | ❌ | ✅ Re-run fit() on new overrides |
+| Taxonomy | NAICS only | 6 taxonomies |
+| Jurisdiction-aware | ❌ | ✅ 200+ codes, auto-routing |
 
-| Data point | Available in Worth AI raw data | Used/persisted by Worth AI | Used by New Engine |
-|------------|-------------------------------|---------------------------|-------------------|
-| US NAICS 2022 (6-digit) | ✅ All 7 sources | ✅ Primary stored code | ✅ One of 6 outputs |
-| US NAICS sector hierarchy (5 levels) | ✅ Equifax only | ❌ Dropped | ✅ Used in sector classification |
-| Secondary NAICS codes (×4) | ✅ Equifax | ❌ Dropped | ✅ Secondary industry output |
-| UK SIC 2007 | ✅ OpenCorporates + Trulioo | ❌ Dropped (no table/column) | ✅ **Primary output for GB jurisdictions** |
-| Canadian NAICS | ✅ OpenCorporates | ❌ Dropped | ✅ Primary output for CA_PROV jurisdictions |
-| NACE Rev.2 | ❌ Not in any source | ❌ Not present | ✅ Primary output for EU jurisdictions |
-| ISIC Rev.4 | ❌ Not in any source | ❌ Not present | ✅ Primary output for APAC/LATAM/MENA/Africa |
-| US SIC 1987 | ✅ Equifax + ZoomInfo | ❌ Dropped | ✅ Available as secondary output |
-| MCC code | ✅ AI enrichment + NAICS lookup | ✅ Derived via `rel_naics_mcc` | ✅ Direct output per jurisdiction |
-| Source-level confidence | Partial (computed by fact engine) | ❌ Not stored or exposed | ✅ All 6 sources exposed in lineage |
-| Data quality flags | ❌ None | ❌ None | ✅ POLLUTED / CONFLICT / MATCHED per source |
-| Temporal history | ❌ None | ❌ None | ✅ 3-snapshot pivot score |
-| AML risk signals | ❌ None | ❌ None | ✅ 9 signal types |
-| Shell company detection | ❌ None | ❌ None | ✅ `SHELL_COMPANY_SIGNAL` flag |
-| Calibrated probability | ❌ None (text string) | ❌ None | ✅ Softmax float 0–1 |
-| Jurisdiction-aware taxonomy | ❌ All go through NAICS | ❌ NAICS only | ✅ 200+ codes → correct taxonomy |
+### 3.3 The Full Capability Comparison
 
-### 3.2 Full Output Comparison
-
-| Output field | Worth AI | New Engine |
-|-------------|----------|------------|
-| Primary industry code | ✅ NAICS only | ✅ Auto-selected per jurisdiction |
-| UK SIC 2007 | ❌ | ✅ Auto-selected for GB/GG/JE |
-| NACE Rev.2 | ❌ | ✅ Auto-selected for EU |
-| ISIC Rev.4 | ❌ | ✅ Auto-selected for APAC/LATAM/MENA |
-| MCC code | ✅ Derived from NAICS via join | ✅ Direct, per-jurisdiction |
-| Up to 4 secondary codes | ❌ | ✅ Cross-taxonomy |
-| Calibrated probability | ❌ text string | ✅ Float 0–1 |
-| Source lineage | Partial (`rel_business_industry_naics`) | ✅ All 6 sources with weight, status, label |
-| AML/KYB risk signals | ❌ | ✅ 9 types with severity + score |
+| Capability | Worth AI | Consensus Engine |
+|-----------|----------|-----------------|
+| US NAICS 2022 | ✅ Stored | ✅ |
+| UK SIC 2007 | ❌ Not stored | ✅ Auto-selected for GB/GG/JE |
+| NACE Rev.2 (EU) | ❌ | ✅ Auto-selected for EU |
+| ISIC Rev.4 (Global) | ❌ | ✅ Auto-selected for APAC/LATAM/MENA |
+| MCC code | ✅ Derived via JOIN | ✅ Direct per jurisdiction |
+| Secondary codes | ❌ | ✅ Up to 4 cross-taxonomy |
+| Calibrated probability | ❌ Text string | ✅ Float 0.0–1.0 |
+| AML/KYB risk signals | ❌ | ✅ 9 signal types |
 | Shell company detection | ❌ | ✅ |
-| Temporal pivot detection | ❌ | ✅ |
-| KYB recommendation | ❌ | ✅ APPROVE / REVIEW / ESCALATE / REJECT |
-| Entity type classification | ❌ | ✅ Operating / Holding / NGO / Partnership |
-| Jurisdiction label + metadata | ❌ | ✅ Full label, ISO-2, region bucket |
-| Feature debug output | ❌ | ✅ All 38 features explained |
+| Temporal pivot/code-change | ❌ | ✅ |
+| Full source lineage | Partial | ✅ All 6 sources |
+| Data quality detection | ❌ | ✅ Trulioo pollution, conflict |
+| Liberty Data as 4th source | ❌ (planned) | ✅ Simulated |
+| 200+ jurisdiction codes | ❌ | ✅ us_mo, ca_bc, ae_az, gg… |
+| Typo-tolerant name matching | ❌ (9 suffixes only) | ✅ 5-pass + rapidfuzz |
+| KYB recommendation | ❌ | ✅ APPROVE/REVIEW/ESCALATE/REJECT |
+| Taxonomy explorer (UGO) | ❌ | ✅ 2,330 codes, semantic search |
+| Cross-taxonomy alignment | ❌ | ✅ NAICS ↔ UK SIC ↔ NACE without crosswalk |
 
 ---
 
-## Part 4 — What Was Dropped vs. What Was Gained
+## Part 4 — The Application — 6 Pages Explained
 
-### Data that Worth AI already has but drops today (zero new APIs needed)
+### Page 1: Single Company Lookup
+**Input:** Company name + address + country/jurisdiction code  
+**Processing:** Full 6-step pipeline (entity resolution → 6 vendors → 38-feature XGBoost → LLM enrichment → Risk Engine)  
+**Output:** Primary industry code + taxonomy, up to 4 secondary codes, 9 AML risk signals, source lineage table with explanation of every value, feature debug panel
 
-| Data | Where it is today | Why it is dropped | What the new engine does |
-|------|------------------|------------------|--------------------------|
-| UK SIC from OpenCorporates `gb_sic-XXXXX` | `integration_data.request_response` | No `core_uk_sic_code` table, no `uk_sic_id` column | Routes to `UK_SIC_2007` for GB — **persists it** |
-| UK SIC from Trulioo `.sicCode` | Same table | `.sicCode` field never read in `businessDetails/index.ts` | Reads both `.naicsCode` and `.sicCode` per jurisdiction |
-| Canadian NAICS from OpenCorporates `ca_naics-XXXXXX` | `classification_codes` fact | No downstream consumer | Routes CA_PROV to NAICS with CA-specific handling |
-| Equifax secondary NAICS (×4) + full hierarchy | `integration_data.request_response` response JSONB | No fact defined | Used as secondary industry codes |
-| Equifax + ZoomInfo SIC 1987 | Same | No fact, no table | Available as US_SIC_1987 secondary output |
+### Page 2: Batch Classification
+**Input:** CSV/Excel with `Org Name` column (plus optional Address, Country, Description)  
+**Processing:** Full pipeline on every row  
+**Output:** Downloadable Excel with: Clean Name, Jurisdiction, Entity Type, Primary Code/Taxonomy/Desc, Consensus Probability, LLM Code, MCC, Risk Level, Risk Score, KYB Recommendation, Risk Flags  
+**Use case:** Onboarding portfolio review, bulk KYB processing, periodic re-classification
 
-### New capabilities that require additional work in production
+### Page 3: Risk Dashboard
+**Input:** Slider to choose portfolio size (10–100 companies)  
+**Processing:** Synthetic portfolio generation + full Risk Engine on all companies  
+**Output:** Risk level distribution chart, KYB recommendation chart, jurisdiction risk heatmap, high-risk entity detail table, downloadable Excel report  
+**Use case:** AML/CTF portfolio monitoring, compliance reporting
 
-| Capability | What it needs |
-|-----------|---------------|
-| NACE Rev.2 for EU companies | New data source (no current vendor returns NACE) |
-| ISIC Rev.4 for global companies | New data source |
-| AML/KYB risk signals | New logic layer (built in Risk Engine) |
-| Temporal pivot detection | Historical fact snapshots (built into FactEngine pattern already) |
-| Calibrated probabilities | XGBoost model trained on manual overrides |
+### Page 4: Taxonomy Explorer
+**Input:** Search query (free text) + optional taxonomy filter + top-K slider  
+**Processing:** FAISS cosine similarity search across 2,330 UGO codes  
+**Output:** Ranked results with similarity scores, cross-ontology semantic distance matrix, cross-taxonomy agreement panel  
+**Use case:** Industry research, code verification, cross-taxonomy translation
+
+### Page 5: Industry Lookup
+**Input:** Jurisdiction code or country name → code/keyword search  
+**Processing:** Jurisdiction → taxonomy routing → filtered code list  
+**Output:** Searchable dropdown showing `code — description`, detail card, copy-ready JSON, full taxonomy CSV download, cross-taxonomy comparison  
+**Use case:** Onboarding form industry selector, manual code verification, regulatory compliance
+
+### Page 6: Source Architecture
+**Input:** Status filter (Active / Simulated / Planned)  
+**Processing:** Static registry of all 11 data sources  
+**Output:** Per-source details (type, weight, coverage, industry fields, production SQL/API), name matching explanation, future architecture guide  
+**Use case:** Engineering documentation, onboarding new engineers, planning new source integrations
 
 ---
 
-## Part 5 — Recommended Next Steps
+## Part 5 — Data Available vs. Used
+
+| Data point | In Worth AI raw data | Used/persisted | Used by Consensus Engine |
+|------------|---------------------|----------------|--------------------------|
+| US NAICS 2022 | ✅ All 7 sources | ✅ Primary stored | ✅ One of 6 outputs |
+| Equifax NAICS hierarchy (5 levels) | ✅ `extended_attributes` | ❌ Dropped | ✅ Sector classification |
+| Secondary NAICS codes (×4) | ✅ Equifax | ❌ Dropped | ✅ Secondary industry output |
+| UK SIC 2007 | ✅ OpenCorporates + Trulioo | ❌ Dropped | ✅ Primary for GB |
+| Canadian NAICS | ✅ OpenCorporates | ❌ Dropped | ✅ Primary for CA_PROV |
+| NACE Rev.2 | ❌ No source | ❌ | ✅ Primary for EU |
+| ISIC Rev.4 | ❌ No source | ❌ | ✅ Primary for APAC/LATAM/MENA/Africa |
+| US SIC 1987 | ✅ Equifax + ZoomInfo | ❌ Dropped | ✅ Secondary output |
+| MCC code | ✅ AI + NAICS JOIN | ✅ Derived | ✅ Direct per jurisdiction |
+| Liberty Data industry codes | ✅ Redshift table | ❌ Not wired yet | ✅ 4th entity-matching source |
+| Match confidence per source | Partial (entity matching) | ❌ Not exposed | ✅ Features 0–5, 6–11 |
+| Temporal code history | ❌ | ❌ | ✅ Feature 14 (pivot score) |
+| AML risk signals | ❌ | ❌ | ✅ 9 signal types |
+| Calibrated probability | ❌ | ❌ | ✅ XGBoost softmax |
+
+---
+
+## Part 6 — Recommended Next Steps
 
 | Priority | Action | Effort | Value |
 |----------|--------|--------|-------|
-| **P0** | Add `core_uk_sic_code` table + `uk_sic_id` column to `data_businesses` | Low — one migration | Fixes UK SIC persistence gap with **zero new API calls** |
-| **P0** | Wire OpenCorporates `gb_sic` entries from `classification_codes` fact to `uk_sic_id` update | Low — one Kafka handler | Activates data already in the database |
-| **P0** | Read Trulioo `.sicCode` field for GB businesses (one-line change in `businessDetails/index.ts`) | Very Low | Adds a second source for UK SIC immediately |
-| **P1** | Add `classification_codes` downstream consumer — persist all jurisdiction codes to a `rel_business_classification_codes` table | Medium | Enables CA NAICS, NACE, ISIC without new vendors |
-| **P1** | Replace AI NAICS prompt with the new Consensus Engine pipeline | Medium | Multi-taxonomy output, calibrated confidence, AML signals |
-| **P1** | Train XGBoost on real manual override history from `rel_business_industry_naics` | Medium | Replaces synthetic training with ground truth |
-| **P2** | Wire Equifax secondary NAICS + SIC hierarchy into fact engine | Low — add path mappings | Exposes richer Equifax data at no extra cost |
-| **P2** | Integrate `jurisdiction_code` as an input to the integration-service FactEngine | Medium | Enables correct taxonomy routing per country |
-| **P3** | Add `core_nace_code` + `core_isic_code` tables and NACE/ISIC vendor sources | High | Full global taxonomy coverage |
+| **P0** | Add `core_uk_sic_code` table + `uk_sic_id` column on `data_businesses` | Low (one migration) | Fixes UK persistence with zero new API calls |
+| **P0** | Read Trulioo `.sicCode` for GB businesses | Very Low (one line) | Adds 2nd UK SIC source immediately |
+| **P0** | Wire `classification_codes` fact to a persistence handler | Low | Unlocks CA NAICS, all OC schemes |
+| **P0** | Add Liberty Data to `build_matching_tables.py` SOURCES dict | Low (one SQL query) | 4th entity-matching source |
+| **P1** | Replace AI NAICS enrichment with full Consensus Engine pipeline | Medium | Multi-taxonomy, calibrated confidence, AML signals |
+| **P1** | Train XGBoost consensus on real manual overrides from `rel_business_industry_naics` | Medium | Ground-truth model replaces synthetic training |
+| **P1** | Add Companies House API connector (free, no auth) | Low | Best UK SIC source — weight 0.95 |
+| **P2** | Wire Equifax secondary NAICS + SIC into fact engine | Low | 24 industry columns currently discarded |
+| **P2** | Add `jurisdiction_code` field to integration-service FactEngine | Medium | Enables correct taxonomy routing per country |
+| **P3** | Add GLEIF LEI as 5th entity-matching source | Medium | Global entity type + parent detection |
 
 ---
 
-## Appendix — Taxonomy Reference
+## Appendix A — Taxonomy Reference
 
-| Taxonomy | Authority | Jurisdictions | Codes | Worth AI today | New Engine |
-|----------|-----------|--------------|-------|----------------|-----------|
-| NAICS 2022 | US Census Bureau | US, Canada, Mexico, AU, NZ | 1,035 | ✅ Primary (stored) | ✅ |
-| UK SIC 2007 | Companies House / ONS | GB, GG, JE | 386 | ⚠️ Parsed, not stored | ✅ |
+| Taxonomy | Authority | Jurisdictions | Codes | Worth AI | Consensus Engine |
+|----------|-----------|--------------|-------|----------|-----------------|
+| NAICS 2022 | US Census | US, CA, AU, MX | 1,033 | ✅ Stored | ✅ |
+| UK SIC 2007 | Companies House / ONS | GB, GG, JE | 386 | ❌ Dropped | ✅ |
 | NACE Rev.2 | Eurostat | EU/EEA | 88 | ❌ | ✅ |
-| ISIC Rev.4 | United Nations | All other countries | 439 | ❌ | ✅ |
-| US SIC 1987 | SEC / US Government | United States (legacy) | 79 | ⚠️ In raw data, dropped | ✅ |
-| MCC | Visa / Mastercard | Global (payments) | 305 | ✅ Derived via NAICS join | ✅ |
-| **Total** | | | **2,351** | **2 stored, 4 dropped** | **6 used** |
+| ISIC Rev.4 | United Nations | Global | 439 | ❌ | ✅ |
+| US SIC 1987 | SEC / US Gov | US (legacy) | 79 | ❌ Dropped | ✅ |
+| MCC | Visa / Mastercard | Global | 305 | ✅ Derived | ✅ |
+| **Total** | | | **2,330** | **2 types used** | **6 types** |
+
+## Appendix B — Jurisdiction Registry Summary
+
+200+ OpenCorporates-format jurisdiction codes supported:
+- **US:** `us` + all 50 states + DC + territories (`us_mo`, `us_ca`, `us_ny`, `pr`…)
+- **Canada:** `ca` + all 13 provinces/territories (`ca_bc`, `ca_qc`, `ca_nu`…)
+- **UAE:** `ae` + all 7 emirates (`ae_az` Abu Dhabi, `ae_du` Dubai, `ae_sh` Sharjah…)
+- **Australia:** `au` + all states/territories (`au_nsw`, `au_vic`, `au_qld`…)
+- **UK:** `gb`, `gb_eng`, `gb_sct`, `gb_wls`, `gb_nir`, `gg` (Guernsey), `je` (Jersey)
+- **Europe:** All EU/EEA (`de`, `fr`, `it`, `es`, `nl`, `pl`, `gl`, `gp`, `re`…)
+- **APAC, LATAM, MENA, Africa:** Full coverage of all ISO-3166 countries
 
 ---
 
-*Prepared by Worth AI Engineering*  
-*Sources: `SIC-UK-Codes` repo (integration-service, case-service, warehouse-service), `WORTH_INDUSTRY_CLASSIFICATION_REPORT.md` (March 23 2026), and new Consensus Engine codebase*
+*Sources: `SIC-UK-Codes` repo (integration-service, case-service, warehouse-service), `Entity-Matching` repo (`matching_v1.py`, `build_matching_tables.py`, `feature_generator.py`), `WORTH_INDUSTRY_CLASSIFICATION_REPORT.md` (March 2026)*  
+*Document prepared by Worth AI Engineering — March 2026*

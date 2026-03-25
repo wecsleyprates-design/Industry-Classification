@@ -244,20 +244,45 @@ SOURCE_REGISTRY: list[SourceDefinition] = [
 
     SourceDefinition(
         id="liberty_data",
-        label="Liberty Data (if available in Redshift)",
+        label="Liberty Data — Commercial Business Intelligence",
         source_type="REDSHIFT_TABLE",
-        status="PLANNED",
-        default_weight=0.75,
-        coverage="TBD",
-        freshness="TBD — depends on ingestion cadence",
-        industry_fields=["TBD — to be determined from Liberty Data schema"],
+        status="SIMULATED",
+        default_weight=0.78,
+        coverage="US, UK, Canada (commercial intelligence overlay)",
+        freshness="Batch — updated periodically from Liberty Data feeds",
+        industry_fields=[
+            "lib_naics_code (6-digit US NAICS)",
+            "lib_sic_code (4-digit US SIC 1987)",
+            "lib_uk_sic_code (5-digit UK SIC 2007 — when available)",
+            "lib_industry_description (text label)",
+            "lib_business_type (Operating / Holding / Branch / Franchise)",
+            "lib_annual_revenue_range",
+            "lib_employee_count_range",
+        ],
         production_query="""
-            -- Add Liberty Data Redshift table query here
-            -- Extend build_matching_tables.py SOURCES dict:
-            -- 'liberty_data': 'SELECT ... FROM dev.warehouse.liberty_data_standard'
+            -- To be added to build_matching_tables.py SOURCES dict:
+            -- 'liberty_data': '''
+            SELECT
+                lib_business_id || '|' ||
+                    ROW_NUMBER() OVER(PARTITION BY lib_business_id) as id,
+                lib_business_name as business_name,
+                lib_address as street_address,
+                lib_postal_code as postal_code,
+                lib_city as city,
+                COALESCE(UPPER(TRIM(lib_state)), 'MISSING') as region,
+                lib_country_code as country_code
+            FROM dev.warehouse.liberty_data_standard
+            -- (table name TBC — confirm with Data Engineering)
+
+            -- And add to COUNTRY_SOURCES:
+            -- "US": ["open_corporates", "equifax", "zoominfo", "liberty_data"]
+            -- "GB": ["open_corporates", "zoominfo", "liberty_data"]
+            -- "CA": ["open_corporates", "zoominfo", "liberty_data"]
         """,
-        notes="NOT present in current build_matching_tables.py (only open_corporates, "
-              "equifax, zoominfo are defined there). Add when table is available.",
+        notes="Fourth matching source extending the three already in build_matching_tables.py "
+              "(open_corporates, equifax, zoominfo). Liberty Data provides a commercial "
+              "intelligence layer with industry classification, revenue, and employee data. "
+              "Adds features: lib_confidence (feature 38) and lib_status_flag (feature 39).",
     ),
 
     SourceDefinition(

@@ -124,7 +124,7 @@ class FeatureEngineer:
 
     Feature layout (38 features):
       [0..5]   – per-source weighted confidence (opencorporates, equifax,
-                 trulioo, zoominfo, duns, ai_semantic)
+                 trulioo, zoominfo, liberty_data, ai_semantic)
       [6..11]  – per-source status flags (MATCHED=1, else=0)
       [12]     – Trulioo pollution flag
       [13]     – web-to-registry semantic distance (0–1)
@@ -161,7 +161,7 @@ class FeatureEngineer:
 
     _SOURCES = [
         "opencorporates", "equifax", "trulioo",
-        "zoominfo", "duns", "ai_semantic",
+        "zoominfo", "liberty_data", "ai_semantic",
     ]
 
     def __init__(self, taxonomy_engine=None) -> None:

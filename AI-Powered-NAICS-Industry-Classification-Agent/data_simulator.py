@@ -210,7 +210,9 @@ class DataSimulator:
 
     def __init__(self, base_weights: Optional[dict] = None) -> None:
         from config import SOURCE_WEIGHTS
-        self.weights = base_weights or SOURCE_WEIGHTS
+        self.weights = dict(base_weights or SOURCE_WEIGHTS)
+        # Liberty Data default weight (not in config yet)
+        self.weights.setdefault("liberty_data", 0.78)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -265,16 +267,17 @@ class DataSimulator:
                                           self.weights["equifax"])
             zi = self._signal_from_record(em_result.zoominfo, "zoominfo",
                                           self.weights["zoominfo"])
+            # Liberty Data: derive from opencorporates record for known entities
+            ld = self._liberty_data_from_known(em_result.opencorporates, seed)
             bundle.signals.append(oc)
             bundle.signals.append(eq)
             bundle.signals.append(self._call_trulioo(seed, jurisdiction))
             bundle.signals.append(zi)
-            bundle.signals.append(self._call_duns(seed, jurisdiction))
+            bundle.signals.append(ld)
             bundle.signals.append(self._call_ai_semantic(seed, web_summary))
             bundle.registry_label = oc.label
             bundle.registry_code  = oc.raw_code
             bundle.registry_taxonomy = oc.taxonomy
-            # Stable history for known entities (same code across periods)
             bundle.history = self._stable_history(oc.raw_code, oc.label, oc.taxonomy)
         else:
             # ── Unknown entity or stress-test: random-pool simulation ──────────
@@ -286,7 +289,7 @@ class DataSimulator:
             bundle.signals.append(self._call_equifax(seed, jurisdiction))
             bundle.signals.append(self._call_trulioo(seed, jurisdiction))
             bundle.signals.append(self._call_zoominfo(seed))
-            bundle.signals.append(self._call_duns(seed, jurisdiction))
+            bundle.signals.append(self._call_liberty_data(seed, jurisdiction))
             bundle.signals.append(self._call_ai_semantic(seed, web_summary))
             bundle.history = self._generate_history(seed, jurisdiction)
 
@@ -460,6 +463,46 @@ class DataSimulator:
             raw_code=code, taxonomy=taxonomy, label=label,
             weight=_jitter(self.weights["duns"], 0.05),
             status=status, confidence=confidence,
+            retrieved_at=_ts(0),
+        )
+
+    def _call_liberty_data(self, seed: int, jurisdiction: str) -> SourceSignal:
+        """
+        Liberty Data — commercial business intelligence (Redshift table).
+        Fourth matching source alongside open_corporates, equifax, zoominfo.
+        In production: query dev.warehouse.liberty_data_standard after
+        entity-matching XGBoost resolves lib_business_id.
+        """
+        jc = jurisdiction.lower().strip()
+        code, label, taxonomy = self._taxonomy_pool(jc, seed + 8)
+        # Unknown entities: Liberty Data coverage varies
+        r = random.random()
+        if r < 0.30:
+            status, confidence = "INFERRED", _jitter(0.50, 0.12)
+        elif r < 0.48:
+            status, confidence = "CONFLICT",  _jitter(0.62, 0.10)
+        else:
+            status, confidence = "MATCHED",   _jitter(0.68, 0.08)
+        return SourceSignal(
+            source="liberty_data",
+            raw_code=code, taxonomy=taxonomy, label=label,
+            weight=_jitter(self.weights["liberty_data"], 0.05),
+            status=status, confidence=confidence,
+            retrieved_at=_ts(0),
+        )
+
+    def _liberty_data_from_known(self, oc_record, seed: int) -> SourceSignal:
+        """For known entities: Liberty Data agrees with OpenCorporates record."""
+        if oc_record is None:
+            return self._call_liberty_data(seed, "us")
+        return SourceSignal(
+            source="liberty_data",
+            raw_code=oc_record.naics_code,
+            taxonomy=oc_record.taxonomy,
+            label=oc_record.naics_label,
+            weight=_jitter(self.weights["liberty_data"], 0.04),
+            status="MATCHED",
+            confidence=_jitter(oc_record.match_confidence * 0.93, 0.03),
             retrieved_at=_ts(0),
         )
 

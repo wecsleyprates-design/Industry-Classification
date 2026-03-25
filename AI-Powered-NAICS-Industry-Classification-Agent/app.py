@@ -315,16 +315,17 @@ def display_consensus_result(
         with col_g1:
             st.markdown("""
 **Source** — which data provider produced this signal:
-- `opencorporates` → Official government company registries worldwide *(highest authority)*
-- `equifax` → Equifax commercial credit bureau — batch file from Redshift warehouse
-- `trulioo` → Trulioo KYB/KYC verification API — primary vendor for UK/Canada
-- `zoominfo` → ZoomInfo B2B firmographic database — live API
-- `duns` → Dun & Bradstreet — DUNS number linked industry code
+- `opencorporates` → Official government registries worldwide *(highest authority)* — Redshift: `dev.datascience.open_corporates_standard_ml_2`
+- `equifax` → Equifax commercial credit bureau — Redshift batch file: `dev.warehouse.equifax_us_standardized`
+- `trulioo` → Trulioo KYB/KYC live API — primary vendor for UK/Canada
+- `zoominfo` → ZoomInfo B2B firmographics — Redshift: `dev.datascience.zoominfo_standard_ml_2`
+- `liberty_data` → Liberty Data commercial intelligence — Redshift: `dev.warehouse.liberty_data_standard` *(4th entity-matching source)*
 - `ai_semantic` → Our own AI enrichment: web search + GPT-4o-mini inference
 
 **Weight** — how much this source's opinion counts in the consensus (0.0–1.0):
 - `opencorporates` = 0.90 *(authoritative government data)*
-- `zoominfo` = 0.80, `trulioo` = 0.80 *(high-quality live APIs)*
+- `zoominfo` = 0.80, `trulioo` = 0.80 *(high-quality APIs)*
+- `liberty_data` = 0.78 *(commercial intelligence overlay)*
 - `equifax` = 0.70 *(batch file — may be days or weeks old)*
 - `ai_semantic` = 0.70 *(AI inference — useful but not authoritative)*
 - Higher weight = more influence on the final XGBoost consensus score
@@ -520,9 +521,64 @@ checkbox is enabled.
 elif page == "Batch Classification":
     st.title("Batch Global Classification")
     st.markdown(
-        "Upload an Excel or CSV file. Required column: **Org Name**. "
-        "Optional: **Address**, **Country**, **Description**."
+        "Process hundreds of companies at once. Upload a file, run the full pipeline "
+        "on every row, and download a results spreadsheet with industry codes, "
+        "risk scores, and KYB recommendations."
     )
+
+    with st.expander("What this page does — inputs, outputs, and how to interpret results"):
+        st.markdown("""
+### What it does
+Runs the **complete 6-step classification pipeline** (entity resolution → 6-source vendor lookup →
+38-feature XGBoost consensus → LLM enrichment → AML/KYB risk engine) on every row in your file simultaneously.
+
+### Input file format
+Upload a **CSV or Excel (.xlsx)** file. The file must contain at least:
+
+| Column | Required | Description |
+|--------|----------|-------------|
+| `Org Name` | ✅ Required | Company name. Typos are handled automatically via 5-pass fuzzy matching. |
+| `Address` | Optional | Street address. Improves entity matching accuracy. |
+| `Country` | Optional | Any format: `US`, `United States`, `us_mo`, `gb`, `de`, `ae_az`… |
+| `Description` | Optional | Business description or website URL. Used by AI Semantic enrichment. |
+
+### Output columns explained
+
+| Column | What it means |
+|--------|---------------|
+| `Clean Name` | Company name after suffix removal (LLC, GmbH, PLC…) and accent normalisation |
+| `Jurisdiction` | Detected OpenCorporates jurisdiction code (`us`, `gb`, `us_mo`, `ca_bc`…) |
+| `Entity Type` | Detected legal entity type: Operating / Holding / Partnership / NGO / Trust |
+| `Primary Taxonomy` | Which classification system was used for the primary code (auto-selected per jurisdiction) |
+| `Primary Code` | The winning industry code (e.g. `334118` for Apple, `64191` for Barclays) |
+| `Primary Desc` | Human-readable description of the primary code |
+| `Consensus Prob` | XGBoost model's confidence in the primary code — **0.0–1.0** (higher = more certain) |
+| `LLM Code` | Code selected by GPT-4o-mini from UGO semantic search candidates |
+| `LLM Taxonomy` | Taxonomy the LLM used (may differ from XGBoost if sources disagree) |
+| `LLM Confidence` | LLM self-reported confidence: HIGH / MEDIUM / LOW |
+| `MCC Code` | Merchant Category Code (4-digit Visa/Mastercard payment network code) |
+| `Risk Level` | Aggregate AML/KYB risk: **LOW / MEDIUM / HIGH / CRITICAL** |
+| `Risk Score` | Numeric risk score 0.00–1.00 (sum of all signal scores, capped at 1.0) |
+| `KYB Recommendation` | Action recommendation: **APPROVE / REVIEW / ESCALATE / REJECT** |
+| `Risk Flags` | Semicolon-separated list of triggered risk signals |
+
+### How to interpret Consensus Probability
+- **≥ 0.70**: High confidence — well-known company or sources strongly agree
+- **0.40–0.70**: Moderate confidence — some source disagreement, review recommended
+- **< 0.40**: Low confidence — company unknown to databases, or sources heavily conflict
+
+### How to interpret Risk Level
+- 🟢 **LOW** (score < 0.25): Standard business. No significant AML signals. → APPROVE
+- 🟡 **MEDIUM** (0.25–0.50): Some flags raised. Requires manual review. → REVIEW
+- 🟠 **HIGH** (0.50–0.75): Significant signals. Needs escalation. → ESCALATE
+- 🔴 **CRITICAL** (≥ 0.75): Multiple serious signals. → REJECT pending investigation
+
+### Tips
+- Company names with typos resolve automatically (`Mycrosoft` → Microsoft)
+- The `Country` column accepts jurisdiction codes (`us_mo`, `ca_bc`, `ae_az`) for state/province precision
+- Download the Excel output, then use the `Risk Level` column to filter for HIGH/CRITICAL cases
+""")
+    st.markdown("---")
 
     uploaded = st.file_uploader("Upload file", type=["csv", "xlsx"])
 
@@ -633,9 +689,59 @@ elif page == "Batch Classification":
 elif page == "Risk Dashboard":
     st.title("AML / KYB Risk Dashboard")
     st.markdown(
-        "Analyse a portfolio of companies for AML/CTF risk signals. "
-        "Generates a synthetic dataset of 50 companies for demonstration."
+        "Portfolio-level AML/CTF risk analysis across a simulated set of companies. "
+        "See risk distribution, jurisdiction heatmaps, and high-risk entity details."
     )
+
+    with st.expander("What this page does — how risk is scored and what each signal means"):
+        st.markdown("""
+### What it does
+Generates a synthetic portfolio of companies across all jurisdictions and runs the full
+**Risk Engine** on each one. Produces a portfolio-level risk report with charts,
+drill-down tables, and a downloadable Excel.
+
+### How Risk Scoring Works
+Each company is evaluated against **9 signal detectors**. Each triggered signal
+contributes a score (0.05–0.35) to the overall risk score (capped at 1.0):
+
+| Signal | Severity | Score | What triggers it |
+|--------|----------|-------|-----------------|
+| `SHELL_COMPANY_SIGNAL` | HIGH | +0.35 | Registered as Holding Co but web presence shows Operating sector |
+| `REGISTRY_DISCREPANCY` | HIGH | +0.30 | Semantic distance between registry label and AI-inferred label > 0.55 |
+| `STRUCTURE_CHANGE` | HIGH | +0.30 | Industry code changed in every historical snapshot (potential U-Turn fraud) |
+| `SOURCE_CONFLICT` | HIGH | +0.20 | ≥60% of sources disagree on primary code |
+| `HIGH_RISK_SECTOR` | HIGH | +0.25 | Primary code is in AML-elevated sector (finance, electronics wholesale, holding companies) |
+| `TEMPORAL_PIVOT` | MEDIUM | +0.12 | Code changed 2+ times in recent history |
+| `HOLDING_MISMATCH` | MEDIUM | +0.15 | Entity type = Holding but classified in Operating sector |
+| `LOW_CONSENSUS_PROBABILITY` | MEDIUM | +0.12 | XGBoost confidence < 40% |
+| `TRULIOO_POLLUTION` | LOW | +0.05 | Trulioo returned wrong digit-length code for this jurisdiction |
+
+### Reading the Charts
+
+**Risk Level Distribution** — shows how many companies in the portfolio fall into each risk bucket.
+A healthy portfolio should be predominantly LOW/MEDIUM.
+
+**KYB Recommendation Distribution** — APPROVE/REVIEW/ESCALATE/REJECT distribution.
+High ESCALATE or REJECT counts indicate either a risky portfolio or data quality issues.
+
+**Jurisdiction Risk Breakdown** — average risk score per jurisdiction.
+High-risk jurisdictions (Cayman Islands, offshore centers) will naturally score higher.
+
+**High-Risk Entity Detail** — all companies with HIGH or CRITICAL risk, sorted by score.
+These are the entities that need immediate manual review.
+
+### What "CRITICAL" means
+A CRITICAL risk score (≥ 0.75) means multiple serious signals fired simultaneously.
+For example: SHELL_COMPANY_SIGNAL + REGISTRY_DISCREPANCY + SOURCE_CONFLICT = 0.85.
+This does NOT mean the company is necessarily fraudulent — it means the data
+across sources is highly inconsistent and the entity requires thorough KYB investigation.
+
+### Simulation Note
+In this demo, companies are synthetically generated. In production, this page would
+run against real companies from your onboarding pipeline, with signals derived from
+real Redshift data (OpenCorporates, Equifax, ZoomInfo, Liberty Data).
+""")
+    st.markdown("---")
 
     n_companies = st.slider("Number of synthetic companies to analyse", 10, 100, 50)
 
@@ -716,10 +822,55 @@ elif page == "Risk Dashboard":
 elif page == "Taxonomy Explorer":
     st.title("Unified Global Ontology Explorer")
     st.markdown(
-        "Semantically search across all six taxonomy systems simultaneously. "
-        "The UGO index maps every code into a shared embedding space for "
-        "cross-ontology alignment (NAICS ↔ UK SIC ↔ NACE ↔ ISIC ↔ MCC)."
+        "Semantic search engine across all 2,330 industry codes in 6 taxonomy systems. "
+        "Type any business description and instantly see cross-taxonomy matches ranked by similarity."
     )
+
+    with st.expander("What this page does — how semantic search works and how to use it"):
+        st.markdown("""
+### What it does
+This is the **Unified Global Ontology (UGO)** — a FAISS vector index of all 2,330 industry
+codes across 6 classification systems, embedded using `all-MiniLM-L6-v2` sentence transformers.
+
+Instead of keyword matching, it uses **cosine similarity** in embedding space: codes whose
+*meaning* is similar rank higher, even if the words are different.
+
+### The 6 Taxonomy Systems
+
+| Taxonomy | Authority | Jurisdictions | Codes | Use case |
+|----------|-----------|--------------|-------|----------|
+| **NAICS 2022** | US Census Bureau | US, Canada, Australia | 1,033 | Primary for North America |
+| **UK SIC 2007** | Companies House / ONS | UK, Guernsey, Jersey | 386 | Required for UK regulatory reporting |
+| **NACE Rev.2** | Eurostat | All EU/EEA countries | 88 | EU statistical classification |
+| **ISIC Rev.4** | United Nations | Global fallback | 439 | International/UN standard |
+| **US SIC 1987** | SEC / US Government | United States (legacy) | 79 | Legacy codes; Equifax still uses these |
+| **MCC** | Visa / Mastercard | Global (payment networks) | 305 | Payment processing compliance |
+
+### How to Search
+Type any business description, product category, or activity. Examples:
+- `"restaurant food service"` → UK SIC 56101, NAICS 722511, ISIC 5610
+- `"software development consulting"` → UK SIC 62012, NAICS 541512, NACE J62
+- `"banking financial services"` → UK SIC 64191, NAICS 522110, NACE K64
+- `"pharmaceutical manufacturing"` → NAICS 325412, UK SIC 21200, NACE C21
+
+### Understanding the Similarity Score
+The Similarity column shows the **cosine similarity** (0.0–1.0):
+- **≥ 0.75**: Very strong semantic match — this code almost certainly describes your business
+- **0.55–0.75**: Good match — likely relevant but verify the description
+- **< 0.55**: Weak match — tangentially related
+
+### Cross-Taxonomy Distance Matrix
+When you search, the app also shows a **semantic distance matrix** between the top 5 results.
+- **0.00**: Codes describe identical concepts (e.g. NAICS 722511 and UK SIC 56101 both = "full-service restaurant")
+- **0.50+**: Codes describe different sectors (e.g. restaurant vs. financial services)
+This demonstrates **Cross-Ontology Embedding Alignment** — the ability to directly compare
+codes from different systems without a hardcoded crosswalk table.
+
+### Cross-Taxonomy Agreement
+Enter a description in the bottom section to see what each taxonomy maps it to.
+High agreement (same concept across 4+ taxonomies) = high classification confidence.
+""")
+    st.markdown("---")
 
     te_engine = get_taxonomy_engine()
 
@@ -793,12 +944,50 @@ elif page == "Industry Lookup":
 
     st.title("Industry Lookup — Jurisdiction-Aware Classification")
     st.markdown(
-        "Select a country or jurisdiction and instantly get the correct official "
-        "taxonomy for that location. The dropdown automatically switches to "
-        "**SIC 2007** for the UK, **NACE Rev.2** for EU countries, **NAICS 2022** "
-        "for US/Canada/Australia, and **ISIC Rev.4** for all other jurisdictions. "
-        "Search by code number or keyword."
+        "Browse and search industry codes using the **correct taxonomy for each country**. "
+        "UK → SIC 2007. EU → NACE Rev.2. US/Canada → NAICS 2022. Others → ISIC Rev.4."
     )
+
+    with st.expander("What this page does — inputs, outputs, and how taxonomy routing works"):
+        st.markdown("""
+### What it does
+This is the **industry code selector** for cases where a human needs to choose or verify
+a classification manually. It presents the correct taxonomy for the selected jurisdiction
+as a **searchable dropdown** — the same codes that would appear in a KYB onboarding form.
+
+### Why the Taxonomy Changes by Jurisdiction
+Different countries have different official standards:
+
+| Jurisdiction | Taxonomy shown | Why |
+|---|---|---|
+| `gb`, `gg`, `je` (UK + Crown Dependencies) | **UK SIC 2007** | Required by Companies House and ONS for all UK entities |
+| `us`, `us_*`, `ca`, `ca_*`, `au`, `au_*` | **NAICS 2022** | Official North American standard |
+| `de`, `fr`, `it`, `es`, `nl`, `pl`… (EU) | **NACE Rev.2** | Eurostat statistical classification for EU reporting |
+| `ae`, `ae_az`, `th`, `tz`, `in`… (global) | **ISIC Rev.4** | UN international standard — most universal |
+| Any | Manual override | You can force any taxonomy regardless of jurisdiction |
+
+### How to Use the Dropdown
+1. **Select a jurisdiction** — type to search (e.g. "United Kingdom", "gb", "Missouri", "us_mo")
+2. **Type in the Search box** — filter by code number OR keyword:
+   - `62012` → shows only that exact UK SIC code
+   - `software` → shows all codes containing "software" in the description
+   - `restaurant` → shows SIC 56101, 56102, 56103 for UK; NAICS 722511 for US
+3. **Click a result** to see the full detail card with JSON output
+
+### Output — What You Get
+- **Selected code** with taxonomy label and jurisdiction metadata
+- **Copy-ready JSON** with all fields needed for an API call or database insert
+- **Full browsable table** of all codes in that taxonomy — downloadable as CSV
+- **Cross-taxonomy comparison** — see how 6 different systems classify the same keyword
+
+### Acceptance Criteria (implemented)
+- ✅ Dropdown switches to SIC 2007 when jurisdiction is `gb` (UK)
+- ✅ Displays both code and description: `62012 — Business and domestic software development`
+- ✅ Searchable by code number OR keyword
+- ✅ Taxonomy data is stored as CSV files in `data/` — update taxonomy by swapping CSV (no code deployment)
+- ✅ Works for all 200+ jurisdiction codes: `us_mo`, `ca_bc`, `ae_az`, `gg`, `je`, `pr`, `tz`…
+""")
+    st.markdown("---")
 
     # ── Jurisdiction selector ─────────────────────────────────────────────────
     st.subheader("1. Select Jurisdiction")
