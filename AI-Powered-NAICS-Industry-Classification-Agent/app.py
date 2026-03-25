@@ -70,13 +70,8 @@ def get_data_simulator():
 
 
 # ── Colour palette for risk levels ───────────────────────────────────────────
-_RISK_COLOURS = {
-    "CRITICAL": "#d32f2f",
-    "HIGH":     "#f57c00",
-    "MEDIUM":   "#fbc02d",
-    "LOW":      "#388e3c",
-    "INFO":     "#1976d2",
-}
+# Imported from risk_engine so it is defined in exactly one place.
+from risk_engine import _RISK_COLOURS
 
 _SEVERITY_EMOJI = {
     "CRITICAL": "🔴",
@@ -177,8 +172,6 @@ def display_consensus_result(
     entity, bundle, result, risk_profile, llm_result
 ) -> None:
     """Render the full consensus output in the Streamlit UI."""
-    from risk_engine import _RISK_COLOURS
-
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Primary Code", result.primary_industry.code)
