@@ -19,9 +19,8 @@ data/consensus_model*
 # Streamlit secrets (never commit)
 .streamlit/secrets.toml
 
-# Jupyter
+# Jupyter checkpoints only (keep .ipynb files)
 .ipynb_checkpoints/
-*.ipynb
 
 # macOS
 .DS_Store
