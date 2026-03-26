@@ -211,297 +211,351 @@ def run_full_pipeline(
 def display_consensus_result(
     entity, bundle, result, risk_profile, llm_result, external_registry=None
 ) -> None:
-    """Render the full consensus output in the Streamlit UI."""
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Primary Code", result.primary_industry.code)
-    with col2:
-        st.metric("Taxonomy", result.primary_industry.taxonomy.replace("_", " "))
-    with col3:
-        st.metric(
-            "Consensus Probability",
-            f"{result.primary_industry.consensus_probability:.1%}",
-        )
-    with col4:
-        rcolour = _RISK_COLOURS.get(risk_profile.overall_risk_level, "#666")
-        st.metric("Risk Level", risk_profile.overall_risk_level)
+    """Render the full consensus output — clean story-driven layout."""
 
-    st.markdown(f"**Primary Industry:** {result.primary_industry.label}")
-    st.markdown(f"**Jurisdiction:** `{result.jurisdiction}` | **Entity Type:** `{result.entity_type}`")
+    prob    = result.primary_industry.consensus_probability
+    rlvl    = risk_profile.overall_risk_level
+    kyb     = risk_profile.kyb_recommendation
+    debug   = result.feature_debug
 
-    # ── Result interpretation banner ──────────────────────────────────────────
-    prob  = result.primary_industry.consensus_probability
-    rlvl  = risk_profile.overall_risk_level
-    kyb   = risk_profile.kyb_recommendation
+    # ── KYB action colour ─────────────────────────────────────────────────────
+    KYB_COLOUR = {"APPROVE":"#2E7D32","REVIEW":"#F57F17","ESCALATE":"#E65100","REJECT":"#C62828"}
+    kyb_colour = KYB_COLOUR.get(kyb, "#546E7A")
 
-    if prob >= 0.70 and rlvl in ("LOW", "MEDIUM"):
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECTION 1 — VERDICT (what the team needs to know in 3 seconds)
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.markdown("## Classification Verdict")
+
+    v1, v2, v3, v4, v5 = st.columns(5)
+    v1.metric("Company", entity.clean_name)
+    v2.metric("Jurisdiction", f"{debug.get('jurisdiction_code','')} — {debug.get('jurisdiction_label','')}")
+    v3.metric("Entity Type", result.entity_type)
+    v4.metric("Consensus Probability", f"{prob:.1%}",
+              help="XGBoost Model 2 softmax probability. ≥70% = high confidence. <40% = review needed.")
+    kyb_delta = {"APPROVE":"✅ Low risk","REVIEW":"🟡 Review needed","ESCALATE":"🟠 Escalate","REJECT":"🔴 Reject"}
+    v5.metric("KYB Recommendation", kyb, delta=kyb_delta.get(kyb,""), delta_color="off")
+
+    # Confidence interpretation banner
+    if prob >= 0.70 and rlvl == "LOW":
         st.success(
-            f"**High-confidence classification.** The consensus model is {prob:.0%} confident "
-            f"in this primary code. Sources are largely in agreement and no critical risk signals detected."
+            f"✅ **APPROVE — High confidence, low risk.** "
+            f"The consensus model is **{prob:.0%}** confident. "
+            f"Sources are largely in agreement. No AML signals detected.",
+            icon="✅"
         )
-    elif prob >= 0.50:
+    elif prob >= 0.70 and rlvl in ("MEDIUM","HIGH"):
         st.warning(
-            f"**Moderate confidence ({prob:.0%}).** The model has reasonable confidence but sources "
-            f"show some disagreement. Review the Source Lineage below to understand which vendors "
-            f"contributed and whether any conflicts exist."
+            f"🟡 **{kyb} — High classification confidence but risk signals present.** "
+            f"Model confidence is {prob:.0%} but {len(risk_profile.signals)} risk signal(s) were triggered. "
+            f"Review the Risk Assessment section below.",
+            icon="⚠️"
         )
-    elif prob < 0.30:
-        src_statuses = [v.get("status","") for v in result.source_lineage.values()]
-        n_matched  = sum(1 for s in src_statuses if s == "MATCHED")
-        n_inferred = sum(1 for s in src_statuses if s == "INFERRED")
-        n_conflict = sum(1 for s in src_statuses if s == "CONFLICT")
-        if n_matched < 2:
-            st.warning(
-                f"**Low consensus probability ({prob:.0%}) — this company was not found in the internal "
-                f"Redshift tables (OpenCorporates, Equifax, ZoomInfo).** "
-                f"Only {n_matched}/6 sources returned a confirmed match. "
-                f"{n_inferred} source(s) returned INFERRED codes (AI-derived, not from a database record) "
-                f"and {n_conflict} showed CONFLICT. "
-                f"The XGBoost model is uncertain because sources disagree. "
-                f"This is expected for private, small, or newly-registered companies. "
-                f"Adding more information (website, full address) or manually reviewing the code is recommended."
-            )
-        else:
-            st.error(
-                f"**Low consensus probability ({prob:.0%}) — sources have high conflict.** "
-                f"{n_matched}/6 sources matched but returned different codes. "
-                f"This can indicate a multi-sector conglomerate, a holding company with diverse subsidiaries, "
-                f"or a data quality issue across vendors. Check the Source Lineage table below."
-            )
+    elif prob >= 0.40:
+        st.warning(
+            f"🟡 **{kyb} — Moderate confidence ({prob:.0%}).** "
+            f"Sources show some disagreement. See Model 1 Source Evidence below to understand which vendors "
+            f"contributed and whether any conflicts exist.",
+            icon="⚠️"
+        )
     else:
-        st.warning(
-            f"**Confidence: {prob:.0%}.** Check the Source Lineage and Feature Debug sections below "
-            f"to understand what is driving uncertainty."
+        src_statuses = [v.get("status","") for v in result.source_lineage.values()]
+        n_matched = sum(1 for s in src_statuses if s == "MATCHED")
+        st.error(
+            f"🔴 **{kyb} — Low confidence ({prob:.0%}).** "
+            f"Only {n_matched}/6 sources returned a confirmed match. "
+            f"Company may be private, small, or newly registered. "
+            f"Manual review of the classification is recommended.",
+            icon="🚨"
         )
 
-    # ── External Registry Data ────────────────────────────────────────────────
-    if external_registry and external_registry.found_anything:
-        with st.expander("External Registry Data — Authoritative Government Sources"):
-            ext_dict = external_registry.to_dict()
-            if "sec_edgar" in ext_dict:
-                ed = ext_dict["sec_edgar"]
-                st.markdown(f"**SEC EDGAR (US)**  [{ed.get('name','')}]({ed.get('url','')})")
-                col_e1, col_e2, col_e3 = st.columns(3)
-                col_e1.metric("SIC Code", ed.get("sic", ""))
-                col_e2.metric("SIC Description", ed.get("sic_description", ""))
-                col_e3.metric("State / Entity Type", f"{ed.get('state','')} · {ed.get('entity_type','')}")
-                if ed.get("ticker"):
-                    st.markdown(f"**Ticker:** `{ed['ticker']}` | **CIK:** `{ed['cik']}`")
-                if ed.get("former_names"):
-                    st.markdown(f"**Former names:** {', '.join(ed['former_names'][:3])}")
-            if "companies_house" in ext_dict:
-                ch = ext_dict["companies_house"]
-                st.markdown(f"**Companies House (UK)**  [{ch.get('name','')}]({ch.get('url','')})")
-                col_c1, col_c2 = st.columns(2)
-                col_c1.markdown(f"**SIC Codes:** {', '.join(ch.get('sic_codes', []))}")
-                col_c1.markdown(f"**Descriptions:** {' | '.join(ch.get('sic_descriptions', []))}")
-                col_c2.markdown(f"**Type:** {ch.get('type','')} | **Status:** {ch.get('status','')}")
-                if ch.get("incorporated"):
-                    col_c2.markdown(f"**Incorporated:** {ch['incorporated']}")
-            st.caption(
-                "These codes were filed directly by the company with the government registry. "
-                "They are the highest-authority source for classification."
-            )
-    elif external_registry is not None:
-        with st.expander("External Registry Data"):
-            st.info(
-                "No external registry record found for this company. "
-                "SEC EDGAR covers US public companies (SEC filers). "
-                "Companies House covers UK registered companies (requires COMPANIES_HOUSE_API_KEY). "
-                "Classification is based on vendor signals and UGO semantic search."
-            )
+    st.markdown("---")
 
-    # ── LLM reasoning ─────────────────────────────────────────────────────────
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECTION 2 — CLASSIFICATION OUTPUT (Model 1 → Model 2 → LLM)
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.markdown("## Industry Classification — Complete Output")
+    st.caption(
+        "The table below shows what each stage of the pipeline produced. "
+        "**Model 1** (Entity Matching XGBoost) found the right vendor records. "
+        "**Model 2** (Consensus XGBoost) turned all signals into calibrated probabilities. "
+        "**GPT-4o-mini** selected the best code per taxonomy from semantic candidates."
+    )
+
+    # Build the single classification table
+    class_rows = []
+
+    # Government registry rows (highest authority)
+    if external_registry:
+        if external_registry.edgar:
+            ed = external_registry.edgar
+            class_rows.append({
+                "Stage":         "0 — Government Registry",
+                "Source":        f"SEC EDGAR ({ed.ticker or 'US'})",
+                "Taxonomy":      "US SIC 1987",
+                "Code":          ed.sic,
+                "Description":   ed.sic_description,
+                "Confidence":    "Registry filing (ground truth)",
+                "What this means": "Apple itself reported this SIC to the US government. Highest possible authority.",
+            })
+        if external_registry.companies_house:
+            ch = external_registry.companies_house
+            for c, d in zip(ch.sic_codes[:2], ch.sic_descriptions[:2]):
+                class_rows.append({
+                    "Stage":         "0 — Government Registry",
+                    "Source":        "Companies House (UK)",
+                    "Taxonomy":      "UK SIC 2007",
+                    "Code":          c,
+                    "Description":   d,
+                    "Confidence":    "Registry filing (ground truth)",
+                    "What this means": "Filed directly with UK Companies House. Official registration code.",
+                })
+
+    # Model 1 source evidence rows
+    src_label = {
+        "opencorporates": "OC (Redshift — gov registry)",
+        "equifax":        "Equifax (Redshift batch)",
+        "trulioo":        "Trulioo (live KYB API)",
+        "zoominfo":       "ZoomInfo (Redshift)",
+        "liberty_data":   "Liberty Data (Redshift)",
+        "ai_semantic":    "AI Semantic (GPT + web)",
+    }
+    status_meaning = {
+        "MATCHED":   "✅ Entity confirmed in database (Model 1 ≥ 0.80)",
+        "CONFLICT":  "⚠️ Match found but code differs from majority — down-weighted",
+        "POLLUTED":  "🔴 Data quality issue — digit mismatch detected",
+        "SIMULATED": "🟡 No live Redshift — simulated signal",
+        "INFERRED":  "🔵 No database match — AI inferred from web",
+        "UNAVAILABLE": "⚫ No data returned",
+    }
+    for src, v in result.source_lineage.items():
+        if not v.get("value"):
+            continue
+        code  = v["value"].split("-",2)[-1] if "-" in v["value"] else v["value"]
+        tax   = v["value"].split("-")[0].upper().replace("_"," ") if "-" in v["value"] else ""
+        status = v.get("status","")
+        conf   = v.get("confidence", 0)
+        weight = v.get("weight", 0)
+        label  = v.get("label","")
+        class_rows.append({
+            "Stage":         "1 — Model 1: Entity Match",
+            "Source":        src_label.get(src, src),
+            "Taxonomy":      tax,
+            "Code":          code,
+            "Description":   label[:55] if label else "",
+            "Confidence":    f"{conf:.0%} match · weight {weight:.2f} → effective {conf*weight:.2f}",
+            "What this means": status_meaning.get(status, status),
+        })
+
+    # Model 2 output rows
+    all_model2 = [result.primary_industry] + result.secondary_industries
+    for i, code_obj in enumerate(all_model2):
+        label_type = "PRIMARY (highest probability)" if i == 0 else f"SECONDARY #{i}"
+        class_rows.append({
+            "Stage":         "2 — Model 2: Consensus XGBoost",
+            "Source":        label_type,
+            "Taxonomy":      code_obj.taxonomy.replace("_"," "),
+            "Code":          code_obj.code,
+            "Description":   code_obj.label,
+            "Confidence":    f"{code_obj.consensus_probability:.1%} softmax probability",
+            "What this means": (
+                f"XGBoost Model 2 output. {'≥70% = high confidence → APPROVE threshold' if code_obj.consensus_probability >= 0.70 else '40–70% = moderate → REVIEW recommended' if code_obj.consensus_probability >= 0.40 else '<40% = low → manual review required'}."
+            ),
+        })
+
+    # LLM output rows
+    if llm_result.primary_code:
+        src_used = getattr(llm_result, "source_used", "semantic_search") or "semantic_search"
+        class_rows.append({
+            "Stage":         "3 — LLM Enrichment (GPT-4o-mini)",
+            "Source":        f"Primary — {src_used.replace('_',' ')}",
+            "Taxonomy":      llm_result.primary_taxonomy.replace("_"," "),
+            "Code":          llm_result.primary_code,
+            "Description":   llm_result.primary_label,
+            "Confidence":    llm_result.primary_confidence,
+            "What this means": (
+                "GPT-4o-mini selected this code from UGO semantic candidates after reviewing "
+                "registry data, vendor signals, and source agreements. "
+                + (f"⚠️ Registry conflict: {getattr(llm_result,'registry_conflict_note','')}" if getattr(llm_result,'registry_conflict',False) else "")
+            ),
+        })
+    for alt in (llm_result.alternative_codes or []):
+        class_rows.append({
+            "Stage":         "3 — LLM Enrichment (GPT-4o-mini)",
+            "Source":        "Alternative (cross-taxonomy)",
+            "Taxonomy":      alt.get("taxonomy","").replace("_"," "),
+            "Code":          alt.get("code",""),
+            "Description":   alt.get("label",""),
+            "Confidence":    "Cross-taxonomy alternative",
+            "What this means": "Best equivalent code in this taxonomy system.",
+        })
+    if llm_result.mcc_code:
+        mcc_risk = getattr(llm_result, "mcc_risk_note", "normal") or "normal"
+        class_rows.append({
+            "Stage":         "3 — LLM Enrichment (GPT-4o-mini)",
+            "Source":        "MCC (payment compliance)",
+            "Taxonomy":      "MCC (Visa/Mastercard)",
+            "Code":          llm_result.mcc_code,
+            "Description":   llm_result.mcc_label or "",
+            "Confidence":    mcc_risk,
+            "What this means": f"Merchant Category Code for payment processing compliance. {'⚠️ HIGH RISK MCC — enhanced due diligence required' if 'high_risk' in mcc_risk else '✅ Standard MCC — no elevated payment risk'}.",
+        })
+
+    df_class = pd.DataFrame(class_rows)
+    st.dataframe(df_class, use_container_width=True, hide_index=True,
+                 column_config={
+                     "Stage": st.column_config.TextColumn("Pipeline Stage", width="medium"),
+                     "Source": st.column_config.TextColumn("Source", width="medium"),
+                     "Taxonomy": st.column_config.TextColumn("Taxonomy", width="small"),
+                     "Code": st.column_config.TextColumn("Code", width="small"),
+                     "Description": st.column_config.TextColumn("Description", width="large"),
+                     "Confidence": st.column_config.TextColumn("Confidence / Weight", width="large"),
+                     "What this means": st.column_config.TextColumn("Interpretation", width="large"),
+                 })
+
     if llm_result.reasoning:
-        with st.expander("LLM Classification Reasoning"):
-            # Source used badge
-            src_used = getattr(llm_result, "source_used", "")
-            if src_used:
-                src_colour = {
-                    "registry":          "#2E7D32",
-                    "vendor_consensus":  "#1565C0",
-                    "semantic_search":   "#6A1B9A",
-                    "web_inference":     "#E65100",
-                }.get(src_used, "#546E7A")
-                st.markdown(
-                    f"**Evidence source used:** "
-                    f'<span style="background:{src_colour};color:white;padding:3px 10px;'
-                    f'border-radius:4px;font-size:12px">{src_used.replace("_"," ").upper()}</span>',
-                    unsafe_allow_html=True,
-                )
-
+        with st.expander("GPT-4o-mini Classification Reasoning (how it chose the codes)"):
             st.write(llm_result.reasoning)
 
-            # Registry conflict alert
-            if getattr(llm_result, "registry_conflict", False):
-                st.warning(
-                    f"⚠️ **Registry conflict detected:** {getattr(llm_result, 'registry_conflict_note', '')}"
-                )
-
-            # MCC
-            if llm_result.mcc_code:
-                mcc_risk = getattr(llm_result, "mcc_risk_note", None) or "normal"
-                mcc_colour = "#C62828" if "high_risk" in mcc_risk else "#2E7D32"
-                st.markdown(
-                    f"**MCC Code:** `{llm_result.mcc_code}` — {llm_result.mcc_label}  "
-                    f'<span style="background:{mcc_colour};color:white;padding:2px 8px;'
-                    f'border-radius:3px;font-size:11px">{mcc_risk.upper()}</span>',
-                    unsafe_allow_html=True,
-                )
-
-    # ── Secondary codes ───────────────────────────────────────────────────────
-    if result.secondary_industries:
-        with st.expander("Secondary Industry Classifications"):
-            for sec in result.secondary_industries:
-                st.markdown(
-                    f"- **{sec.taxonomy.replace('_',' ')}** `{sec.code}` "
-                    f"— {sec.label} "
-                    f"*(prob: {sec.consensus_probability:.1%})*"
-                )
-
-    # ── LLM alternative codes ─────────────────────────────────────────────────
-    if llm_result.alternative_codes:
-        with st.expander("Cross-Taxonomy Alternative Codes (LLM)"):
-            for alt in llm_result.alternative_codes:
-                st.markdown(
-                    f"- **{alt.get('taxonomy','').replace('_',' ')}** "
-                    f"`{alt.get('code','')}` — {alt.get('label','')}"
-                )
-
-    # ── Risk signals ──────────────────────────────────────────────────────────
-    st.subheader("Risk Signals")
-    if not risk_profile.signals:
-        st.success("No risk signals detected.")
-    else:
-        for sig in risk_profile.signals:
-            sev = sig.severity
-            emoji = _SEVERITY_EMOJI.get(sev, "")
-            colour = _RISK_COLOURS.get(sev, "#666")
-            with st.expander(f"{emoji} [{sev}] {sig.flag}"):
-                st.markdown(sig.description)
-                if sig.evidence:
-                    st.json(sig.evidence)
-
-        rcolour = _RISK_COLOURS.get(risk_profile.overall_risk_level, "#666")
-        st.markdown(
-            f"**Overall Risk Score:** `{risk_profile.overall_risk_score:.2f}` — "
-            + _risk_badge(risk_profile.overall_risk_level)
-            + f"&nbsp;&nbsp;**KYB Recommendation:** `{risk_profile.kyb_recommendation}`",
-            unsafe_allow_html=True,
-        )
-
-    # ── Source lineage ────────────────────────────────────────────────────────
-    with st.expander("Source Lineage — What Each Vendor Returned"):
-        # Colour-coded status
-        STATUS_COLOURS = {
-            "MATCHED":     "#2E7D32",
-            "INFERRED":    "#1565C0",
-            "CONFLICT":    "#E65100",
-            "POLLUTED":    "#C62828",
-            "UNAVAILABLE": "#9E9E9E",
-        }
-
-        lin_rows = []
-        for src, v in result.source_lineage.items():
-            lin_rows.append({
-                "Source":     src,
-                "Code":       v["value"].split("-", 2)[-1] if "-" in v["value"] else v["value"],
-                "Taxonomy":   v["value"].split("-")[0].upper().replace("_", " ") if "-" in v["value"] else "",
-                "Description": v.get("label", ""),
-                "Weight":     f"{v['weight']:.2f}",
-                "Status":     v["status"],
-                "Confidence": f"{v['confidence']:.0%}",
-            })
-        lin_df = pd.DataFrame(lin_rows)
-        st.dataframe(lin_df, use_container_width=True)
-
-        # ── Glossary ──────────────────────────────────────────────────────────
-        st.markdown("---")
-        st.markdown("##### How to read this table")
-
-        col_g1, col_g2 = st.columns(2)
-        with col_g1:
-            st.markdown("""
-**Source** — which data provider produced this signal:
-- `opencorporates` → Official government registries worldwide *(highest authority)* — Redshift: `dev.datascience.open_corporates_standard_ml_2`
-- `equifax` → Equifax commercial credit bureau — Redshift batch file: `dev.warehouse.equifax_us_standardized`
-- `trulioo` → Trulioo KYB/KYC live API — primary vendor for UK/Canada
-- `zoominfo` → ZoomInfo B2B firmographics — Redshift: `dev.datascience.zoominfo_standard_ml_2`
-- `liberty_data` → Liberty Data commercial intelligence — Redshift: `dev.warehouse.liberty_data_standard` *(4th entity-matching source)*
-- `ai_semantic` → Our own AI enrichment: web search + GPT-4o-mini inference
-
-**Weight** — how much this source's opinion counts in the consensus (0.0–1.0):
-- `opencorporates` = 0.90 *(authoritative government data)*
-- `zoominfo` = 0.80, `trulioo` = 0.80 *(high-quality APIs)*
-- `liberty_data` = 0.78 *(commercial intelligence overlay)*
-- `equifax` = 0.70 *(batch file — may be days or weeks old)*
-- `ai_semantic` = 0.70 *(AI inference — useful but not authoritative)*
-- Higher weight = more influence on the final XGBoost consensus score
-""")
-        with col_g2:
-            st.markdown("""
-**Status** — the quality assessment of this source's match:
-- 🟢 `MATCHED` — the entity was found in the **real Redshift table** with high name/address similarity (≥ 0.80 confidence). The industry code comes directly from the live database record.
-- 🔵 `INFERRED` — no direct database match found; code was inferred by AI from web presence or calculated from context.
-- 🟠 `CONFLICT` — the source returned a code but it disagrees significantly with the majority of other sources. Flagged for review.
-- 🔴 `POLLUTED` — Trulioo returned a 4-digit SIC code in a jurisdiction that uses 5–6 digit codes. Known data quality issue — this signal is down-weighted automatically.
-- 🟡 `SIMULATED` — Redshift credentials are not configured. The signal is **simulated** (not from real data). Set `REDSHIFT_HOST`, `REDSHIFT_USER`, `REDSHIFT_PASSWORD`, `REDSHIFT_DB` environment variables to activate live data for OpenCorporates, Equifax, ZoomInfo, and Liberty Data.
-- ⚫ `UNAVAILABLE` — source did not return data for this entity.
-
-**Confidence** — the entity-matching model's certainty (0–100%) that this source's record belongs to the *same real-world company* as the input:
-- Computed by the **entity_matching XGBoost model** (model: `entity_matching_20250127`) using name similarity (Jaccard k-gram), address similarity, postal code match, and city match as features — same algorithm as `matching_v1.py`
-- ≥ 80%: reliable match — the source's industry code is trustworthy
-- 50–80%: moderate match — used but down-weighted
-- < 50%: low match — essentially ignored by the consensus
-""")
-
-        st.info(
-            "**How the final code is chosen:** The XGBoost consensus model takes all 6 source signals "
-            "plus 32 additional features (jurisdiction, entity type, temporal history, semantic distance…) "
-            "and outputs a probability distribution over all possible industry codes. "
-            "The code with the highest consensus probability becomes the primary classification. "
-            "It is NOT a simple majority vote — sources with higher weight and higher confidence "
-            "have proportionally more influence."
-        )
-
-    # ── Feature debug ─────────────────────────────────────────────────────────
-    with st.expander("Feature Debug — XGBoost Model Inputs (38 features)"):
-        debug = result.feature_debug
-        col_d1, col_d2 = st.columns(2)
-        with col_d1:
-            st.markdown("**Data Quality Features**")
-            tp = debug.get("trulioo_polluted", False)
-            wrd = debug.get("web_registry_distance", 0)
-            tps = debug.get("temporal_pivot_score", 0)
-            cta = debug.get("cross_taxonomy_agreement", 0)
-            mca = debug.get("majority_code_agreement", 0)
-            st.markdown(f"- **Trulioo Polluted:** `{tp}` — {'⚠️ Trulioo returned wrong digit-length code' if tp else '✅ Trulioo data format is correct'}")
-            st.markdown(f"- **Web↔Registry Distance:** `{wrd:.2f}` — {'🔴 High gap: web activity differs from registry filing' if wrd > 0.55 else ('🟡 Moderate gap' if wrd > 0.30 else '🟢 Web and registry agree')}")
-            st.markdown(f"- **Temporal Pivot Score:** `{tps:.2f}` — {'🔴 Code changed frequently = potential fraud signal' if tps > 0.7 else ('🟡 Some code change' if tps > 0.3 else '🟢 Stable classification history')}")
-            st.markdown(f"- **Cross-Taxonomy Agreement:** `{cta:.2f}` — {int(cta*6)}/6 taxonomy systems agree on the same semantic cluster")
-            st.markdown(f"- **Majority Code Agreement:** `{mca:.2f}` — {mca:.0%} of sources returned the same code")
-        with col_d2:
-            st.markdown("**Jurisdiction Features**")
-            jc = debug.get("jurisdiction_code", "")
-            jl = debug.get("jurisdiction_label", "")
-            rb = debug.get("region_bucket", "")
-            sub = debug.get("is_subnational", False)
-            naics_j = debug.get("is_naics_jurisdiction", False)
-            hrisk = debug.get("high_risk_naics_flag", False)
-            avg_conf = debug.get("avg_source_confidence", 0)
-            st.markdown(f"- **Jurisdiction:** `{jc}` ({jl})")
-            st.markdown(f"- **Region Bucket:** `{rb}` → determines which taxonomy is primary")
-            st.markdown(f"- **Sub-national:** `{sub}` (state/province/emirate level)")
-            st.markdown(f"- **NAICS Jurisdiction:** `{naics_j}` → {'NAICS 2022 is primary taxonomy' if naics_j else 'Non-NAICS taxonomy preferred'}")
-            st.markdown(f"- **High-Risk NAICS:** `{hrisk}` — {'⚠️ At least one source code is in an AML-elevated sector' if hrisk else '✅ No high-risk sector codes detected'}")
-            st.markdown(f"- **Avg Source Confidence:** `{avg_conf:.0%}` — average entity-matching confidence across all sources")
-        with st.expander("Raw JSON (all 38 feature values)"):
-            st.json(debug)
-
-    # ── Results summary table + download ─────────────────────────────────────
     st.markdown("---")
-    st.subheader("Complete Results — Table View")
-    st.caption("All classification and risk data for this company in one downloadable table.")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECTION 3 — RISK ASSESSMENT
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.markdown("## AML / KYB Risk Assessment")
+
+    # Risk score bar
+    score = risk_profile.overall_risk_score
+    score_pct = int(score * 100)
+    bar_colour = _RISK_COLOURS.get(rlvl, "#546E7A")
+    st.markdown(
+        f'<div style="background:#f0f4f8;border-radius:8px;padding:12px 16px;margin-bottom:12px">'
+        f'<div style="display:flex;align-items:center;gap:16px">'
+        f'<div style="font-size:1.8em;font-weight:900;color:{bar_colour}">{score:.2f}</div>'
+        f'<div style="flex:1">'
+        f'<div style="background:#ddd;border-radius:4px;height:12px;overflow:hidden">'
+        f'<div style="background:{bar_colour};width:{score_pct}%;height:100%;border-radius:4px"></div>'
+        f'</div>'
+        f'<div style="font-size:0.72em;color:#546E7A;margin-top:4px">Risk Score: {score:.2f} / 1.00 &nbsp;·&nbsp; '
+        f'{len(risk_profile.signals)} signal(s) triggered &nbsp;·&nbsp; '
+        f'Level: <strong style="color:{bar_colour}">{rlvl}</strong></div>'
+        f'</div>'
+        f'<div style="background:{bar_colour};color:white;padding:6px 18px;border-radius:6px;font-weight:700;font-size:0.88em">KYB: {kyb}</div>'
+        f'</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    if not risk_profile.signals:
+        st.success("✅ No AML/KYB risk signals detected. All 9 signal detectors returned clean.")
+    else:
+        # Risk signals table
+        risk_rows = []
+        action_map = {
+            "CRITICAL": "Immediate investigation required before any approval",
+            "HIGH":     "Escalate to compliance team — do not auto-approve",
+            "MEDIUM":   "Manual review by underwriter required",
+            "LOW":      "Note for file — monitor but can proceed",
+            "INFO":     "Informational — no action required",
+        }
+        for sig in risk_profile.signals:
+            risk_rows.append({
+                "Severity":      sig.severity,
+                "Signal":        sig.flag,
+                "Score":         f"+{sig.score:.2f}",
+                "What happened": sig.description[:120] + ("…" if len(sig.description)>120 else ""),
+                "Required action": action_map.get(sig.severity, "Review"),
+            })
+        df_risk = pd.DataFrame(risk_rows)
+        st.dataframe(df_risk, use_container_width=True, hide_index=True,
+                     column_config={
+                         "Severity": st.column_config.TextColumn("Severity", width="small"),
+                         "Signal":   st.column_config.TextColumn("Signal", width="medium"),
+                         "Score":    st.column_config.TextColumn("Contributes", width="small"),
+                         "What happened": st.column_config.TextColumn("What was detected", width="large"),
+                         "Required action": st.column_config.TextColumn("Required Action", width="large"),
+                     })
+
+    st.markdown("---")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECTION 4 — MODEL INPUTS (what the 38 features looked like — for audit)
+    # ═══════════════════════════════════════════════════════════════════════════
+    with st.expander("Model Inputs Audit — 38 XGBoost Features (for compliance/audit trail)"):
+        st.caption(
+            "These are the 38 numeric features fed to XGBoost Model 2. "
+            "They are derived from Model 1 (entity matching confidence per source) "
+            "plus jurisdiction, entity type, AML signals, and source agreement. "
+            "This section is for audit and explainability — not needed for day-to-day use."
+        )
+        tp    = debug.get("trulioo_polluted", False)
+        wrd   = debug.get("web_registry_distance", 0)
+        tps   = debug.get("temporal_pivot_score", 0)
+        cta   = debug.get("cross_taxonomy_agreement", 0)
+        mca   = debug.get("majority_code_agreement", 0)
+        hrisk = debug.get("high_risk_naics_flag", False)
+        avg_conf = debug.get("avg_source_confidence", 0)
+        jc    = debug.get("jurisdiction_code", "")
+        jl    = debug.get("jurisdiction_label", "")
+        rb    = debug.get("region_bucket", "")
+        naics_j = debug.get("is_naics_jurisdiction", False)
+
+        feat_rows = [
+            {"Feature Group": "Source Quality (Model 1 output)", "Feature": "Avg source match confidence", "Value": f"{avg_conf:.0%}", "Interpretation": "Average entity-matching confidence across all 6 sources from Model 1"},
+            {"Feature Group": "Source Quality (Model 1 output)", "Feature": "Majority code agreement",    "Value": f"{mca:.0%}", "Interpretation": f"{mca:.0%} of sources returned the same primary code"},
+            {"Feature Group": "AML / Semantic signals",          "Feature": "Web ↔ Registry distance",   "Value": f"{wrd:.3f}", "Interpretation": "🔴 Shell company signal" if wrd>0.55 else ("🟡 Minor gap" if wrd>0.30 else "🟢 Sources agree")},
+            {"Feature Group": "AML / Semantic signals",          "Feature": "Temporal pivot score",       "Value": f"{tps:.3f}", "Interpretation": "🔴 U-Turn fraud signal" if tps>0.70 else ("🟡 Some history change" if tps>0.30 else "🟢 Stable history")},
+            {"Feature Group": "AML / Semantic signals",          "Feature": "Cross-taxonomy agreement",   "Value": f"{cta:.2f}", "Interpretation": f"{int(cta*6)}/6 taxonomy systems agree on same semantic cluster"},
+            {"Feature Group": "AML / Semantic signals",          "Feature": "Trulioo pollution flag",     "Value": str(tp),     "Interpretation": "⚠️ 4-digit SIC in 5/6-digit jurisdiction" if tp else "✅ Correct format"},
+            {"Feature Group": "AML / Semantic signals",          "Feature": "High-risk NAICS prefix",     "Value": str(hrisk),  "Interpretation": "⚠️ AML-elevated sector detected" if hrisk else "✅ Standard sector"},
+            {"Feature Group": "Jurisdiction routing",            "Feature": "Jurisdiction code",          "Value": jc,           "Interpretation": f"{jl} ({rb} bucket) → primary taxonomy: {'NAICS 2022' if naics_j else 'non-NAICS'}"},
+        ]
+        st.dataframe(pd.DataFrame(feat_rows), use_container_width=True, hide_index=True)
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECTION 5 — DOWNLOAD
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("## Download Results")
+
+    def _to_excel_multi(frames: dict) -> bytes:
+        from io import BytesIO
+        buf = BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+            for sheet, df in frames.items():
+                df.to_excel(writer, sheet_name=sheet[:31], index=False)
+        buf.seek(0)
+        return buf.read()
+
+    dl1, dl2 = st.columns(2)
+    with dl1:
+        excel_bytes = _to_excel_multi({
+            "Classification": df_class,
+            "Risk Signals":   pd.DataFrame(risk_rows if risk_profile.signals else []),
+            "Model Inputs":   pd.DataFrame(feat_rows),
+        })
+        st.download_button(
+            label="📥 Download Full Results (Excel)",
+            data=excel_bytes,
+            file_name=f"classification_{entity.clean_name.replace(' ','_')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+        )
+    with dl2:
+        import json as _json
+        out = result.to_dict()
+        out["consensus_output"]["risk_profile"] = risk_profile.to_dict()
+        if external_registry:
+            out["consensus_output"]["external_registry"] = external_registry.to_dict()
+        st.download_button(
+            label="📥 Download Full Results (JSON)",
+            data=_json.dumps(out, indent=2),
+            file_name=f"classification_{entity.clean_name.replace(' ','_')}.json",
+            mime="application/json",
+        )
+
+    # Full JSON (collapsed)
+    with st.expander("Full JSON Output (raw)"):
+        st.json(out)
 
     # Build a flat table of all results
     table_rows = []
