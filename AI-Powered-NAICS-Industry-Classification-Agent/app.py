@@ -912,14 +912,36 @@ Runs the **complete 6-step classification pipeline** (entity resolution → 6-so
 38-feature XGBoost consensus → LLM enrichment → AML/KYB risk engine) on every row in your file simultaneously.
 
 ### Input file format
-Upload a **CSV or Excel (.xlsx)** file. The file must contain at least:
+Upload a **CSV or Excel (.xlsx)** file. The app **auto-detects your column names** — including Amex/Worth AI format columns like `lgl_nm_worth`, `dba_nm_worth`, etc.
 
-| Column | Required | Description |
-|--------|----------|-------------|
-| `Org Name` | ✅ Required | Company name. Typos are handled automatically via 5-pass fuzzy matching. |
-| `Address` | Optional | Street address. Improves entity matching accuracy. |
-| `Country` | Optional | Any format: `US`, `United States`, `us_mo`, `gb`, `de`, `ae_az`… |
-| `Description` | Optional | Business description or website URL. Used by AI Semantic enrichment. |
+#### Standard column names (any of these work)
+
+| What the field is | Column names the app recognises |
+|---|---|
+| **Company name** ✅ Required | `Org Name`, `lgl_nm_worth`, `lgl_nm_received`, `company_name`, `business_name`, `name`, `Company`, `BusinessName` |
+| **DBA / Trade name** | `dba_nm_worth`, `dba_nm_received`, `dba_name`, `DBA`, `trade_name` |
+| **Full address** | `full_address_worth`, `Address`, `business_address_received`, `address`, `street_address` |
+| **Street address line 1** | `address_1_worth`, `address_1`, `street_1`, `Address Line 1` |
+| **City** | `city_worth`, `city`, `City` |
+| **State / Region** | `region_worth`, `region`, `state`, `State`, `Region` |
+| **Postal / ZIP code** | `zip_code_worth`, `postal_code`, `zip`, `postcode`, `ZIP Code` |
+| **Country** | `country_worth`, `country`, `Country` |
+| **Description / URL** | `Description`, `website`, `url`, `business_description` |
+| **UID / Reference** | `uid_worth`, `uid_received` — passed through to output for traceability |
+
+#### How extra fields improve confidence
+
+The more fields you provide, the better the entity matching (Model 1) and classification consensus (Model 2):
+
+| Fields provided | Entity matching | Classification confidence |
+|---|---|---|
+| Company name only | Low | Low |
+| + Country | Low | Medium (correct taxonomy routing) |
+| + ZIP / postal code | **High** (strongest address signal) | High |
+| + Full address + City | Very high | Very high |
+| + DBA name + Region | Excellent | Excellent |
+
+**Minimum recommended:** `lgl_nm_worth` (or `Org Name`) + `country_worth` (or `Country`)
 
 ### Output columns explained
 
@@ -968,16 +990,132 @@ Upload a **CSV or Excel (.xlsx)** file. The file must contain at least:
             df_input = pd.read_csv(uploaded)
         df_input.columns = df_input.columns.str.strip()
 
-        if "Org Name" not in df_input.columns:
-            st.error("File must contain an 'Org Name' column.")
+        # ── Auto-detect and map column names ──────────────────────────────────
+        def _find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+            """Return the first matching column name (case-insensitive)."""
+            cols_lower = {c.lower(): c for c in df.columns}
+            for c in candidates:
+                if c.lower() in cols_lower:
+                    return cols_lower[c.lower()]
+            return None
+
+        # Priority-ordered candidate lists — most specific first
+        COL_ORG_NAME  = ["lgl_nm_worth", "lgl_nm_received", "Org Name", "org_name",
+                         "company_name", "business_name", "Company", "BusinessName",
+                         "name", "legal_name"]
+        COL_DBA       = ["dba_nm_worth", "dba_nm_received", "dba_name", "DBA",
+                         "trade_name", "dba"]
+        COL_ADDRESS   = ["full_address_worth", "Address", "full_address",
+                         "business_address_received", "address", "street_address",
+                         "Address Line 1"]
+        COL_ADDR1     = ["address_1_worth", "address_1", "addr1", "street_1",
+                         "address1"]
+        COL_CITY      = ["city_worth", "city", "City"]
+        COL_REGION    = ["region_worth", "region", "state", "State", "Region",
+                         "province"]
+        COL_ZIP       = ["zip_code_worth", "zip_code", "postal_code", "zip",
+                         "postcode", "ZIP Code", "PostalCode"]
+        COL_COUNTRY   = ["country_worth", "country", "Country", "country_code"]
+        COL_DESC      = ["Description", "description", "website", "url",
+                         "business_description", "web_summary"]
+        COL_UID       = ["uid_worth", "uid_received", "uid", "ID", "reference",
+                         "external_id"]
+
+        c_org    = _find_col(df_input, COL_ORG_NAME)
+        c_dba    = _find_col(df_input, COL_DBA)
+        c_addr   = _find_col(df_input, COL_ADDRESS)
+        c_addr1  = _find_col(df_input, COL_ADDR1)
+        c_city   = _find_col(df_input, COL_CITY)
+        c_region = _find_col(df_input, COL_REGION)
+        c_zip    = _find_col(df_input, COL_ZIP)
+        c_ctry   = _find_col(df_input, COL_COUNTRY)
+        c_desc   = _find_col(df_input, COL_DESC)
+        c_uid    = _find_col(df_input, COL_UID)
+
+        if c_org is None:
+            st.error(
+                "Could not find a company name column. The file must contain one of: "
+                + ", ".join(f"`{c}`" for c in COL_ORG_NAME[:5]) + "…"
+            )
             st.stop()
 
-        df_input["Address"]     = df_input.get("Address", pd.Series([""] * len(df_input)))
-        df_input["Country"]     = df_input.get("Country", pd.Series([""] * len(df_input)))
-        df_input["Description"] = df_input.get("Description", pd.Series([""] * len(df_input)))
+        # Show detected mapping to user
+        detected = {
+            "Company name": c_org,
+            "DBA / Trade name": c_dba or "—",
+            "Address": c_addr or c_addr1 or "—",
+            "City": c_city or "—",
+            "Region / State": c_region or "—",
+            "ZIP / Postal code": c_zip or "—",
+            "Country": c_ctry or "—",
+            "Description / URL": c_desc or "—",
+            "UID / Reference": c_uid or "—",
+        }
+        with st.expander("Column mapping detected — click to review"):
+            for field, col in detected.items():
+                icon = "✅" if col != "—" else "➖"
+                bonus = ""
+                if col != "—":
+                    if field in ("ZIP / Postal code", "Country"):
+                        bonus = " ← **high impact on accuracy**"
+                    elif field in ("Address", "City"):
+                        bonus = " ← improves entity matching"
+                    elif field == "DBA / Trade name":
+                        bonus = " ← catches trade name variations"
+                st.markdown(f"{icon} **{field}**: `{col}`{bonus}")
 
-        st.dataframe(df_input.head(10), use_container_width=True)
-        st.info(f"{len(df_input)} records loaded.")
+            missing_high_impact = [f for f, c in {
+                "Country": c_ctry, "ZIP / Postal code": c_zip,
+            }.items() if c is None]
+            if missing_high_impact:
+                st.warning(
+                    f"Missing high-impact fields: **{', '.join(missing_high_impact)}**. "
+                    f"Adding these would significantly improve entity matching confidence."
+                )
+
+        # Build normalised address string
+        def _build_address(row) -> str:
+            parts = []
+            if c_addr and row.get(c_addr, ""):
+                parts.append(str(row[c_addr]))
+            elif c_addr1 and row.get(c_addr1, ""):
+                parts.append(str(row[c_addr1]))
+            if c_city and row.get(c_city, ""):
+                parts.append(str(row[c_city]))
+            if c_region and row.get(c_region, ""):
+                parts.append(str(row[c_region]))
+            if c_zip and row.get(c_zip, ""):
+                parts.append(str(row[c_zip]))
+            return ", ".join(p for p in parts if p and p != "nan")
+
+        # Build jurisdiction from country + region (e.g. US + AK → us_ak)
+        def _build_jurisdiction(row) -> str:
+            country = str(row.get(c_ctry, "") or "").strip().upper() if c_ctry else ""
+            region  = str(row.get(c_region, "") or "").strip().upper() if c_region else ""
+            if country == "US" and region and len(region) == 2:
+                return f"us_{region.lower()}"
+            return country.lower() if country else ""
+
+        # Build company name — prefer legal name, fall back to DBA
+        def _get_company_name(row) -> str:
+            name = str(row.get(c_org, "") or "").strip()
+            if not name or name == "nan":
+                if c_dba:
+                    name = str(row.get(c_dba, "") or "").strip()
+            return name
+
+        # Compatibility: create standard columns the rest of the pipeline expects
+        df_input["__org_name"]  = df_input.apply(_get_company_name, axis=1)
+        df_input["__address"]   = df_input.apply(_build_address, axis=1)
+        df_input["__country"]   = df_input.apply(_build_jurisdiction, axis=1)
+        df_input["__dba"]       = df_input[c_dba].fillna("") if c_dba else ""
+        df_input["__uid"]       = df_input[c_uid].astype(str) if c_uid else ""
+        df_input["__desc"]      = df_input[c_desc].fillna("") if c_desc else ""
+
+        # Preview using original columns but highlight detected name
+        preview_cols = [c for c in [c_org, c_dba, c_addr or c_addr1, c_city, c_region, c_zip, c_ctry] if c]
+        st.dataframe(df_input[preview_cols].head(10), use_container_width=True)
+        st.info(f"{len(df_input)} records loaded. Company name column: **`{c_org}`**")
 
         if st.button("Run Batch Classification", type="primary"):
             results = []
@@ -986,19 +1124,34 @@ Upload a **CSV or Excel (.xlsx)** file. The file must contain at least:
             t0 = time.time()
 
             for i, row in df_input.iterrows():
-                status.text(f"Processing {i+1}/{len(df_input)}: {row['Org Name']}")
+                company_name = row["__org_name"]
+                address      = row["__address"]
+                country      = row["__country"]
+                web_summary  = str(row.get("__desc", "") or "")
+                uid_val      = str(row.get("__uid", "") or "")
+                dba_val      = str(row.get("__dba", "") or "")
+
+                status.text(f"Processing {i+1}/{len(df_input)}: {company_name}")
                 try:
                     entity, bundle, result, risk, llm, ext_reg = run_full_pipeline(
-                        company_name=str(row["Org Name"]),
-                        address=str(row.get("Address", "")),
-                        country=str(row.get("Country", "")),
-                        web_summary=str(row.get("Description", "")),
+                        company_name=company_name,
+                        address=address,
+                        country=country,
+                        web_summary=web_summary,
                     )
                     results.append({
-                        "Org Name":            row["Org Name"],
+                        # ── Input fields (pass-through for traceability) ──────
+                        "UID":                 uid_val,
+                        "Org Name":            company_name,
+                        "DBA Name":            dba_val,
+                        "Address Used":        address,
+                        "Jurisdiction Input":  country,
+                        # ── Entity resolution ─────────────────────────────────
                         "Clean Name":          entity.clean_name,
-                        "Jurisdiction":        entity.detected_jurisdiction,
+                        "Jurisdiction":        entity.jurisdiction_code,
+                        "Jurisdiction Label":  entity.jurisdiction_label,
                         "Entity Type":         entity.detected_entity_type,
+                        # ── Classification ────────────────────────────────────
                         "Primary Code":        result.primary_industry.code,
                         "Primary Taxonomy":    result.primary_industry.taxonomy,
                         "Primary Label":       result.primary_industry.label,
@@ -1011,9 +1164,11 @@ Upload a **CSV or Excel (.xlsx)** file. The file must contain at least:
                         "Registry Conflict":   getattr(llm, "registry_conflict", False),
                         "MCC Code":            llm.mcc_code or "",
                         "MCC Risk":            getattr(llm, "mcc_risk_note", "") or "",
+                        # ── Government registry ───────────────────────────────
                         "SEC EDGAR SIC":       ext_reg.edgar.sic if ext_reg and ext_reg.edgar else "",
                         "SEC EDGAR SIC Desc":  ext_reg.edgar.sic_description if ext_reg and ext_reg.edgar else "",
                         "CH SIC Codes":        ", ".join(ext_reg.companies_house.sic_codes) if ext_reg and ext_reg.companies_house else "",
+                        # ── Risk ──────────────────────────────────────────────
                         "Risk Level":          risk.overall_risk_level,
                         "Risk Score":          round(risk.overall_risk_score, 4),
                         "KYB Recommendation":  risk.kyb_recommendation,
@@ -1021,7 +1176,9 @@ Upload a **CSV or Excel (.xlsx)** file. The file must contain at least:
                     })
                 except Exception as exc:
                     results.append({
-                        "Org Name": row["Org Name"],
+                        "UID":      uid_val,
+                        "Org Name": company_name,
+                        "DBA Name": dba_val,
                         "Risk Level": "ERROR",
                         "KYB Recommendation": "REVIEW",
                         "Risk Flags": str(exc),
