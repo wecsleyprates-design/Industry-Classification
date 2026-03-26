@@ -1,0 +1,61 @@
+{
+  "model": "Model 1 \u2014 Entity Matching XGBoost",
+  "architecture": "binary:logistic (same company vs different company)",
+  "n_features": 33,
+  "n_train": 4800,
+  "n_test": 1200,
+  "threshold_used": 0.8,
+  "auc_roc": 0.9915,
+  "cv_auc_mean": 0.9894,
+  "cv_auc_std": 0.0019,
+  "precision": 0.9446,
+  "recall": 0.98,
+  "f1_score": 0.962,
+  "accuracy": 0.9742,
+  "confusion_matrix": [
+    [
+      777,
+      23
+    ],
+    [
+      8,
+      392
+    ]
+  ],
+  "best_n_estimators": 124,
+  "feature_importance": {
+    "similarity_street_name_k3": 0.546015,
+    "similarity_street_name_k2": 0.232357,
+    "similarity_street_name_k4": 0.192332,
+    "sim_norm_jac_k3": 0.004633,
+    "match_address": 0.004563,
+    "sim_norm_jac_k4": 0.004453,
+    "sim_norm_jac_k2": 0.003618,
+    "sim_norm_street_name_k3": 0.00161,
+    "similarity_short_name_k4": 0.001217,
+    "similarity_jaccard_k4": 0.001148,
+    "similarity_short_name_k1": 0.001096,
+    "similarity_jaccard_k3": 0.000956,
+    "similarity_jaccard_word": 0.00092,
+    "similarity_jaccard_k1": 0.000894,
+    "similarity_short_name_k2": 0.000786,
+    "similarity_short_name_k3": 0.000771,
+    "similarity_street_name_k1": 0.000712,
+    "similarity_jaccard_k2": 0.000696,
+    "match_street_number": 0.0005,
+    "distance_street_number": 0.00044,
+    "match_street_block": 0.000283,
+    "match_normalized_zip": 0.0,
+    "match_city": 0.0,
+    "match_short_name": 0.0,
+    "sim_norm_street_name_k1": 0.0,
+    "sim_norm_street_name_k2": 0.0,
+    "sim_norm_street_name_k4": 0.0,
+    "sim_norm_jac_k1": 0.0,
+    "sim_norm_jac_word": 0.0,
+    "sim_norm_short_name_k1": 0.0,
+    "sim_norm_short_name_k2": 0.0,
+    "sim_norm_short_name_k3": 0.0,
+    "sim_norm_short_name_k4": 0.0
+  }
+}
