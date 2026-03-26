@@ -23,6 +23,9 @@ duckduckgo-search>=5.3.0
 # ── Web App ───────────────────────────────────────────────────────────────────
 streamlit>=1.35.0
 
+# ── Database ──────────────────────────────────────────────────────────────────
+psycopg2-binary>=2.9.0   # Redshift connection (same as Entity-Matching repo)
+
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv>=1.0.0
 rapidfuzz>=3.9.0

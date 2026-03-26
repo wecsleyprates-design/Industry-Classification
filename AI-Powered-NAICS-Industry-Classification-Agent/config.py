@@ -52,7 +52,7 @@ SOURCE_WEIGHTS = {
 
 # ── XGBoost consensus model ───────────────────────────────────────────────────
 XGBOOST_MODEL_PATH: str = os.path.join(DATA_DIR, "consensus_model.ubj")
-N_SYNTHETIC_TRAINING_SAMPLES: int = 2_000   # kept low for fast cloud cold-start
+N_SYNTHETIC_TRAINING_SAMPLES: int = 300    # minimal — fast cold-start on Streamlit Cloud
 CONSENSUS_TOP_K: int = 5            # top-K codes returned in output
 
 # ── FAISS / UGO ───────────────────────────────────────────────────────────────

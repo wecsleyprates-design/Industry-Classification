@@ -153,59 +153,220 @@ class LLMClassificationResult:
     alternative_codes: list[dict] = field(default_factory=list)
     mcc_code: Optional[str] = None
     mcc_label: Optional[str] = None
+    # Extended fields from improved prompt
+    source_used: str = ""              # registry | vendor_consensus | semantic_search | web_inference
+    mcc_risk_note: Optional[str] = None
+    registry_conflict: bool = False
+    registry_conflict_note: Optional[str] = None
+
+
+def _build_vendor_signals_block(vendor_signals: Optional[list] = None) -> str:
+    """
+    Format vendor source signals for LLM prompt injection.
+    vendor_signals: list of dicts with keys source, raw_code, taxonomy, label, weight, status, confidence
+    """
+    if not vendor_signals:
+        return ""
+
+    lines = ["VENDOR SOURCE SIGNALS (what our internal databases returned):"]
+    agree_codes: dict[str, int] = {}
+
+    for sig in vendor_signals:
+        source      = sig.get("source", "unknown")
+        code        = sig.get("raw_code", "")
+        taxonomy    = sig.get("taxonomy", "")
+        label       = sig.get("label", "")
+        weight      = sig.get("weight", 0)
+        status      = sig.get("status", "")
+        confidence  = sig.get("confidence", 0)
+
+        if not code:
+            continue
+
+        status_note = ""
+        if status == "MATCHED":
+            status_note = f"✅ MATCHED ({confidence:.0%} entity match confidence)"
+        elif status == "CONFLICT":
+            status_note = f"⚠️  CONFLICT ({confidence:.0%})"
+        elif status == "POLLUTED":
+            status_note = f"🔴 POLLUTED — data quality issue, down-weighted"
+        elif status == "SIMULATED":
+            status_note = f"🟡 SIMULATED — Redshift not connected"
+        else:
+            status_note = f"🔵 {status} ({confidence:.0%})"
+
+        tax_short = taxonomy.replace("_", " ") if taxonomy else ""
+        lines.append(
+            f"  • {source:<16} weight={weight:.2f}  {status_note}"
+            f"\n    → {code} ({tax_short}): {label}"
+        )
+
+        if status in ("MATCHED", "SIMULATED") and code:
+            agree_codes[code] = agree_codes.get(code, 0) + 1
+
+    # Agreement summary
+    if agree_codes:
+        max_count = max(agree_codes.values())
+        top_code  = max(agree_codes, key=lambda k: agree_codes[k])
+        n_sources = len([s for s in vendor_signals if s.get("raw_code") and s.get("status") not in ("POLLUTED",)])
+        if n_sources > 0:
+            lines.append(
+                f"\n  Source agreement: {max_count}/{n_sources} sources agree on"
+                f" code {top_code}"
+                + (" (strong consensus — confirm this code unless registry data contradicts)" if max_count >= 3
+                   else " (moderate agreement — cross-check with registry data)")
+            )
+
+    return "\n".join(lines)
 
 
 def llm_classify(
     company_name: str,
     business_description: str,
     jurisdiction: str,
-    candidates_by_taxonomy: dict,   # {taxonomy: [{code, description}, ...]}
+    candidates_by_taxonomy: dict,
     web_summary: str = "",
+    vendor_signals: Optional[list] = None,
+    external_registry=None,          # ExternalRegistryData from external_lookup.py
+    entity_type: str = "Operating",
+    entity_profile: Optional[dict] = None,
 ) -> LLMClassificationResult:
     """
-    GPT-4o-mini selects the best code per taxonomy from UGO candidates.
-    Returns a structured multi-taxonomy classification.
+    GPT-4o-mini classifies the company across all taxonomies.
+
+    Improved prompt strategy — the LLM acts as a REFEREE, not a blind classifier:
+      1. External registry data (SEC EDGAR / Companies House) — ground truth
+      2. Vendor source signals — what our 4 Redshift databases say
+      3. UGO FAISS semantic candidates — semantic similarity baseline
+      4. Web summary — general business description
+      5. Entity type + jurisdiction metadata — routing context
+
+    The LLM is asked to:
+      - Confirm codes where sources agree (save reasoning effort)
+      - Adjudicate conflicts where sources disagree (the real value-add)
+      - Flag discrepancies between registry filings and web presence
+      - Select best code per taxonomy from the UGO candidates
     """
+    # ── Build prompt sections ─────────────────────────────────────────────────
+    import jurisdiction_registry as JR
+    jr_rec = JR.lookup(jurisdiction.lower().strip())
+    jur_label  = jr_rec.label if jr_rec else jurisdiction
+    jur_bucket = jr_rec.region_bucket if jr_rec else "OTHER"
+    pref_tax   = jr_rec.preferred_taxonomy if jr_rec else "US_NAICS_2022"
+    is_naics_j = jr_rec.is_naics_jurisdiction if jr_rec else True
+
+    # Taxonomy routing instruction
+    if pref_tax == "UK_SIC_2007":
+        primary_tax_instruction = (
+            f"PRIMARY TAXONOMY for this jurisdiction: UK_SIC_2007 (UK Standard Industrial Classification 2007).\n"
+            f"This is the official Companies House / ONS taxonomy. Always select a UK SIC code as primary."
+        )
+    elif pref_tax == "NACE_REV2":
+        primary_tax_instruction = (
+            f"PRIMARY TAXONOMY for this jurisdiction: NACE_REV2 (EU Statistical Classification).\n"
+            f"Select NACE Rev.2 as primary. Also provide US_NAICS_2022 as secondary for US comparability."
+        )
+    elif pref_tax == "ISIC_REV4":
+        primary_tax_instruction = (
+            f"PRIMARY TAXONOMY for this jurisdiction: ISIC_REV4 (UN International Standard).\n"
+            f"Select ISIC Rev.4 as primary. Also provide MCC for payment compliance."
+        )
+    else:
+        primary_tax_instruction = (
+            f"PRIMARY TAXONOMY for this jurisdiction: US_NAICS_2022 (North American Industry Classification 2022).\n"
+            f"Select a 6-digit NAICS 2022 code as primary. Also provide MCC for payment compliance."
+        )
+
+    # Registry block
+    registry_block = ""
+    if external_registry and external_registry.found_anything:
+        registry_block = external_registry.to_prompt_block()
+
+    # Vendor signals block
+    signals_block = _build_vendor_signals_block(vendor_signals)
+
+    # UGO candidates
     candidates_json = json.dumps(candidates_by_taxonomy, indent=2)
 
-    prompt = f"""You are a world-class industry classification expert specialising in
-global taxonomy systems (NAICS 2022, US SIC 1987, UK SIC 2007, NACE Rev2, ISIC Rev4, MCC).
+    # ── Compose the full prompt ────────────────────────────────────────────────
+    prompt = f"""You are a world-class global industry classification expert and KYB analyst.
+Your task is to classify the following company across multiple taxonomy systems.
 
-Company: {company_name}
-Jurisdiction: {jurisdiction}
-Business Description: {business_description}
-Web Summary: {web_summary[:1000] if web_summary else "N/A"}
+═══════════════════════════════════════════════════════════════════
+COMPANY INFORMATION
+═══════════════════════════════════════════════════════════════════
+Company Name:    {company_name}
+Jurisdiction:    {jurisdiction} — {jur_label} (region: {jur_bucket})
+Entity Type:     {entity_type}
+Business Description: {business_description or "Not available"}
+Web Summary:     {(web_summary[:800] + "...") if web_summary and len(web_summary) > 800 else (web_summary or "Not available")}
 
-Candidate codes retrieved from the Unified Global Ontology:
+═══════════════════════════════════════════════════════════════════
+TAXONOMY ROUTING INSTRUCTION
+═══════════════════════════════════════════════════════════════════
+{primary_tax_instruction}
+
+═══════════════════════════════════════════════════════════════════
+{registry_block if registry_block else "AUTHORITATIVE REGISTRY DATA: Not available for this jurisdiction or company."}
+═══════════════════════════════════════════════════════════════════
+
+═══════════════════════════════════════════════════════════════════
+{signals_block if signals_block else "VENDOR SOURCE SIGNALS: Not available (Redshift not connected — using simulation)."}
+═══════════════════════════════════════════════════════════════════
+
+═══════════════════════════════════════════════════════════════════
+UGO SEMANTIC SEARCH CANDIDATES (top candidates by cosine similarity)
+═══════════════════════════════════════════════════════════════════
 {candidates_json[:3000]}
 
-Instructions:
-1. Determine the primary taxonomy based on jurisdiction ({jurisdiction}).
-   - For US → prefer US_NAICS_2022
-   - For GB → prefer UK_SIC_2007
-   - For EU (DE/FR/IT/ES/NL/...) → prefer NACE_REV2
-   - For others → prefer ISIC_REV4 or US_NAICS_2022
-2. Select the single MOST appropriate code from that taxonomy's candidates.
-3. Select the best MCC code if MCC candidates are provided.
-4. List up to 2 alternative codes from other taxonomies.
-5. Provide concise reasoning.
+═══════════════════════════════════════════════════════════════════
+YOUR CLASSIFICATION TASK
+═══════════════════════════════════════════════════════════════════
+Using ALL the evidence above, classify this company. Follow this reasoning order:
 
-Return a JSON object with these exact keys:
+STEP 1 — Registry data first
+  If authoritative registry data (SEC EDGAR / Companies House) is available,
+  it is the ground truth. The company self-reported this code to the government.
+  Start here. Do not override it without strong evidence from web/business description.
+
+STEP 2 — Vendor signal consensus
+  If 3+ vendor sources agree on a code, confirm it.
+  If sources conflict, adjudicate: which source is most authoritative for this
+  jurisdiction? (opencorporates weight 0.90 > zoominfo 0.80 > liberty_data 0.78
+  > equifax 0.70 for non-US jurisdictions)
+
+STEP 3 — Resolve discrepancies
+  If registry/vendor codes conflict with the web business description,
+  note this in your reasoning. A Holding company registered code but an
+  Operating company web presence is a significant signal.
+
+STEP 4 — Select from UGO candidates
+  From the semantic candidates above, select the best code per taxonomy.
+  Prefer candidates that match the registry/vendor evidence.
+
+STEP 5 — Select MCC
+  Choose the most appropriate 4-digit Merchant Category Code.
+  Note if the MCC is in a high-risk category (financial services, electronics
+  wholesale, dual-use goods).
+
+Return ONLY this JSON object:
 {{
   "primary_taxonomy": "e.g. US_NAICS_2022",
   "primary_code": "e.g. 722511",
   "primary_label": "Full-Service Restaurants",
   "primary_confidence": "HIGH | MEDIUM | LOW",
-  "reasoning": "brief explanation",
+  "reasoning": "2-3 sentences explaining which evidence was used and why",
+  "source_used": "registry | vendor_consensus | semantic_search | web_inference",
   "mcc_code": "e.g. 5812 or null",
   "mcc_label": "e.g. Eating Places Restaurants or null",
+  "mcc_risk_note": "normal | high_risk (brief reason if high) or null",
+  "registry_conflict": true or false,
+  "registry_conflict_note": "explain conflict if true, else null",
   "alternative_codes": [
     {{"taxonomy": "UK_SIC_2007", "code": "56101", "label": "Licensed restaurants"}},
     {{"taxonomy": "NACE_REV2", "code": "I56", "label": "Food and beverage service activities"}}
   ]
-}}
-
-Return valid JSON only."""
+}}"""
 
     for attempt in range(3):
         try:
@@ -213,13 +374,13 @@ Return valid JSON only."""
                 model=OPENAI_CHAT_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
-                max_tokens=600,
+                max_tokens=800,
                 response_format={"type": "json_object"},
             )
-            raw = response.choices[0].message.content.strip()
+            raw  = response.choices[0].message.content.strip()
             data = json.loads(raw)
             return LLMClassificationResult(
-                primary_taxonomy=data.get("primary_taxonomy", "US_NAICS_2022"),
+                primary_taxonomy=data.get("primary_taxonomy", pref_tax),
                 primary_code=data.get("primary_code", ""),
                 primary_label=data.get("primary_label", ""),
                 primary_confidence=data.get("primary_confidence", "LOW"),
@@ -227,6 +388,11 @@ Return valid JSON only."""
                 alternative_codes=data.get("alternative_codes", []),
                 mcc_code=data.get("mcc_code"),
                 mcc_label=data.get("mcc_label"),
+                # Extended fields
+                source_used=data.get("source_used", ""),
+                mcc_risk_note=data.get("mcc_risk_note"),
+                registry_conflict=bool(data.get("registry_conflict", False)),
+                registry_conflict_note=data.get("registry_conflict_note"),
             )
         except Exception as exc:
             logger.warning(f"LLM classify attempt {attempt+1} failed: {exc}")
@@ -234,7 +400,7 @@ Return valid JSON only."""
                 time.sleep(1.5 ** attempt)
 
     return LLMClassificationResult(
-        primary_taxonomy="US_NAICS_2022",
+        primary_taxonomy=pref_tax,
         primary_code="",
         primary_label="Classification failed",
         primary_confidence="LOW",

@@ -124,7 +124,7 @@ class FeatureEngineer:
 
     Feature layout (38 features):
       [0..5]   – per-source weighted confidence (opencorporates, equifax,
-                 trulioo, zoominfo, duns, ai_semantic)
+                 trulioo, zoominfo, liberty_data, ai_semantic)
       [6..11]  – per-source status flags (MATCHED=1, else=0)
       [12]     – Trulioo pollution flag
       [13]     – web-to-registry semantic distance (0–1)
@@ -161,7 +161,7 @@ class FeatureEngineer:
 
     _SOURCES = [
         "opencorporates", "equifax", "trulioo",
-        "zoominfo", "duns", "ai_semantic",
+        "zoominfo", "liberty_data", "ai_semantic",
     ]
 
     def __init__(self, taxonomy_engine=None) -> None:
@@ -372,41 +372,40 @@ class IndustryConsensusEngine:
 
         y_enc = np.array([self._code_map.index(c) for c in y_labels])
 
-        n_classes = len(self._code_map)
-        X_tr, X_val, y_tr, y_val = train_test_split(
-            X, y_enc, test_size=0.15, random_state=42
-        )
+        # Remap labels to contiguous 0..n-1 (required when small sample counts
+        # mean not every class appears in both train and val splits)
+        all_classes = np.unique(y_enc)
+        class_remap = {c: i for i, c in enumerate(all_classes)}
+        y_remapped  = np.array([class_remap[c] for c in y_enc])
+        # Rebuild code_map in remapped order
+        self._code_map = [self._code_map[c] for c in all_classes]
+        n_classes = len(all_classes)
 
         if _XGB_AVAILABLE:
             self._model = xgb.XGBClassifier(
                 objective="multi:softprob",
                 num_class=n_classes,
                 tree_method="hist",
-                max_depth=6,
-                n_estimators=200,
-                learning_rate=0.08,
+                max_depth=5,
+                n_estimators=80,
+                learning_rate=0.10,
                 subsample=0.8,
                 colsample_bytree=0.8,
-                eval_metric="mlogloss",
-                early_stopping_rounds=20,
                 n_jobs=-1,
                 verbosity=0,
             )
-            self._model.fit(
-                X_tr, y_tr,
-                eval_set=[(X_val, y_val)],
-                verbose=False,
-            )
+            # Train on full dataset — no early stopping to avoid class mismatch
+            self._model.fit(X, y_remapped, verbose=False)
         else:
             self._model = GradientBoostingClassifier(
-                n_estimators=200,
+                n_estimators=80,
                 max_depth=5,
-                learning_rate=0.08,
+                learning_rate=0.10,
                 subsample=0.8,
             )
-            self._model.fit(X_tr, y_tr)
+            self._model.fit(X, y_remapped)
 
-        logger.info(f"Model trained on {len(X_tr)} samples, {n_classes} classes.")
+        logger.info(f"Model trained on {len(X)} samples, {n_classes} classes.")
         self._loaded = True
 
     # ── Internal helpers ──────────────────────────────────────────────────────
