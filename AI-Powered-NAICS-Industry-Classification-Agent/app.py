@@ -765,12 +765,9 @@ else:
 page = st.sidebar.radio(
     "Navigate",
     [
-        "Single Company Lookup",
-        "Batch Classification",
-        "Risk Dashboard",
-        "Taxonomy Explorer",
+        "Classify",
         "Industry Lookup",
-        "Source Architecture",
+        "Taxonomy Explorer",
     ],
     index=0,
 )
@@ -783,60 +780,37 @@ er = get_entity_resolver()
 
 
 # ────────────────────────────────────────────────────────────────────────────────
-# PAGE 1 — SINGLE COMPANY LOOKUP
+# PAGE 1 — CLASSIFY (single company OR batch file — merged)
 # ────────────────────────────────────────────────────────────────────────────────
 
-if page == "Single Company Lookup":
-    st.title("Single Company Global Classification")
-    st.markdown(
-        "Enter a company name and optional metadata. The engine runs entity resolution, "
-        "multi-source vendor simulation, UGO semantic search, XGBoost consensus, "
-        "LLM enrichment, and AML/KYB risk scoring in a single pipeline."
+if page == "Classify":
+    st.title("Industry Classification")
+    st.caption(
+        "Classify a single company by name, or upload a file of companies. "
+        "The same full pipeline runs either way: entity matching → XGBoost consensus → "
+        "LLM enrichment → AML/KYB risk scoring."
     )
 
-    with st.expander("How this pipeline works — click to understand what you're seeing"):
-        st.markdown("""
-**Step 1 — Entity Resolution**
-The company name is canonised using the same algorithm as Worth's `entity_matching` pipeline
-(stripping legal suffixes like LLC, GmbH, PLC, SAS; normalising accents and special characters).
-The system then looks up the canonical name against a known-entity table — simulating a live query
-to the Redshift tables used by `matching_v1.py`:
-- `dev.datascience.open_corporates_standard_ml_2`
-- `dev.warehouse.equifax_us_standardized`
-- `dev.datascience.zoominfo_standard_ml_2`
-
-**Step 2 — Multi-Source Signal Collection (Level 0)**
-Six vendor sources are queried simultaneously. For recognised companies, each source returns
-its actual industry code from the database record, with a `match_confidence` from the entity-matching
-XGBoost model (`entity_matching_20250127`). For unknown companies, signals are simulated.
-
-**Step 3 — Feature Engineering (Level 1)**
-38 numeric features are computed from the 6 source signals. These include: per-source weighted
-confidence, data quality flags (Trulioo pollution), semantic distance between registry and web
-labels, temporal pivot score (how often the code changes), jurisdiction one-hot encoding,
-entity type flags, and source agreement scores.
-
-**Step 4 — XGBoost Consensus (Level 2)**
-An XGBoost multi-class classifier takes the 38-feature vector and outputs a probability
-distribution over all industry codes. The top-5 codes with their probabilities are returned.
-A low probability (< 40%) means the model is uncertain — not that the company is risky.
-
-**Step 5 — LLM Enrichment**
-GPT-4o-mini selects the best code per taxonomy from UGO semantic search candidates,
-considering the company's jurisdiction to pick the correct taxonomy (UK SIC for GB, NACE for EU, etc.).
-
-**Step 6 — Risk Engine**
-Nine AML/KYB signal detectors check for: registry vs. web discrepancy, shell company patterns,
-high-risk sector codes, industry code pivot history, source conflicts, and data quality issues.
-Risk signals reflect data quality and structural patterns — not a judgment on the company's integrity.
-
-**Important note on well-known companies:**
-For globally recognised companies (Apple, Google, etc.), the current simulator has entity-matching
-data that returns correct codes. If a company shows a low consensus probability or unexpected signals,
-it means the entity is either unknown to the simulator, or the "Inject shell-company conflict"
-checkbox is enabled.
-""")
+    mode_tab = st.radio(
+        "Input mode",
+        ["Single company", "Upload file (batch)"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
     st.markdown("---")
+
+if page == "Classify" and mode_tab == "Single company":
+    with st.expander("How the pipeline works — 4 steps"):
+        st.markdown(
+            "**Step 1 — Entity Matching (Model 1 XGBoost):** Canonises name, searches OpenCorporates / "
+            "Equifax / ZoomInfo / Liberty Data in Redshift. Outputs `match_confidence` per source.\n\n"
+            "**Step 2 — Consensus (Model 2 XGBoost):** 38 features from all signals → softmax probability "
+            "distribution over all codes. Top-5 codes with calibrated probabilities.\n\n"
+            "**Step 3 — LLM Enrichment (GPT-4o-mini):** Reviews vendor evidence + SEC EDGAR / Companies House "
+            "ground truth. Selects best code per taxonomy (NAICS, UK SIC, NACE, ISIC, MCC).\n\n"
+            "**Step 4 — Risk Engine:** 9 AML/KYB detectors → risk score 0–1 → "
+            "KYB: APPROVE / REVIEW / ESCALATE / REJECT."
+        )
 
     with st.form("single_lookup"):
         c1, c2 = st.columns(2)
@@ -948,92 +922,31 @@ checkbox is enabled.
 
 
 # ────────────────────────────────────────────────────────────────────────────────
-# PAGE 2 — BATCH CLASSIFICATION
+# PAGE 1b — CLASSIFY / BATCH (merged into Classify page, Upload File mode)
 # ────────────────────────────────────────────────────────────────────────────────
 
-elif page == "Batch Classification":
-    st.title("Batch Global Classification")
-    st.markdown(
-        "Process hundreds of companies at once. Upload a file, run the full pipeline "
-        "on every row, and download a results spreadsheet with industry codes, "
-        "risk scores, and KYB recommendations."
+elif page == "Classify" and mode_tab == "Upload file (batch)":
+    pass  # header already printed above
+
+if page == "Classify" and mode_tab == "Upload file (batch)":
+    st.caption(
+        "Upload a CSV or Excel file. Column names are auto-detected — including Worth AI / Amex format "
+        "(`lgl_nm_worth`, `dba_nm_worth`, `full_address_worth`, `city_worth`, `region_worth`, `zip_code_worth`, `country_worth`). "
+        "More fields = higher entity matching confidence. Minimum: company name."
     )
-
-    with st.expander("What this page does — inputs, outputs, and how to interpret results"):
+    with st.expander("Accepted column names and confidence tips"):
         st.markdown("""
-### What it does
-Runs the **complete 6-step classification pipeline** (entity resolution → 6-source vendor lookup →
-38-feature XGBoost consensus → LLM enrichment → AML/KYB risk engine) on every row in your file simultaneously.
-
-### Input file format
-Upload a **CSV or Excel (.xlsx)** file. The app **auto-detects your column names** — including Amex/Worth AI format columns like `lgl_nm_worth`, `dba_nm_worth`, etc.
-
-#### Standard column names (any of these work)
-
-| What the field is | Column names the app recognises |
-|---|---|
-| **Company name** ✅ Required | `Org Name`, `lgl_nm_worth`, `lgl_nm_received`, `company_name`, `business_name`, `name`, `Company`, `BusinessName` |
-| **DBA / Trade name** | `dba_nm_worth`, `dba_nm_received`, `dba_name`, `DBA`, `trade_name` |
-| **Full address** | `full_address_worth`, `Address`, `business_address_received`, `address`, `street_address` |
-| **Street address line 1** | `address_1_worth`, `address_1`, `street_1`, `Address Line 1` |
-| **City** | `city_worth`, `city`, `City` |
-| **State / Region** | `region_worth`, `region`, `state`, `State`, `Region` |
-| **Postal / ZIP code** | `zip_code_worth`, `postal_code`, `zip`, `postcode`, `ZIP Code` |
-| **Country** | `country_worth`, `country`, `Country` |
-| **Description / URL** | `Description`, `website`, `url`, `business_description` |
-| **UID / Reference** | `uid_worth`, `uid_received` — passed through to output for traceability |
-
-#### How extra fields improve confidence
-
-The more fields you provide, the better the entity matching (Model 1) and classification consensus (Model 2):
-
-| Fields provided | Entity matching | Classification confidence |
+| Field | Accepted column names | Impact |
 |---|---|---|
-| Company name only | Low | Low |
-| + Country | Low | Medium (correct taxonomy routing) |
-| + ZIP / postal code | **High** (strongest address signal) | High |
-| + Full address + City | Very high | Very high |
-| + DBA name + Region | Excellent | Excellent |
-
-**Minimum recommended:** `lgl_nm_worth` (or `Org Name`) + `country_worth` (or `Country`)
-
-### Output columns explained
-
-| Column | What it means |
-|--------|---------------|
-| `Clean Name` | Company name after suffix removal (LLC, GmbH, PLC…) and accent normalisation |
-| `Jurisdiction` | Detected OpenCorporates jurisdiction code (`us`, `gb`, `us_mo`, `ca_bc`…) |
-| `Entity Type` | Detected legal entity type: Operating / Holding / Partnership / NGO / Trust |
-| `Primary Taxonomy` | Which classification system was used for the primary code (auto-selected per jurisdiction) |
-| `Primary Code` | The winning industry code (e.g. `334118` for Apple, `64191` for Barclays) |
-| `Primary Desc` | Human-readable description of the primary code |
-| `Consensus Prob` | XGBoost model's confidence in the primary code — **0.0–1.0** (higher = more certain) |
-| `LLM Code` | Code selected by GPT-4o-mini from UGO semantic search candidates |
-| `LLM Taxonomy` | Taxonomy the LLM used (may differ from XGBoost if sources disagree) |
-| `LLM Confidence` | LLM self-reported confidence: HIGH / MEDIUM / LOW |
-| `MCC Code` | Merchant Category Code (4-digit Visa/Mastercard payment network code) |
-| `Risk Level` | Aggregate AML/KYB risk: **LOW / MEDIUM / HIGH / CRITICAL** |
-| `Risk Score` | Numeric risk score 0.00–1.00 (sum of all signal scores, capped at 1.0) |
-| `KYB Recommendation` | Action recommendation: **APPROVE / REVIEW / ESCALATE / REJECT** |
-| `Risk Flags` | Semicolon-separated list of triggered risk signals |
-
-### How to interpret Consensus Probability
-- **≥ 0.70**: High confidence — well-known company or sources strongly agree
-- **0.40–0.70**: Moderate confidence — some source disagreement, review recommended
-- **< 0.40**: Low confidence — company unknown to databases, or sources heavily conflict
-
-### How to interpret Risk Level
-- 🟢 **LOW** (score < 0.25): Standard business. No significant AML signals. → APPROVE
-- 🟡 **MEDIUM** (0.25–0.50): Some flags raised. Requires manual review. → REVIEW
-- 🟠 **HIGH** (0.50–0.75): Significant signals. Needs escalation. → ESCALATE
-- 🔴 **CRITICAL** (≥ 0.75): Multiple serious signals. → REJECT pending investigation
-
-### Tips
-- Company names with typos resolve automatically (`Mycrosoft` → Microsoft)
-- The `Country` column accepts jurisdiction codes (`us_mo`, `ca_bc`, `ae_az`) for state/province precision
-- Download the Excel output, then use the `Risk Level` column to filter for HIGH/CRITICAL cases
+| **Company name** ✅ | `lgl_nm_worth`, `Org Name`, `company_name`, `business_name`, `name` | Required |
+| DBA / Trade name | `dba_nm_worth`, `DBA`, `trade_name` | Catches trade name variants |
+| Full address | `full_address_worth`, `Address`, `full_address` | High — disambiguates same-name companies |
+| City | `city_worth`, `city`, `City` | Medium |
+| State / Region | `region_worth`, `region`, `state` | Derives jurisdiction (US+AK → `us_ak`) |
+| ZIP / Postal code | `zip_code_worth`, `postal_code`, `zip` | **Highest impact — prefix-blocks Redshift search** |
+| Country | `country_worth`, `country`, `Country` | Routes to correct taxonomy (GB→UK SIC, DE→NACE) |
+| UID / Reference | `uid_worth`, `uid_received` | Passed through to output unchanged |
 """)
-    st.markdown("---")
 
     uploaded = st.file_uploader("Upload file", type=["csv", "xlsx"])
 
@@ -1278,26 +1191,52 @@ The more fields you provide, the better the entity matching (Model 1) and classi
                     })
             st.session_state["batch_taxonomy_df"] = pd.DataFrame(tax_rows)
             status.empty()
-            st.success(f"Batch complete in {elapsed:.1f}s")
+            n_total = len(df_results)
+            st.success(f"Done — {n_total} companies classified in {elapsed:.1f}s")
 
-            # Confidence distribution chart
-            if "Consensus Prob" in df_results.columns:
-                st.subheader("Consensus Probability Distribution")
-                hist = pd.cut(
-                    df_results["Consensus Prob"].dropna(),
-                    bins=[0, 0.3, 0.5, 0.7, 0.85, 1.0],
-                    labels=["<30%", "30–50%", "50–70%", "70–85%", ">85%"],
-                ).value_counts().sort_index()
-                st.bar_chart(hist)
+            # ── Portfolio summary cards ───────────────────────────────────────
+            st.markdown("### Portfolio Summary")
+            kyb_counts = df_results["KYB Recommendation"].value_counts() if "KYB Recommendation" in df_results.columns else pd.Series(dtype=int)
+            risk_col = df_results["Risk Score"].dropna() if "Risk Score" in df_results.columns else pd.Series(dtype=float)
+            prob_col  = df_results["Consensus Prob"].dropna() if "Consensus Prob" in df_results.columns else pd.Series(dtype=float)
 
-            # Risk level distribution
+            sm1, sm2, sm3, sm4, sm5 = st.columns(5)
+            sm1.metric("Total", n_total)
+            sm2.metric("APPROVE",  kyb_counts.get("APPROVE", 0),  delta=None)
+            sm3.metric("REVIEW",   kyb_counts.get("REVIEW", 0),   delta=None)
+            sm4.metric("ESCALATE / REJECT", kyb_counts.get("ESCALATE",0)+kyb_counts.get("REJECT",0), delta=None)
+            sm5.metric("Avg Confidence", f"{prob_col.mean():.0%}" if not prob_col.empty else "—")
+
+            # Risk distribution bar chart
             if "Risk Level" in df_results.columns:
-                st.subheader("Risk Level Distribution")
-                st.bar_chart(df_results["Risk Level"].value_counts())
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("**KYB Recommendation**")
+                    st.bar_chart(kyb_counts)
+                with c2:
+                    st.markdown("**Risk Level Distribution**")
+                    st.bar_chart(df_results["Risk Level"].value_counts())
 
-            # Editable results table
-            st.subheader("Results")
-            edited = st.data_editor(df_results, use_container_width=True)
+            # High-risk entities highlighted
+            if "Risk Level" in df_results.columns:
+                df_high = df_results[df_results["Risk Level"].isin(["HIGH","CRITICAL"])]
+                if not df_high.empty:
+                    st.markdown(f"**⚠️ {len(df_high)} company/companies require immediate review (HIGH/CRITICAL):**")
+                    show_cols = [c for c in ["Org Name","Jurisdiction","Primary Code","Primary Label","Risk Level","Risk Score","KYB Recommendation","Risk Flags"] if c in df_high.columns]
+                    st.dataframe(df_high[show_cols].sort_values("Risk Score",ascending=False), use_container_width=True, hide_index=True)
+
+            st.markdown("---")
+            st.markdown("### All Results")
+
+            # Show/hide columns for clarity
+            key_cols = [c for c in [
+                "UID","Org Name","Clean Name","Jurisdiction","Entity Type",
+                "Primary Taxonomy","Primary Code","Primary Desc","Consensus Prob",
+                "LLM Code","LLM Taxonomy","LLM Label","LLM Confidence",
+                "MCC Code","Risk Level","Risk Score","KYB Recommendation","Risk Flags",
+                "SEC EDGAR SIC","SEC EDGAR SIC Desc",
+            ] if c in df_results.columns]
+            st.dataframe(df_results[key_cols], use_container_width=True, hide_index=True)
 
             # Download
             def to_excel(df: pd.DataFrame) -> bytes:
@@ -1307,10 +1246,11 @@ The more fields you provide, the better the entity matching (Model 1) and classi
                 return buf.read()
 
             st.download_button(
-                "Download Results (Excel)",
-                data=to_excel(edited),
-                file_name="global_classification_results.xlsx",
+                "📥 Download Results (Excel)",
+                data=to_excel(df_results[key_cols]),
+                file_name="classification_results.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
             )
 
 
@@ -1318,7 +1258,7 @@ The more fields you provide, the better the entity matching (Model 1) and classi
 # PAGE 3 — RISK DASHBOARD
 # ────────────────────────────────────────────────────────────────────────────────
 
-elif page == "Risk Dashboard":
+elif page == "__removed_risk_dashboard__":
     st.title("AML / KYB Risk Dashboard")
     st.markdown(
         "Portfolio-level AML/CTF risk analysis. Analyse your uploaded batch file **or** "
@@ -1518,127 +1458,14 @@ real Redshift data (OpenCorporates, Equifax, ZoomInfo, Liberty Data).
 # PAGE 4 — TAXONOMY EXPLORER
 # ────────────────────────────────────────────────────────────────────────────────
 
-elif page == "Taxonomy Explorer":
-    st.title("Unified Global Ontology Explorer")
-    st.markdown(
-        "Semantic search engine across all 2,330 industry codes in 6 taxonomy systems. "
-        "Type any business description and instantly see cross-taxonomy matches ranked by similarity."
+elif page == "Taxonomy Explorer":  # Tab 3
+    st.title("Taxonomy Explorer")
+    st.caption(
+        "Search 2,330 industry codes across 6 classification systems (NAICS, UK SIC, NACE, ISIC, MCC, SIC) "
+        "by description or keyword. Use this to verify a code, translate between taxonomies, or find the right "
+        "code for a business type."
     )
-
-    # ── Show codes from previous search/upload ────────────────────────────────
-    _single_tax_df = st.session_state.get("single_taxonomy_df")
-    _batch_tax_df  = st.session_state.get("batch_taxonomy_df")
-    _single_name   = st.session_state.get("single_result", {}).get("company_name", "")
-
-    if _single_tax_df is not None and not _single_tax_df.empty:
-        st.success(f"Showing codes classified for: **{_single_name}**")
-        st.subheader(f"Classification Codes for {_single_name}")
-        st.dataframe(_single_tax_df, use_container_width=True, hide_index=True)
-
-        # UGO semantic search for each code to show cross-taxonomy neighbours
-        te_e = get_taxonomy_engine()
-        with st.expander("Cross-taxonomy exploration — find similar codes in other systems"):
-            for _, row in _single_tax_df.iterrows():
-                if not row.get("Description") or row.get("Prob") == "—":
-                    continue
-                label = row["Description"]
-                sim_results = te_e.search(label, top_k=5)
-                st.markdown(f"**{row['Source']} `{row['Code']}`** — *{label}*")
-                sim_rows = [
-                    {
-                        "Taxonomy":    r.taxonomy.replace("_"," "),
-                        "Code":        r.code,
-                        "Description": r.description,
-                        "Similarity":  f"{score:.3f}",
-                    }
-                    for r, score in sim_results
-                    if r.code != row["Code"]
-                ][:4]
-                if sim_rows:
-                    st.dataframe(pd.DataFrame(sim_rows), use_container_width=True, hide_index=True)
-        st.markdown("---")
-        st.subheader("Search the full taxonomy index below")
-
-    elif _batch_tax_df is not None and not _batch_tax_df.empty:
-        n_companies = _batch_tax_df["Company"].nunique() if "Company" in _batch_tax_df.columns else 0
-        st.success(f"Showing codes from your batch file — {len(_batch_tax_df)} codes across {n_companies} companies.")
-        st.subheader("All Classification Codes from Batch File")
-
-        # Filter by company
-        companies = sorted(_batch_tax_df["Company"].unique().tolist()) if "Company" in _batch_tax_df.columns else []
-        if len(companies) > 1:
-            selected_company = st.selectbox("Filter by company (or show all)", ["All companies"] + companies)
-            if selected_company != "All companies":
-                show_df = _batch_tax_df[_batch_tax_df["Company"] == selected_company]
-            else:
-                show_df = _batch_tax_df
-        else:
-            show_df = _batch_tax_df
-
-        st.dataframe(show_df, use_container_width=True, hide_index=True)
-
-        # Download
-        csv_bytes = show_df.to_csv(index=False).encode()
-        st.download_button(
-            "📥 Download Taxonomy Results (CSV)",
-            data=csv_bytes,
-            file_name="taxonomy_codes.csv",
-            mime="text/csv",
-        )
-        st.markdown("---")
-        st.subheader("Search the full taxonomy index below")
-    else:
-        st.info(
-            "**Tip:** Search a company in **Single Company Lookup** or upload a file in **Batch Classification** "
-            "and the codes assigned to your companies will appear here automatically, with cross-taxonomy "
-            "exploration for each code."
-        )
-
-    with st.expander("What this page does — how semantic search works and how to use it"):
-        st.markdown("""
-### What it does
-This is the **Unified Global Ontology (UGO)** — a FAISS vector index of all 2,330 industry
-codes across 6 classification systems, embedded using `all-MiniLM-L6-v2` sentence transformers.
-
-Instead of keyword matching, it uses **cosine similarity** in embedding space: codes whose
-*meaning* is similar rank higher, even if the words are different.
-
-### The 6 Taxonomy Systems
-
-| Taxonomy | Authority | Jurisdictions | Codes | Use case |
-|----------|-----------|--------------|-------|----------|
-| **NAICS 2022** | US Census Bureau | US, Canada, Australia | 1,033 | Primary for North America |
-| **UK SIC 2007** | Companies House / ONS | UK, Guernsey, Jersey | 386 | Required for UK regulatory reporting |
-| **NACE Rev.2** | Eurostat | All EU/EEA countries | 88 | EU statistical classification |
-| **ISIC Rev.4** | United Nations | Global fallback | 439 | International/UN standard |
-| **US SIC 1987** | SEC / US Government | United States (legacy) | 79 | Legacy codes; Equifax still uses these |
-| **MCC** | Visa / Mastercard | Global (payment networks) | 305 | Payment processing compliance |
-
-### How to Search
-Type any business description, product category, or activity. Examples:
-- `"restaurant food service"` → UK SIC 56101, NAICS 722511, ISIC 5610
-- `"software development consulting"` → UK SIC 62012, NAICS 541512, NACE J62
-- `"banking financial services"` → UK SIC 64191, NAICS 522110, NACE K64
-- `"pharmaceutical manufacturing"` → NAICS 325412, UK SIC 21200, NACE C21
-
-### Understanding the Similarity Score
-The Similarity column shows the **cosine similarity** (0.0–1.0):
-- **≥ 0.75**: Very strong semantic match — this code almost certainly describes your business
-- **0.55–0.75**: Good match — likely relevant but verify the description
-- **< 0.55**: Weak match — tangentially related
-
-### Cross-Taxonomy Distance Matrix
-When you search, the app also shows a **semantic distance matrix** between the top 5 results.
-- **0.00**: Codes describe identical concepts (e.g. NAICS 722511 and UK SIC 56101 both = "full-service restaurant")
-- **0.50+**: Codes describe different sectors (e.g. restaurant vs. financial services)
-This demonstrates **Cross-Ontology Embedding Alignment** — the ability to directly compare
-codes from different systems without a hardcoded crosswalk table.
-
-### Cross-Taxonomy Agreement
-Enter a description in the bottom section to see what each taxonomy maps it to.
-High agreement (same concept across 4+ taxonomies) = high classification confidence.
-""")
-    st.markdown("---")
+    st.markdown("")
 
     te_engine = get_taxonomy_engine()
 
@@ -1702,7 +1529,7 @@ High agreement (same concept across 4+ taxonomies) = high classification confide
 # PAGE 5 — INDUSTRY LOOKUP (Jurisdiction-aware searchable dropdown)
 # ────────────────────────────────────────────────────────────────────────────────
 
-elif page == "Industry Lookup":
+elif page == "Industry Lookup":  # Tab 2
     from industry_dropdown import (
         get_entries, search_entries, get_taxonomy_label,
         taxonomy_for_jurisdiction, get_all_taxonomy_names,
@@ -1926,7 +1753,7 @@ Different countries have different official standards:
 # PAGE 6 — SOURCE ARCHITECTURE
 # ────────────────────────────────────────────────────────────────────────────────
 
-elif page == "Source Architecture":
+elif page == "__removed_source_arch__":
     from source_registry import all_sources, active_sources, planned_sources, SOURCE_REGISTRY
 
     st.title("Source Architecture — All Classification Data Sources")
