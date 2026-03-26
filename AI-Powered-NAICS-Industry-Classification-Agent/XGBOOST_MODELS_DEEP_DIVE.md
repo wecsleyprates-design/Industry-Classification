@@ -1,6 +1,17 @@
 # The Two XGBoost Models in Industry Classification
 ## A Deep Dive: What Worth AI Has, What Is Missing, and Why the Consensus Engine Needs Both
 
+**📚 Deck 3 of 4 — Read after Technical Briefing.**
+
+| Reading Order | Document | Slides |
+|---|---|---|
+| 1 | [PIPELINE_PHASES_DEEP_DIVE.md](PIPELINE_PHASES_DEEP_DIVE.md) | [phases.html](https://wecsleyprates-design.github.io/Industry-Classification/phases.html) |
+| 2 | [TECHNICAL_BRIEFING.md](TECHNICAL_BRIEFING.md) | [slides.html](https://wecsleyprates-design.github.io/Industry-Classification/slides.html) |
+| **3 → You are here** | This document | [models.html](https://wecsleyprates-design.github.io/Industry-Classification/models.html) |
+| 4 | — | [presentation.html](https://wecsleyprates-design.github.io/Industry-Classification/presentation.html) |
+
+**Full learning portal:** https://wecsleyprates-design.github.io/Industry-Classification/
+
 **Audience:** Engineering team, data scientists, product managers  
 **Date:** March 2026  
 **Source:** `entity_matching/core/matchers/matching_v1.py`, `integration-service/lib/facts/`, new Consensus Engine codebase

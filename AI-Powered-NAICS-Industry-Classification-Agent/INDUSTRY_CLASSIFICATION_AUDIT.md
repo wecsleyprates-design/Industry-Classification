@@ -1,8 +1,12 @@
 # Industry Classification Audit
 ## What Worth AI Has · What It Uses · What It Drops · What the Consensus Adds
 
+**Supplementary reference document — read alongside the 4 main decks.**
+
+**Full learning portal:** https://wecsleyprates-design.github.io/Industry-Classification/
+
 **Date:** March 2026  
-**Scope:** Complete audit of all six data sources across integration-service, warehouse-service, case-service, and manual-score-service based on S3 bucket structure, TypeScript types, Pydantic models, and SQL procedures.
+**Scope:** Complete audit of all six data sources (S3 buckets, TypeScript types, Pydantic models, SQL procedures) across integration-service, warehouse-service, case-service, and manual-score-service based on S3 bucket structure, TypeScript types, Pydantic models, and SQL procedures.
 
 ---
 

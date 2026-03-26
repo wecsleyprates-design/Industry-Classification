@@ -1,6 +1,17 @@
 # Technical Briefing: Industry Classification
 ## Worth AI Current Pipeline vs. Global Consensus Engine
 
+**📚 Deck 2 of 4 — Read after Pipeline Phases.**
+
+| Reading Order | Document | Slides |
+|---|---|---|
+| 1 | [PIPELINE_PHASES_DEEP_DIVE.md](PIPELINE_PHASES_DEEP_DIVE.md) | [phases.html](https://wecsleyprates-design.github.io/Industry-Classification/phases.html) |
+| **2 → You are here** | This document | [slides.html](https://wecsleyprates-design.github.io/Industry-Classification/slides.html) |
+| 3 | [XGBOOST_MODELS_DEEP_DIVE.md](XGBOOST_MODELS_DEEP_DIVE.md) | [models.html](https://wecsleyprates-design.github.io/Industry-Classification/models.html) |
+| 4 | — | [presentation.html](https://wecsleyprates-design.github.io/Industry-Classification/presentation.html) |
+
+**Full learning portal:** https://wecsleyprates-design.github.io/Industry-Classification/
+
 **Prepared for:** Engineering Team & Management  
 **Date:** March 2026  
 **Sources:** `SIC-UK-Codes` repo (integration-service, case-service, warehouse-service), `Entity-Matching` repo (matching_v1.py, build_matching_tables.py), `WORTH_INDUSTRY_CLASSIFICATION_REPORT.md`, and new Consensus Engine codebase

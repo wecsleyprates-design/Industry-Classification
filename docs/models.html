@@ -71,12 +71,16 @@ td.par{color:#E65100;font-weight:700;}
 
 <!-- ═══════════ SLIDE 1 — TITLE ═══════════ -->
 <section class="title-slide" data-background-color="#0D1B2A">
+  <div style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.2);border-radius:20px;padding:6px 20px;display:inline-block;font-size:0.55em;color:#90CAF9;margin-bottom:16px;">
+    📚 Deck 3 of 4 — Read after Technical Briefing
+  </div>
   <h1>The Two XGBoost Models</h1>
   <h2>Industry Classification — A Deep Dive</h2>
   <br/>
   <p>What Worth AI has · What is missing · Why the Consensus Engine needs both</p>
-  <br/>
-  <p>Engineering &amp; Product · March 2026</p>
+  <p style="font-size:0.52em;color:#546E7A;margin-top:10px">
+    Prerequisite: Deck 1 (Phases) + Deck 2 (Technical Briefing) · Full portal: <strong style="color:#90CAF9">wecsleyprates-design.github.io/Industry-Classification</strong>
+  </p>
 </section>
 
 <!-- ═══════════ SLIDE 2 — FRAMING ═══════════ -->
@@ -653,7 +657,11 @@ NAICS 541511 → 0.11
     <div style="color:#A5D6A7;font-size:0.75em;margin-bottom:12px">🟢 <strong style="color:white">Model 1 (Entity Matching):</strong> Already in Worth AI. Answers "Is this the same company?" using 26 name+address features. Output feeds directly into Model 2 as weighted confidence features.</div>
     <div style="color:#EF9A9A;font-size:0.75em;margin-bottom:12px">🔴 <strong style="color:white">Worth AI classification:</strong> Not a model — a deterministic rule. Picks one NAICS winner. No probability. No learning. No jurisdiction routing. No AML signals.</div>
     <div style="color:#90CAF9;font-size:0.75em;margin-bottom:12px">🔵 <strong style="color:white">Model 2 (Classification Consensus):</strong> New in Consensus Engine. 38 features encode ALL vendor signals, data quality, jurisdiction context, AML patterns. XGBoost multi:softprob outputs calibrated probability distribution → multi-taxonomy output + 9 risk signals.</div>
-    <div style="color:#FFE082;font-size:0.75em">🚀 <strong style="color:white">Why both are needed:</strong> Model 1 finds the right evidence. Model 2 synthesises it into an actionable, probability-weighted, risk-annotated classification across all jurisdictions and taxonomies simultaneously.</div>
+    <div style="color:#FFE082;font-size:0.75em;margin-bottom:14px">🚀 <strong style="color:white">Why both are needed:</strong> Model 1 finds the right evidence. Model 2 synthesises it into an actionable, probability-weighted, risk-annotated classification across all jurisdictions and taxonomies simultaneously.</div>
+    <div style="border-top:1px solid rgba(255,255,255,.15);padding-top:12px;font-size:0.58em;color:#90CAF9">
+      <a href="presentation.html" style="color:#90CAF9">→ Deck 4: System Overview</a> — the complete Consensus Engine architecture, taxonomies, and live output<br/>
+      <a href="index.html" style="color:#FFE082">→ Learning Portal</a> — all 4 decks with full reading guide
+    </div>
   </div>
 </section>
 

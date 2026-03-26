@@ -1,9 +1,34 @@
 # Industry Classification Pipeline Phases
 ## Worth AI End-to-End Flow vs. Where the Consensus Engine Fits
 
+**📚 Deck 1 of 4 — Read this first. All other documents build on this.**
+
+| Reading Order | Document | Slides |
+|---|---|---|
+| **1 → Start here** | This document | [phases.html](https://wecsleyprates-design.github.io/Industry-Classification/phases.html) |
+| 2 | [TECHNICAL_BRIEFING.md](TECHNICAL_BRIEFING.md) | [slides.html](https://wecsleyprates-design.github.io/Industry-Classification/slides.html) |
+| 3 | [XGBOOST_MODELS_DEEP_DIVE.md](XGBOOST_MODELS_DEEP_DIVE.md) | [models.html](https://wecsleyprates-design.github.io/Industry-Classification/models.html) |
+| 4 | — | [presentation.html](https://wecsleyprates-design.github.io/Industry-Classification/presentation.html) |
+
+**Full learning portal:** https://wecsleyprates-design.github.io/Industry-Classification/
+
 **Audience:** Engineering team and management  
 **Date:** March 2026  
 **Purpose:** Explain the complete data journey from applicant submission to industry classification, and precisely where the Consensus Engine replaces Worth AI's logic.
+
+---
+
+## The Most Important Thing to Know Before Reading Anything
+
+**Worth AI already receives all the data it needs for complete global industry classification. The pipeline collects it, stores a fraction of it, and discards the rest at Phase 4.**
+
+- OpenCorporates sends `uk_sic-62012` in `industry_code_uids` for every UK company — the loop only reads `us_naics`
+- Trulioo sends `{ naicsCode, sicCode }` in the same object — `.sicCode` is adjacent, never read
+- Equifax sends 25 industry columns — only `primnaicscode` is used (24 dropped)
+- `jurisdiction_code` for 16M+ GB companies sits in Redshift — used for matching, never for taxonomy routing
+- `match_confidence` per source from Model 1 — used to pick 1 winner, never as 38 numeric features
+
+The Consensus Engine does not add new data sources. It adds a Phase 4 that reads the same data more completely, encodes it as 38 numeric features, and applies a trained XGBoost model.
 
 ---
 

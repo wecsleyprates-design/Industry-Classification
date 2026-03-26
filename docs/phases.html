@@ -91,12 +91,52 @@ td.par{color:#E65100;font-weight:700;}
 
 <!-- ═══ SLIDE 1 — TITLE ═══ -->
 <section class="title-slide" data-background-color="#0D1B2A">
-  <h1>Industry Classification Phases</h1>
+  <div style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.2);border-radius:20px;padding:6px 20px;display:inline-block;font-size:0.58em;color:#90CAF9;margin-bottom:16px;">
+    📚 Deck 1 of 4 — Read this first
+  </div>
+  <h1>Pipeline Phases</h1>
   <h2>The Complete Data Journey — Worth AI vs. Consensus Engine</h2>
   <br/>
-  <p>From applicant submission to classification output — every step explained</p>
-  <br/>
-  <p>Engineering &amp; Product · March 2026</p>
+  <p>From government registries → Redshift → vendor APIs → Phase 4 decision</p>
+  <p style="font-size:0.55em;color:#546E7A;margin-top:10px">
+    After this deck: read Deck 2 (Technical Briefing) → Deck 3 (XGBoost Models) → Deck 4 (System Overview)<br/>
+    Full learning portal: <strong style="color:#90CAF9">wecsleyprates-design.github.io/Industry-Classification</strong>
+  </p>
+</section>
+
+<!-- ═══ SLIDE 1b — DATA ALREADY EXISTS ═══ -->
+<section style="background:#1B5E20 !important;">
+  <h2 style="color:#A5D6A7 !important;border-color:#66BB6A;">The Most Important Insight — Before Any Phase</h2>
+  <div style="margin-top:10px">
+    <div style="background:rgba(255,255,255,.1);border-radius:10px;padding:16px;margin-bottom:10px;font-size:0.62em;color:#C8E6C9;line-height:1.7">
+      <strong style="color:white;font-size:1.1em">Worth AI already receives all the data it needs for complete global industry classification.</strong><br/>
+      The pipeline collects it, stores a fraction of it, and discards the rest at Phase 4.
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div>
+        <h3 style="color:#A5D6A7;font-size:0.62em;margin-bottom:8px">DATA ALREADY IN THE PIPELINE — NOT USED</h3>
+        <div style="font-size:0.54em;display:grid;gap:5px">
+          <div style="background:rgba(198,40,40,.2);border:1px solid rgba(198,40,40,.4);border-radius:6px;padding:7px 10px;color:#FFCDD2"><code>uk_sic-62012</code> in OpenCorporates <code>industry_code_uids</code> — loop only reads <code>us_naics</code></div>
+          <div style="background:rgba(198,40,40,.2);border:1px solid rgba(198,40,40,.4);border-radius:6px;padding:7px 10px;color:#FFCDD2">Trulioo returns <code>{ naicsCode, sicCode }</code> — <code>.sicCode</code> is adjacent, never read</div>
+          <div style="background:rgba(198,40,40,.2);border:1px solid rgba(198,40,40,.4);border-radius:6px;padding:7px 10px;color:#FFCDD2">Equifax: 25 industry columns available — only <code>primnaicscode</code> used (24 dropped)</div>
+          <div style="background:rgba(198,40,40,.2);border:1px solid rgba(198,40,40,.4);border-radius:6px;padding:7px 10px;color:#FFCDD2"><code>jurisdiction_code</code> for 16M+ GB companies in Redshift — used for matching, not taxonomy routing</div>
+          <div style="background:rgba(198,40,40,.2);border:1px solid rgba(198,40,40,.4);border-radius:6px;padding:7px 10px;color:#FFCDD2"><code>rel_business_industry_naics</code> has historical codes — never checked for pivot/change patterns</div>
+          <div style="background:rgba(198,40,40,.2);border:1px solid rgba(198,40,40,.4);border-radius:6px;padding:7px 10px;color:#FFCDD2"><code>match_confidence</code> per source from Model 1 — used to pick 1 winner, never as 38-feature input</div>
+        </div>
+      </div>
+      <div>
+        <h3 style="color:#A5D6A7;font-size:0.62em;margin-bottom:8px">WHAT THE CONSENSUS ENGINE DOES WITH IT</h3>
+        <div style="font-size:0.54em;display:grid;gap:5px">
+          <div style="background:rgba(46,125,50,.3);border:1px solid rgba(102,187,106,.4);border-radius:6px;padding:7px 10px;color:#C8E6C9">Reads ALL entries from <code>industry_code_uids</code> → routes uk_sic to UK SIC 2007 output</div>
+          <div style="background:rgba(46,125,50,.3);border:1px solid rgba(102,187,106,.4);border-radius:6px;padding:7px 10px;color:#C8E6C9">Reads Trulioo <code>.sicCode</code> alongside <code>.naicsCode</code> — 2nd UK SIC source immediately</div>
+          <div style="background:rgba(46,125,50,.3);border:1px solid rgba(102,187,106,.4);border-radius:6px;padding:7px 10px;color:#C8E6C9">Uses Equifax secondary NAICS + SIC as additional taxonomy outputs</div>
+          <div style="background:rgba(46,125,50,.3);border:1px solid rgba(102,187,106,.4);border-radius:6px;padding:7px 10px;color:#C8E6C9">Routes <code>jurisdiction_code</code> → correct taxonomy: gb → UK SIC, de → NACE, us_mo → NAICS</div>
+          <div style="background:rgba(46,125,50,.3);border:1px solid rgba(102,187,106,.4);border-radius:6px;padding:7px 10px;color:#C8E6C9">Computes temporal pivot score from <code>rel_business_industry_naics</code> → STRUCTURE_CHANGE AML signal</div>
+          <div style="background:rgba(46,125,50,.3);border:1px solid rgba(102,187,106,.4);border-radius:6px;padding:7px 10px;color:#C8E6C9">Encodes all 6 <code>match_confidence</code> values as features 0–11 in Model 2's 38-feature vector</div>
+        </div>
+      </div>
+    </div>
+  </div>
 </section>
 
 <!-- ═══ SLIDE 2 — THE KEY INSIGHT ═══ -->
@@ -602,7 +642,14 @@ P(NAICS 722511) = 0.14  ← LOW CONFIDENCE ⚠️
     <div style="color:#A5D6A7;font-size:0.72em;margin-bottom:10px">🟢 <strong style="color:white">Phases 1–3:</strong> Applicant submits → live API calls → entity matching (Model 1) finds the right Redshift row per vendor. IDENTICAL in both systems.</div>
     <div style="color:#EF9A9A;font-size:0.72em;margin-bottom:10px">🔴 <strong style="color:white">Phase 4A (Worth AI):</strong> Deterministic rule picks one NAICS winner. No probability. No UK SIC. No AML signals. No jurisdiction routing.</div>
     <div style="color:#90CAF9;font-size:0.72em;margin-bottom:10px">🔵 <strong style="color:white">Phase 4B (Consensus):</strong> 5-step stacking — 38 features → XGBoost probabilities → external registry → LLM referee → Risk Engine. Replaces only Phase 4.</div>
-    <div style="color:#FFE082;font-size:0.72em">🚀 <strong style="color:white">Implementation:</strong> Replace <code style="color:#FFE082">factWithHighestConfidence()</code> with <code style="color:#FFE082">ConsensusEngine.predict()</code>. Add one migration + two one-liners for UK SIC. Everything else is unchanged.</div>
+    <div style="color:#FFE082;font-size:0.72em;margin-bottom:14px">🚀 <strong style="color:white">Implementation:</strong> Replace <code style="color:#FFE082">factWithHighestConfidence()</code> with <code style="color:#FFE082">ConsensusEngine.predict()</code>. Add one migration + two one-liners for UK SIC. Everything else is unchanged.</div>
+    <div style="border-top:1px solid rgba(255,255,255,.15);padding-top:14px;font-size:0.62em;color:#90CAF9">
+      <strong style="color:white">Continue reading:</strong><br/>
+      <a href="slides.html" style="color:#90CAF9">→ Deck 2: Technical Briefing</a> — every source, every gap, every confirmed fix<br/>
+      <a href="models.html" style="color:#90CAF9">→ Deck 3: XGBoost Models</a> — how Model 1 and Model 2 work, the 38 features<br/>
+      <a href="presentation.html" style="color:#90CAF9">→ Deck 4: System Overview</a> — the complete Consensus Engine architecture<br/>
+      <a href="index.html" style="color:#FFE082">→ Learning Portal</a> — all 4 decks with reading guide
+    </div>
   </div>
 </section>
 

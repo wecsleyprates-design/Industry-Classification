@@ -81,13 +81,16 @@ td.par { color:#E65100; font-weight:700; }
 
 <!-- ═══════════════════════ SLIDE 1 — TITLE ═══════════════════════ -->
 <section class="title-slide" data-background-color="#0D1B2A">
-  <h1>Industry Classification</h1>
+  <div style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.2);border-radius:20px;padding:6px 20px;display:inline-block;font-size:0.55em;color:#90CAF9;margin-bottom:16px;">
+    📚 Deck 2 of 4 — Read after Pipeline Phases
+  </div>
+  <h1>Technical Briefing</h1>
   <h2>Worth AI Current Pipeline vs. Global Consensus Engine</h2>
   <br/>
-  <p>A technical deep-dive based on the <strong style="color:white">SIC-UK-Codes</strong>,
-     <strong style="color:white">Entity-Matching</strong> repos, and the new Consensus Engine codebase.</p>
-  <br/>
-  <p>Engineering &amp; Management · March 2026</p>
+  <p>Every source, every gap, every confirmed fix — based on actual codebase</p>
+  <p style="font-size:0.52em;color:#546E7A;margin-top:10px">
+    Prerequisite: Deck 1 (Pipeline Phases) · Full portal: <strong style="color:#90CAF9">wecsleyprates-design.github.io/Industry-Classification</strong>
+  </p>
 </section>
 
 <!-- ═══════════════════════ SLIDE 2 — AGENDA ═══════════════════════ -->
@@ -928,12 +931,15 @@ and mcc_code 5614 as last resort.</code></pre>
     <div style="color:#EF9A9A;font-size:0.78em;margin-bottom:12px">🔴 <strong style="color:white">Today (Worth AI):</strong> Rule-based · NAICS only · UK SIC silently dropped · 0 risk signals · No calibrated probability · LLM weight 0.10</div>
     <div style="color:#FFE082;font-size:0.78em;margin-bottom:12px">🟡 <strong style="color:white">The Gap:</strong> UK/EU/global companies get wrong taxonomy · 24/25 Equifax columns unused · No shell company detection · No source conflict visibility</div>
     <div style="color:#A5D6A7;font-size:0.78em;margin-bottom:12px">🟢 <strong style="color:white">Consensus Engine:</strong> XGBoost ML · 6 taxonomies · 38 features · 9 risk signals · SEC EDGAR + Companies House · LLM acts as referee</div>
-    <div style="color:#90CAF9;font-size:0.78em">🚀 <strong style="color:white">P0 — UK SIC in 2 steps, zero new APIs:</strong><br/>
+    <div style="color:#90CAF9;font-size:0.78em;margin-bottom:14px">🚀 <strong style="color:white">P0 — UK SIC in 2 steps, zero new APIs:</strong><br/>
     &nbsp;&nbsp;1. Add <code style="color:#90CAF9">core_uk_sic_code</code> table + <code style="color:#90CAF9">uk_sic_id</code> column → one migration<br/>
     &nbsp;&nbsp;2. Read Trulioo <code style="color:#90CAF9">.sicCode</code> field → one line of code</div>
+    <div style="border-top:1px solid rgba(255,255,255,.15);padding-top:12px;font-size:0.58em;color:#90CAF9">
+      <a href="models.html" style="color:#90CAF9">→ Deck 3: XGBoost Models Deep Dive</a> — how Model 1 and Model 2 work, all 38 features explained<br/>
+      <a href="presentation.html" style="color:#90CAF9">→ Deck 4: System Overview</a> — the complete Consensus Engine architecture<br/>
+      <a href="index.html" style="color:#FFE082">→ Learning Portal</a> — all 4 decks with reading guide
+    </div>
   </div>
-  <br/>
-  <p style="font-size:0.54em;color:#546E7A">Full technical details: <code style="color:#90CAF9">TECHNICAL_BRIEFING.md</code> · Live demo: Streamlit app</p>
 </section>
 
 </div><!-- /slides -->
