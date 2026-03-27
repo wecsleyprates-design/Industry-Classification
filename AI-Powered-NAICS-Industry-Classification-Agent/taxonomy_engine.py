@@ -20,8 +20,18 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-import faiss
-from sentence_transformers import SentenceTransformer
+
+try:
+    import faiss
+    _FAISS_AVAILABLE = True
+except ImportError:
+    _FAISS_AVAILABLE = False
+
+try:
+    from sentence_transformers import SentenceTransformer
+    _ST_AVAILABLE = True
+except ImportError:
+    _ST_AVAILABLE = False
 
 from config import (
     DATA_DIR,
@@ -66,15 +76,23 @@ class TaxonomyEngine:
     }
 
     def __init__(self, rebuild: bool = False) -> None:
-        self._embed_model = SentenceTransformer(LOCAL_EMBED_MODEL)
+        if _ST_AVAILABLE:
+            self._embed_model = SentenceTransformer(LOCAL_EMBED_MODEL)
+        else:
+            self._embed_model = None
+            logger.warning("sentence-transformers not available — semantic search disabled, using keyword fallback.")
+
         self._records: list[TaxonomyRecord] = []
-        self._index: Optional[faiss.Index] = None
+        self._index = None
 
         if not rebuild and os.path.exists(FAISS_INDEX_PATH) and os.path.exists(FAISS_META_PATH):
             self._load_from_disk()
-        else:
+        elif _ST_AVAILABLE and _FAISS_AVAILABLE:
             self._build()
             self._save_to_disk()
+        else:
+            # No embeddings available — still load taxonomy records for keyword search
+            self._build_records_only()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -88,8 +106,12 @@ class TaxonomyEngine:
         Semantic search across all taxonomies.
 
         Returns list of (TaxonomyRecord, cosine_similarity) sorted descending.
+        Falls back to keyword substring matching when FAISS index is unavailable.
         taxonomy_filter: if given, restrict to those taxonomy names.
         """
+        if self._index is None or self._embed_model is None:
+            return self._keyword_search(query, top_k, taxonomy_filter)
+
         vec = self._embed(query)
         D, I = self._index.search(vec, min(top_k * 4, len(self._records)))
 
@@ -100,12 +122,32 @@ class TaxonomyEngine:
             rec = self._records[idx]
             if taxonomy_filter and rec.taxonomy not in taxonomy_filter:
                 continue
-            # FAISS IndexFlatIP returns inner product (cosine for L2-normalised)
             results.append((rec, float(dist)))
             if len(results) >= top_k:
                 break
 
         return results
+
+    def _keyword_search(
+        self,
+        query: str,
+        top_k: int,
+        taxonomy_filter: Optional[list[str]] = None,
+    ) -> list[tuple[TaxonomyRecord, float]]:
+        """Simple keyword substring fallback used when FAISS is unavailable."""
+        q = query.lower()
+        words = q.split()
+        pool = self._records
+        if taxonomy_filter:
+            pool = [r for r in pool if r.taxonomy in taxonomy_filter]
+        scored = []
+        for rec in pool:
+            desc = rec.description.lower()
+            hits = sum(1 for w in words if w in desc)
+            if hits:
+                scored.append((rec, hits / max(len(words), 1)))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return scored[:top_k]
 
     def get_all_for_taxonomy(self, taxonomy: str) -> list[TaxonomyRecord]:
         return [r for r in self._records if r.taxonomy == taxonomy]
@@ -119,6 +161,13 @@ class TaxonomyEngine:
 
     def compute_semantic_distance(self, label_a: str, label_b: str) -> float:
         """Cosine distance (0=identical, 1=orthogonal) between two labels."""
+        if self._embed_model is None:
+            # Keyword fallback: Jaccard distance on word sets
+            a = set(label_a.lower().split())
+            b = set(label_b.lower().split())
+            if not a and not b:
+                return 0.0
+            return round(1.0 - len(a & b) / max(len(a | b), 1), 4)
         vecs = self._embed_model.encode(
             [label_a, label_b], convert_to_numpy=True, normalize_embeddings=True
         )
@@ -145,28 +194,21 @@ class TaxonomyEngine:
 
     # ── Internal ─────────────────────────────────────────────────────────────
 
-    def _build(self) -> None:
-        logger.info("Building Unified Global Ontology FAISS index …")
+    def _load_records(self) -> list[str]:
+        """Load TaxonomyRecords from CSV files. Returns list of description strings."""
         descriptions: list[str] = []
-
         for taxonomy, filename in TAXONOMY_FILES.items():
             path = os.path.join(DATA_DIR, filename)
             if not os.path.exists(path):
                 logger.warning(f"Missing taxonomy file: {path}")
                 continue
-
             df = pd.read_csv(path, dtype=str).fillna("")
             code_col, desc_col = self._COL_MAP.get(taxonomy, ("code", "description"))
-
             if code_col not in df.columns or desc_col not in df.columns:
                 logger.warning(f"Unexpected columns in {filename}: {df.columns.tolist()}")
                 continue
-
             for _, row in df.iterrows():
-                extra = {
-                    k: v for k, v in row.items()
-                    if k not in (code_col, desc_col) and v
-                }
+                extra = {k: v for k, v in row.items() if k not in (code_col, desc_col) and v}
                 rec = TaxonomyRecord(
                     taxonomy=taxonomy,
                     code=row[code_col].strip(),
@@ -175,27 +217,40 @@ class TaxonomyEngine:
                 )
                 self._records.append(rec)
                 descriptions.append(f"{taxonomy}: {rec.description}")
-
             logger.info(f"Loaded {len(df)} records from {taxonomy}")
+        return descriptions
+
+    def _build_records_only(self) -> None:
+        """Load records without building FAISS index (keyword-only fallback)."""
+        logger.info("Building taxonomy record list (no FAISS — keyword search mode) …")
+        self._load_records()
+        logger.info(f"Loaded {len(self._records)} taxonomy records (no vector index)")
+
+    def _build(self) -> None:
+        logger.info("Building Unified Global Ontology FAISS index …")
+        descriptions = self._load_records()
 
         if not descriptions:
-            raise RuntimeError("No taxonomy files loaded.")
+            logger.warning("No taxonomy files loaded — running in keyword-only mode.")
+            return
 
         logger.info(f"Encoding {len(descriptions)} descriptions …")
         embeddings = self._embed_model.encode(
             descriptions,
             batch_size=256,
             convert_to_numpy=True,
-            normalize_embeddings=True,   # needed for cosine via inner product
-            show_progress_bar=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
         ).astype(np.float32)
 
         dim = embeddings.shape[1]
-        self._index = faiss.IndexFlatIP(dim)   # Inner Product = cosine on L2-norm
+        self._index = faiss.IndexFlatIP(dim)
         self._index.add(embeddings)
         logger.info(f"UGO index built: {self._index.ntotal} vectors, dim={dim}")
 
     def _save_to_disk(self) -> None:
+        if self._index is None or not _FAISS_AVAILABLE:
+            return
         os.makedirs(DATA_DIR, exist_ok=True)
         faiss.write_index(self._index, FAISS_INDEX_PATH)
         with open(FAISS_META_PATH, "wb") as f:
@@ -203,6 +258,9 @@ class TaxonomyEngine:
         logger.info(f"UGO index saved to {FAISS_INDEX_PATH}")
 
     def _load_from_disk(self) -> None:
+        if not _FAISS_AVAILABLE:
+            self._build_records_only()
+            return
         self._index = faiss.read_index(FAISS_INDEX_PATH)
         with open(FAISS_META_PATH, "rb") as f:
             self._records = pickle.load(f)

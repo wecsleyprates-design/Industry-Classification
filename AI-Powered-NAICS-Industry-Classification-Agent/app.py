@@ -748,18 +748,26 @@ st.sidebar.caption(
     "Multi-taxonomy · XGBoost Consensus · AML/KYB Risk · Unified Global Ontology"
 )
 
-# ── Redshift connection status ────────────────────────────────────────────────
-from redshift_connector import get_connector as _get_rc
-_rc = _get_rc()
-if _rc.is_connected:
-    st.sidebar.success("🗄️ Redshift: LIVE", icon="✅")
+# ── Redshift connection status (lazy — never blocks startup) ─────────────────
+@st.cache_resource(show_spinner=False)
+def _get_redshift_connector():
+    """Connect to Redshift once, cache result. Never blocks the UI on failure."""
+    try:
+        from redshift_connector import get_connector
+        return get_connector()
+    except Exception:
+        return None
+
+_rc = _get_redshift_connector()
+_rc_connected = _rc is not None and getattr(_rc, "is_connected", False)
+if _rc_connected:
+    st.sidebar.success("Redshift: LIVE", icon="✅")
     st.sidebar.caption("OpenCorporates, Equifax, ZoomInfo, Liberty Data querying real tables.")
 else:
-    st.sidebar.warning("🗄️ Redshift: SIMULATED", icon="⚠️")
+    st.sidebar.warning("Redshift: SIMULATED", icon="⚠️")
     st.sidebar.caption(
         "Set REDSHIFT_HOST / REDSHIFT_USER / REDSHIFT_PASSWORD / REDSHIFT_DB "
-        "environment variables to connect to real data. "
-        "Trulioo and AI Semantic always require their own API keys."
+        "in Streamlit secrets to connect to real data."
     )
 
 page = st.sidebar.radio(
