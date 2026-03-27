@@ -208,6 +208,38 @@ def run_full_pipeline(
     return entity, bundle, consensus_result, risk_profile, llm_result, external_registry
 
 
+def run_batch_pipeline(
+    company_name: str,
+    address: str = "",
+    country: str = "",
+) -> tuple:
+    """
+    Lightweight pipeline for batch processing — no LLM calls, no HTTP calls.
+    EntityResolver → DataSimulator → ConsensusEngine → RiskEngine only.
+    Returns (entity, bundle, consensus_result, risk_profile).
+    ~0.2s per company vs ~25s for the full pipeline.
+    """
+    er  = get_entity_resolver()
+    sim = get_data_simulator()
+    ce  = get_consensus_engine()
+    re  = get_risk_engine()
+
+    entity = er.resolve(company_name, address, country)
+    bundle = sim.fetch(
+        company_name=company_name,
+        address=address,
+        country=country,
+        jurisdiction=entity.jurisdiction_code,
+        entity_type="Operating",
+        web_summary="",
+        force_conflict=False,
+    )
+    consensus_result = ce.predict(bundle)
+    risk_profile = re.evaluate(bundle, consensus_result)
+    consensus_result.risk_signals = [s.to_dict() for s in risk_profile.signals]
+    return entity, bundle, consensus_result, risk_profile
+
+
 def display_consensus_result(
     entity, bundle, result, risk_profile, llm_result, external_registry=None
 ) -> None:
@@ -1094,71 +1126,70 @@ if page == "Classify" and mode_tab == "Upload file (batch)":
 
         if st.button("Run Batch Classification", type="primary"):
             results = []
-            prog = st.progress(0)
+            prog   = st.progress(0)
             status = st.empty()
-            t0 = time.time()
+            t0     = time.time()
+            n_rows = len(df_input)
+
+            st.caption(
+                "ℹ️ Batch mode runs the fast pipeline (Entity Resolution + "
+                "Consensus XGBoost + Risk Engine). For LLM enrichment, SEC EDGAR "
+                "and Companies House lookups, use **Single company** mode."
+            )
 
             for i, row in df_input.iterrows():
-                company_name = row["__org_name"]
-                address      = row["__address"]
-                country      = row["__country"]
-                web_summary  = str(row.get("__desc", "") or "")
-                uid_val      = str(row.get("__uid", "") or "")
-                dba_val      = str(row.get("__dba", "") or "")
+                company_name = str(row.get("__org_name", "") or "").strip()
+                address      = str(row.get("__address",  "") or "").strip()
+                country      = str(row.get("__country",  "") or "").strip()
+                uid_val      = str(row.get("__uid",      "") or "")
+                dba_val      = str(row.get("__dba",      "") or "")
 
-                status.text(f"Processing {i+1}/{len(df_input)}: {company_name}")
+                if not company_name:
+                    prog.progress((i + 1) / n_rows)
+                    continue
+
+                status.text(f"Processing {i + 1}/{n_rows}: {company_name}")
                 try:
-                    entity, bundle, result, risk, llm, ext_reg = run_full_pipeline(
+                    entity, bundle, result, risk = run_batch_pipeline(
                         company_name=company_name,
                         address=address,
                         country=country,
-                        web_summary=web_summary,
+                    )
+                    # Top-3 secondary codes as a readable string
+                    secondary_str = " | ".join(
+                        f"{c.code} {c.taxonomy} ({c.consensus_probability:.0%})"
+                        for c in result.secondary_industries[:3]
                     )
                     results.append({
-                        # ── Input fields (pass-through for traceability) ──────
-                        "UID":                 uid_val,
-                        "Org Name":            company_name,
-                        "DBA Name":            dba_val,
-                        "Address Used":        address,
-                        "Jurisdiction Input":  country,
-                        # ── Entity resolution ─────────────────────────────────
-                        "Clean Name":          entity.clean_name,
-                        "Jurisdiction":        entity.jurisdiction_code,
-                        "Jurisdiction Label":  entity.jurisdiction_label,
-                        "Entity Type":         entity.detected_entity_type,
-                        # ── Classification ────────────────────────────────────
-                        "Primary Code":        result.primary_industry.code,
-                        "Primary Taxonomy":    result.primary_industry.taxonomy,
-                        "Primary Label":       result.primary_industry.label,
-                        "Consensus Prob":      round(result.primary_industry.consensus_probability, 4),
-                        "LLM Code":            llm.primary_code,
-                        "LLM Taxonomy":        llm.primary_taxonomy,
-                        "LLM Label":           llm.primary_label,
-                        "LLM Confidence":      llm.primary_confidence,
-                        "LLM Source Used":     getattr(llm, "source_used", ""),
-                        "Registry Conflict":   getattr(llm, "registry_conflict", False),
-                        "MCC Code":            llm.mcc_code or "",
-                        "MCC Risk":            getattr(llm, "mcc_risk_note", "") or "",
-                        # ── Government registry ───────────────────────────────
-                        "SEC EDGAR SIC":       ext_reg.edgar.sic if ext_reg and ext_reg.edgar else "",
-                        "SEC EDGAR SIC Desc":  ext_reg.edgar.sic_description if ext_reg and ext_reg.edgar else "",
-                        "CH SIC Codes":        ", ".join(ext_reg.companies_house.sic_codes) if ext_reg and ext_reg.companies_house else "",
-                        # ── Risk ──────────────────────────────────────────────
-                        "Risk Level":          risk.overall_risk_level,
-                        "Risk Score":          round(risk.overall_risk_score, 4),
-                        "KYB Recommendation":  risk.kyb_recommendation,
-                        "Risk Flags":          "; ".join(s.flag for s in risk.signals),
+                        "UID":                uid_val,
+                        "Org Name":           company_name,
+                        "DBA Name":           dba_val,
+                        "Address Used":       address,
+                        "Jurisdiction Input": country,
+                        "Clean Name":         entity.clean_name,
+                        "Jurisdiction":       entity.jurisdiction_code,
+                        "Jurisdiction Label": entity.jurisdiction_label,
+                        "Entity Type":        entity.detected_entity_type,
+                        "Primary Code":       result.primary_industry.code,
+                        "Primary Taxonomy":   result.primary_industry.taxonomy,
+                        "Primary Desc":       result.primary_industry.label,
+                        "Consensus Prob":     round(result.primary_industry.consensus_probability, 4),
+                        "Secondary Codes":    secondary_str,
+                        "Risk Level":         risk.overall_risk_level,
+                        "Risk Score":         round(risk.overall_risk_score, 4),
+                        "KYB Recommendation": risk.kyb_recommendation,
+                        "Risk Flags":         "; ".join(s.flag for s in risk.signals),
                     })
                 except Exception as exc:
                     results.append({
-                        "UID":      uid_val,
-                        "Org Name": company_name,
-                        "DBA Name": dba_val,
-                        "Risk Level": "ERROR",
+                        "UID":                uid_val,
+                        "Org Name":           company_name,
+                        "DBA Name":           dba_val,
+                        "Risk Level":         "ERROR",
                         "KYB Recommendation": "REVIEW",
-                        "Risk Flags": str(exc),
+                        "Risk Flags":         str(exc)[:200],
                     })
-                prog.progress((i + 1) / len(df_input))
+                prog.progress((i + 1) / n_rows)
 
             elapsed = time.time() - t0
             df_results = pd.DataFrame(results)
@@ -1171,31 +1202,15 @@ if page == "Classify" and mode_tab == "Upload file (batch)":
             tax_rows = []
             for _, row in df_results.iterrows():
                 if row.get("Primary Code"):
+                    prob_val = row.get("Consensus Prob", "")
+                    prob_str = f"{float(prob_val):.1%}" if prob_val != "" else "—"
                     tax_rows.append({
-                        "Company":     row.get("Org Name",""),
+                        "Company":     row.get("Org Name", ""),
                         "Source":      "XGBoost Consensus",
-                        "Taxonomy":    str(row.get("Primary Taxonomy","")).replace("_"," "),
-                        "Code":        row.get("Primary Code",""),
-                        "Description": row.get("Primary Desc",""),
-                        "Prob":        str(row.get("Consensus Prob","")),
-                    })
-                if row.get("LLM Code"):
-                    tax_rows.append({
-                        "Company":     row.get("Org Name",""),
-                        "Source":      "GPT-4o-mini",
-                        "Taxonomy":    str(row.get("LLM Taxonomy","")).replace("_"," "),
-                        "Code":        row.get("LLM Code",""),
-                        "Description": row.get("LLM Label",""),
-                        "Prob":        str(row.get("LLM Confidence","")),
-                    })
-                if row.get("MCC Code"):
-                    tax_rows.append({
-                        "Company":     row.get("Org Name",""),
-                        "Source":      "MCC",
-                        "Taxonomy":    "MCC",
-                        "Code":        row.get("MCC Code",""),
-                        "Description": "",
-                        "Prob":        "—",
+                        "Taxonomy":    str(row.get("Primary Taxonomy", "")).replace("_", " "),
+                        "Code":        row.get("Primary Code", ""),
+                        "Description": row.get("Primary Desc", ""),
+                        "Prob":        prob_str,
                     })
             st.session_state["batch_taxonomy_df"] = pd.DataFrame(tax_rows)
             status.empty()
@@ -1251,19 +1266,16 @@ if page == "Classify" and mode_tab == "Upload file (batch)":
                 df_high = df_results[df_results["Risk Level"].isin(["HIGH","CRITICAL"])]
                 if not df_high.empty:
                     st.markdown(f"**⚠️ {len(df_high)} company/companies require immediate review (HIGH/CRITICAL):**")
-                    show_cols = [c for c in ["Org Name","Jurisdiction","Primary Code","Primary Label","Risk Level","Risk Score","KYB Recommendation","Risk Flags"] if c in df_high.columns]
+                    show_cols = [c for c in ["Org Name","Jurisdiction","Primary Code","Primary Desc","Risk Level","Risk Score","KYB Recommendation","Risk Flags"] if c in df_high.columns]
                     st.dataframe(df_high[show_cols].sort_values("Risk Score",ascending=False), use_container_width=True, hide_index=True)
 
             st.markdown("---")
             st.markdown("### All Results")
 
-            # Show/hide columns for clarity
             key_cols = [c for c in [
-                "UID","Org Name","Clean Name","Jurisdiction","Entity Type",
-                "Primary Taxonomy","Primary Code","Primary Desc","Consensus Prob",
-                "LLM Code","LLM Taxonomy","LLM Label","LLM Confidence",
-                "MCC Code","Risk Level","Risk Score","KYB Recommendation","Risk Flags",
-                "SEC EDGAR SIC","SEC EDGAR SIC Desc",
+                "UID","Org Name","DBA Name","Clean Name","Jurisdiction","Jurisdiction Label","Entity Type",
+                "Primary Taxonomy","Primary Code","Primary Desc","Consensus Prob","Secondary Codes",
+                "Risk Level","Risk Score","KYB Recommendation","Risk Flags",
             ] if c in df_results.columns]
             st.dataframe(df_results[key_cols], use_container_width=True, hide_index=True)
 
