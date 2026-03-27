@@ -1,8 +1,12 @@
+# ── Web App ───────────────────────────────────────────────────────────────────
+streamlit==1.41.1
+altair==5.4.1
+
 # ── Core LLM & AI ─────────────────────────────────────────────────────────────
-openai
-langchain
-langchain-core
-langchain-community
+openai>=1.30.0
+langchain>=0.2.0
+langchain-core>=0.2.0
+langchain-community>=0.2.0
 
 # ── Embeddings & Vector Search (optional — app degrades gracefully without) ───
 sentence-transformers
@@ -19,9 +23,6 @@ openpyxl
 
 # ── Web Search ────────────────────────────────────────────────────────────────
 duckduckgo-search
-
-# ── Web App ───────────────────────────────────────────────────────────────────
-streamlit
 
 # ── Database ──────────────────────────────────────────────────────────────────
 psycopg2-binary
