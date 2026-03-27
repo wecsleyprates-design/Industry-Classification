@@ -24,7 +24,6 @@ from openai import OpenAI
 from langchain_community.tools import DuckDuckGoSearchRun
 
 from config import (
-    OPENAI_API_KEY,
     OPENAI_CHAT_MODEL,
     WEB_SEARCH_MAX_CHARS,
     WEB_SEARCH_ENABLED,
@@ -33,7 +32,23 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
-_client = OpenAI(api_key=OPENAI_API_KEY)
+# Lazy client — resolved at first call so Streamlit secrets are already loaded
+_client: Optional[OpenAI] = None
+
+
+def _get_client() -> OpenAI:
+    """Return (and cache) the OpenAI client, reading the key at first use."""
+    global _client
+    if _client is None:
+        from config import _get_openai_key
+        key = _get_openai_key()
+        if not key:
+            raise ValueError(
+                "OPENAI_API_KEY is not set. Add it to Streamlit secrets "
+                "(Settings → Secrets → OPENAI_API_KEY = 'sk-...') or as an environment variable."
+            )
+        _client = OpenAI(api_key=key)
+    return _client
 
 
 # ── Web search ─────────────────────────────────────────────────────────────────
@@ -105,7 +120,7 @@ If any field cannot be determined, use reasonable defaults. Return valid JSON on
 
     for attempt in range(3):
         try:
-            response = _client.chat.completions.create(
+            response = _get_client().chat.completions.create(
                 model=OPENAI_CHAT_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
@@ -370,7 +385,7 @@ Return ONLY this JSON object:
 
     for attempt in range(3):
         try:
-            response = _client.chat.completions.create(
+            response = _get_client().chat.completions.create(
                 model=OPENAI_CHAT_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
@@ -433,7 +448,7 @@ In 2-3 sentences, explain:
 Be concise and professional."""
 
     try:
-        response = _client.chat.completions.create(
+        response = _get_client().chat.completions.create(
             model=OPENAI_CHAT_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
@@ -485,7 +500,7 @@ Return valid JSON only:
 
     for attempt in range(3):
         try:
-            response = _client.chat.completions.create(
+            response = _get_client().chat.completions.create(
                 model=OPENAI_CHAT_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,

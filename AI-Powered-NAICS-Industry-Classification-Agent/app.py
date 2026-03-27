@@ -1541,13 +1541,16 @@ elif page == "Taxonomy Explorer":  # Tab 3
                 taxonomy = row.get("Taxonomy", "")
                 with col:
                     st.markdown(
-                        f"""<div style="border:1px solid {colour};border-radius:8px;padding:12px;margin-bottom:10px;">
-                        <div style="font-size:11px;color:{colour};font-weight:700;text-transform:uppercase;
-                                    letter-spacing:0.5px;margin-bottom:4px;">{src}</div>
-                        <div style="font-size:22px;font-weight:800;color:#1a1a2e;font-family:monospace;">{code}</div>
-                        <div style="font-size:11px;color:#555;margin-bottom:6px;">{taxonomy}</div>
-                        <div style="font-size:13px;color:#222;margin-bottom:6px;">{desc}</div>
-                        <div style="font-size:12px;color:{colour};font-weight:600;">Confidence: {prob_str}</div>
+                        f"""<div style="border:2px solid {colour};border-radius:8px;padding:14px;
+                                        margin-bottom:10px;background:rgba(255,255,255,0.04);">
+                        <div style="font-size:10px;color:{colour};font-weight:700;text-transform:uppercase;
+                                    letter-spacing:1px;margin-bottom:6px;">{src}</div>
+                        <div style="font-size:26px;font-weight:800;color:#ffffff;font-family:monospace;
+                                    letter-spacing:2px;margin-bottom:4px;">{code}</div>
+                        <div style="font-size:11px;color:#aab4c8;margin-bottom:8px;">{taxonomy}</div>
+                        <div style="font-size:13px;color:#e0e6f0;margin-bottom:8px;line-height:1.4;">{desc}</div>
+                        <div style="font-size:12px;color:{colour};font-weight:700;">
+                            Confidence: {prob_str}</div>
                         </div>""",
                         unsafe_allow_html=True,
                     )
@@ -1615,17 +1618,14 @@ elif page == "Taxonomy Explorer":  # Tab 3
                             d = te_engine.compute_semantic_distance(
                                 str(r1["Description"]), str(r2["Description"])
                             )
-                            row_dists.append(d)
+                            row_dists.append(round(d, 3))
                         dist_mat.append(row_dists)
                     dist_df = pd.DataFrame(dist_mat, index=mat_labels, columns=mat_labels)
                     st.caption(
                         "Values close to 0 = semantically identical codes across taxonomies. "
                         "Values close to 1 = codes describe very different activities — potential registry discrepancy signal."
                     )
-                    st.dataframe(
-                        dist_df.style.background_gradient(cmap="RdYlGn_r", vmin=0, vmax=1),
-                        use_container_width=True,
-                    )
+                    st.dataframe(dist_df, use_container_width=True)
 
         st.markdown("---")
 
@@ -1699,10 +1699,7 @@ elif page == "Taxonomy Explorer":  # Tab 3
                             row_dists.append(d)
                         dist_mat.append(row_dists)
                     dist_df = pd.DataFrame(dist_mat, index=labels, columns=labels)
-                    st.dataframe(
-                        dist_df.style.background_gradient(cmap="RdYlGn_r", vmin=0, vmax=1),
-                        use_container_width=True,
-                    )
+                    st.dataframe(dist_df, use_container_width=True)
         else:
             st.info("No results found. Try a broader keyword.")
 
