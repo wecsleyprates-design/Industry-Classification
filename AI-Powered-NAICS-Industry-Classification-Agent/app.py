@@ -1217,13 +1217,34 @@ if page == "Classify" and mode_tab == "Upload file (batch)":
 
             # Risk distribution bar chart
             if "Risk Level" in df_results.columns:
+                import plotly.express as px
                 c1, c2 = st.columns(2)
                 with c1:
                     st.markdown("**KYB Recommendation**")
-                    st.bar_chart(kyb_counts)
+                    kyb_df = kyb_counts.reset_index()
+                    kyb_df.columns = ["Recommendation", "Count"]
+                    kyb_colours = {"APPROVE":"#48BB78","REVIEW":"#4299E1",
+                                   "ESCALATE":"#ECC94B","REJECT":"#FC8181"}
+                    fig = px.bar(kyb_df, x="Recommendation", y="Count",
+                                 color="Recommendation",
+                                 color_discrete_map=kyb_colours,
+                                 template="plotly_dark")
+                    fig.update_layout(showlegend=False, margin=dict(t=20,b=20,l=0,r=0),
+                                      height=280)
+                    st.plotly_chart(fig, use_container_width=True)
                 with c2:
                     st.markdown("**Risk Level Distribution**")
-                    st.bar_chart(df_results["Risk Level"].value_counts())
+                    rl = df_results["Risk Level"].value_counts().reset_index()
+                    rl.columns = ["Risk Level", "Count"]
+                    rl_colours = {"CRITICAL":"#9B2335","HIGH":"#FC8181",
+                                  "MEDIUM":"#ECC94B","LOW":"#48BB78","INFO":"#4299E1"}
+                    fig2 = px.bar(rl, x="Risk Level", y="Count",
+                                  color="Risk Level",
+                                  color_discrete_map=rl_colours,
+                                  template="plotly_dark")
+                    fig2.update_layout(showlegend=False, margin=dict(t=20,b=20,l=0,r=0),
+                                       height=280)
+                    st.plotly_chart(fig2, use_container_width=True)
 
             # High-risk entities highlighted
             if "Risk Level" in df_results.columns:
@@ -1428,17 +1449,44 @@ real Redshift data (OpenCorporates, Equifax, ZoomInfo, Liberty Data).
                   len(df_risk[df_risk["KYB Action"].isin(["REVIEW","ESCALATE","REJECT"])]))
         m4.metric("Avg Risk Score", f"{df_risk['Risk Score'].mean():.3f}")
 
+        import plotly.express as px
         col_a, col_b = st.columns(2)
         with col_a:
             st.subheader("Risk Level Distribution")
-            st.bar_chart(df_risk["Risk Level"].value_counts())
+            rl2 = df_risk["Risk Level"].value_counts().reset_index()
+            rl2.columns = ["Risk Level", "Count"]
+            rl_colours = {"CRITICAL":"#9B2335","HIGH":"#FC8181",
+                          "MEDIUM":"#ECC94B","LOW":"#48BB78","INFO":"#4299E1"}
+            fig_rl = px.bar(rl2, x="Risk Level", y="Count",
+                            color="Risk Level", color_discrete_map=rl_colours,
+                            template="plotly_dark")
+            fig_rl.update_layout(showlegend=False, margin=dict(t=20,b=20,l=0,r=0), height=300)
+            st.plotly_chart(fig_rl, use_container_width=True)
         with col_b:
             st.subheader("KYB Recommendation Distribution")
-            st.bar_chart(df_risk["KYB Action"].value_counts())
+            kyb2 = df_risk["KYB Action"].value_counts().reset_index()
+            kyb2.columns = ["Recommendation", "Count"]
+            kyb_colours = {"APPROVE":"#48BB78","REVIEW":"#4299E1",
+                           "ESCALATE":"#ECC94B","REJECT":"#FC8181"}
+            fig_kyb = px.bar(kyb2, x="Recommendation", y="Count",
+                             color="Recommendation", color_discrete_map=kyb_colours,
+                             template="plotly_dark")
+            fig_kyb.update_layout(showlegend=False, margin=dict(t=20,b=20,l=0,r=0), height=300)
+            st.plotly_chart(fig_kyb, use_container_width=True)
 
         st.subheader("Jurisdiction Risk Breakdown")
-        jur_risk = df_risk.groupby("Jurisdiction")["Risk Score"].mean().sort_values(ascending=False)
-        st.bar_chart(jur_risk)
+        jur_risk = (df_risk.groupby("Jurisdiction")["Risk Score"]
+                    .mean()
+                    .sort_values(ascending=True)
+                    .reset_index())
+        jur_risk.columns = ["Jurisdiction", "Avg Risk Score"]
+        fig_jur = px.bar(jur_risk, x="Avg Risk Score", y="Jurisdiction",
+                         orientation="h", template="plotly_dark",
+                         color="Avg Risk Score",
+                         color_continuous_scale=["#48BB78","#ECC94B","#FC8181"])
+        fig_jur.update_layout(margin=dict(t=20,b=20,l=0,r=0),
+                              height=max(200, len(jur_risk) * 30))
+        st.plotly_chart(fig_jur, use_container_width=True)
 
         st.subheader("High-Risk Entity Detail")
         df_high = df_risk[df_risk["Risk Level"].isin(["HIGH","CRITICAL"])].sort_values(
