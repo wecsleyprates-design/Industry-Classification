@@ -1468,27 +1468,208 @@ real Redshift data (OpenCorporates, Equifax, ZoomInfo, Liberty Data).
 
 elif page == "Taxonomy Explorer":  # Tab 3
     st.title("Taxonomy Explorer")
-    st.caption(
-        "Search 2,330 industry codes across 6 classification systems (NAICS, UK SIC, NACE, ISIC, MCC, SIC) "
-        "by description or keyword. Use this to verify a code, translate between taxonomies, or find the right "
-        "code for a business type."
-    )
-    st.markdown("")
-
     te_engine = get_taxonomy_engine()
 
-    st.info(
-        f"Loaded **{te_engine.record_count:,}** taxonomy records across "
-        f"6 classification systems."
+    # ── Determine context from session state ─────────────────────────────────
+    has_single = (
+        "single_taxonomy_df" in st.session_state
+        and st.session_state["single_taxonomy_df"] is not None
+        and not st.session_state["single_taxonomy_df"].empty
+    )
+    has_batch = (
+        "batch_taxonomy_df" in st.session_state
+        and st.session_state["batch_taxonomy_df"] is not None
+        and not st.session_state["batch_taxonomy_df"].empty
     )
 
+    # ── Section 1: Results from last classification ───────────────────────────
+    if has_single or has_batch:
+        if has_single and not has_batch:
+            cname = st.session_state.get("single_result", {}).get("company_name", "last searched company")
+            ctx_label = f"Classification codes for **{cname}**"
+            ctx_df = st.session_state["single_taxonomy_df"].copy()
+            is_batch_ctx = False
+        elif has_batch and not has_single:
+            n_companies = st.session_state["batch_taxonomy_df"]["Company"].nunique()
+            ctx_label = f"Classification codes from last batch upload — **{n_companies} companies**"
+            ctx_df = st.session_state["batch_taxonomy_df"].copy()
+            is_batch_ctx = True
+        else:
+            # Both exist — prefer whichever was most recently set
+            # single_taxonomy_df is cleared when a batch runs, so if both exist single is newer
+            cname = st.session_state.get("single_result", {}).get("company_name", "last searched company")
+            ctx_label = f"Classification codes for **{cname}**"
+            ctx_df = st.session_state["single_taxonomy_df"].copy()
+            is_batch_ctx = False
+
+        st.markdown(f"### {ctx_label}")
+
+        # ── Company selector for batch mode ──────────────────────────────────
+        selected_company = None
+        if is_batch_ctx:
+            companies = sorted(ctx_df["Company"].dropna().unique().tolist())
+            selected_company = st.selectbox(
+                "Select a company to explore its codes:",
+                options=companies,
+                index=0,
+            )
+            ctx_df = ctx_df[ctx_df["Company"] == selected_company].copy()
+            st.caption(f"Showing taxonomy codes for **{selected_company}**")
+
+        # ── Code cards ────────────────────────────────────────────────────────
+        if ctx_df.empty:
+            st.info("No classification codes available for this company.")
+        else:
+            # Colour map per source
+            source_colours = {
+                "XGBoost Consensus": "#1976d2",
+                "GPT-4o-mini":       "#7b1fa2",
+                "GPT-4o-mini (alt)": "#9c27b0",
+                "SEC EDGAR":         "#d32f2f",
+                "Companies House":   "#2e7d32",
+                "MCC":               "#e65100",
+            }
+
+            cols = st.columns(min(len(ctx_df), 3))
+            for i, (_, row) in enumerate(ctx_df.iterrows()):
+                col = cols[i % len(cols)]
+                src = row.get("Source", "")
+                colour = source_colours.get(src, "#546e7a")
+                prob_str = str(row.get("Prob", ""))
+                desc = row.get("Description", "")
+                code = row.get("Code", "")
+                taxonomy = row.get("Taxonomy", "")
+                with col:
+                    st.markdown(
+                        f"""<div style="border:1px solid {colour};border-radius:8px;padding:12px;margin-bottom:10px;">
+                        <div style="font-size:11px;color:{colour};font-weight:700;text-transform:uppercase;
+                                    letter-spacing:0.5px;margin-bottom:4px;">{src}</div>
+                        <div style="font-size:22px;font-weight:800;color:#1a1a2e;font-family:monospace;">{code}</div>
+                        <div style="font-size:11px;color:#555;margin-bottom:6px;">{taxonomy}</div>
+                        <div style="font-size:13px;color:#222;margin-bottom:6px;">{desc}</div>
+                        <div style="font-size:12px;color:{colour};font-weight:600;">Confidence: {prob_str}</div>
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+
+            st.markdown("")
+
+            # Full table
+            with st.expander("Full codes table — all sources", expanded=False):
+                st.dataframe(ctx_df.drop(columns=["Company"], errors="ignore"),
+                             use_container_width=True)
+                csv_ctx = ctx_df.to_csv(index=False)
+                st.download_button(
+                    "Download as CSV",
+                    data=csv_ctx,
+                    file_name=f"taxonomy_codes_{(selected_company or 'company').replace(' ','_')}.csv",
+                    mime="text/csv",
+                )
+
+            # ── UGO deep-dive: pre-fill search with the primary code's description
+            primary_row = ctx_df[ctx_df["Source"] == "XGBoost Consensus"].head(1)
+            if primary_row.empty:
+                primary_row = ctx_df.head(1)
+            prefill_desc = primary_row["Description"].iloc[0] if not primary_row.empty else ""
+            prefill_code = primary_row["Code"].iloc[0] if not primary_row.empty else ""
+            prefill_tax  = primary_row["Taxonomy"].iloc[0].replace(" ","_") if not primary_row.empty else ""
+
+            st.markdown("---")
+            st.markdown("#### Explore in the Unified Global Ontology")
+            st.caption(
+                "The search below is pre-filled with the primary classification code's description. "
+                "It searches all 2,330 codes across all 6 taxonomies to find semantically similar codes — "
+                "useful for cross-taxonomy translation or verifying the classification."
+            )
+
+            # Cross-taxonomy agreement for primary code
+            if prefill_desc:
+                with st.expander(
+                    f"Cross-taxonomy mapping for `{prefill_code}` — {prefill_desc[:60]}…",
+                    expanded=True
+                ):
+                    agreement = te_engine.cross_taxonomy_agreement(prefill_desc)
+                    tax_cols = st.columns(3)
+                    for idx, (taxonomy, records) in enumerate(agreement.items()):
+                        with tax_cols[idx % 3]:
+                            st.markdown(f"**{taxonomy.replace('_',' ')}**")
+                            for rec in records[:3]:
+                                st.markdown(
+                                    f"<span style='font-family:monospace;font-weight:700'>{rec.code}</span> "
+                                    f"<span style='font-size:12px;color:#555'>{rec.description[:50]}</span>",
+                                    unsafe_allow_html=True,
+                                )
+
+            # Semantic distance matrix across the company's own codes
+            if len(ctx_df) >= 2:
+                with st.expander("Semantic distance between this company's codes (cross-ontology alignment)"):
+                    sample_rows = ctx_df.head(5)
+                    mat_labels = [
+                        f"{r['Code']} ({r['Taxonomy'][:8]})"
+                        for _, r in sample_rows.iterrows()
+                    ]
+                    dist_mat = []
+                    for _, r1 in sample_rows.iterrows():
+                        row_dists = []
+                        for _, r2 in sample_rows.iterrows():
+                            d = te_engine.compute_semantic_distance(
+                                str(r1["Description"]), str(r2["Description"])
+                            )
+                            row_dists.append(d)
+                        dist_mat.append(row_dists)
+                    dist_df = pd.DataFrame(dist_mat, index=mat_labels, columns=mat_labels)
+                    st.caption(
+                        "Values close to 0 = semantically identical codes across taxonomies. "
+                        "Values close to 1 = codes describe very different activities — potential registry discrepancy signal."
+                    )
+                    st.dataframe(
+                        dist_df.style.background_gradient(cmap="RdYlGn_r", vmin=0, vmax=1),
+                        use_container_width=True,
+                    )
+
+        st.markdown("---")
+
+    else:
+        # No classification has been run yet
+        st.info(
+            "No company has been classified yet. "
+            "Go to the **Classify** tab, search for a company or upload a CSV, "
+            "then come back here to explore the taxonomy codes found."
+        )
+        st.markdown("")
+
+    # ── Section 2: Manual UGO search ─────────────────────────────────────────
+    st.markdown("### Search the Unified Global Ontology")
+    st.caption(
+        f"Search all **{te_engine.record_count:,}** industry codes across 6 classification systems "
+        "(NAICS, UK SIC, NACE, ISIC, MCC, SIC) by keyword or description."
+    )
+
+    # Pre-fill query from context if available
+    prefill_query = ""
+    if has_single or has_batch:
+        ctx_df_pf = st.session_state.get("single_taxonomy_df") or st.session_state.get("batch_taxonomy_df")
+        if ctx_df_pf is not None and not ctx_df_pf.empty:
+            primary_pf = ctx_df_pf[ctx_df_pf["Source"] == "XGBoost Consensus"].head(1)
+            if primary_pf.empty:
+                primary_pf = ctx_df_pf.head(1)
+            if not primary_pf.empty:
+                prefill_query = str(primary_pf["Description"].iloc[0])
+
     with st.form("ugo_search"):
-        query     = st.text_input("Search query", placeholder="e.g. licensed restaurant food service")
-        top_k     = st.slider("Top-K results", 5, 30, 10)
-        tax_opts  = ["ALL", "US_NAICS_2022", "US_SIC_1987", "UK_SIC_2007",
-                     "NACE_REV2", "ISIC_REV4", "MCC"]
-        tax_filter = st.selectbox("Filter by taxonomy", tax_opts)
-        search_btn = st.form_submit_button("Search UGO")
+        query = st.text_input(
+            "Search query",
+            value=prefill_query,
+            placeholder="e.g. licensed restaurant food service",
+        )
+        col_k, col_f = st.columns([1, 2])
+        with col_k:
+            top_k = st.slider("Top-K results", 5, 30, 10)
+        with col_f:
+            tax_opts   = ["ALL", "US_NAICS_2022", "US_SIC_1987", "UK_SIC_2007",
+                          "NACE_REV2", "ISIC_REV4", "MCC"]
+            tax_filter = st.selectbox("Filter by taxonomy", tax_opts)
+        search_btn = st.form_submit_button("Search")
 
     if search_btn and query.strip():
         filter_list = None if tax_filter == "ALL" else [tax_filter]
@@ -1503,34 +1684,27 @@ elif page == "Taxonomy Explorer":  # Tab 3
             }
             for r, score in results
         ]
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-        if len(results) >= 2:
-            st.subheader("Cross-Ontology Semantic Distance Matrix")
-            sample = results[:5]
-            labels = [f"{r.code} ({r.taxonomy[:6]})" for r, _ in sample]
-            dist_mat = []
-            for r1, _ in sample:
-                row_dists = []
-                for r2, _ in sample:
-                    d = te_engine.compute_semantic_distance(r1.description, r2.description)
-                    row_dists.append(d)
-                dist_mat.append(row_dists)
-            dist_df = pd.DataFrame(dist_mat, index=labels, columns=labels)
-            st.dataframe(dist_df.style.background_gradient(cmap="RdYlGn_r"), use_container_width=True)
-
-    # Cross-taxonomy agreement demo
-    st.subheader("Cross-Taxonomy Agreement")
-    st.markdown(
-        "Enter a free-text description to see what each taxonomy maps it to."
-    )
-    desc_input = st.text_input("Business description", placeholder="e.g. software development consulting")
-    if desc_input.strip():
-        agreement = te_engine.cross_taxonomy_agreement(desc_input.strip())
-        for taxonomy, records in agreement.items():
-            st.markdown(f"**{taxonomy.replace('_',' ')}**")
-            for rec in records:
-                st.markdown(f"  - `{rec.code}` — {rec.description}")
+            if len(results) >= 2:
+                with st.expander("Cross-Ontology Semantic Distance Matrix"):
+                    sample = results[:5]
+                    labels = [f"{r.code} ({r.taxonomy[:6]})" for r, _ in sample]
+                    dist_mat = []
+                    for r1, _ in sample:
+                        row_dists = []
+                        for r2, _ in sample:
+                            d = te_engine.compute_semantic_distance(r1.description, r2.description)
+                            row_dists.append(d)
+                        dist_mat.append(row_dists)
+                    dist_df = pd.DataFrame(dist_mat, index=labels, columns=labels)
+                    st.dataframe(
+                        dist_df.style.background_gradient(cmap="RdYlGn_r", vmin=0, vmax=1),
+                        use_container_width=True,
+                    )
+        else:
+            st.info("No results found. Try a broader keyword.")
 
 
 # ────────────────────────────────────────────────────────────────────────────────
