@@ -1648,7 +1648,9 @@ elif page == "Taxonomy Explorer":  # Tab 3
     # Pre-fill query from context if available
     prefill_query = ""
     if has_single or has_batch:
-        ctx_df_pf = st.session_state.get("single_taxonomy_df") or st.session_state.get("batch_taxonomy_df")
+        _s = st.session_state.get("single_taxonomy_df")
+        _b = st.session_state.get("batch_taxonomy_df")
+        ctx_df_pf = _s if (_s is not None and not _s.empty) else _b
         if ctx_df_pf is not None and not ctx_df_pf.empty:
             primary_pf = ctx_df_pf[ctx_df_pf["Source"] == "XGBoost Consensus"].head(1)
             if primary_pf.empty:
