@@ -45,21 +45,33 @@ do not currently exist in Redshift because the model has not been deployed yet:
 | AML/KYB risk signals (6 types) | Feature engineering + Level 2 | New |
 | KYB recommendation (APPROVE/REVIEW/ESCALATE/REJECT) | Risk score | New |
 
-### Why OpenCorporates and Liberty Never Appear as `Prod: Winning source`
+### Two Separate Concepts: Best Source vs Production Classification Winner
 
-The production rule is:
-```
+**Important distinction:**
+
+- **`best_source`** — the source with the highest Level 1 confidence across ALL sources
+  (Equifax, OpenCorporates, ZoomInfo, Liberty). OpenCorporates and Liberty CAN and DO win
+  this comparison. The entity_matching_dashboard.py report shows this correctly.
+
+- **`Prod: Winning source` (production classification rule)** — which vendor's INDUSTRY CODE
+  gets written to the database. This is a different and more restrictive rule:
+
+```sql
+-- customer_table.sql
 IF zi_match_confidence > efx_match_confidence
-    → winner = ZoomInfo,  prod_naics = zi_c_naics6
+    → use ZoomInfo NAICS code
 ELSE
-    → winner = Equifax,   prod_naics = efx_primnaicscode
+    → use Equifax NAICS code
 ```
 
-This is a hard-coded binary comparison between only two sources.
-OpenCorporates and Liberty **are used by Level 1** for matching (their confidence
-scores are computed), but their industry codes are **never routed through**
-the production classification rule. OpenCorporates `industry_code_uids` is
-available in Redshift but is ignored by `customer_table.sql`.
+This rule only selects between **two sources** for the industry CODE.
+OpenCorporates and Liberty have their Level 1 confidence computed — and OC or Liberty
+may even be the best-matching source overall — but the production classification rule
+**never reads their industry codes** for the final NAICS output.
+
+So when the experiment results show `Prod: Winning source = zoominfo` or `equifax`,
+this refers specifically to which source's NAICS code was selected by the rule —
+not which source had the highest entity match confidence overall.
 
 This is one of the four confirmed gaps that the Consensus engine addresses.
 
