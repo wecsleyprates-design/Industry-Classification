@@ -31,3 +31,4 @@ psycopg2-binary
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv
 rapidfuzz
+jinja2
