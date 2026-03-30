@@ -1,0 +1,68 @@
+{
+  "top1_accuracy_pct": 6.1,
+  "top3_accuracy_pct": 20.4,
+  "log_loss": 3.9391,
+  "top10_features": {
+    "is_holding": 0.2705,
+    "hi_risk_sector": 0.12074,
+    "is_subnational": 0.07135,
+    "j_us_state": 0.05629,
+    "cross_taxonomy_agreement": 0.0493,
+    "j_eu": 0.043,
+    "source_code_diversity": 0.02961,
+    "source_majority_agreement": 0.02939,
+    "oc_matched": 0.02906,
+    "is_naics_jurisdiction": 0.02837
+  },
+  "per_sector": {
+    "Construction": {
+      "n": 189,
+      "top1_pct": 82.5
+    },
+    "Finance": {
+      "n": 780,
+      "top1_pct": 83.3
+    },
+    "Food": {
+      "n": 427,
+      "top1_pct": 78.9
+    },
+    "Healthcare": {
+      "n": 434,
+      "top1_pct": 80.9
+    },
+    "Holding": {
+      "n": 213,
+      "top1_pct": 84.5
+    },
+    "Hospitality": {
+      "n": 211,
+      "top1_pct": 81.0
+    },
+    "Manufacturing": {
+      "n": 660,
+      "top1_pct": 80.0
+    },
+    "Real Estate": {
+      "n": 211,
+      "top1_pct": 80.1
+    },
+    "Retail": {
+      "n": 833,
+      "top1_pct": 79.4
+    },
+    "Services": {
+      "n": 222,
+      "top1_pct": 82.0
+    },
+    "Technology": {
+      "n": 820,
+      "top1_pct": 81.7
+    }
+  },
+  "n_train": 4000,
+  "n_test": 1000,
+  "n_classes": 54,
+  "n_total": 5000,
+  "data_source": "SYNTHETIC"
+}
