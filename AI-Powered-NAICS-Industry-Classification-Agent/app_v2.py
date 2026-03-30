@@ -68,6 +68,10 @@ RISK_C = {"CRITICAL":"#9B2335","HIGH":"#FC8181","MEDIUM":"#ECC94B","LOW":"#48BB7
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
+/* Shrink st.metric so values don't get cut off */
+[data-testid="stMetricValue"] { font-size: 1.1rem !important; }
+[data-testid="stMetricLabel"] { font-size: 0.75rem !important; }
+
 .src-card {
     border-radius: 10px; padding: 14px 16px; margin-bottom: 10px;
     background: rgba(255,255,255,0.04); border: 2px solid;
@@ -910,16 +914,196 @@ def _sidebar():
         pass
 
     st.sidebar.divider()
-    mode = st.sidebar.radio("Input mode", ["Single company", "Batch upload"], index=0)
-    return mode
+    page = st.sidebar.radio(
+        "Navigate",
+        ["Classify", "Industry Lookup"],
+        index=0,
+    )
+    mode = None
+    if page == "Classify":
+        st.sidebar.divider()
+        mode = st.sidebar.radio("Input mode", ["Single company", "Batch upload"], index=0)
+    return page, mode
+
+
+# ── Industry Lookup page (ported from app.py) ─────────────────────────────────
+
+def _render_industry_lookup() -> None:
+    from industry_dropdown import (
+        get_entries, search_entries, get_taxonomy_label,
+        taxonomy_for_jurisdiction, get_all_taxonomy_names,
+        get_entry_by_code, reload_taxonomy, TAXONOMY_LABELS,
+    )
+    import jurisdiction_registry as JR
+
+    st.title("Industry Lookup — Jurisdiction-Aware Classification")
+    st.markdown(
+        "Browse and search industry codes using the **correct taxonomy for each country**. "
+        "UK → SIC 2007. EU → NACE Rev.2. US/Canada → NAICS 2022. Others → ISIC Rev.4."
+    )
+
+    with st.expander("What this page does — inputs, outputs, and how taxonomy routing works"):
+        st.markdown("""
+**Industry code selector** for cases where a human needs to choose or verify a classification manually.
+
+| Jurisdiction | Taxonomy shown | Why |
+|---|---|---|
+| `gb`, `gg`, `je` (UK) | **UK SIC 2007** | Required by Companies House and ONS |
+| `us`, `us_*`, `ca`, `ca_*`, `au` | **NAICS 2022** | Official North American standard |
+| `de`, `fr`, `it`, `es`, `nl`, `pl`… (EU) | **NACE Rev.2** | Eurostat statistical classification |
+| `ae`, `th`, `tz`, `in`… (global) | **ISIC Rev.4** | UN international standard |
+
+1. Select a jurisdiction (type to search — e.g. `gb`, `us_mo`, `ca_bc`, `ae_az`)
+2. Type in the Search box to filter by code number OR keyword
+3. Click a result to see the full detail card with JSON output
+""")
+
+    st.markdown("---")
+
+    # ── 1. Jurisdiction selector ──────────────────────────────────────────────
+    st.subheader("1. Select Jurisdiction")
+    col_a, col_b, col_c = st.columns([2, 2, 1])
+
+    all_jur = sorted(JR.all_codes())
+    jur_display = [f"{jc}  —  {JR.lookup(jc).label if JR.lookup(jc) else jc}" for jc in all_jur]
+    jur_map = dict(zip(jur_display, all_jur))
+
+    with col_a:
+        default_idx = all_jur.index("gb") if "gb" in all_jur else 0
+        selected_display = st.selectbox(
+            "Jurisdiction / Country",
+            options=jur_display,
+            index=default_idx,
+            help="Type to search — e.g. 'united kingdom', 'us_mo', 'ca_bc'",
+        )
+        jc = jur_map[selected_display]
+
+    with col_b:
+        auto_tax = taxonomy_for_jurisdiction(jc)
+        all_tax_opts = get_all_taxonomy_names()
+        auto_idx = all_tax_opts.index(auto_tax) if auto_tax in all_tax_opts else 0
+        taxonomy_override_sel = st.selectbox(
+            "Taxonomy (auto-selected, can override)",
+            options=all_tax_opts,
+            index=auto_idx,
+            format_func=lambda t: TAXONOMY_LABELS.get(t, t),
+        )
+
+    with col_c:
+        if st.button("Reload CSV"):
+            reload_taxonomy(taxonomy_override_sel)
+            st.success("Reloaded.")
+
+    jr_rec    = JR.lookup(jc)
+    tax_used  = taxonomy_override_sel
+    tax_label = TAXONOMY_LABELS.get(tax_used, tax_used)
+    st.info(
+        f"**Jurisdiction:** `{jc}` — {jr_rec.label if jr_rec else jc}  |  "
+        f"**Sovereign country:** `{jr_rec.iso2 if jr_rec else '?'}`  |  "
+        f"**Region:** {jr_rec.region_bucket if jr_rec else '?'}  |  "
+        f"**Taxonomy in use:** {tax_label}"
+    )
+
+    # ── 2. Search bar ─────────────────────────────────────────────────────────
+    st.subheader("2. Search Industry")
+    search_col, clear_col = st.columns([5, 1])
+    with search_col:
+        search_q = st.text_input(
+            "Search", placeholder="e.g.  62012   or   software   or   restaurant",
+            label_visibility="collapsed",
+        )
+    with clear_col:
+        if st.button("Clear"):
+            search_q = ""
+
+    if search_q.strip():
+        entries = search_entries(jc, search_q.strip(), taxonomy_override=tax_used)
+        st.caption(f"{len(entries)} result(s) for **\"{search_q}\"**")
+    else:
+        entries = get_entries(jc, taxonomy_override=tax_used)
+        st.caption(f"{len(entries)} codes in {tax_label}")
+
+    # ── 3. Select code ────────────────────────────────────────────────────────
+    st.subheader("3. Select Industry Code")
+    if not entries:
+        st.warning("No codes found. Try a different search term or taxonomy.")
+    else:
+        display_options = [e["display"] for e in entries]
+        display_map     = {e["display"]: e for e in entries}
+        selected_display_code = st.selectbox(
+            "Industry code", options=display_options, label_visibility="collapsed",
+        )
+        selected_entry = display_map[selected_display_code]
+
+        st.markdown("---")
+        st.subheader("Selected Classification")
+        d1, d2, d3 = st.columns(3)
+        d1.metric("Code",       selected_entry["code"])
+        d2.metric("Taxonomy",   selected_entry["taxonomy"].replace("_"," "))
+        d3.metric("Jurisdiction", jc.upper())
+        st.markdown(f"**Description:** {selected_entry['description']}")
+        st.markdown(f"**Official Taxonomy:** {tax_label}")
+        if jr_rec:
+            st.markdown(
+                f"**Jurisdiction:** {jr_rec.label} "
+                f"({'Sub-national' if jr_rec.is_subnational else 'Country'} — {jr_rec.iso2})"
+            )
+
+        with st.expander("Copy-ready JSON output"):
+            st.json({
+                "jurisdiction_code":    jc,
+                "jurisdiction_label":   jr_rec.label if jr_rec else jc,
+                "sovereign_country":    jr_rec.iso2 if jr_rec else "",
+                "taxonomy":             selected_entry["taxonomy"],
+                "taxonomy_label":       tax_label,
+                "industry_code":        selected_entry["code"],
+                "industry_description": selected_entry["description"],
+            })
+
+    # ── Full browsable table ──────────────────────────────────────────────────
+    with st.expander(f"Browse full {tax_label} table ({len(entries)} codes)"):
+        df_table = pd.DataFrame([
+            {"Code": e["code"], "Description": e["description"]} for e in entries
+        ])
+        st.dataframe(df_table, use_container_width=True, height=400)
+        st.download_button(
+            f"Download {tax_used} CSV",
+            data=df_table.to_csv(index=False).encode(),
+            file_name=f"{tax_used}_{jc}.csv",
+            mime="text/csv",
+        )
+
+    # ── Cross-taxonomy comparison ─────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("Compare Across Taxonomies")
+    compare_q = st.text_input("Keyword for cross-taxonomy comparison",
+                              placeholder="e.g. restaurant")
+    if compare_q.strip():
+        compare_cols = st.columns(3)
+        for idx, tax in enumerate(["US_NAICS_2022","UK_SIC_2007","NACE_REV2",
+                                    "ISIC_REV4","MCC","US_SIC_1987"]):
+            matches = search_entries(jc, compare_q.strip(), taxonomy_override=tax, max_results=5)
+            with compare_cols[idx % 3]:
+                st.markdown(f"**{TAXONOMY_LABELS.get(tax, tax)}**")
+                if matches:
+                    for m in matches:
+                        st.markdown(f"- `{m['code']}` {m['description'][:50]}")
+                else:
+                    st.caption("No matches")
 
 
 def main():
     # Pre-warm all models on first render — shows spinner once, then instant
     _prewarm_models()
 
-    mode = _sidebar()
+    page, mode = _sidebar()
 
+    # ── INDUSTRY LOOKUP ───────────────────────────────────────────────────────
+    if page == "Industry Lookup":
+        _render_industry_lookup()
+        return
+
+    # ── CLASSIFY ─────────────────────────────────────────────────────────────
     st.title("🏭 Global Industry Classification Engine v2")
     st.caption(
         "**Level 1** — entity matching confidence per source · "
