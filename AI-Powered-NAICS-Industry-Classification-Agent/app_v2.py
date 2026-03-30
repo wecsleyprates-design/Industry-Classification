@@ -1,29 +1,20 @@
 """
 app_v2.py — Global Industry Classification Engine (v2)
 ========================================================
-Rebuilt from the ground up for speed and clarity.
-
-What it produces per company:
-  Level 1 — Entity Matching:
-    • Match confidence per source (OC, Equifax, ZoomInfo, Liberty, Trulioo, AI)
-    • Source status (MATCHED / POLLUTED / INFERRED / CONFLICT / UNAVAILABLE)
-    • Best source, average confidence, sources matched ≥ 0.80
-
-  Level 2 — Consensus XGBoost:
-    • Primary industry code + label + calibrated probability
-    • Top-3 alternative codes
-    • Correct taxonomy per jurisdiction (NAICS / UK SIC / NACE / ISIC)
-    • 6 AML/KYB risk signal types
-    • KYB recommendation: APPROVE / REVIEW / ESCALATE / REJECT
-
-Modes:
-  Single company — type a name, get full analysis instantly
-  Batch upload   — CSV/Excel with company names, process all, download results
+Single company or batch upload → same output, same speed.
 
 Performance:
-  All models cached via @st.cache_resource (load once, reuse forever)
-  Batch runs the fast pipeline: no LLM, no HTTP calls (~0.01s per company)
-  Single mode runs the full pipeline with LLM enrichment
+  Fast pipeline (default):  entity resolver + consensus XGBoost + risk engine
+                             ~0.02 s per company after first model load
+  Deep analysis (optional): adds LLM enrichment + SEC EDGAR + Companies House
+                             ~10-20 s per company, opt-in per button click
+
+Both single and batch produce identical output structure:
+  • Level 1 source confidence cards + bar chart
+  • Level 2 Consensus classification: top-5 codes with probability bars
+  • AML/KYB risk panel
+  • Analyst interpretation card
+  • Full downloadable results table
 """
 from __future__ import annotations
 
@@ -48,14 +39,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Industry Classification Engine v2",
+    page_title="Industry Classification Engine",
     page_icon="🏭",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ── Colour constants ──────────────────────────────────────────────────────────
-SOURCE_COLOURS = {
+# ── Design tokens ─────────────────────────────────────────────────────────────
+SRC_C = {
     "opencorporates": "#68D391",
     "equifax":        "#4299E1",
     "trulioo":        "#9F7AEA",
@@ -63,34 +54,49 @@ SOURCE_COLOURS = {
     "liberty":        "#FC8181",
     "ai_semantic":    "#63B3ED",
 }
-STATUS_COLOURS = {
+STATUS_C = {
     "MATCHED":     "#48BB78",
     "INFERRED":    "#4299E1",
     "CONFLICT":    "#ECC94B",
     "POLLUTED":    "#FC8181",
     "UNAVAILABLE": "#718096",
 }
-KYB_COLOURS = {
-    "APPROVE":  "#48BB78",
-    "REVIEW":   "#4299E1",
-    "ESCALATE": "#ECC94B",
-    "REJECT":   "#FC8181",
-}
-KYB_BG = {
-    "APPROVE":  "#1a4731",
-    "REVIEW":   "#1a365d",
-    "ESCALATE": "#5c3a00",
-    "REJECT":   "#5c1a1a",
-}
+KYB_C  = {"APPROVE":"#48BB78","REVIEW":"#4299E1","ESCALATE":"#ECC94B","REJECT":"#FC8181"}
+KYB_BG = {"APPROVE":"#1a4731","REVIEW":"#1a365d","ESCALATE":"#5c3a00","REJECT":"#5c1a1a"}
+RISK_C = {"CRITICAL":"#9B2335","HIGH":"#FC8181","MEDIUM":"#ECC94B","LOW":"#48BB78","INFO":"#4299E1"}
 
-# ── Model singletons ──────────────────────────────────────────────────────────
+# ── CSS ───────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+.src-card {
+    border-radius: 10px; padding: 14px 16px; margin-bottom: 10px;
+    background: rgba(255,255,255,0.04); border: 2px solid;
+}
+.kyb-banner {
+    border-radius: 10px; padding: 14px 22px; text-align: center;
+    font-size: 1.3em; font-weight: 800; color: white; margin-bottom: 16px;
+}
+.interp-card {
+    border-radius: 10px; padding: 18px 20px; margin: 12px 0;
+    background: #1A1F2E; border-left: 5px solid;
+}
+.prob-bar-wrap { margin-bottom: 10px; }
+.prob-bar-label { font-size: 11px; color: #A0AEC0; margin-bottom: 2px; }
+.prob-bar-desc  { font-size: 13px; color: #E2E8F0; margin-bottom: 4px; }
+.prob-bar-outer { background: #2D3748; border-radius: 4px; height: 16px; }
+.prob-bar-inner { height: 16px; border-radius: 4px; display: flex;
+                  align-items: center; padding-left: 6px; }
+.prob-bar-pct   { font-size: 11px; font-weight: 700; color: white; }
+</style>
+""", unsafe_allow_html=True)
 
-@st.cache_resource(show_spinner="Loading taxonomy index (2 330 codes) …")
+# ── Cached model singletons ───────────────────────────────────────────────────
+@st.cache_resource(show_spinner="⏳ Loading taxonomy index — first load only, ~8s …")
 def _te():
     from taxonomy_engine import TaxonomyEngine
     return TaxonomyEngine()
 
-@st.cache_resource(show_spinner="Warming up Consensus XGBoost …")
+@st.cache_resource(show_spinner="⏳ Warming up Consensus XGBoost …")
 def _ce():
     from consensus_engine import IndustryConsensusEngine
     return IndustryConsensusEngine(taxonomy_engine=_te())
@@ -110,31 +116,14 @@ def _sim():
     from data_simulator import DataSimulator
     return DataSimulator()
 
-@st.cache_resource(show_spinner=False)
-def _get_redshift_status():
-    try:
-        from redshift_connector import get_connector
-        rc = get_connector()
-        return "LIVE" if rc.is_connected else "SIMULATED"
-    except Exception:
-        return "SIMULATED"
-
-# ── Column name mapping for uploaded CSVs ─────────────────────────────────────
+# ── CSV normalisation ─────────────────────────────────────────────────────────
 _COL_MAP = {
-    "lgl_nm_worth":   "company_name",
-    "lgl_nm_received":"company_name",
-    "name":           "company_name",
-    "business_name":  "company_name",
-    "company":        "company_name",
-    "address_1_worth":"address",
-    "address":        "address",
-    "street_address": "address",
-    "city_worth":     "city",
-    "region_worth":   "state",
-    "zip_code_worth": "zip",
-    "country_worth":  "country",
+    "lgl_nm_worth":"company_name","lgl_nm_received":"company_name",
+    "name":"company_name","business_name":"company_name","company":"company_name",
+    "address_1_worth":"address","address":"address","street_address":"address",
+    "city_worth":"city","region_worth":"state","zip_code_worth":"zip",
+    "country_worth":"country",
 }
-
 
 def _parse_upload(raw: pd.DataFrame) -> pd.DataFrame:
     df = raw.copy()
@@ -143,720 +132,901 @@ def _parse_upload(raw: pd.DataFrame) -> pd.DataFrame:
             df[dst] = df[src].fillna("").astype(str).str.strip()
     if "company_name" not in df.columns:
         for c in df.columns:
-            if any(w in c.lower() for w in ("name", "nm", "company")):
-                df["company_name"] = df[c].fillna("").astype(str).str.strip()
-                break
+            if any(w in c.lower() for w in ("name","nm","company")):
+                df["company_name"] = df[c].fillna("").astype(str).str.strip(); break
     if "company_name" not in df.columns:
         st.error("No company name column found. Expected `lgl_nm_worth` or `company_name`.")
         st.stop()
-    for col in ("address", "city", "state", "country"):
-        if col not in df.columns:
-            df[col] = ""
+    for col in ("address","city","state","country"):
+        if col not in df.columns: df[col] = ""
     df["country"] = df["country"].where(df["country"].str.strip() != "", "US")
     return df
 
-
-# ── Fast batch pipeline (no LLM / no HTTP) ───────────────────────────────────
-
-def _run_batch(df: pd.DataFrame) -> pd.DataFrame:
+# ── Fast classification (shared by both single and batch) ─────────────────────
+def _classify_rows(df: pd.DataFrame, show_progress: bool = True) -> pd.DataFrame:
     """
-    Classify all rows with Entity Resolver + DataSimulator +
-    ConsensusEngine + RiskEngine. No LLM, no external HTTP calls.
-    ~0.01 s per company after model warm-up.
+    Fast pipeline: entity resolver → data simulator → consensus → risk.
+    No LLM, no HTTP. ~0.02s per company after model warm-up.
     """
-    er  = _er()
-    sim = _sim()
-    ce  = _ce()
-    rev = _re()
-
+    er = _er(); sim = _sim(); ce = _ce(); rev = _re()
     n = len(df)
-    prog   = st.progress(0.0, text="Classifying …")
-    t0     = time.time()
-    rows   = []
+    prog = st.progress(0.0, text="Classifying …") if show_progress else None
+    t0 = time.time()
+    rows = []
 
-    for i, row in df.iterrows():
-        name    = str(row.get("company_name", "") or "").strip()
-        address = str(row.get("address", "")      or "").strip()
-        country = str(row.get("country", "")      or "").strip()
-        state   = str(row.get("state", "")        or "").strip()
+    for idx, row in df.iterrows():
+        name    = str(row.get("company_name","") or "").strip()
+        address = str(row.get("address","")      or "").strip()
+        country = str(row.get("country","")      or "").strip()
+        state   = str(row.get("state","")        or "").strip()
 
         if not name:
-            rows.append({"_error": "empty name"})
-            prog.progress((i + 1) / n)
+            rows.append({"_error":"empty"})
             continue
-
         try:
-            entity  = er.resolve(name, address, country or state)
-            bundle  = sim.fetch(name, address, country or state,
-                                entity.jurisdiction_code, "Operating", "")
-            cons    = ce.predict(bundle)
-            risk    = rev.evaluate(bundle, cons)
+            entity = er.resolve(name, address, country or state)
+            bundle = sim.fetch(name, address, country or state,
+                               entity.jurisdiction_code, "Operating", "")
+            cons   = ce.predict(bundle)
+            risk   = rev.evaluate(bundle, cons)
 
-            p1   = cons.primary_industry
-            sec  = cons.secondary_industries[:2]
+            p1  = cons.primary_industry
+            sec = cons.secondary_industries
             sigs = bundle.signals
 
-            # Level 1 — per-source confidence
             src_conf = {s.source: round(s.confidence, 4) for s in sigs}
-            src_stat = {s.source: s.status                for s in sigs}
-            src_code = {s.source: s.raw_code              for s in sigs}
+            src_stat = {s.source: s.status for s in sigs}
+            src_code = {s.source: s.raw_code for s in sigs}
+            src_lbl  = {s.source: s.label for s in sigs}
+            src_tax  = {s.source: s.taxonomy for s in sigs}
+            src_wt   = {s.source: s.weight for s in sigs}
 
             best_src  = max(src_conf, key=src_conf.get) if src_conf else "—"
             avg_conf  = round(float(np.mean(list(src_conf.values()))), 4) if src_conf else 0
             matched   = sum(1 for c in src_conf.values() if c >= 0.80)
             flags_str = "; ".join(s.flag for s in risk.signals) if risk.signals else "—"
-            aml_n     = len(risk.signals)
+            zi_c      = src_conf.get("zoominfo", 0)
+            efx_c     = src_conf.get("equifax",  0)
 
-            rows.append({
-                # Identity
-                "Company":              name,
-                "Clean Name":           entity.clean_name,
-                "Jurisdiction":         entity.jurisdiction_code,
-                "Entity Type":          entity.detected_entity_type,
-                # Level 1 — source confidences
-                "L1: OC confidence":    src_conf.get("opencorporates", 0),
-                "L1: OC status":        src_stat.get("opencorporates", "—"),
-                "L1: OC code":          src_code.get("opencorporates", "—"),
-                "L1: EFX confidence":   src_conf.get("equifax", 0),
-                "L1: EFX status":       src_stat.get("equifax", "—"),
-                "L1: EFX code":         src_code.get("equifax", "—"),
-                "L1: ZI confidence":    src_conf.get("zoominfo", 0),
-                "L1: ZI status":        src_stat.get("zoominfo", "—"),
-                "L1: ZI code":          src_code.get("zoominfo", "—"),
-                "L1: TRU confidence":   src_conf.get("trulioo", 0),
-                "L1: TRU status":       src_stat.get("trulioo", "—"),
-                "L1: Liberty confidence": src_conf.get("liberty", 0),
-                "L1: Liberty status":   src_stat.get("liberty", "—"),
-                "L1: AI confidence":    src_conf.get("ai_semantic", 0),
-                "L1: Best source":      best_src,
-                "L1: Avg confidence":   avg_conf,
-                "L1: Sources ≥ 0.80":  matched,
-                # Production rule (ZI vs EFX winner-takes-all)
-                "Prod: Winner":         "zoominfo" if src_conf.get("zoominfo",0) > src_conf.get("equifax",0) else "equifax",
-                "Prod: Winner conf":    round(max(src_conf.get("zoominfo",0), src_conf.get("equifax",0)), 4),
-                "Prod: NAICS code":     src_code.get("zoominfo","—") if src_conf.get("zoominfo",0) > src_conf.get("equifax",0) else src_code.get("equifax","—"),
+            row_out = {
+                "Company":          name,
+                "Clean Name":       entity.clean_name,
+                "Jurisdiction":     entity.jurisdiction_code,
+                "Entity Type":      entity.detected_entity_type,
+                # Level 1 — source confidences (raw model outputs)
+                "OC Confidence":    src_conf.get("opencorporates", 0),
+                "OC Status":        src_stat.get("opencorporates", "—"),
+                "OC Code":          src_code.get("opencorporates", "—"),
+                "EFX Confidence":   src_conf.get("equifax", 0),
+                "EFX Status":       src_stat.get("equifax", "—"),
+                "EFX Code":         src_code.get("equifax", "—"),
+                "ZI Confidence":    src_conf.get("zoominfo", 0),
+                "ZI Status":        src_stat.get("zoominfo", "—"),
+                "ZI Code":          src_code.get("zoominfo", "—"),
+                "TRU Confidence":   src_conf.get("trulioo", 0),
+                "TRU Status":       src_stat.get("trulioo", "—"),
+                "TRU Code":         src_code.get("trulioo", "—"),
+                "LIB Confidence":   src_conf.get("liberty", 0),
+                "LIB Status":       src_stat.get("liberty", "—"),
+                "AI Confidence":    src_conf.get("ai_semantic", 0),
+                "Best Source":      best_src,
+                "Avg Confidence":   avg_conf,
+                "Sources ≥ 0.80":   matched,
+                # Production rule output (ZI vs EFX)
+                "Prod Winner":      "ZoomInfo" if zi_c > efx_c else "Equifax",
+                "Prod Confidence":  round(max(zi_c, efx_c), 4),
+                "Prod NAICS":       src_code.get("zoominfo","—") if zi_c > efx_c else src_code.get("equifax","—"),
                 # Level 2 — Consensus XGBoost
-                "Cons: Primary code":  p1.code,
-                "Cons: Primary label": p1.label,
-                "Cons: Probability":   f"{p1.consensus_probability:.1%}",
-                "Cons: Probability_f": round(p1.consensus_probability, 4),
-                "Cons: Taxonomy":      p1.taxonomy,
-                "Cons: 2nd code":      sec[0].code  if sec        else "",
-                "Cons: 2nd label":     sec[0].label if sec        else "",
-                "Cons: 3rd code":      sec[1].code  if len(sec)>1 else "",
-                "Cons: 3rd label":     sec[1].label if len(sec)>1 else "",
-                "Cons: Risk score":    round(risk.overall_risk_score, 4),
-                "Cons: Risk level":    risk.overall_risk_level,
-                "Cons: KYB":          risk.kyb_recommendation,
-                "Cons: AML flags":    flags_str,
-                "Cons: AML count":    aml_n,
+                "Primary Code":     p1.code,
+                "Primary Label":    p1.label,
+                "Primary Taxonomy": p1.taxonomy.replace("_"," "),
+                "Primary Prob":     round(p1.consensus_probability, 4),
+            }
+            # Top-5 codes
+            all_codes = [p1] + list(sec)
+            for rank in range(1, 6):
+                if rank <= len(all_codes):
+                    c = all_codes[rank-1]
+                    row_out[f"Rank {rank} Code"]  = c.code
+                    row_out[f"Rank {rank} Label"] = c.label
+                    row_out[f"Rank {rank} Tax"]   = c.taxonomy.replace("_"," ")
+                    row_out[f"Rank {rank} Prob"]  = round(c.consensus_probability, 4)
+                else:
+                    row_out[f"Rank {rank} Code"]  = ""
+                    row_out[f"Rank {rank} Label"] = ""
+                    row_out[f"Rank {rank} Tax"]   = ""
+                    row_out[f"Rank {rank} Prob"]  = 0.0
+
+            row_out.update({
+                "Risk Score":    round(risk.overall_risk_score, 4),
+                "Risk Level":    risk.overall_risk_level,
+                "KYB":           risk.kyb_recommendation,
+                "AML Flags":     flags_str,
+                "AML Count":     len(risk.signals),
+                # store signals list for rendering
+                "_signals":      [(s.flag, s.severity, s.description) for s in risk.signals],
+                "_sigs_raw":     sigs,
             })
+            rows.append(row_out)
+
         except Exception as exc:
-            rows.append({
-                "Company": name,
-                "Cons: KYB": "REVIEW",
-                "Cons: AML flags": str(exc)[:120],
-                "_error": str(exc)[:120],
-            })
+            rows.append({"Company": name, "KYB": "REVIEW",
+                         "AML Flags": str(exc)[:120], "_error": str(exc)[:120]})
 
-        if (i + 1) % 5 == 0 or (i + 1) == n:
+        if prog:
+            i_pos = list(df.index).index(idx) + 1
             elapsed = time.time() - t0
-            rate    = (i + 1) / elapsed if elapsed > 0 else 999
-            eta     = (n - i - 1) / rate if rate > 0 else 0
-            prog.progress(
-                (i + 1) / n,
-                text=f"Classifying {i+1}/{n} — {rate:.0f} companies/s — ETA {eta:.0f}s",
-            )
+            rate = i_pos / elapsed if elapsed > 0 else 999
+            eta  = (n - i_pos) / rate if rate > 0 else 0
+            if i_pos % 5 == 0 or i_pos == n:
+                prog.progress(i_pos / n,
+                    text=f"Classifying {i_pos}/{n} — {rate:.0f} companies/s — ETA {eta:.0f}s")
 
-    prog.empty()
+    if prog: prog.empty()
     return pd.DataFrame(rows)
 
+# ── Optional deep enrichment (LLM + external registries) ─────────────────────
+def _deep_enrich(row: pd.Series) -> dict:
+    """Run LLM enrichment and external registry lookup for one company."""
+    name    = str(row.get("Company",""))
+    jc      = str(row.get("Jurisdiction","us"))
+    address = str(row.get("Clean Name",""))  # best we have post-resolve
+    try:
+        from llm_enrichment import enrich_company_profile, llm_classify
+        prof = enrich_company_profile(name, "", "", "")
+        from taxonomy_engine import TaxonomyEngine
+        te = _te()
+        ugo = te.search(f"{prof.primary_business_description} {name}", top_k=10)
+        candidates = {}
+        for rec, score in ugo:
+            candidates.setdefault(rec.taxonomy, []).append(
+                {"code": rec.code, "description": rec.description, "score": round(float(score),4)})
+        llm = llm_classify(name, prof.primary_business_description, jc,
+                            candidates, prof.web_summary, None, None,
+                            prof.probable_entity_type)
+    except Exception as exc:
+        llm = None
 
-# ── Full single-company pipeline (with LLM) ───────────────────────────────────
+    try:
+        from external_lookup import lookup_all as _ext
+        ext = _ext(name, jc)
+    except Exception:
+        ext = None
 
-def _run_single(name: str, address: str, country: str) -> tuple:
-    from llm_enrichment import enrich_company_profile, llm_classify
-    from external_lookup import lookup_all as _ext_lookup
+    return {"llm": llm, "ext": ext}
 
-    er  = _er()
-    sim = _sim()
-    ce  = _ce()
-    rev = _re()
-    te  = _te()
+# ════════════════════════════════════════════════════════════
+# RENDERING  (identical for single and batch)
+# ════════════════════════════════════════════════════════════
 
-    entity      = er.resolve(name, address, country)
-    llm_profile = enrich_company_profile(name, address, country or entity.detected_jurisdiction, "")
-    query       = f"{llm_profile.primary_business_description} {name}"
-    ugo         = te.search(query, top_k=10)
-    candidates  = {}
-    for rec, score in ugo:
-        candidates.setdefault(rec.taxonomy, []).append(
-            {"code": rec.code, "description": rec.description, "score": round(float(score), 4)}
-        )
-    ext_reg = _ext_lookup(name, entity.jurisdiction_code)
-    bundle  = sim.fetch(name, address, country, entity.jurisdiction_code,
-                        llm_profile.probable_entity_type, llm_profile.primary_business_description)
-    vendor_signals = [
-        {"source": s.source, "raw_code": s.raw_code, "taxonomy": s.taxonomy,
-         "label": s.label, "weight": s.weight, "status": s.status, "confidence": s.confidence}
-        for s in bundle.signals if s.raw_code
-    ]
-    llm_result = llm_classify(
-        company_name=name,
-        business_description=llm_profile.primary_business_description,
-        jurisdiction=entity.jurisdiction_code,
-        candidates_by_taxonomy=candidates,
-        web_summary=llm_profile.web_summary,
-        vendor_signals=vendor_signals,
-        external_registry=ext_reg,
-        entity_type=llm_profile.probable_entity_type,
-    )
-    cons = ce.predict(bundle)
-    risk = rev.evaluate(bundle, cons)
-    cons.risk_signals = [s.to_dict() for s in risk.signals]
-    return entity, bundle, cons, risk, llm_result, ext_reg
-
-
-# ── Rendering helpers ─────────────────────────────────────────────────────────
-
-def _confidence_gauge(value: float, title: str) -> go.Figure:
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=value,
-        number={"suffix": "", "valueformat": ".3f"},
-        title={"text": title, "font": {"size": 13}},
-        gauge={
-            "axis": {"range": [0, 1], "tickformat": ".1f"},
-            "steps": [
-                {"range": [0.00, 0.50], "color": "#742A2A"},
-                {"range": [0.50, 0.80], "color": "#744210"},
-                {"range": [0.80, 1.00], "color": "#276749"},
-            ],
-            "threshold": {"line": {"color": "white", "width": 3}, "value": 0.80},
-            "bar": {"color": "rgba(255,255,255,0.25)"},
-        },
-    ))
-    fig.update_layout(height=180, margin=dict(t=30, b=5, l=10, r=10), template="plotly_dark")
-    return fig
-
-
-def _source_bar(signals) -> go.Figure:
-    labels = [s.source.replace("_", " ").title() for s in signals]
-    values = [s.confidence for s in signals]
-    colours = [SOURCE_COLOURS.get(s.source, "#718096") for s in signals]
-    statuses = [s.status for s in signals]
-
-    fig = go.Figure(go.Bar(
-        x=labels, y=values,
-        marker_color=colours,
-        text=[f"{v:.2f}<br><span style='font-size:10px'>{st}</span>"
-              for v, st in zip(values, statuses)],
-        textposition="outside",
-        hovertemplate="<b>%{x}</b><br>Confidence: %{y:.3f}<br>Status: %{customdata}<extra></extra>",
-        customdata=statuses,
-    ))
-    fig.add_hline(y=0.80, line_dash="dash", line_color="white",
-                  annotation_text="0.80 threshold", annotation_position="top right")
-    fig.update_layout(
-        title="Level 1 — Source Match Confidence",
-        yaxis=dict(range=[0, 1.1], title="Confidence"),
-        template="plotly_dark",
-        height=280,
-        margin=dict(t=40, b=20, l=20, r=20),
-        showlegend=False,
-    )
-    return fig
-
-
-def _kyb_badge(kyb: str) -> str:
-    bg = KYB_BG.get(kyb, "#374151")
-    return (
-        f'<div style="background:{bg};padding:10px 20px;border-radius:8px;'
-        f'font-size:1.1em;font-weight:800;color:white;text-align:center;">'
-        f'KYB: {kyb}</div>'
-    )
-
-
-def _prob_bar(prob: float, code: str, label: str, rank: int) -> str:
+def _html_prob_bar(rank: int, code: str, label: str, prob: float, taxonomy: str) -> str:
     pct    = int(prob * 100)
     colour = "#48BB78" if pct >= 70 else "#ECC94B" if pct >= 40 else "#FC8181"
-    return (
-        f'<div style="margin-bottom:8px">'
-        f'<div style="font-size:11px;color:#A0AEC0;margin-bottom:2px">#{rank} — {code}</div>'
-        f'<div style="font-size:13px;color:#E2E8F0;margin-bottom:4px">{label}</div>'
-        f'<div style="background:#2D3748;border-radius:4px;height:14px;width:100%">'
-        f'<div style="background:{colour};height:14px;border-radius:4px;width:{pct}%;'
-        f'display:flex;align-items:center;padding-left:6px">'
-        f'<span style="font-size:10px;font-weight:700;color:white">{prob:.0%}</span></div></div></div>'
-    )
+    type_label = "PRIMARY" if rank == 1 else f"SECONDARY {rank-1}"
+    return f"""
+<div class="prob-bar-wrap">
+  <div style="display:flex;justify-content:space-between;margin-bottom:2px">
+    <span style="font-size:10px;font-weight:700;color:#A0AEC0;text-transform:uppercase;
+                 letter-spacing:.5px">{type_label}</span>
+    <span style="font-size:11px;color:#718096">{taxonomy}</span>
+  </div>
+  <div style="font-size:15px;font-weight:800;color:#fff;font-family:monospace;
+              letter-spacing:2px;margin-bottom:2px">{code}</div>
+  <div style="font-size:13px;color:#CBD5E0;margin-bottom:6px">{label}</div>
+  <div class="prob-bar-outer">
+    <div class="prob-bar-inner" style="width:{pct}%;background:{colour}">
+      <span class="prob-bar-pct">{prob:.0%}</span>
+    </div>
+  </div>
+</div>"""
 
 
-def _render_single(name, bundle, cons, risk, llm, ext_reg) -> None:
-    """Render full single-company analysis."""
-    p1   = cons.primary_industry
-    sigs = bundle.signals
+def _html_src_card(src_key: str, conf: float, status: str, code: str, label: str = "") -> str:
+    colour   = SRC_C.get(src_key, "#718096")
+    st_col   = STATUS_C.get(status, "#718096")
+    src_name = src_key.replace("_"," ").title()
+    matched  = conf >= 0.80
+    tick     = "✅" if matched else "⚠️" if conf >= 0.50 else "❌"
+    return f"""
+<div class="src-card" style="border-color:{colour}">
+  <div style="font-size:10px;color:{colour};font-weight:700;text-transform:uppercase;
+              letter-spacing:.8px;margin-bottom:4px">{src_name}</div>
+  <div style="font-size:26px;font-weight:900;color:#fff;font-family:monospace">{conf:.3f}</div>
+  <div style="margin:4px 0">
+    <span style="background:{st_col};color:#fff;padding:2px 8px;border-radius:20px;
+                 font-size:10px;font-weight:700">{status}</span>
+    <span style="margin-left:6px;font-size:14px">{tick}</span>
+  </div>
+  <div style="font-size:11px;color:#A0AEC0;margin-top:4px">{code[:30] if code else '—'}</div>
+</div>"""
 
-    # ── Row 1: KYB verdict + summary metrics ─────────────────────────────────
-    st.markdown(_kyb_badge(risk.kyb_recommendation), unsafe_allow_html=True)
-    st.markdown("")
 
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Primary Code",   p1.code)
-    m2.metric("Taxonomy",       p1.taxonomy.replace("_", " "))
-    m3.metric("Probability",    f"{p1.consensus_probability:.0%}")
-    m4.metric("Risk Score",     f"{risk.overall_risk_score:.3f}")
-    m5.metric("Risk Level",     risk.overall_risk_level)
+def _analyst_card(row: pd.Series, deep: dict | None = None) -> str:
+    kyb     = str(row.get("KYB",""))
+    prob    = float(row.get("Primary Prob", 0))
+    avg_c   = float(row.get("Avg Confidence", 0))
+    matched = int(row.get("Sources ≥ 0.80", 0))
+    aml_n   = int(row.get("AML Count", 0))
+    prod_w  = str(row.get("Prod Winner",""))
+    prod_c  = float(row.get("Prod Confidence", 0))
+    best_s  = str(row.get("Best Source",""))
+    p_code  = str(row.get("Primary Code",""))
+    p_label = str(row.get("Primary Label",""))
+    risk_l  = str(row.get("Risk Level",""))
+    border  = KYB_C.get(kyb, "#718096")
 
-    st.divider()
+    bullets = []
 
-    # ── Row 2: Level 1 bar chart + gauges ────────────────────────────────────
-    st.markdown("### Level 1 — Entity Matching Source Confidences")
-    st.caption(
-        "These confidence scores come from the Level 1 XGBoost entity matching model. "
-        "Each score (0–1) measures how well this company matches a record in that vendor's database. "
-        "≥ 0.80 = matched. The production rule uses only ZoomInfo vs Equifax for the NAICS code — "
-        "OC, Liberty, and Trulioo industry codes are ignored by the current pipeline."
-    )
+    # Entity matching quality
+    if matched >= 3:
+        bullets.append(f"✅ <strong>Strong entity match</strong> — {matched} of 6 sources matched with ≥ 0.80 confidence, "
+                       f"including {best_s.replace('_',' ').title()}. High confidence this company exists in vendor databases.")
+    elif matched >= 1:
+        bullets.append(f"🟡 <strong>Partial entity match</strong> — only {matched} source(s) matched at ≥ 0.80. "
+                       f"Company may be small, newly registered, or not yet in all vendor databases.")
+    else:
+        bullets.append(f"🔴 <strong>Weak entity match</strong> — no source reached 0.80 confidence. "
+                       f"Classification relies on AI inference rather than direct vendor match. Treat with caution.")
 
-    col_bar, col_info = st.columns([3, 1])
-    with col_bar:
-        st.plotly_chart(_source_bar(sigs), use_container_width=True)
-    with col_info:
-        best_src  = max(sigs, key=lambda s: s.confidence) if sigs else None
-        avg_c     = np.mean([s.confidence for s in sigs]) if sigs else 0
-        matched_n = sum(1 for s in sigs if s.confidence >= 0.80)
-        st.markdown(f"**Best source:** {best_src.source if best_src else '—'}")
-        st.markdown(f"**Best confidence:** {best_src.confidence:.3f}" if best_src else "")
-        st.markdown(f"**Avg confidence:** {avg_c:.3f}")
-        st.markdown(f"**Sources ≥ 0.80:** {matched_n}/{len(sigs)}")
-        zi_c  = next((s.confidence for s in sigs if s.source == "zoominfo"), 0)
-        efx_c = next((s.confidence for s in sigs if s.source == "equifax"), 0)
-        prod_win = "zoominfo" if zi_c > efx_c else "equifax"
-        st.markdown(f"**Production winner:** {prod_win} ({max(zi_c, efx_c):.3f})")
+    # Production rule gap
+    if best_s in ("opencorporates","liberty","trulioo","ai_semantic"):
+        bullets.append(f"⚠️ <strong>Production rule gap</strong> — the best match came from "
+                       f"<strong>{best_s.replace('_',' ').title()}</strong>, but the current production rule "
+                       f"only compares ZoomInfo vs Equifax for the NAICS code. "
+                       f"The production output may be based on a weaker match ({prod_w}, conf {prod_c:.3f}).")
 
-    # Source lineage table
-    with st.expander("Source lineage detail", expanded=False):
-        lineage_rows = []
-        for s in sigs:
-            lineage_rows.append({
-                "Source":     s.source.replace("_", " ").title(),
-                "Raw Code":   s.raw_code,
-                "Taxonomy":   s.taxonomy.replace("_", " "),
-                "Label":      s.label[:50] if s.label else "",
-                "Confidence": f"{s.confidence:.3f}",
-                "Status":     s.status,
-                "Weight":     f"{s.weight:.2f}",
-            })
-        lineage_df = pd.DataFrame(lineage_rows)
-        st.dataframe(lineage_df, use_container_width=True, hide_index=True)
-        st.caption("""
-**Status values:**
-- MATCHED — real Redshift record found with high confidence
-- INFERRED — derived from entity type / jurisdiction (no direct API match)
-- CONFLICT — code returned but contradicts other sources
-- POLLUTED — Trulioo 4-digit SIC returned for a 5-digit jurisdiction (data quality issue)
-- UNAVAILABLE — source did not return a result
+    # Classification confidence
+    if prob >= 0.70:
+        bullets.append(f"✅ <strong>High classification confidence ({prob:.0%})</strong> — industry signals are "
+                       f"consistent across sources. Primary code <code>{p_code}</code> ({p_label}) is reliable.")
+    elif prob >= 0.40:
+        bullets.append(f"🟡 <strong>Medium classification confidence ({prob:.0%})</strong> — some source disagreement. "
+                       f"Review the secondary codes before using <code>{p_code}</code> as the final answer.")
+    else:
+        bullets.append(f"🔴 <strong>Low classification confidence ({prob:.0%})</strong> — sources conflict significantly. "
+                       f"Manual review required before accepting <code>{p_code}</code>.")
+
+    # AML/KYB
+    if kyb in ("ESCALATE","REJECT"):
+        bullets.append(f"🚨 <strong>KYB {kyb}</strong> — {aml_n} AML signal(s) detected. "
+                       f"This company requires immediate human review before any onboarding decision.")
+    elif kyb == "REVIEW":
+        bullets.append(f"🟡 <strong>KYB REVIEW</strong> — routine analyst review recommended. "
+                       f"{aml_n} signal(s) detected; none are critical individually but warrant verification.")
+    else:
+        bullets.append(f"✅ <strong>KYB APPROVE</strong> — no elevated risk signals. "
+                       f"Company can proceed through automated onboarding with standard monitoring.")
+
+    # LLM second opinion
+    llm = deep.get("llm") if deep else None
+    if llm and llm.primary_code:
+        agree = llm.primary_code == p_code
+        if agree:
+            bullets.append(f"✅ <strong>LLM agrees</strong> — GPT-4o-mini independently selected "
+                           f"<code>{llm.primary_code}</code> with {llm.primary_confidence} confidence.")
+        else:
+            bullets.append(f"⚠️ <strong>LLM diverges</strong> — GPT-4o-mini selected "
+                           f"<code>{llm.primary_code}</code> ({llm.primary_label}) vs Consensus "
+                           f"<code>{p_code}</code>. Review both codes before making a final decision.")
+
+    bullet_html = "".join(f"<li style='margin-bottom:8px'>{b}</li>" for b in bullets)
+    return f"""
+<div class="interp-card" style="border-color:{border}">
+  <div style="font-size:13px;font-weight:700;color:{border};text-transform:uppercase;
+              letter-spacing:.5px;margin-bottom:10px">🧠 Analyst Interpretation</div>
+  <ul style="color:#E2E8F0;font-size:13px;line-height:1.7;padding-left:18px;margin:0">
+    {bullet_html}
+  </ul>
+</div>"""
+
+
+def _render_result(result_df: pd.DataFrame, deep: dict | None = None) -> None:
+    """
+    Render the full output — identical layout for single company or batch.
+    For single company: result_df has 1 row.
+    For batch: result_df has N rows; extra portfolio charts added.
+    """
+    single = len(result_df) == 1
+    row = result_df.iloc[0] if single else None
+    n   = len(result_df)
+
+    # Filter error rows for display
+    ok_df = result_df[~result_df.get("_error", pd.Series(dtype=str)).notna()].copy() if "_error" in result_df.columns else result_df.copy()
+
+    # ── TAB STRUCTURE ─────────────────────────────────────────────────────────
+    tab_summary, tab_l1, tab_l2, tab_table, tab_download = st.tabs([
+        "📊 Summary & Interpretation",
+        "🔍 Level 1 — Source Confidences",
+        "🏭 Level 2 — Classification",
+        "📋 Full Results Table",
+        "📥 Download",
+    ])
+
+    # ════════════════════════════════════════════════════════
+    # TAB 1 — SUMMARY & INTERPRETATION
+    # ════════════════════════════════════════════════════════
+    with tab_summary:
+
+        if single and row is not None:
+            # Single company — KYB banner + analyst card
+            kyb = str(row.get("KYB",""))
+            bg  = KYB_BG.get(kyb,"#374151")
+            st.markdown(
+                f'<div class="kyb-banner" style="background:{bg}">KYB Recommendation: {kyb}</div>',
+                unsafe_allow_html=True,
+            )
+
+            # Metric row
+            m1,m2,m3,m4,m5,m6 = st.columns(6)
+            m1.metric("Primary Code",   str(row.get("Primary Code","")))
+            m2.metric("Taxonomy",       str(row.get("Primary Taxonomy","")))
+            m3.metric("Probability",    f"{float(row.get('Primary Prob',0)):.0%}")
+            m4.metric("Risk Score",     f"{float(row.get('Risk Score',0)):.3f}")
+            m5.metric("Risk Level",     str(row.get("Risk Level","")))
+            m6.metric("Sources ≥ 0.80", str(row.get("Sources ≥ 0.80",0)))
+
+            st.divider()
+            st.markdown(_analyst_card(row, deep), unsafe_allow_html=True)
+
+        else:
+            # Batch — portfolio summary metrics
+            kyb_dist = ok_df["KYB"].value_counts().to_dict() if "KYB" in ok_df.columns else {}
+            prob_col  = pd.to_numeric(ok_df.get("Primary Prob", pd.Series()), errors="coerce")
+            aml_any   = int((ok_df.get("AML Count", pd.Series(dtype=int)) > 0).sum())
+            matched_hi = int((pd.to_numeric(ok_df.get("Avg Confidence", pd.Series()), errors="coerce") >= 0.80).sum())
+
+            c1,c2,c3,c4,c5,c6 = st.columns(6)
+            c1.metric("Total", n)
+            c2.metric("APPROVE",        kyb_dist.get("APPROVE",0))
+            c3.metric("REVIEW",         kyb_dist.get("REVIEW",0))
+            c4.metric("ESCALATE/REJECT",kyb_dist.get("ESCALATE",0)+kyb_dist.get("REJECT",0))
+            c5.metric("Avg Probability",f"{prob_col.mean():.0%}" if not prob_col.empty else "—")
+            c6.metric("AML Flagged",    aml_any)
+
+            st.divider()
+
+            # Charts row
+            ca,cb,cc = st.columns(3)
+            with ca:
+                if not prob_col.empty:
+                    fig = go.Figure(go.Histogram(x=prob_col,nbinsx=20,
+                                                 marker_color="#48BB78",opacity=0.85))
+                    fig.add_vline(x=0.70,line_dash="dash",line_color="white",annotation_text="70%")
+                    fig.add_vline(x=0.40,line_dash="dash",line_color="#ECC94B",annotation_text="40%")
+                    fig.update_layout(title="Consensus Probability",xaxis_title="Probability",
+                                      yaxis_title="Companies",template="plotly_dark",
+                                      height=270,margin=dict(t=40,b=20,l=20,r=10))
+                    st.plotly_chart(fig,use_container_width=True)
+
+            with cb:
+                if kyb_dist:
+                    order = ["APPROVE","REVIEW","ESCALATE","REJECT"]
+                    fig2 = px.bar(x=order,y=[kyb_dist.get(k,0) for k in order],color=order,
+                                  color_discrete_map=KYB_C,template="plotly_dark",height=270,
+                                  title="KYB Recommendations",labels={"x":"","y":"Companies"})
+                    fig2.update_layout(showlegend=False,margin=dict(t=40,b=20,l=20,r=10))
+                    st.plotly_chart(fig2,use_container_width=True)
+
+            with cc:
+                src_means = {}
+                for lbl,col in [("OC","OC Confidence"),("EFX","EFX Confidence"),
+                                 ("ZI","ZI Confidence"),("Trulioo","TRU Confidence"),
+                                 ("Liberty","LIB Confidence")]:
+                    if col in ok_df.columns:
+                        v = pd.to_numeric(ok_df[col],errors="coerce").mean()
+                        if not np.isnan(v): src_means[lbl] = round(v,3)
+                if src_means:
+                    fig3 = px.bar(x=list(src_means.keys()),y=list(src_means.values()),
+                                  color=list(src_means.keys()),template="plotly_dark",height=270,
+                                  title="Avg Level 1 Confidence",labels={"x":"","y":"Avg"},
+                                  color_discrete_sequence=["#68D391","#4299E1","#F6E05E","#9F7AEA","#FC8181"])
+                    fig3.add_hline(y=0.80,line_dash="dash",line_color="white")
+                    fig3.update_layout(showlegend=False,margin=dict(t=40,b=20,l=20,r=10))
+                    st.plotly_chart(fig3,use_container_width=True)
+
+            # AML signal breakdown
+            if "AML Flags" in ok_df.columns:
+                all_flags = [f.strip() for row_f in ok_df["AML Flags"]
+                             for f in str(row_f).split(";")
+                             if f.strip() and f.strip() != "—"]
+                if all_flags:
+                    st.markdown("#### AML Signal Breakdown")
+                    fc = Counter(all_flags).most_common()
+                    flag_meanings = {
+                        "HIGH_RISK_SECTOR":     "Code in AML-elevated NAICS sector (Holding, Banking, Dual-use, Defence)",
+                        "REGISTRY_DISCREPANCY": "Web presence diverges from registry — shell company signal",
+                        "STRUCTURE_CHANGE":     "Industry code changed across calls — U-Turn fraud signal",
+                        "SOURCE_CONFLICT":      "Sources return different industry codes",
+                        "TRULIOO_POLLUTION":    "Trulioo returned 4-digit SIC for 5-digit jurisdiction",
+                        "LOW_CONSENSUS_PROB":   "Model confidence < 40% — data is ambiguous",
+                    }
+                    flag_df = pd.DataFrame([
+                        {"Signal": f, "Companies": c,
+                         "% of Total": f"{c/n:.0%}",
+                         "Meaning": flag_meanings.get(f,"")}
+                        for f,c in fc
+                    ])
+                    st.dataframe(flag_df,use_container_width=True,hide_index=True)
+
+            # High-risk companies callout
+            if "Risk Level" in ok_df.columns:
+                hi = ok_df[ok_df["Risk Level"].isin(["HIGH","CRITICAL"])]
+                if not hi.empty:
+                    st.markdown(f"#### ⚠️ {len(hi)} companies — HIGH / CRITICAL risk")
+                    show = [c for c in ["Company","Jurisdiction","Primary Code","Primary Label",
+                                        "Primary Prob","Risk Score","KYB","AML Flags"]
+                            if c in hi.columns]
+                    st.dataframe(hi[show].sort_values("Risk Score",ascending=False),
+                                 use_container_width=True,hide_index=True)
+
+    # ════════════════════════════════════════════════════════
+    # TAB 2 — LEVEL 1 SOURCE CONFIDENCES
+    # ════════════════════════════════════════════════════════
+    with tab_l1:
+        st.markdown("""
+**Level 1 XGBoost entity matching** — the same model (`entity_matching_20250127 v1`) that runs in the Worth AI production pipeline.  
+For each company it outputs a **match confidence 0–1 per source** by comparing name + address using 33 pairwise text similarity features.
+
+| Status | Meaning |
+|---|---|
+| **MATCHED** | Real vendor record found with high confidence (≥ 0.80) |
+| **INFERRED** | Derived from jurisdiction / entity type — no direct vendor match |
+| **CONFLICT** | Code returned but contradicts other sources |
+| **POLLUTED** | Trulioo returned 4-digit SIC for a 5-digit jurisdiction (data quality) |
+| **UNAVAILABLE** | Source did not return a result |
+
+> **Production rule:** only ZoomInfo vs Equifax are compared for the NAICS code. OC, Liberty, Trulioo industry codes are computed but ignored by the current pipeline.
 """)
 
-    st.divider()
+        if single and row is not None:
+            # Source cards for single company
+            sigs_raw = row.get("_sigs_raw", [])
+            cols = st.columns(min(len(sigs_raw), 3)) if sigs_raw else []
+            for i, sig in enumerate(sigs_raw):
+                with cols[i % len(cols)] if cols else st:
+                    st.markdown(_html_src_card(
+                        sig.source, sig.confidence, sig.status,
+                        sig.raw_code, sig.label
+                    ), unsafe_allow_html=True)
 
-    # ── Row 3: Level 2 Consensus classification ───────────────────────────────
-    st.markdown("### Level 2 — Consensus XGBoost Industry Classification")
-    st.caption(
-        "The Consensus XGBoost model uses the Level 1 confidence scores + vendor industry codes "
-        "as a 45-feature input vector and produces calibrated probabilities across all NAICS classes. "
-        "Unlike the production rule, it uses ALL 6 sources and routes to the correct taxonomy per jurisdiction."
-    )
+            # Bar chart
+            if sigs_raw:
+                labels  = [s.source.replace("_"," ").title() for s in sigs_raw]
+                values  = [s.confidence for s in sigs_raw]
+                colours = [SRC_C.get(s.source,"#718096") for s in sigs_raw]
+                statuses= [s.status for s in sigs_raw]
+                fig = go.Figure(go.Bar(
+                    x=labels, y=values, marker_color=colours,
+                    text=[f"{v:.3f}<br>{st_}" for v,st_ in zip(values,statuses)],
+                    textposition="outside",
+                ))
+                fig.add_hline(y=0.80,line_dash="dash",line_color="white",
+                              annotation_text="0.80 threshold",annotation_position="top right")
+                fig.update_layout(title="Level 1 Match Confidence by Source",
+                                  yaxis=dict(range=[0,1.15]),template="plotly_dark",
+                                  height=320,margin=dict(t=40,b=20),showlegend=False)
+                st.plotly_chart(fig,use_container_width=True)
 
-    col_codes, col_llm = st.columns(2)
+            # Production rule comparison
+            zi_c  = float(row.get("ZI Confidence",0))
+            efx_c = float(row.get("EFX Confidence",0))
+            oc_c  = float(row.get("OC Confidence",0))
+            prod_w = str(row.get("Prod Winner",""))
+            prod_c = float(row.get("Prod Confidence",0))
+            best   = str(row.get("Best Source",""))
 
-    with col_codes:
-        st.markdown("**Top-3 Predictions (Consensus XGBoost)**")
-        all_codes = [cons.primary_industry] + cons.secondary_industries[:2]
-        prob_html = "".join(
-            _prob_bar(c.consensus_probability, c.code, c.label, i + 1)
-            for i, c in enumerate(all_codes)
-        )
-        st.markdown(prob_html, unsafe_allow_html=True)
-
-    with col_llm:
-        st.markdown("**GPT-4o-mini Classification (LLM Referee)**")
-        if llm and llm.primary_code:
-            st.markdown(
-                f"**Code:** `{llm.primary_code}` — {llm.primary_label}  \n"
-                f"**Taxonomy:** {llm.primary_taxonomy.replace('_',' ')}  \n"
-                f"**Confidence:** {llm.primary_confidence}  \n"
-                f"**Source used:** {getattr(llm,'source_used','—')}"
-            )
-            if getattr(llm, "registry_conflict", False):
-                st.warning(f"Registry conflict: {getattr(llm,'registry_conflict_note','')}")
+            st.markdown("#### Production Rule vs Best Source")
+            st.markdown(f"""
+| | Source | Confidence | Industry code used |
+|---|---|---|---|
+| **Best across all sources** | {best.replace('_',' ').title()} | {max(zi_c,efx_c,oc_c):.3f} | {'Yes — but only if ZI or EFX' if best in ('zoominfo','equifax') else '❌ Ignored by production rule'} |
+| **Production rule winner** | {prod_w} | {prod_c:.3f} | ✅ NAICS code written to DB |
+""")
         else:
-            st.info("LLM unavailable or no API key set.")
+            # Batch — confidence heatmap + table
+            src_cols = {
+                "OC":"OC Confidence","EFX":"EFX Confidence",
+                "ZI":"ZI Confidence","Trulioo":"TRU Confidence","Liberty":"LIB Confidence",
+            }
+            avail = {k:v for k,v in src_cols.items() if v in ok_df.columns}
+            if avail:
+                heat_data = ok_df[list(avail.values())].apply(
+                    pd.to_numeric, errors="coerce").fillna(0).head(50)
+                heat_data.columns = list(avail.keys())
+                fig_h = px.imshow(heat_data.T,color_continuous_scale="Blues",
+                                  aspect="auto",zmin=0,zmax=1,
+                                  title="Level 1 Confidence Heatmap (first 50 companies)",
+                                  template="plotly_dark",height=300)
+                fig_h.update_layout(margin=dict(t=50,b=10,l=80,r=10))
+                st.plotly_chart(fig_h,use_container_width=True)
 
-    # External registries
-    if ext_reg and (ext_reg.edgar or ext_reg.companies_house):
-        st.markdown("**Government Registry Sources**")
-        reg_rows = []
-        if ext_reg.edgar:
-            reg_rows.append({"Registry": "SEC EDGAR",
-                             "Code": ext_reg.edgar.sic,
-                             "Label": ext_reg.edgar.sic_description,
-                             "Taxonomy": "US SIC 1987"})
-        if ext_reg.companies_house:
-            for c, d in zip(ext_reg.companies_house.sic_codes,
-                            ext_reg.companies_house.sic_descriptions):
-                reg_rows.append({"Registry": "Companies House",
-                                 "Code": c, "Label": d, "Taxonomy": "UK SIC 2007"})
-        if reg_rows:
-            st.dataframe(pd.DataFrame(reg_rows), use_container_width=True, hide_index=True)
+            # Coverage table
+            rows_cov = []
+            for lbl,col in avail.items():
+                v = pd.to_numeric(ok_df[col],errors="coerce").fillna(0)
+                hi = int((v>=0.80).sum())
+                rows_cov.append({
+                    "Source": lbl,
+                    "Mean Confidence": f"{v.mean():.3f}",
+                    "Median": f"{v.median():.3f}",
+                    "≥ 0.80 (Matched)": f"{hi} ({hi/n:.0%})",
+                    "< 0.50 (Weak)": f"{(v<0.50).sum()} ({(v<0.50).mean():.0%})",
+                    "Used by production?": "✅ NAICS code" if lbl in ("EFX","ZI")
+                                           else "⚠️ Match only — NAICS ignored",
+                })
+            st.dataframe(pd.DataFrame(rows_cov),use_container_width=True,hide_index=True)
 
-    st.divider()
+            l1_cols = [c for c in ["Company","Jurisdiction",
+                "OC Confidence","OC Status","OC Code",
+                "EFX Confidence","EFX Status","EFX Code",
+                "ZI Confidence","ZI Status","ZI Code",
+                "TRU Confidence","TRU Status",
+                "LIB Confidence","LIB Status",
+                "Best Source","Avg Confidence","Sources ≥ 0.80",
+                "Prod Winner","Prod Confidence","Prod NAICS",
+            ] if c in ok_df.columns]
+            st.dataframe(ok_df[l1_cols],use_container_width=True,hide_index=True)
 
-    # ── Row 4: AML / KYB ─────────────────────────────────────────────────────
-    st.markdown("### AML / KYB Risk Assessment")
-    st.caption("Based on 6 signal types: source conflict, registry discrepancy, "
-               "temporal pivot, shell company indicators, Trulioo pollution, low consensus probability.")
+    # ════════════════════════════════════════════════════════
+    # TAB 3 — LEVEL 2 CLASSIFICATION
+    # ════════════════════════════════════════════════════════
+    with tab_l2:
+        st.markdown("""
+**Consensus Level 2 XGBoost** — uses all 6 source confidence scores + vendor industry codes  
+as a 45-feature vector to produce calibrated probabilities across all industry codes.
 
-    if risk.signals:
-        for sig in risk.signals:
-            colour = {"CRITICAL": "🔴", "HIGH": "🟠", "MEDIUM": "🟡", "LOW": "🟢"}.get(sig.severity, "⚪")
-            st.markdown(f"{colour} **{sig.flag}** ({sig.severity}) — {sig.description}")
-    else:
-        st.success("✅ No AML/KYB risk signals detected.")
+Unlike the production rule (1 winner, no probability), Level 2 returns:
+top-5 codes with probabilities, correct taxonomy per jurisdiction, and AML/KYB signals.
+""")
 
-    st.divider()
+        if single and row is not None:
+            col_codes, col_kyb = st.columns([3, 2])
+            with col_codes:
+                st.markdown("#### Top-5 Industry Codes — Consensus XGBoost")
+                bars_html = ""
+                for rank in range(1, 6):
+                    code  = str(row.get(f"Rank {rank} Code",""))
+                    label = str(row.get(f"Rank {rank} Label",""))
+                    prob  = float(row.get(f"Rank {rank} Prob",0))
+                    tax   = str(row.get(f"Rank {rank} Tax",""))
+                    if code:
+                        bars_html += _html_prob_bar(rank, code, label, prob, tax)
+                st.markdown(bars_html, unsafe_allow_html=True)
 
-    # ── Row 5: Entity resolution ──────────────────────────────────────────────
-    with st.expander("Entity resolution detail", expanded=False):
-        from entity_resolver import EntityProfile
-        st.json({
-            "clean_name":         bundle.company_name,
-            "jurisdiction_code":  bundle.jurisdiction,
-            "entity_type":        bundle.entity_type,
-            "web_summary":        (bundle.web_summary[:200] + "…") if bundle.web_summary else "",
-        })
+                # LLM column
+                if deep and deep.get("llm") and deep["llm"].primary_code:
+                    llm = deep["llm"]
+                    st.markdown("#### GPT-4o-mini Second Opinion")
+                    st.markdown(f"""
+- **Code:** `{llm.primary_code}` — {llm.primary_label}
+- **Taxonomy:** {llm.primary_taxonomy.replace('_',' ')}
+- **Confidence:** {llm.primary_confidence}
+""")
 
+            with col_kyb:
+                # AML risk signals
+                st.markdown("#### AML / KYB Risk Signals")
+                sigs_raw = row.get("_signals",[])
+                if sigs_raw:
+                    for flag, sev, desc in sigs_raw:
+                        col_sev = RISK_C.get(sev,"#718096")
+                        st.markdown(
+                            f'<div style="border-left:4px solid {col_sev};padding:8px 12px;'
+                            f'margin-bottom:8px;background:rgba(255,255,255,0.03);border-radius:0 6px 6px 0">'
+                            f'<span style="font-weight:700;color:{col_sev}">{sev}</span> — '
+                            f'<span style="font-weight:600">{flag}</span><br>'
+                            f'<span style="font-size:12px;color:#A0AEC0">{desc}</span></div>',
+                            unsafe_allow_html=True,
+                        )
+                else:
+                    st.success("✅ No AML signals detected")
 
-# ── Charts for batch results ──────────────────────────────────────────────────
+                # External registries
+                if deep:
+                    ext = deep.get("ext")
+                    if ext and ext.edgar:
+                        st.markdown("#### SEC EDGAR")
+                        st.markdown(f"SIC `{ext.edgar.sic}` — {ext.edgar.sic_description}")
+                    if ext and ext.companies_house:
+                        st.markdown("#### Companies House")
+                        for c,d in zip(ext.companies_house.sic_codes,
+                                       ext.companies_house.sic_descriptions):
+                            st.markdown(f"SIC `{c}` — {d}")
 
-def _batch_charts(df: pd.DataFrame) -> None:
-    n = len(df)
+        else:
+            # Batch — taxonomy pie + classification table
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if "Primary Taxonomy" in ok_df.columns:
+                    tc = ok_df["Primary Taxonomy"].value_counts().reset_index()
+                    tc.columns = ["Taxonomy","Count"]
+                    fig_t = px.pie(tc,names="Taxonomy",values="Count",
+                                   title="Primary Taxonomy Distribution",
+                                   template="plotly_dark",height=300,
+                                   color_discrete_sequence=px.colors.qualitative.Safe)
+                    fig_t.update_layout(margin=dict(t=40,b=10))
+                    st.plotly_chart(fig_t,use_container_width=True)
+            with col_b:
+                if "Primary Code" in ok_df.columns:
+                    top_codes = ok_df["Primary Code"].value_counts().head(10).reset_index()
+                    top_codes.columns = ["Code","Count"]
+                    fig_c = px.bar(top_codes,x="Count",y="Code",orientation="h",
+                                   title="Top-10 Primary Codes",template="plotly_dark",
+                                   height=300)
+                    fig_c.update_layout(margin=dict(t=40,b=10,l=80))
+                    st.plotly_chart(fig_c,use_container_width=True)
 
-    ca, cb, cc = st.columns(3)
+            l2_cols = [c for c in [
+                "Company","Jurisdiction",
+                "Rank 1 Code","Rank 1 Label","Rank 1 Tax","Rank 1 Prob",
+                "Rank 2 Code","Rank 2 Label","Rank 2 Prob",
+                "Rank 3 Code","Rank 3 Label","Rank 3 Prob",
+                "Rank 4 Code","Rank 5 Code",
+                "Risk Score","Risk Level","KYB","AML Flags",
+            ] if c in ok_df.columns]
+            st.dataframe(ok_df[l2_cols],use_container_width=True,hide_index=True)
 
-    with ca:
-        if "Cons: Probability_f" in df.columns:
-            probs = pd.to_numeric(df["Cons: Probability_f"], errors="coerce").dropna()
-            fig = go.Figure(go.Histogram(x=probs, nbinsx=20,
-                                         marker_color="#48BB78", opacity=0.85))
-            fig.add_vline(x=0.70, line_dash="dash", line_color="white",
-                          annotation_text="70% HIGH")
-            fig.add_vline(x=0.40, line_dash="dash", line_color="#ECC94B",
-                          annotation_text="40% MED")
-            fig.update_layout(title="Consensus Probability",
-                              xaxis_title="Top-1 Probability", yaxis_title="Companies",
-                              template="plotly_dark", height=280, margin=dict(t=40,b=20))
-            st.plotly_chart(fig, use_container_width=True)
+    # ════════════════════════════════════════════════════════
+    # TAB 4 — FULL RESULTS TABLE
+    # ════════════════════════════════════════════════════════
+    with tab_table:
+        st.markdown("Complete results — every column. Use the search box to filter.")
 
-    with cb:
-        if "Cons: KYB" in df.columns:
-            kyb_order  = ["APPROVE", "REVIEW", "ESCALATE", "REJECT"]
-            kyb_counts = df["Cons: KYB"].value_counts()
-            vals = [kyb_counts.get(k, 0) for k in kyb_order]
-            fig2 = px.bar(x=kyb_order, y=vals, color=kyb_order,
-                          color_discrete_map={k: KYB_COLOURS[k] for k in kyb_order},
-                          template="plotly_dark", height=280,
-                          title="KYB Recommendations",
-                          labels={"x": "", "y": "Companies"})
-            fig2.update_layout(showlegend=False, margin=dict(t=40,b=20))
-            st.plotly_chart(fig2, use_container_width=True)
+        # Pretty display table
+        display_cols = [c for c in [
+            "Company","Clean Name","Jurisdiction","Entity Type",
+            # Level 1
+            "OC Confidence","OC Status","EFX Confidence","EFX Status",
+            "ZI Confidence","ZI Status","TRU Confidence","LIB Confidence",
+            "Best Source","Avg Confidence","Sources ≥ 0.80",
+            # Production
+            "Prod Winner","Prod Confidence","Prod NAICS",
+            # Level 2
+            "Rank 1 Code","Rank 1 Label","Rank 1 Tax","Rank 1 Prob",
+            "Rank 2 Code","Rank 2 Label","Rank 2 Prob",
+            "Rank 3 Code","Rank 3 Label","Rank 3 Prob",
+            "Rank 4 Code","Rank 4 Label","Rank 4 Prob",
+            "Rank 5 Code","Rank 5 Label","Rank 5 Prob",
+            # Risk
+            "Risk Score","Risk Level","KYB","AML Flags","AML Count",
+        ] if c in result_df.columns]
 
-    with cc:
-        # L1 source confidence comparison
-        src_means = {}
-        for src, col in [("OC","L1: OC confidence"),("EFX","L1: EFX confidence"),
-                          ("ZI","L1: ZI confidence"),("Liberty","L1: Liberty confidence"),
-                          ("Trulioo","L1: TRU confidence")]:
-            if col in df.columns:
-                src_means[src] = round(pd.to_numeric(df[col], errors="coerce").mean(), 3)
-        if src_means:
-            fig3 = px.bar(
-                x=list(src_means.keys()), y=list(src_means.values()),
-                title="Avg Level 1 Confidence by Source",
-                template="plotly_dark", height=280,
-                labels={"x": "Source", "y": "Avg Confidence"},
-                color=list(src_means.keys()),
-                color_discrete_sequence=["#68D391","#4299E1","#F6E05E","#FC8181","#9F7AEA"],
+        # Format probability columns
+        disp_df = result_df[display_cols].copy()
+        for col in [c for c in display_cols if "Prob" in c]:
+            disp_df[col] = pd.to_numeric(disp_df[col],errors="coerce").apply(
+                lambda v: f"{v:.1%}" if pd.notna(v) else "—"
             )
-            fig3.add_hline(y=0.80, line_dash="dash", line_color="white")
-            fig3.update_layout(showlegend=False, margin=dict(t=40,b=20))
-            st.plotly_chart(fig3, use_container_width=True)
-
-    # AML signal breakdown
-    if "Cons: AML flags" in df.columns:
-        all_flags = [
-            f.strip() for row in df["Cons: AML flags"]
-            for f in str(row).split(";")
-            if f.strip() and f.strip() != "—"
-        ]
-        if all_flags:
-            fc = Counter(all_flags).most_common()
-            st.markdown("**AML Signal Breakdown**")
-            flag_df = pd.DataFrame(
-                [(f, c, f"{c/n:.0%}") for f, c in fc],
-                columns=["Signal", "Companies", "% of Total"],
+        for col in [c for c in display_cols if "Confidence" in c or "Score" in c]:
+            disp_df[col] = pd.to_numeric(disp_df[col],errors="coerce").apply(
+                lambda v: f"{v:.3f}" if pd.notna(v) else "—"
             )
-            st.dataframe(flag_df, use_container_width=True, hide_index=True)
+
+        st.dataframe(disp_df, use_container_width=True, hide_index=True, height=500)
+
+    # ════════════════════════════════════════════════════════
+    # TAB 5 — DOWNLOAD
+    # ════════════════════════════════════════════════════════
+    with tab_download:
+        st.markdown("Download the complete results in your preferred format.")
+
+        export_cols = [c for c in result_df.columns
+                       if not c.startswith("_") and c not in ("_signals","_sigs_raw")]
+        export_df = result_df[export_cols].copy()
+        for col in [c for c in export_cols if "Prob" in c]:
+            export_df[col] = pd.to_numeric(export_df[col],errors="coerce")
+
+        c1,c2 = st.columns(2)
+        with c1:
+            buf = io.BytesIO()
+            export_df.to_excel(buf,index=False,engine="openpyxl")
+            buf.seek(0)
+            st.download_button(
+                "📥 Download Excel (.xlsx)",
+                data=buf,
+                file_name="industry_classification_results.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+            st.caption("Full results with all Level 1 confidences, Level 2 codes, AML flags")
+        with c2:
+            st.download_button(
+                "📥 Download CSV (.csv)",
+                data=export_df.to_csv(index=False),
+                file_name="industry_classification_results.csv",
+                mime="text/csv",
+            )
+            st.caption("Same data in CSV format for programmatic use")
+
+        # Column dictionary
+        with st.expander("Column reference — what each column means"):
+            st.markdown("""
+| Column | Source | Meaning |
+|---|---|---|
+| `OC Confidence` | Level 1 XGBoost | OpenCorporates entity match confidence (0–1) |
+| `EFX Confidence` | Level 1 XGBoost | Equifax entity match confidence (0–1) |
+| `ZI Confidence` | Level 1 XGBoost | ZoomInfo entity match confidence (0–1) |
+| `TRU Confidence` | Level 1 XGBoost | Trulioo entity match confidence (0–1) |
+| `LIB Confidence` | Level 1 XGBoost | Liberty Data match confidence (0–1) |
+| `*Status` | Level 1 | MATCHED / INFERRED / CONFLICT / POLLUTED / UNAVAILABLE |
+| `Prod Winner` | Production rule | Which source won (ZI vs EFX only) |
+| `Prod NAICS` | Production rule | Code currently written to `customer_files.naics_code` |
+| `Rank 1–5 Code` | Consensus L2 | Top-5 NAICS/SIC codes by calibrated probability |
+| `Rank 1–5 Prob` | Consensus L2 | Model confidence for each code (0–1) |
+| `Rank 1–5 Tax` | Consensus L2 | Taxonomy (NAICS 2022 / UK SIC / NACE / ISIC) |
+| `Risk Score` | Risk engine | Composite AML score 0–1 |
+| `KYB` | Risk engine | APPROVE / REVIEW / ESCALATE / REJECT |
+| `AML Flags` | Risk engine | Signal types detected |
+""")
 
 
-# ── Sidebar ───────────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR + MAIN
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _sidebar():
     st.sidebar.title("🏭 Classification Engine v2")
     st.sidebar.caption("Level 1 Entity Matching + Consensus Level 2 XGBoost")
     st.sidebar.divider()
 
-    # Redshift status
-    rs_status = _get_redshift_status()
-    if rs_status == "LIVE":
-        st.sidebar.success("Redshift: LIVE", icon="✅")
-    else:
+    # Connection status
+    try:
+        from redshift_connector import get_connector
+        rc = get_connector()
+        if rc.is_connected:
+            st.sidebar.success("Redshift: LIVE", icon="✅")
+        else:
+            st.sidebar.warning("Redshift: SIMULATED", icon="⚠️")
+    except Exception:
         st.sidebar.warning("Redshift: SIMULATED", icon="⚠️")
-        st.sidebar.caption("Set REDSHIFT_* env vars to use real data.")
 
-    # OpenAI status
     try:
         from config import _get_openai_key
         key = _get_openai_key()
         if key and len(key) > 10:
             st.sidebar.success("OpenAI: Configured", icon="✅")
         else:
-            st.sidebar.warning("OpenAI: Not set", icon="⚠️")
-            st.sidebar.caption("LLM enrichment disabled in Single mode.")
+            st.sidebar.info("OpenAI: Not set — LLM disabled", icon="ℹ️")
     except Exception:
         pass
 
     st.sidebar.divider()
-    mode = st.sidebar.radio(
-        "Input mode",
-        ["Single company", "Batch upload"],
-        index=0,
-    )
+    mode = st.sidebar.radio("Input mode", ["Single company", "Batch upload"], index=0)
     return mode
 
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     mode = _sidebar()
 
     st.title("🏭 Global Industry Classification Engine v2")
-    st.markdown(
-        "**Level 1** entity matching confidence per source · "
-        "**Level 2** Consensus XGBoost classification · "
-        "Production rule comparison · AML/KYB risk signals"
+    st.caption(
+        "**Level 1** — entity matching confidence per source · "
+        "**Level 2** — Consensus XGBoost with calibrated probabilities · "
+        "AML / KYB risk signals · Production rule comparison"
     )
     st.divider()
 
-    # ═══════════════════════════════════════════════════════════════
-    # MODE A — SINGLE COMPANY
-    # ═══════════════════════════════════════════════════════════════
+    # ── SINGLE COMPANY ────────────────────────────────────────────────────────
     if mode == "Single company":
         with st.form("single_form"):
             col1, col2, col3 = st.columns([3, 2, 1])
             with col1:
-                company = st.text_input("Company name", placeholder="e.g. Apple Inc")
+                company = st.text_input("Company name",
+                    placeholder="e.g. Apple Inc, Worth AI, JPMORGAN CHASE BANK")
             with col2:
-                address = st.text_input("Address (optional)", placeholder="1 Infinite Loop, CA")
+                address = st.text_input("Address (optional)",
+                    placeholder="e.g. 1 Infinite Loop, Cupertino CA")
             with col3:
                 country = st.text_input("Country", value="US", max_chars=5)
             submitted = st.form_submit_button("▶ Classify", type="primary")
 
         if submitted and company.strip():
-            with st.spinner("Running full pipeline (entity resolution → LLM → consensus → risk) …"):
+            df_input = pd.DataFrame([{
+                "company_name": company.strip(),
+                "address":      address.strip(),
+                "country":      country.strip(),
+                "state":        "",
+            }])
+            with st.spinner("Classifying …"):
                 t0 = time.time()
-                try:
-                    entity, bundle, cons, risk, llm, ext_reg = _run_single(
-                        company.strip(), address.strip(), country.strip()
-                    )
-                    elapsed = time.time() - t0
-                    st.success(f"Completed in {elapsed:.1f}s")
-                    st.session_state["single_result"] = (company, entity, bundle, cons, risk, llm, ext_reg)
-                except Exception as exc:
-                    st.error(f"Pipeline error: {exc}")
-                    st.session_state.pop("single_result", None)
+                results = _classify_rows(df_input, show_progress=False)
+                elapsed = time.time() - t0
+            st.success(f"Completed in {elapsed:.2f}s")
+            st.session_state["single_result"] = results
+            st.session_state["single_deep"]   = None
 
-        if "single_result" in st.session_state:
-            company, entity, bundle, cons, risk, llm, ext_reg = st.session_state["single_result"]
-            st.markdown(f"## {company}")
-            _render_single(company, bundle, cons, risk, llm, ext_reg)
+        if "single_result" in st.session_state and st.session_state["single_result"] is not None:
+            results = st.session_state["single_result"]
+            row     = results.iloc[0]
+
+            if "_error" in results.columns and pd.notna(row.get("_error","")):
+                st.error(f"Classification error: {row['_error']}")
+            else:
+                company_name = str(row.get("Company",""))
+                st.markdown(f"## Results for **{company_name}**")
+
+                # Optional deep analysis
+                deep = st.session_state.get("single_deep")
+                try:
+                    from config import _get_openai_key
+                    has_key = bool(_get_openai_key())
+                except Exception:
+                    has_key = False
+
+                if has_key and deep is None:
+                    if st.button("🔬 Run Deep Analysis (LLM + external registries)",
+                                 help="Adds GPT-4o-mini classification + SEC EDGAR + Companies House (~10s)"):
+                        with st.spinner("Running deep analysis …"):
+                            deep = _deep_enrich(row)
+                        st.session_state["single_deep"] = deep
+                        st.rerun()
+                elif deep:
+                    st.caption("✅ Deep analysis complete (LLM + external registries)")
+                else:
+                    st.caption("ℹ️ Set OPENAI_API_KEY to enable LLM enrichment")
+
+                _render_result(results, deep=st.session_state.get("single_deep"))
 
         elif not submitted:
             st.info("Enter a company name above and click **▶ Classify**.")
+            st.markdown("""
+**Try these examples:**
+- `Apple Inc` (US technology)
+- `JPMORGAN CHASE BANK` (US finance)
+- `Tesco PLC` (UK retail — will show UK SIC 2007)
+- `SAP SE` (Germany — will show NACE Rev.2)
+- `Foster's Alaska Cabins` (small US business)
+""")
 
-    # ═══════════════════════════════════════════════════════════════
-    # MODE B — BATCH UPLOAD
-    # ═══════════════════════════════════════════════════════════════
+    # ── BATCH UPLOAD ──────────────────────────────────────────────────────────
     else:
         st.markdown(
-            "Upload a CSV or Excel file with company names. "
-            "Supported column names: `lgl_nm_worth`, `company_name`, `name`. "
+            "Upload a CSV or Excel file. "
+            "Required column: `lgl_nm_worth` or `company_name`. "
             "Optional: `address_1_worth`, `city_worth`, `region_worth`, `country_worth`."
         )
 
-        uploaded = st.file_uploader("Upload file", type=["csv", "xlsx", "xls"])
+        uploaded = st.file_uploader("Upload file", type=["csv","xlsx","xls"])
 
-        # Sample data button
         sample_path = Path(__file__).parent / "amex_worth_final_cleaned_data_sample_50_nonrandom.csv"
-        if sample_path.exists():
-            if st.button("📂 Use sample file (50 companies)"):
-                st.session_state["batch_upload_df"] = pd.read_csv(sample_path)
-                st.session_state.pop("batch_results", None)
-
-        if uploaded:
-            if uploaded.name.endswith((".xlsx", ".xls")):
-                raw_df = pd.read_excel(uploaded)
-            else:
-                raw_df = pd.read_csv(uploaded)
-            st.session_state["batch_upload_df"] = raw_df
+        if sample_path.exists() and st.button("📂 Use sample file (50 NJ companies)"):
+            st.session_state["batch_raw"] = pd.read_csv(sample_path)
             st.session_state.pop("batch_results", None)
 
-        if "batch_upload_df" not in st.session_state:
-            st.info("Upload a file or click **Use sample file** to begin.")
+        if uploaded:
+            if uploaded.name.endswith((".xlsx",".xls")):
+                st.session_state["batch_raw"] = pd.read_excel(uploaded)
+            else:
+                st.session_state["batch_raw"] = pd.read_csv(uploaded)
+            st.session_state.pop("batch_results", None)
+
+        if "batch_raw" not in st.session_state:
+            st.info("Upload a file or click **📂 Use sample file** to begin.")
             return
 
-        raw_df = st.session_state["batch_upload_df"]
-        df     = _parse_upload(raw_df)
-        n      = len(df)
-        st.success(f"{n} companies loaded. Click **▶ Run Batch Classification** to classify.")
+        raw = st.session_state["batch_raw"]
+        df  = _parse_upload(raw)
+        n   = len(df)
+        st.success(f"{n} companies loaded.")
 
-        with st.expander("Preview input", expanded=False):
-            st.dataframe(df[["company_name", "address", "state", "country"]].head(10),
+        with st.expander("Preview input (first 5 rows)"):
+            st.dataframe(df[["company_name","address","state","country"]].head(5),
                          use_container_width=True)
 
         if st.button("▶ Run Batch Classification", type="primary"):
             t0 = time.time()
-            results_df = _run_batch(df)
+            results = _classify_rows(df, show_progress=True)
             elapsed = time.time() - t0
-            st.session_state["batch_results"] = results_df
-            st.success(f"Done — {n} companies classified in {elapsed:.1f}s ({n/elapsed:.0f}/s)")
+            st.session_state["batch_results"] = results
+            n_ok = len(results) - (results.get("_error",pd.Series()).notna().sum()
+                                   if "_error" in results.columns else 0)
+            st.success(f"Done — {n_ok}/{n} classified in {elapsed:.1f}s  "
+                       f"({n/elapsed:.0f} companies/s)")
 
         if "batch_results" not in st.session_state:
             return
 
-        results_df = st.session_state["batch_results"]
-        n_ok = results_df["_error"].isna().sum() if "_error" in results_df.columns else len(results_df)
-
-        # ── Summary metrics ───────────────────────────────────────────────────
-        kyb_dist = results_df["Cons: KYB"].value_counts().to_dict() if "Cons: KYB" in results_df.columns else {}
-        prob_col  = pd.to_numeric(results_df.get("Cons: Probability_f", pd.Series()), errors="coerce")
-        aml_any   = int((results_df.get("Cons: AML count", pd.Series()) > 0).sum())
-
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("Total", n)
-        c2.metric("APPROVE",         kyb_dist.get("APPROVE", 0))
-        c3.metric("REVIEW",          kyb_dist.get("REVIEW", 0))
-        c4.metric("ESCALATE/REJECT", kyb_dist.get("ESCALATE",0)+kyb_dist.get("REJECT",0))
-        c5.metric("Avg Probability",  f"{prob_col.mean():.0%}" if not prob_col.empty else "—")
-        c6.metric("AML Flagged",     aml_any)
-
-        st.divider()
-
-        # ── Tabs: charts / L1 table / L2 table / full table / download ────────
-        tab_charts, tab_l1, tab_l2, tab_full = st.tabs([
-            "📊 Charts",
-            "🔍 Level 1 — Source Confidences",
-            "🏭 Level 2 — Classification",
-            "📋 Full Results",
-        ])
-
-        with tab_charts:
-            _batch_charts(results_df)
-
-        with tab_l1:
-            st.markdown("""
-**Level 1 XGBoost entity matching confidence scores per source.**
-
-Each confidence is the output of `entity_matching_20250127 v1` — the probability
-that this company record is the same real-world entity as a record in that vendor's database.
-
-| Value | Meaning |
-|---|---|
-| ≥ 0.80 | Matched — confident the company was found |
-| 0.50–0.79 | Possible match — use with caution |
-| < 0.50 | Weak / no match |
-
-**Production rule:** only ZoomInfo vs Equifax are compared for the NAICS code.
-OC and Liberty confidences are computed but their industry codes are ignored.
-""")
-            l1_cols = [c for c in [
-                "Company", "Jurisdiction",
-                "L1: OC confidence",   "L1: OC status",   "L1: OC code",
-                "L1: EFX confidence",  "L1: EFX status",  "L1: EFX code",
-                "L1: ZI confidence",   "L1: ZI status",   "L1: ZI code",
-                "L1: TRU confidence",  "L1: TRU status",
-                "L1: Liberty confidence", "L1: Liberty status",
-                "L1: Best source", "L1: Avg confidence", "L1: Sources ≥ 0.80",
-                "Prod: Winner", "Prod: Winner conf", "Prod: NAICS code",
-            ] if c in results_df.columns]
-            st.dataframe(results_df[l1_cols], use_container_width=True, hide_index=True)
-
-        with tab_l2:
-            st.markdown("""
-**Consensus Level 2 XGBoost classification results.**
-
-The model uses all 6 source confidence scores + vendor industry codes
-as a 45-feature input vector and outputs calibrated probabilities.
-
-| Column | Meaning |
-|---|---|
-| Cons: Primary code | Top-1 NAICS/SIC/NACE code |
-| Cons: Probability | Calibrated confidence (0–100%) |
-| Cons: Taxonomy | Correct taxonomy for this jurisdiction |
-| Cons: KYB | APPROVE / REVIEW / ESCALATE / REJECT |
-| Cons: AML flags | Risk signals detected |
-""")
-            l2_cols = [c for c in [
-                "Company", "Jurisdiction",
-                "Cons: Primary code",  "Cons: Primary label", "Cons: Probability",
-                "Cons: Taxonomy",
-                "Cons: 2nd code",  "Cons: 2nd label",
-                "Cons: 3rd code",  "Cons: 3rd label",
-                "Cons: Risk score", "Cons: Risk level",
-                "Cons: KYB", "Cons: AML flags",
-            ] if c in results_df.columns]
-            st.dataframe(results_df[l2_cols], use_container_width=True, hide_index=True)
-
-            # High-risk table
-            if "Cons: Risk level" in results_df.columns:
-                high_risk = results_df[results_df["Cons: Risk level"].isin(["HIGH","CRITICAL"])]
-                if not high_risk.empty:
-                    st.markdown(f"**⚠️ {len(high_risk)} companies — HIGH / CRITICAL risk:**")
-                    st.dataframe(
-                        high_risk[l2_cols].sort_values("Cons: Risk score", ascending=False),
-                        use_container_width=True, hide_index=True,
-                    )
-
-        with tab_full:
-            all_cols = [c for c in results_df.columns if not c.startswith("_")]
-            st.dataframe(results_df[all_cols], use_container_width=True, hide_index=True)
-
-        # ── Download ──────────────────────────────────────────────────────────
-        st.divider()
-        export_cols = [c for c in results_df.columns if not c.startswith("_")]
-        c_d1, c_d2 = st.columns(2)
-        with c_d1:
-            buf = io.BytesIO()
-            results_df[export_cols].to_excel(buf, index=False, engine="openpyxl")
-            buf.seek(0)
-            st.download_button("📥 Download Excel", data=buf,
-                               file_name="classification_results_v2.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        with c_d2:
-            st.download_button("📥 Download CSV",
-                               data=results_df[export_cols].to_csv(index=False),
-                               file_name="classification_results_v2.csv",
-                               mime="text/csv")
+        results = st.session_state["batch_results"]
+        _render_result(results, deep=None)
 
 
 if __name__ == "__main__":
