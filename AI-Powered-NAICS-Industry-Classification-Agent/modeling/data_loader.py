@@ -250,9 +250,18 @@ class DataLoader:
 
     def _load_features_redshift(self, limit: int) -> pd.DataFrame:
         """
-        Pull from datascience.customer_files joined to the three match tables
-        and the source industry tables.
-        Verified against warehouse-service SQL files.
+        Pull all Level 1 outputs and vendor industry codes from Redshift.
+
+        Data pulled (all REAL — already produced by the production pipeline):
+          - Level 1 match confidence per source (oc, efx, zi from match tables)
+          - Trulioo SIC code and match signal from global_trulioo_us_kyb
+          - Vendor industry codes from each source table
+          - Production rule output (naics_code already stored in customer_files)
+          - OC jurisdiction_code (drives taxonomy routing in Consensus)
+
+        Liberty match confidence is stored locally (parquet), not in Redshift.
+        It defaults to 0 here; real liberty_confidence can be joined if the
+        {TABLE}_results.parquet is available.
         """
         sql = f"""
         SELECT
@@ -263,38 +272,57 @@ class DataLoader:
             cf.company_city,
             cf.company_state,
             cf.company_postalcode,
-            -- Level 1 match confidence outputs (from match tables)
-            COALESCE(oc.oc_probability,  0.0) AS oc_confidence,
-            COALESCE(ef.efx_probability, 0.0) AS efx_confidence,
-            COALESCE(zi.zi_probability,  0.0) AS zi_confidence,
-            -- No liberty confidence column in customer_files yet; default 0
-            0.0::FLOAT                         AS liberty_confidence,
-            -- Vendor industry codes
-            oc_src.industry_code_uids           AS oc_industry_uids,
-            oc_src.jurisdiction_code            AS oc_jurisdiction_code,
-            ef_src.efx_primnaicscode            AS efx_naics,
-            ef_src.efx_primsic                  AS efx_sic,
-            zi_src.zi_c_naics6                  AS zi_naics,
-            -- Production rule output (what currently gets stored)
-            cf.naics_code                       AS production_naics,
-            cf.zi_match_confidence              AS zi_match_conf_raw,
-            cf.efx_match_confidence             AS efx_match_conf_raw,
-            -- Jurisdiction from OC
-            COALESCE(oc.jurisdiction_code, '')  AS matched_oc_jc,
-            -- Entity identifiers for joining back to labels
-            oc.company_number                   AS oc_company_number,
-            ef.efx_id                           AS efx_id,
-            zi.zi_c_company_id                  AS zi_company_id,
-            zi.zi_c_location_id                 AS zi_location_id,
-            zi.zi_es_location_id                AS zi_es_location_id
+
+            -- ── Level 1 outputs (REAL — already computed by entity_matching model) ──
+            -- OC match confidence
+            COALESCE(oc.oc_probability,       0.0) AS oc_confidence,
+            -- Equifax match confidence
+            COALESCE(ef.efx_probability,      0.0) AS efx_confidence,
+            -- ZoomInfo match confidence
+            COALESCE(zi.zi_probability,       0.0) AS zi_confidence,
+            -- Liberty: stored locally in parquet, not in Redshift → default 0
+            0.0::FLOAT                             AS liberty_confidence,
+            -- Trulioo: name_verification acts as a proxy confidence signal
+            COALESCE(tru.name_verification,   0.0) AS tru_confidence,
+
+            -- ── Vendor industry codes (REAL — returned by API calls, stored in Redshift) ──
+            -- OpenCorporates: pipe-delimited multi-taxonomy (us_naics-XXXX|gb_sic-XXXX|...)
+            oc_src.industry_code_uids              AS oc_industry_uids,
+            oc_src.jurisdiction_code               AS oc_jurisdiction_code,
+            -- Equifax: primary NAICS + SIC
+            ef_src.efx_primnaicscode               AS efx_naics,
+            ef_src.efx_primsic                     AS efx_sic,
+            -- ZoomInfo: 6-digit NAICS
+            zi_src.zi_c_naics6                     AS zi_naics,
+            -- Trulioo: SIC code returned by API
+            tru.mcc_code                           AS tru_sic,
+
+            -- ── Production rule output (REAL — what customer_table.sql stored) ──
+            cf.naics_code                          AS production_naics,
+            cf.zi_match_confidence                 AS zi_match_conf_raw,
+            cf.efx_match_confidence                AS efx_match_conf_raw,
+
+            -- ── Jurisdiction (from OC — drives taxonomy routing in Consensus) ──
+            COALESCE(oc.jurisdiction_code, '')     AS matched_oc_jc,
+
+            -- ── Entity IDs (for joining Liberty parquet if available) ──
+            oc.company_number                      AS oc_company_number,
+            ef.efx_id                              AS efx_id,
+            zi.zi_c_company_id                     AS zi_company_id,
+            zi.zi_c_location_id                    AS zi_location_id,
+            zi.zi_es_location_id                   AS zi_es_location_id
+
         FROM {TABLES["customer_files"]} cf
-        LEFT JOIN {TABLES["oc_matches"]}  oc  ON oc.business_id  = cf.business_id
-        LEFT JOIN {TABLES["efx_matches"]} ef  ON ef.business_id  = cf.business_id
-        LEFT JOIN {TABLES["zi_matches"]}  zi  ON zi.business_id  = cf.business_id
+        LEFT JOIN {TABLES["oc_matches"]}  oc   ON oc.business_id  = cf.business_id
+        LEFT JOIN {TABLES["efx_matches"]} ef   ON ef.business_id  = cf.business_id
+        LEFT JOIN {TABLES["zi_matches"]}  zi   ON zi.business_id  = cf.business_id
+        LEFT JOIN {TABLES["global_trulioo_us_kyb"]} tru
+               ON tru.customer_unique_identifier = cf.customer_unique_identifier
         LEFT JOIN {TABLES["oc_source"]}   oc_src
                ON oc_src.company_number    = oc.company_number
               AND oc_src.jurisdiction_code = oc.jurisdiction_code
-        LEFT JOIN {TABLES["efx_source"]}  ef_src ON ef_src.efx_id = ef.efx_id
+        LEFT JOIN {TABLES["efx_source"]}  ef_src
+               ON ef_src.efx_id            = ef.efx_id
         LEFT JOIN {TABLES["zi_source"]}   zi_src
                ON zi_src.zi_c_company_id   = zi.zi_c_company_id
               AND zi_src.zi_c_location_id   = zi.zi_c_location_id
@@ -304,6 +332,17 @@ class DataLoader:
         """
         df = self._query_redshift(sql)
         df["_data_source"] = "REDSHIFT_REAL"
+
+        # Annotate each column with its source for transparency in the notebook
+        df["_src_oc_confidence"]  = "Level 1 XGBoost output (oc_matches_custom_inc_ml.oc_probability)"
+        df["_src_efx_confidence"] = "Level 1 XGBoost output (efx_matches_custom_inc_ml.efx_probability)"
+        df["_src_zi_confidence"]  = "Level 1 XGBoost output (zoominfo_matches_custom_inc_ml.zi_probability)"
+        df["_src_tru_confidence"] = "Trulioo API → global_trulioo_us_kyb.name_verification"
+        df["_src_oc_uids"]        = "OC API → open_corporates_standard_ml_2.industry_code_uids"
+        df["_src_efx_naics"]      = "Equifax API → equifax_us_standardized.efx_primnaicscode"
+        df["_src_zi_naics"]       = "ZoomInfo API → zoominfo_standard_ml_2.zi_c_naics6"
+        df["_src_prod_naics"]     = "Production rule → customer_files.naics_code"
+
         return df
 
     def _load_labels_pg(self) -> pd.DataFrame:

@@ -1,0 +1,607 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Industry Classification Modeling — Production vs Consensus</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/black.css">
+<style>
+  :root { --r-main-font-size: 22px; }
+  .reveal { font-family: 'Segoe UI', sans-serif; }
+  .reveal h1 { font-size: 1.8em; color: #63B3ED; }
+  .reveal h2 { font-size: 1.3em; color: #68D391; border-bottom: 2px solid #68D391; padding-bottom: 8px; }
+  .reveal h3 { font-size: 1.05em; color: #F6E05E; }
+  .reveal pre  { font-size: 0.62em; }
+  .reveal code { background: #1a202c; padding: 2px 6px; border-radius: 3px; }
+  .reveal table { font-size: 0.72em; width: 100%; }
+  .reveal table th { background: #2D3748; color: #63B3ED; }
+  .reveal table tr:nth-child(even) td { background: #1A202C; }
+  .reveal ul li { margin-bottom: 6px; }
+  .badge { display:inline-block; padding:3px 10px; border-radius:12px; font-size:0.7em; font-weight:700; margin-left:8px; }
+  .badge-real  { background:#276749; color:#C6F6D5; }
+  .badge-sim   { background:#744210; color:#FEFCBF; }
+  .badge-new   { background:#1A365D; color:#BEE3F8; }
+  .green { color: #68D391; }
+  .red   { color: #FC8181; }
+  .gold  { color: #F6E05E; }
+  .blue  { color: #63B3ED; }
+  .small { font-size: 0.75em; color: #A0AEC0; }
+  .box { background: #1A202C; border: 1px solid #2D3748; border-radius:8px; padding:12px 16px; margin:8px 0; }
+  .box-green { border-color: #276749; }
+  .box-red   { border-color: #742A2A; }
+  .box-blue  { border-color: #2A4365; }
+  .flow { display:flex; gap:10px; align-items:center; justify-content:center; font-size:0.8em; flex-wrap:wrap; }
+  .flow-box { background:#2D3748; border-radius:6px; padding:10px 14px; text-align:center; min-width:120px; }
+  .arrow { color:#63B3ED; font-size:1.4em; }
+  .two-col { display:grid; grid-template-columns:1fr 1fr; gap:20px; }
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- ── TITLE ──────────────────────────────────────────────────────────────── -->
+<section>
+  <h1>Industry Classification Modeling</h1>
+  <h3 style="color:#A0AEC0">Production Pipeline vs Consensus XGBoost</h3>
+  <div style="margin-top:30px;font-size:0.85em;color:#718096">
+    <p>What each column in the experiment results means</p>
+    <p>What is real data from Redshift vs simulated</p>
+    <p>What Level 1 and Level 2 each contribute</p>
+  </div>
+</section>
+
+<!-- ── THE ONE KEY QUESTION ───────────────────────────────────────────────── -->
+<section>
+  <h2>The One Key Question</h2>
+  <div class="box box-blue" style="margin-top:20px;font-size:1em;line-height:1.8">
+    <p>The experiment results table has columns like:</p>
+    <p><code>Prod: NAICS code</code> &nbsp; <code>Prod: Winning source</code> &nbsp; <code>Cons: Probability</code></p>
+    <p><code>Cons: Majority agreement</code> &nbsp; <code>UK SIC: Production</code> &nbsp; <code>Cons: KYB recommendation</code></p>
+  </div>
+  <div style="margin-top:20px">
+    <p>Three questions to answer:</p>
+    <ol style="font-size:0.9em">
+      <li>What does each column mean and where does the data come from?</li>
+      <li>Which data is <strong class="green">real (from Redshift)</strong> vs <strong class="gold">simulated</strong>?</li>
+      <li>Why can OpenCorporates and Liberty never appear as <code>Prod: Winning source</code>?</li>
+    </ol>
+  </div>
+</section>
+
+<!-- ── THREE COLUMN GROUPS ────────────────────────────────────────────────── -->
+<section>
+  <h2>The Experiment Table Has 3 Column Groups</h2>
+  <table>
+    <tr>
+      <th>Group</th><th>Columns</th><th>Question answered</th>
+    </tr>
+    <tr>
+      <td><strong class="red">Production (Prod:)</strong></td>
+      <td>5 columns</td>
+      <td>What does Worth AI currently store about this company's industry?</td>
+    </tr>
+    <tr>
+      <td><strong class="green">Consensus (Cons:)</strong></td>
+      <td>10 columns</td>
+      <td>What does Level 2 XGBoost produce that production never produces?</td>
+    </tr>
+    <tr>
+      <td><strong class="blue">Comparison</strong></td>
+      <td>3 columns</td>
+      <td>Do they agree? Which pipeline produced the better result?</td>
+    </tr>
+  </table>
+</section>
+
+<!-- ── WHAT IS REAL VS SIMULATED ─────────────────────────────────────────── -->
+<section>
+  <h2>What Is Real vs Simulated</h2>
+  <p class="small">Every time a company applies, the production pipeline runs and writes to Redshift. This data already exists.</p>
+  <table style="font-size:0.65em">
+    <tr>
+      <th>Data</th><th>Redshift Table</th><th>Status</th>
+    </tr>
+    <tr>
+      <td>Level 1 — OC match confidence</td>
+      <td><code>datascience.oc_matches_custom_inc_ml.oc_probability</code></td>
+      <td><span class="badge badge-real">REAL</span></td>
+    </tr>
+    <tr>
+      <td>Level 1 — Equifax match confidence</td>
+      <td><code>datascience.efx_matches_custom_inc_ml.efx_probability</code></td>
+      <td><span class="badge badge-real">REAL</span></td>
+    </tr>
+    <tr>
+      <td>Level 1 — ZoomInfo match confidence</td>
+      <td><code>datascience.zoominfo_matches_custom_inc_ml.zi_probability</code></td>
+      <td><span class="badge badge-real">REAL</span></td>
+    </tr>
+    <tr>
+      <td>OC industry codes (multi-taxonomy)</td>
+      <td><code>open_corporates_standard_ml_2.industry_code_uids</code></td>
+      <td><span class="badge badge-real">REAL</span></td>
+    </tr>
+    <tr>
+      <td>Equifax NAICS + SIC</td>
+      <td><code>equifax_us_standardized.efx_primnaicscode</code></td>
+      <td><span class="badge badge-real">REAL</span></td>
+    </tr>
+    <tr>
+      <td>ZoomInfo NAICS</td>
+      <td><code>zoominfo_standard_ml_2.zi_c_naics6</code></td>
+      <td><span class="badge badge-real">REAL</span></td>
+    </tr>
+    <tr>
+      <td>Production rule output</td>
+      <td><code>customer_files.naics_code</code></td>
+      <td><span class="badge badge-real">REAL</span></td>
+    </tr>
+    <tr>
+      <td>Consensus top-3 codes + probabilities</td>
+      <td>Not yet in Redshift</td>
+      <td><span class="badge badge-new">NEW</span></td>
+    </tr>
+    <tr>
+      <td>AML signals + KYB recommendation</td>
+      <td>Not yet in Redshift</td>
+      <td><span class="badge badge-new">NEW</span></td>
+    </tr>
+    <tr>
+      <td>UK SIC as primary output for GB</td>
+      <td>Not yet in Redshift</td>
+      <td><span class="badge badge-new">NEW</span></td>
+    </tr>
+  </table>
+  <p class="small" style="margin-top:12px">When Redshift is unreachable (no VPN / public access not enabled), the experiment generates synthetic data that mirrors this exact schema.</p>
+</section>
+
+<!-- ── LEVEL 1: WHAT IT DOES ─────────────────────────────────────────────── -->
+<section>
+  <h2>Level 1 XGBoost — What It Does</h2>
+  <div class="box box-blue">
+    <p><strong>Model:</strong> <code>entity_matching_20250127 v1</code> — Entity-Matching repo</p>
+    <p><strong>Question:</strong> "Is this submitted company the same real-world entity as this record in our database?"</p>
+    <p><strong>It does NOT classify industries.</strong> It matches identities.</p>
+  </div>
+  <div style="margin-top:16px" class="flow">
+    <div class="flow-box">Submitted company<br><span class="small">name + address</span></div>
+    <div class="arrow">→</div>
+    <div class="flow-box">33 pairwise<br>similarity features</div>
+    <div class="arrow">→</div>
+    <div class="flow-box">Level 1 XGBoost<br><span class="small">binary:logistic</span></div>
+    <div class="arrow">→</div>
+    <div class="flow-box"><strong class="green">match_confidence</strong><br><span class="small">0.0 – 1.0 per source</span></div>
+  </div>
+  <p class="small" style="margin-top:16px">The same Level 1 model runs in BOTH the production pipeline and the Consensus pipeline. The difference is entirely in what you do next with its output.</p>
+</section>
+
+<!-- ── LEVEL 1: 33 FEATURES ───────────────────────────────────────────────── -->
+<section>
+  <h2>Level 1 — The 33 Features</h2>
+  <div class="two-col" style="font-size:0.75em">
+    <div>
+      <p class="gold">Address Exact Matches (binary)</p>
+      <ul>
+        <li><code>match_zipcode</code></li>
+        <li><code>match_city</code></li>
+        <li><code>match_street_number</code></li>
+        <li><code>match_street_block</code> — same 100-number block</li>
+        <li><code>match_address_line_2</code></li>
+        <li><code>match_short_name</code> — city-stripped name</li>
+        <li><code>distance_street_number</code> — |a - b|</li>
+      </ul>
+      <p class="gold" style="margin-top:12px">Business Name — Jaccard (k=1,2,3,4,word)</p>
+      <p class="small">5 features on canonized name (suffixes stripped)</p>
+      <p class="gold">Business Name — Overlap Coefficient (k=1,2,3,4,word)</p>
+      <p class="small">5 features — more lenient for short names</p>
+    </div>
+    <div>
+      <p class="gold">Street Name — Jaccard (k=1,2,3,4)</p>
+      <p class="small">4 features</p>
+      <p class="gold">Street Name — Overlap (k=1,2,3,4)</p>
+      <p class="small">4 features</p>
+      <p class="gold">Short Name — Jaccard (k=1,2,3,4)</p>
+      <p class="small">4 features — city-stripped name</p>
+      <p class="gold">Short Name — Overlap (k=1,2,3,4)</p>
+      <p class="small">4 features</p>
+      <div class="box" style="margin-top:12px">
+        <strong>Pre-processing:</strong> uppercase, strip accents, remove special chars, strip legal suffixes (LLC, INC, CORP, LTD, LLP, 40+), expand address abbreviations
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── LEVEL 1: OUTPUTS ───────────────────────────────────────────────────── -->
+<section>
+  <h2>Level 1 Outputs — One Score per Source</h2>
+  <table>
+    <tr><th>Source</th><th>Redshift table</th><th>Column</th><th>≥ 0.80 = ?</th></tr>
+    <tr>
+      <td>OpenCorporates</td>
+      <td><code>oc_matches_custom_inc_ml</code></td>
+      <td><code>oc_probability</code></td>
+      <td>Matched</td>
+    </tr>
+    <tr>
+      <td>Equifax</td>
+      <td><code>efx_matches_custom_inc_ml</code></td>
+      <td><code>efx_probability</code></td>
+      <td>Matched</td>
+    </tr>
+    <tr>
+      <td>ZoomInfo</td>
+      <td><code>zoominfo_matches_custom_inc_ml</code></td>
+      <td><code>zi_probability</code></td>
+      <td>Matched</td>
+    </tr>
+    <tr>
+      <td>Liberty</td>
+      <td><code>{TABLE}_results.parquet</code> (local)</td>
+      <td><code>liberty_confidence</code></td>
+      <td>Matched</td>
+    </tr>
+  </table>
+  <div class="box box-blue" style="margin-top:16px;font-size:0.85em">
+    <p><strong>Country routing</strong> — Level 1 only queries sources available for each country:</p>
+    <p>US → OC + Equifax + ZoomInfo + Liberty</p>
+    <p>GB, CA, IE → OC + ZoomInfo</p>
+  </div>
+</section>
+
+<!-- ── PRODUCTION RULE ────────────────────────────────────────────────────── -->
+<section>
+  <h2>The Production Rule (customer_table.sql)</h2>
+  <pre><code class="sql">-- From sp_recreate_customer_files()
+primary_naics_code = CASE
+    WHEN zi_match_confidence > efx_match_confidence
+        THEN zi_c_naics6           -- ZoomInfo wins
+    ELSE
+        efx_primnaicscode          -- Equifax wins
+END</code></pre>
+  <div class="two-col" style="margin-top:16px;font-size:0.82em">
+    <div class="box box-green">
+      <p><strong class="green">✅ What gets stored</strong></p>
+      <ul>
+        <li>Winning NAICS code → <code>customer_files.naics_code</code></li>
+        <li>Match confidences → <code>zi_match_confidence</code>, <code>efx_match_confidence</code></li>
+        <li>OC uid field (raw) → <code>industry_code_uids</code></li>
+      </ul>
+    </div>
+    <div class="box box-red">
+      <p><strong class="red">❌ What never gets stored</strong></p>
+      <ul>
+        <li>UK SIC from OC — <strong>no table exists</strong></li>
+        <li>Probability — never computed</li>
+        <li>Alternative codes — single code only</li>
+        <li>AML signals — no risk engine</li>
+        <li>KYB recommendation — not produced</li>
+        <li>OC / Liberty industry codes — never routed</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ── WHY OC/LIBERTY NEVER WIN ───────────────────────────────────────────── -->
+<section>
+  <h2>Why OC and Liberty Never Appear as Winning Source</h2>
+  <div class="box box-red" style="margin-bottom:16px">
+    <p>The production rule only compares <strong>two</strong> sources:</p>
+    <pre><code>IF zi_confidence > efx_confidence → ZoomInfo wins
+ELSE                              → Equifax wins</code></pre>
+  </div>
+  <p style="font-size:0.85em">OpenCorporates and Liberty <strong>are used by Level 1</strong> — their match confidences are computed and stored. But the production classification rule <strong>never reads their industry codes</strong>.</p>
+  <div class="box box-blue" style="font-size:0.85em;margin-top:12px">
+    <p>OpenCorporates <code>industry_code_uids</code> contains richer data than ZoomInfo or Equifax — it includes UK SIC, NACE, NAICS, and more in a single pipe-delimited field. None of it is used by the production rule.</p>
+    <p style="margin-top:8px">This is confirmed by reading <code>customer_table.sql</code> in the SIC-UK-Codes repo.</p>
+  </div>
+  <p class="small" style="margin-top:12px">In the Consensus model, all 4 sources (OC, EFX, ZI, Liberty) contribute as weighted features to Level 2.</p>
+</section>
+
+<!-- ── PRODUCTION COLUMNS ─────────────────────────────────────────────────── -->
+<section>
+  <h2>Production Columns — Explained</h2>
+  <table style="font-size:0.68em">
+    <tr><th>Column</th><th>Meaning</th><th>Example</th></tr>
+    <tr>
+      <td><code>Prod: NAICS code</code></td>
+      <td>Single NAICS written to <code>customer_files.naics_code</code> by the rule</td>
+      <td><code>523110</code>, <code>722511</code></td>
+    </tr>
+    <tr>
+      <td><code>Prod: Winning source</code></td>
+      <td>Which of the two sources won: <code>zoominfo</code> or <code>equifax</code></td>
+      <td>OC and Liberty can never win</td>
+    </tr>
+    <tr>
+      <td><code>Prod: Match confidence</code></td>
+      <td>Level 1 score for the winning source. ≥ 0.80 = confident match.</td>
+      <td><code>0.85</code> = strong · <code>0.47</code> = weak</td>
+    </tr>
+    <tr>
+      <td><code>Prod: UK SIC returned</code></td>
+      <td>Whether OC returned a UK SIC in <code>industry_code_uids</code></td>
+      <td><code>56101 (received, DROPPED)</code></td>
+    </tr>
+    <tr>
+      <td><code>Prod: UK SIC persisted</code></td>
+      <td>Always <em>Never — no table</em>. No DB table exists for UK SIC.</td>
+      <td>Constant — structural gap</td>
+    </tr>
+  </table>
+</section>
+
+<!-- ── CONSENSUS COLUMNS ─────────────────────────────────────────────────── -->
+<section>
+  <h2>Consensus Columns — Primary Code and Probability</h2>
+  <div class="two-col" style="font-size:0.82em">
+    <div>
+      <div class="box box-green">
+        <p><strong class="green">Cons: Primary code</strong></p>
+        <p>Top-1 prediction from Level 2 XGBoost. Scores all possible NAICS codes simultaneously using all 6 vendor signals.</p>
+        <p>Correct for <code>LAKEWOOD HOTEL</code>: <code>721110</code> (Hotels) vs production's <code>561320</code> (Staffing).</p>
+      </div>
+      <div class="box box-green" style="margin-top:12px">
+        <p><strong class="green">Cons: Primary taxonomy</strong></p>
+        <p>Jurisdiction-aware taxonomy routing:</p>
+        <ul>
+          <li>US/CA/AU → NAICS 2022</li>
+          <li>GB/GG/JE → <strong>UK SIC 2007</strong></li>
+          <li>EU → NACE Rev.2</li>
+          <li>Global → ISIC Rev.4</li>
+        </ul>
+        <p>Production always returns NAICS.</p>
+      </div>
+    </div>
+    <div>
+      <div class="box box-blue">
+        <p><strong class="blue">Cons: Probability</strong></p>
+        <p>Calibrated confidence from <code>multi:softprob</code> output:</p>
+        <ul>
+          <li>≥ 70% → High confidence → APPROVE</li>
+          <li>40–69% → Medium → REVIEW</li>
+          <li>&lt; 40% → Low → <code>LOW_CONSENSUS_PROB</code> flag</li>
+        </ul>
+        <p><strong class="red">Production probability: None.</strong></p>
+      </div>
+      <div class="box box-blue" style="margin-top:12px">
+        <p><strong class="blue">Cons: Secondary codes</strong></p>
+        <p>2nd and 3rd most probable codes. Wide spread between primary and secondary = hybrid business or unreliable vendor data signal.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── CONSENSUS: SIGNAL FEATURES ─────────────────────────────────────────── -->
+<section>
+  <h2>Consensus Columns — AML Signal Features</h2>
+  <table style="font-size:0.68em">
+    <tr><th>Column</th><th>What it measures</th><th>AML flag threshold</th></tr>
+    <tr>
+      <td><code>Cons: Majority agreement</code></td>
+      <td>Fraction of sources returning the same 6-digit code (0–1)</td>
+      <td>&lt; 0.40 → <code>SOURCE_CONFLICT</code></td>
+    </tr>
+    <tr>
+      <td><code>Cons: Temporal pivot</code></td>
+      <td>Rate of industry code change across last 3 API calls</td>
+      <td>&gt; 0.50 → <code>STRUCTURE_CHANGE</code></td>
+    </tr>
+    <tr>
+      <td><code>Cons: Web↔Registry dist</code></td>
+      <td>Semantic distance between web presence and OC registry label (0=same, 1=completely different)</td>
+      <td>&gt; 0.55 → <code>REGISTRY_DISCREPANCY</code></td>
+    </tr>
+    <tr>
+      <td><code>Cons: Sources matched</code></td>
+      <td>Count of sources with Level 1 confidence ≥ 0.80</td>
+      <td>0 = no confident match anywhere</td>
+    </tr>
+    <tr>
+      <td><code>Cons: Risk score</code></td>
+      <td>Composite 0–1 score from all signals</td>
+      <td>≥ 0.75 = REJECT</td>
+    </tr>
+    <tr>
+      <td><code>Cons: KYB recommendation</code></td>
+      <td>APPROVE / REVIEW / ESCALATE / REJECT</td>
+      <td>Production: never produced</td>
+    </tr>
+  </table>
+  <div class="box box-red" style="margin-top:14px;font-size:0.82em">
+    <strong>All of these signals come from data already in Redshift.</strong>
+    The feature engineering reads Level 1 confidence scores, vendor industry codes,
+    and OC jurisdiction codes — all stored from the original API calls.
+  </div>
+</section>
+
+<!-- ── KYB RISK FLAGS ─────────────────────────────────────────────────────── -->
+<section>
+  <h2>The 6 AML / KYB Risk Flags</h2>
+  <table style="font-size:0.75em">
+    <tr><th>Flag</th><th>What triggers it</th><th>Risk weight</th></tr>
+    <tr>
+      <td><code>HIGH_RISK_SECTOR</code></td>
+      <td>NAICS prefix: 5511 (Holding), 5221 (Banking), 4236 (Dual-use goods), 9281 (Defence)</td>
+      <td>30%</td>
+    </tr>
+    <tr>
+      <td><code>REGISTRY_DISCREPANCY</code></td>
+      <td>Web↔Registry semantic distance &gt; 0.55</td>
+      <td>25%</td>
+    </tr>
+    <tr>
+      <td><code>STRUCTURE_CHANGE</code></td>
+      <td>Industry code changed across last 3 API calls — temporal pivot &gt; 0.50</td>
+      <td>20%</td>
+    </tr>
+    <tr>
+      <td><code>SOURCE_CONFLICT</code></td>
+      <td>Source majority agreement &lt; 0.40 — vendors disagree on industry</td>
+      <td>15%</td>
+    </tr>
+    <tr>
+      <td><code>TRULIOO_POLLUTION</code></td>
+      <td>Trulioo returned 4-digit SIC for a 5-digit jurisdiction (data quality defect)</td>
+      <td>5%</td>
+    </tr>
+    <tr>
+      <td><code>LOW_CONSENSUS_PROB</code></td>
+      <td>Level 2 top-1 probability &lt; 40% — model is uncertain</td>
+      <td>10%</td>
+    </tr>
+  </table>
+  <p class="small" style="margin-top:12px">Production fires zero AML flags. It has no risk engine.</p>
+</section>
+
+<!-- ── THE 45 FEATURES ────────────────────────────────────────────────────── -->
+<section>
+  <h2>Level 2 — The 45 Input Features</h2>
+  <div class="two-col" style="font-size:0.78em">
+    <div>
+      <p class="gold">A — Source Confidence (6) <span class="small">from Level 1</span></p>
+      <p class="small"><code>oc_confidence</code>, <code>efx_confidence</code>, <code>zi_confidence</code>, <code>liberty_confidence</code>, <code>tru_confidence</code>, <code>ai_confidence</code></p>
+      <p class="gold" style="margin-top:8px">B — Match Flags (6) <span class="small">binary ≥ 0.80</span></p>
+      <p class="small"><code>oc_matched</code>, <code>efx_matched</code>, <code>zi_matched</code>, <code>liberty_matched</code>, <code>tru_matched</code>, <code>ai_matched</code></p>
+      <p class="gold" style="margin-top:8px">C — Code Signals (6) <span class="small">AML features</span></p>
+      <p class="small"><code>tru_pollution_flag</code>, <code>web_registry_distance</code>, <code>temporal_pivot_score</code>, <code>cross_taxonomy_agreement</code>, <code>source_majority_agreement</code>, <code>source_code_diversity</code></p>
+    </div>
+    <div>
+      <p class="gold">D — Jurisdiction Flags (12) <span class="small">from OC jurisdiction_code</span></p>
+      <p class="small"><code>j_us</code>, <code>j_us_state</code>, <code>j_ca</code>, <code>j_ca_province</code>, <code>j_eu</code>, <code>j_apac</code>, <code>j_latam</code>, <code>j_mena</code>, <code>j_afr</code>, <code>j_other</code>, <code>is_subnational</code>, <code>is_naics_jurisdiction</code></p>
+      <p class="gold" style="margin-top:8px">E — Entity Type (3)</p>
+      <p class="small"><code>is_holding</code>, <code>is_ngo</code>, <code>is_partnership</code></p>
+      <p class="gold" style="margin-top:8px">F — Aggregate Quality (4)</p>
+      <p class="small"><code>hi_risk_sector</code>, <code>avg_confidence</code>, <code>max_confidence</code>, <code>sources_above_threshold</code></p>
+      <div class="box box-green" style="margin-top:12px">
+        All 45 features derived from data <strong>already in Redshift</strong>.
+        No new API calls required.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── COMPLETE FLOW ───────────────────────────────────────────────────────── -->
+<section>
+  <h2>The Complete Data Flow</h2>
+  <pre style="font-size:0.58em"><code>SOURCES — real data already received and stored in Redshift
+  OpenCorporates  →  industry_code_uids (multi-taxonomy pipe)
+  Equifax         →  efx_primnaicscode, efx_primsic
+  ZoomInfo        →  zi_c_naics6
+  Liberty         →  naics, sic columns
+  Trulioo         →  sicCode (via global_trulioo_us_kyb)
+         │
+         ▼
+LEVEL 1 XGBOOST  (entity_matching_20250127 v1)  — SAME IN BOTH
+  33 pairwise text/address similarity features
+  Output: match_confidence per source (0.0 – 1.0)
+  oc_probability  → oc_matches_custom_inc_ml
+  efx_probability → efx_matches_custom_inc_ml
+  zi_probability  → zoominfo_matches_custom_inc_ml
+         │
+    ─────┴──────────────────────────────────────────────
+    │                                                   │
+PRODUCTION                                      CONSENSUS (Level 2)
+Rule: max(zi_conf, efx_conf) wins               45-feature vector →
+→ 1 NAICS code                                  XGBClassifier(multi:softprob)
+→ no probability                                → top-3 codes + probabilities
+→ UK SIC dropped                                → UK SIC as primary (GB)
+→ 0 AML signals                                 → 6 AML signal types
+→ 0 KYB output                                  → APPROVE/REVIEW/ESCALATE/REJECT</code></pre>
+</section>
+
+<!-- ── HOW TO GET REAL RESULTS ────────────────────────────────────────────── -->
+<section>
+  <h2>How to Get Real Results in the Notebook</h2>
+  <div class="two-col" style="font-size:0.82em">
+    <div>
+      <div class="box box-red">
+        <p><strong>Current status (without VPN / public access)</strong></p>
+        <p>Redshift is VPC-private. Notebook uses synthetic data that mirrors the exact Redshift schema with realistic confidence distributions.</p>
+        <p class="small">Synthetic data uses the same column names, same code ranges, same confidence distributions as real data.</p>
+      </div>
+    </div>
+    <div>
+      <div class="box box-green">
+        <p><strong>To use real Redshift data</strong></p>
+        <p><strong>Option A:</strong> Enable Redshift public access<br><code>AWS Console → Redshift Serverless → Workgroup → Edit → Toggle "Publicly accessible" ON</code></p>
+        <p><strong>Option B:</strong> Run from inside the VPC (EC2 or VPN)</p>
+        <p>Then set env vars and delete <code>experiment_results.csv</code> to regenerate.</p>
+      </div>
+    </div>
+  </div>
+  <pre style="font-size:0.65em;margin-top:16px"><code>export REDSHIFT_HOST=worthai-services-redshift-endpoint-...
+export REDSHIFT_USER=readonly_all_access
+export REDSHIFT_PASSWORD=...
+export REDSHIFT_DB=dev
+rm experiment_results.csv
+jupyter notebook experiment_notebook.ipynb</code></pre>
+</section>
+
+<!-- ── THE DELTA ──────────────────────────────────────────────────────────── -->
+<section>
+  <h2>The Delta — What Consensus Adds</h2>
+  <table style="font-size:0.72em">
+    <tr>
+      <th>Capability</th>
+      <th>Production</th>
+      <th>Consensus</th>
+    </tr>
+    <tr>
+      <td>NAICS code</td>
+      <td class="red">1 code, winner-takes-all rule</td>
+      <td class="green">Top-3 codes with probabilities</td>
+    </tr>
+    <tr>
+      <td>Calibrated probability</td>
+      <td class="red">❌ None</td>
+      <td class="green">✅ 0–100% per code</td>
+    </tr>
+    <tr>
+      <td>UK SIC 2007</td>
+      <td class="red">❌ Available from OC, silently dropped</td>
+      <td class="green">✅ Primary output for GB companies</td>
+    </tr>
+    <tr>
+      <td>AML risk signals</td>
+      <td class="red">❌ 0 signals</td>
+      <td class="green">✅ 6 signal types</td>
+    </tr>
+    <tr>
+      <td>KYB recommendation</td>
+      <td class="red">❌ Never produced</td>
+      <td class="green">✅ APPROVE / REVIEW / ESCALATE / REJECT</td>
+    </tr>
+    <tr>
+      <td>OC / Liberty industry codes used</td>
+      <td class="red">❌ Ignored by rule</td>
+      <td class="green">✅ Weighted inputs to Level 2</td>
+    </tr>
+    <tr>
+      <td>Jurisdiction-aware taxonomy</td>
+      <td class="red">❌ Always NAICS</td>
+      <td class="green">✅ NAICS / UK SIC / NACE / ISIC per country</td>
+    </tr>
+    <tr>
+      <td>Source agreement signal</td>
+      <td class="red">❌ Ignored</td>
+      <td class="green">✅ Feature + AML flag if conflict</td>
+    </tr>
+  </table>
+  <p class="small" style="margin-top:12px">The input data is identical. Level 1 is identical. The only difference is what happens after Level 1 runs.</p>
+</section>
+
+</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script>
+Reveal.initialize({
+  hash: true, slideNumber: 'c/t', transition: 'slide',
+  width: 1200, height: 700, margin: 0.05,
+  minScale: 0.3, maxScale: 1.5,
+});
+</script>
+</body>
+</html>
