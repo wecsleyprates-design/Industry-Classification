@@ -91,12 +91,15 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Cached model singletons ───────────────────────────────────────────────────
-@st.cache_resource(show_spinner="⏳ Loading taxonomy index — first load only, ~8s …")
+# All models are pre-warmed at startup so the first Classify click is instant.
+# Streamlit calls these functions when the app first renders — not on button click.
+
+@st.cache_resource(show_spinner=False)
 def _te():
     from taxonomy_engine import TaxonomyEngine
     return TaxonomyEngine()
 
-@st.cache_resource(show_spinner="⏳ Warming up Consensus XGBoost …")
+@st.cache_resource(show_spinner=False)
 def _ce():
     from consensus_engine import IndustryConsensusEngine
     return IndustryConsensusEngine(taxonomy_engine=_te())
@@ -115,6 +118,23 @@ def _er():
 def _sim():
     from data_simulator import DataSimulator
     return DataSimulator()
+
+
+def _prewarm_models() -> None:
+    """
+    Call every singleton at startup.
+    Shows a single loading bar so the user knows what's happening once,
+    then all subsequent classifications are instant.
+    """
+    if st.session_state.get("_models_ready"):
+        return
+    with st.spinner("⏳ Loading models on first start — this takes ~10s once, then instant…"):
+        _er()   # entity resolver — fast
+        te = _te()   # taxonomy engine + sentence-transformers — 7s on first load
+        _ce()   # consensus XGBoost — loads from data/consensus_model.ubj
+        _re()   # risk engine
+        _sim()  # data simulator
+    st.session_state["_models_ready"] = True
 
 # ── CSV normalisation ─────────────────────────────────────────────────────────
 _COL_MAP = {
@@ -895,6 +915,9 @@ def _sidebar():
 
 
 def main():
+    # Pre-warm all models on first render — shows spinner once, then instant
+    _prewarm_models()
+
     mode = _sidebar()
 
     st.title("🏭 Global Industry Classification Engine v2")
