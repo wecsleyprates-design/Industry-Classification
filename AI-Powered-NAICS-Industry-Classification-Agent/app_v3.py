@@ -138,16 +138,22 @@ def _audit(event: str, detail: str, entity: str = "system", colour: str = "#4299
         "colour": colour,
     })
 
-def _save_decision(lookup: str, decision: str, reviewer: str, note: str) -> None:
+def _save_decision(lookup: str, decision: str, reviewer: str, note: str,
+                   override_code: str = "", override_label: str = "") -> None:
     old = st.session_state["decisions"].get(lookup, {}).get("decision", "Unreviewed")
     st.session_state["decisions"][lookup] = {
-        "decision": decision, "reviewer": reviewer, "note": note,
+        "decision":       decision,
+        "reviewer":       reviewer,
+        "note":           note,
+        "override_code":  override_code.strip(),
+        "override_label": override_label.strip(),
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
     }
     colour = {"Approved":"#48BB78","Rejected":"#FC8181",
                "Escalated":"#9F7AEA","Needs Review":"#ECC94B"}.get(decision, "#718096")
+    override_note = f" Override code: {override_code}." if override_code else ""
     _audit(f"Decision → {decision}",
-           f"Changed from '{old}'. Reviewer: {reviewer or 'anon'}. Note: {note or '—'}",
+           f"Changed from '{old}'. Reviewer: {reviewer or 'anon'}. Note: {note or '—'}.{override_note}",
            entity=lookup, colour=colour)
 
 # ── CSV parsing ───────────────────────────────────────────────────────────────
@@ -506,20 +512,56 @@ def _render_decision_panel(lookup: str) -> None:
     current = st.session_state["decisions"].get(lookup, {})
     st.markdown('<div class="dec-panel">', unsafe_allow_html=True)
     st.markdown("**📋 Analyst Review Decision**")
-    c1, c2, c3 = st.columns([2,2,2])
+
+    # Row 1 — decision + reviewer + timestamp
+    c1, c2, c3 = st.columns([2, 2, 2])
     with c1:
-        dec = st.selectbox("Decision", DECISION_OPTIONS,
-            index=DECISION_OPTIONS.index(current.get("decision","Unreviewed")),
-            key=f"dec_{lookup}")
+        dec = st.selectbox(
+            "Decision", DECISION_OPTIONS,
+            index=DECISION_OPTIONS.index(current.get("decision", "Unreviewed")),
+            key=f"dec_{lookup}",
+        )
     with c2:
-        rev = st.text_input("Reviewer name", value=current.get("reviewer",""), key=f"rev_{lookup}")
+        rev = st.text_input("Reviewer name", value=current.get("reviewer", ""),
+                            key=f"rev_{lookup}")
     with c3:
         st.markdown("")
-        st.markdown(f"**Last saved:** {current.get('ts','—')}")
-    note = st.text_area("Notes (optional)", value=current.get("note",""), height=70, key=f"note_{lookup}")
+        st.markdown(f"**Last saved:** {current.get('ts', '—')}")
+
+    # Row 2 — override code + label (analyst correction)
+    ov_col1, ov_col2 = st.columns(2)
+    with ov_col1:
+        override_code = st.text_input(
+            "Override industry code (optional)",
+            value=current.get("override_code", ""),
+            placeholder="e.g. 541511",
+            help="Enter the correct 6-digit NAICS or SIC code if the model is wrong.",
+            key=f"ov_code_{lookup}",
+        )
+    with ov_col2:
+        override_label = st.text_input(
+            "Override label (optional)",
+            value=current.get("override_label", ""),
+            placeholder="e.g. Custom Computer Programming Services",
+            key=f"ov_label_{lookup}",
+        )
+
+    # Row 3 — notes
+    note = st.text_area(
+        "Analyst notes — corrections, reasoning, flags (will appear in Full Results Table)",
+        value=current.get("note", ""),
+        height=80,
+        key=f"note_{lookup}",
+    )
+
     if st.button("💾 Save Decision", key=f"save_{lookup}", use_container_width=True):
-        _save_decision(lookup, dec, rev, note)
+        _save_decision(lookup, dec, rev, note, override_code, override_label)
         st.success(f"Decision saved: {dec}")
+
+    # Show current saved values if any
+    if current.get("override_code"):
+        st.caption(f"Current override: `{current['override_code']}` — {current.get('override_label','')}")
+
     st.markdown("</div>", unsafe_allow_html=True)
 
 # ── Main render (shared by single + batch) ───────────────────────────────────
@@ -911,13 +953,26 @@ SHAP is computed using `shap.TreeExplainer` on the Consensus XGBoost model — e
         for col in [c for c in display_cols if "Confidence" in c or "Score" in c]:
             disp_df[col] = pd.to_numeric(disp_df[col],errors="coerce").apply(
                 lambda v: f"{v:.3f}" if pd.notna(v) else "—")
-        # Merge analyst decisions
-        decs = st.session_state.get("decisions",{})
-        if decs and "Company" in disp_df.columns:
-            disp_df["Analyst Decision"] = disp_df["Company"].map(
-                lambda c: decs.get(c,{}).get("decision","Unreviewed"))
-            disp_df["Reviewed By"] = disp_df["Company"].map(
-                lambda c: decs.get(c,{}).get("reviewer",""))
+        # Merge all analyst decision fields into the table
+        decs = st.session_state.get("decisions", {})
+        if "Company" in disp_df.columns:
+            disp_df.insert(0, "Analyst Decision", disp_df["Company"].map(
+                lambda c: decs.get(c, {}).get("decision", "Unreviewed")))
+            disp_df.insert(1, "Override Code", disp_df["Company"].map(
+                lambda c: decs.get(c, {}).get("override_code", "")))
+            disp_df.insert(2, "Override Label", disp_df["Company"].map(
+                lambda c: decs.get(c, {}).get("override_label", "")))
+            disp_df.insert(3, "Analyst Notes", disp_df["Company"].map(
+                lambda c: decs.get(c, {}).get("note", "")))
+            disp_df.insert(4, "Reviewed By", disp_df["Company"].map(
+                lambda c: decs.get(c, {}).get("reviewer", "")))
+
+        # Highlight rows with decisions
+        st.caption(
+            "First 5 columns are analyst inputs. "
+            "Override Code / Label replace the model's code when an analyst corrects it. "
+            "Analyst Notes appear here and in the download."
+        )
         st.dataframe(disp_df, use_container_width=True, hide_index=True, height=500)
         with st.expander("Column reference"):
             st.markdown("""
@@ -931,7 +986,11 @@ SHAP is computed using `shap.TreeExplainer` on the Consensus XGBoost model — e
 | `Rank 1–5 Prob` | Consensus L2 | Model confidence 0–1 for each code |
 | `Risk Score` | Risk engine | Composite AML score 0–1 |
 | `KYB` | Risk engine | APPROVE / REVIEW / ESCALATE / REJECT |
-| `Analyst Decision` | Session state | Decision recorded by the analyst in Record Explorer |
+| `Analyst Decision` | Analyst input | APPROVE / REVIEW / ESCALATE / REJECT / No Match |
+| `Override Code` | Analyst input | Corrected industry code if the model was wrong |
+| `Override Label` | Analyst input | Description for the override code |
+| `Analyst Notes` | Analyst input | Freetext notes, corrections, flags — saved to session and export |
+| `Reviewed By` | Analyst input | Reviewer name entered in the decision panel |
 """)
 
     # ══ DOWNLOAD ═════════════════════════════════════════════════════════════
@@ -940,14 +999,18 @@ SHAP is computed using `shap.TreeExplainer` on the Consensus XGBoost model — e
         export_cols = [c for c in result_df.columns
                        if not c.startswith("_") and c not in ("_signals","_sigs_raw","_bundle")]
         exp_df = result_df[export_cols].copy()
-        decs   = st.session_state.get("decisions",{})
-        if decs and "Company" in exp_df.columns:
+        decs   = st.session_state.get("decisions", {})
+        if "Company" in exp_df.columns:
             exp_df["Analyst Decision"] = exp_df["Company"].map(
-                lambda c: decs.get(c,{}).get("decision","Unreviewed"))
-            exp_df["Reviewed By"] = exp_df["Company"].map(
-                lambda c: decs.get(c,{}).get("reviewer",""))
-            exp_df["Decision Notes"] = exp_df["Company"].map(
-                lambda c: decs.get(c,{}).get("note",""))
+                lambda c: decs.get(c, {}).get("decision", "Unreviewed"))
+            exp_df["Override Code"]    = exp_df["Company"].map(
+                lambda c: decs.get(c, {}).get("override_code", ""))
+            exp_df["Override Label"]   = exp_df["Company"].map(
+                lambda c: decs.get(c, {}).get("override_label", ""))
+            exp_df["Analyst Notes"]    = exp_df["Company"].map(
+                lambda c: decs.get(c, {}).get("note", ""))
+            exp_df["Reviewed By"]      = exp_df["Company"].map(
+                lambda c: decs.get(c, {}).get("reviewer", ""))
         c1,c2 = st.columns(2)
         with c1:
             buf = io.BytesIO()
