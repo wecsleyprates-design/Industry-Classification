@@ -32,3 +32,4 @@ psycopg2-binary
 python-dotenv
 rapidfuzz
 jinja2
+shap
