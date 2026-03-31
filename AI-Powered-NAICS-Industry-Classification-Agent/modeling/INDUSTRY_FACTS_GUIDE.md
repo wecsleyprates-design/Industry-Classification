@@ -8,9 +8,32 @@
 
 > **Your question: "The confidence score is done by the Level 1 XGBoost Model, isn't it?"**
 
-**The answer is: it depends on the source — and it is more nuanced than a single model.**
+**The answer is: it depends on which pipeline you are in — and there are two entirely separate pipelines running in parallel.**
 
 There are **two separate confidence systems** in Worth AI, and they are easy to confuse:
+
+---
+
+### The Two Pipelines at a Glance
+
+```
+PIPELINE A — integration-service (real-time, per business submission)
+  → Calls vendor APIs live (Middesk, Trulioo, SERP)
+  → Reads pre-loaded Redshift tables (ZoomInfo, Equifax, OC)
+  → Each source computes its own confidence score (different formulas per source)
+  → Fact Engine selects winner from ALL sources (ZI, EFX, OC, Middesk, Trulioo, AI)
+  → Produces all 217 facts → publishes to Kafka → stored in rds_warehouse_public.facts
+
+PIPELINE B — warehouse-service (batch, Redshift-only)
+  → Reads only pre-loaded Redshift tables (ZoomInfo + Equifax only)
+  → Worth AI XGBoost entity matching model produces zi_probability + efx_probability
+  → customer_table.sql compares ONLY zi_match_confidence vs efx_match_confidence
+  → Produces datascience.customer_files → used for Redshift analytics + data export
+```
+
+These two pipelines run in parallel and produce separate outputs. The Fact Engine (Pipeline A) is the primary classification system customers interact with via API. The `customer_files` table (Pipeline B) is a Redshift analytics and data export table.
+
+---
 
 ---
 
@@ -37,32 +60,149 @@ Key constant: `MAX_CONFIDENCE_INDEX = 55` (line 33 of `sources.ts`)
 
 ---
 
-### System 2: Entity Match Confidence (warehouse-service / customer_table.sql)
+### System 2: Entity Match Confidence (warehouse-service / Pipeline B)
 
-This is the **separate** `zi_match_confidence` and `efx_match_confidence` used in the **Redshift production pipeline** for the winner-takes-all NAICS rule.
+This is the **Redshift batch analytics pipeline**. Here the XGBoost entity matching model is central.
 
-**These ARE produced by the Worth AI XGBoost entity matching model** (`entity_matching_20250127 v1`). They measure: *"Is this submitted business the same real-world entity as this vendor record?"*
+---
 
-They live in:
-- `datascience.efx_matches_custom_inc_ml.efx_probability` → stored as `efx_match_confidence`
-- `datascience.zoominfo_matches_custom_inc_ml.zi_probability` → stored as `zi_match_confidence`
+#### Step B1 — What the XGBoost Model Does
 
-And they drive the production SQL rule in `customer_table.sql`:
+The Worth AI XGBoost entity matching model (`entity_matching_20250127 v1`, in the Entity-Matching repo) answers one question per candidate pair:
+
+> **"Is this submitted business the same real-world entity as this vendor record?"**
+
+It uses **33 pairwise text/address similarity features** — Jaccard k-grams on business name, street name, short name, plus exact matches on city, ZIP, street number, etc.
+
+**Output:** A probability score 0–1 per source per business:
+- `zi_probability` → "How likely is this ZoomInfo record the same company?"
+- `efx_probability` → "How likely is this Equifax record the same company?"
+- `oc_probability` → "How likely is this OC record the same company?"
+
+These scores are written to `datascience.ml_model_matches` — the central XGBoost output table.
+
+---
+
+#### Step B2 — How zi_match_confidence and efx_match_confidence Are Built
+
+The match select procedures read from `ml_model_matches` and build the match tables. From the actual SQL (`zi_match_select.sql`, `efx_match_select.sql`):
+
+**ZoomInfo match table** (`datascience.zoominfo_matches_custom_inc_ml`):
 ```sql
-WHEN COALESCE(zi_match_confidence, 0) > COALESCE(efx_match_confidence, 0)
-    THEN zi_c_naics6          -- ZoomInfo NAICS wins
-ELSE efx_primnaicscode        -- Equifax NAICS wins
+-- FIRST PREFERENCE: XGBoost probability (if ≥ 0.80)
+SELECT business_id, zi_c_company_id, zi_c_location_id, zi_es_location_id, zi_probability
+FROM datascience.ml_model_matches
+WHERE zi_probability >= 0.8
+
+UNION ALL
+
+-- FALLBACK: Heuristic similarity index (if XGBoost score < 0.80)
+SELECT business_id, zi_c_company_id, zi_c_location_id, zi_es_location_id,
+       NULL AS zi_probability, similarity_index
+FROM datascience.smb_zoominfo_standardized_joined
+WHERE similarity_index_rank = 1
+  AND similarity_index >= 45                -- minimum similarity threshold
+  AND business_id NOT IN (already matched by XGBoost)
 ```
+
+**Equifax match table** (`datascience.efx_matches_custom_inc_ml`):
+```sql
+-- Same two-tier pattern:
+-- FIRST: ml_model_matches.efx_probability >= 0.80
+-- FALLBACK: smb_equifax_standardized_joined.similarity_index >= 45
+```
+
+**OpenCorporates match table** (`datascience.oc_matches_custom_inc_ml`):
+```sql
+-- Same two-tier pattern:
+-- FIRST: ml_model_matches.oc_probability >= 0.80
+-- FALLBACK: smb_open_corporate_standardized_joined.similarity_index >= 45
+```
+
+**Then `zi_match_confidence` and `efx_match_confidence` are computed** in `smb_zi_oc_efx_combined.sql`:
+```sql
+-- ZoomInfo confidence (zi_match_confidence):
+CASE
+    WHEN zi_probability IS NOT NULL         THEN zi_probability          -- XGBoost score
+    WHEN similarity_index IS NOT NULL
+         AND similarity_index / 55.0 >= 0.8 THEN similarity_index / 55.0 -- normalized heuristic
+    ELSE 0
+END AS zi_match_confidence
+
+-- Equifax confidence (efx_match_confidence):
+CASE
+    WHEN efx_probability IS NOT NULL        THEN efx_probability         -- XGBoost score
+    WHEN similarity_index IS NOT NULL
+         AND similarity_index / 55.0 >= 0.8 THEN similarity_index / 55.0 -- normalized heuristic
+    ELSE 0
+END AS efx_match_confidence
+```
+
+**Key constant:** `MAX_CONFIDENCE_INDEX = 55` — heuristic similarity scores are normalized by dividing by 55.
+
+---
+
+#### Step B3 — The Customer Table Production Rule
+
+`smb_zi_oc_efx_combined` is joined into `smb_pr_verification_cs`, which is then read by `customer_table.sql` (the stored procedure `sp_recreate_customer_files()`). The NAICS winner-takes-all rule runs here:
+
+```sql
+-- From customer_table.sql (the actual production SQL):
+
+-- NAICS code: ZoomInfo wins if its confidence > Equifax confidence
+primary_naics_code =
+  COALESCE(
+    CASE
+      WHEN COALESCE(zi_match_confidence, 0) > COALESCE(efx_match_confidence, 0)
+        THEN CAST(REGEXP_REPLACE(zi_c_naics6, '[^0-9]', '') AS INTEGER)
+      ELSE CAST(REGEXP_REPLACE(efx_primnaicscode, '[^0-9]', '') AS INTEGER)
+    END,
+    naics_code  -- fallback to existing naics_code if both are null
+  )
+
+-- The same ZI vs EFX comparison controls ALL other firmographic fields too:
+-- employee_count, year_established, revenue, company_name, address, city,
+-- zipcode, country, county, website_url, affiliate_parent
+```
+
+**This single comparison `zi_match_confidence > efx_match_confidence` decides the winning source for EVERY field in `customer_files`** — not just NAICS.
+
+---
+
+#### Step B4 — Why Only ZoomInfo and Equifax? Why Not OC or Liberty?
+
+This is the most important architectural question. From reading the actual SQL:
+
+**OC IS matched by the XGBoost model** — `oc_probability` exists in `ml_model_matches` and `oc_matches_custom_inc_ml` is built. But:
+
+1. **OC has no NAICS field in its Redshift table.** OC stores `industry_code_uids` (a pipe-delimited string like `us_naics-541110|gb_sic-62012`). The warehouse pipeline was never built to parse this field and extract the NAICS code for use in the `CASE WHEN zi > efx` comparison.
+
+2. **`customer_table.sql` was built when only ZI and EFX had pre-joined Redshift tables** with clean numeric NAICS fields (`zi_c_naics6`, `efx_primnaicscode`). Adding OC would require parsing `industry_code_uids` and handling multi-taxonomy codes — work that was never done in Pipeline B.
+
+3. **Liberty** has no `liberty_match_confidence` column anywhere in the Redshift pipeline. Liberty data (`einmst_*` tables) contains name, address, SIC codes — but was never incorporated into the `customer_files` production rule.
+
+4. **Middesk and Trulioo** return data via live API calls processed by the integration-service (Pipeline A). Their results are not pre-loaded into the Redshift tables that Pipeline B reads.
+
+**In summary:** `zi_match_confidence` and `efx_match_confidence` are the only two confidence scores in `customer_table.sql` because:
+- They are the only sources with clean, pre-loaded Redshift tables containing a usable numeric NAICS field
+- The SQL was written when only these two sources existed in the Redshift pipeline
+- OC, Liberty, Middesk, Trulioo were added later and only integrated into Pipeline A (the Fact Engine)
+
+---
 
 **These are NOT the same as the Fact Engine confidence.** They are parallel systems serving different purposes:
 
-| | Fact Engine confidence (integration-service) | Match confidence (warehouse-service) |
+| | Fact Engine (Pipeline A — integration-service) | Match confidence (Pipeline B — warehouse-service) |
 |---|---|---|
-| **Used by** | FactEngine to pick the winning fact | customer_table.sql to pick the winning NAICS |
-| **Produced by** | Each source's own logic (see table above) | Worth AI XGBoost entity matching model |
-| **Stored in** | `source.confidence` field on each Fact | `efx_match_confidence`, `zi_match_confidence` columns in Redshift |
-| **Covers** | All 6+ sources | Only ZoomInfo and Equifax |
-| **Used for** | All 217 facts | NAICS code selection only (production rule) |
+| **Runs when** | Business submitted via API (real-time) | Batch SQL job on schedule |
+| **Sources covered** | All 6+: ZI, EFX, OC, Middesk, Trulioo, AI | Only ZoomInfo and Equifax |
+| **Confidence produced by** | Each source's own logic (XGBoost where available) | Worth AI XGBoost entity matching model |
+| **Confidence stored in** | `source.confidence` field on each Fact | `datascience.ml_model_matches.zi_probability`, `efx_probability`, `oc_probability` |
+| **Denormalized to** | `rds_warehouse_public.facts` (JSONB) | `datascience.smb_zi_oc_efx_combined` → `smb_pr_verification_cs` → `customer_files` |
+| **Used for** | All 217 facts → REST API response | NAICS + ALL firmographic fields in `customer_files` |
+| **OC industry codes** | ✅ Used (`industry_code_uids` parsed) | ❌ Not used (field not parsed in SQL) |
+| **Liberty industry codes** | ✅ Available | ❌ Not in pipeline |
+| **Analyst sees in API** | GET /facts/business/{id}/details | Not directly — analysts use Redshift queries |
 
 ---
 
