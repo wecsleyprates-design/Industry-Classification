@@ -704,13 +704,48 @@ Outputs a match confidence 0–1 per source using 33 pairwise text/address simil
                         ("ZI","ZI Confidence"),("Trulioo","TRU Confidence"),("Liberty","LIB Confidence")]
                         if v in ok_df.columns}
             if src_cols:
-                heat = ok_df[list(src_cols.values())].apply(pd.to_numeric,errors="coerce").fillna(0).head(50)
-                heat.columns = list(src_cols.keys())
-                fig_h = px.imshow(heat.T,color_continuous_scale="Blues",aspect="auto",zmin=0,zmax=1,
-                                  title="Level 1 Confidence Heatmap (first 50 companies)",
-                                  template="plotly_dark",height=300)
-                fig_h.update_layout(margin=dict(t=50,b=10,l=80,r=10))
-                st.plotly_chart(fig_h,use_container_width=True)
+                # Box plots per source — shows distribution, median, spread, outliers
+                conf_long = []
+                for lbl, col in src_cols.items():
+                    vals = pd.to_numeric(ok_df[col], errors="coerce").dropna()
+                    for v in vals:
+                        conf_long.append({"Source": lbl, "Confidence": float(v)})
+                if conf_long:
+                    bp_df = pd.DataFrame(conf_long)
+                    src_order = list(src_cols.keys())
+                    src_colours = {
+                        "OC":      "#68D391",
+                        "EFX":     "#4299E1",
+                        "ZI":      "#F6E05E",
+                        "Trulioo": "#9F7AEA",
+                        "Liberty": "#FC8181",
+                    }
+                    fig_bp = go.Figure()
+                    for src in src_order:
+                        sub = bp_df[bp_df["Source"] == src]["Confidence"]
+                        fig_bp.add_trace(go.Box(
+                            y=sub, name=src,
+                            marker_color=src_colours.get(src, "#718096"),
+                            boxmean="sd",
+                            hovertemplate=f"<b>{src}</b><br>Confidence: %{{y:.3f}}<extra></extra>",
+                        ))
+                    fig_bp.add_hline(y=0.80, line_dash="dash", line_color="white",
+                                     annotation_text="0.80 threshold",
+                                     annotation_position="top right")
+                    fig_bp.update_layout(
+                        title="Level 1 Confidence Distribution by Source<br>"
+                              "<sub>Box = IQR · Line = median · Dot = mean · Whiskers = 1.5×IQR</sub>",
+                        yaxis=dict(title="Confidence Score", range=[0, 1.05]),
+                        template="plotly_dark", height=360,
+                        margin=dict(t=60, b=20, l=40, r=10),
+                        showlegend=False,
+                    )
+                    st.plotly_chart(fig_bp, use_container_width=True)
+                    st.caption(
+                        "How to read: A high median (line inside box) means that source generally finds "
+                        "good matches. A wide box means high variability — the source is very confident "
+                        "on some companies but weak on others. Points above the whiskers are outliers."
+                    )
             l1_cols = [c for c in ["Company","Jurisdiction","OC Confidence","OC Status","OC Code",
                 "EFX Confidence","EFX Status","EFX Code","ZI Confidence","ZI Status","ZI Code",
                 "TRU Confidence","TRU Status","LIB Confidence","LIB Status",
@@ -810,97 +845,238 @@ SHAP is computed using `shap.TreeExplainer` on the Consensus XGBoost model — e
 
     # ══ RECORD EXPLORER ══════════════════════════════════════════════════════
     with tab_rec:
-        st.subheader("🕵️ Record Explorer")
-        st.caption("Select any company to see per-source detail, SHAP explanation, and record a KYB decision.")
+        st.subheader("🕵️ Record Explorer — Investigation View")
+        st.caption("Full multi-source candidate comparison, field-level evidence, SHAP explainability, and analyst decision.")
 
         companies = ok_df["Company"].tolist() if "Company" in ok_df.columns else []
         if not companies:
             st.info("No records to explore.")
         else:
-            sel_comp = st.selectbox("Select company", companies, key="rec_explorer_sel")
-            sel_idx  = companies.index(sel_comp) if sel_comp in companies else 0
-            sel_row  = ok_df.iloc[sel_idx]
-            sel_sr   = shap_list[sel_idx] if sel_idx < len(shap_list) else None
-
-            # Prev / Next navigation
-            nav1, _, nav2 = st.columns([1,4,1])
+            # ── Company selector + navigation ─────────────────────────────────
+            nav1, sel_col, nav2 = st.columns([1, 5, 1])
+            with sel_col:
+                sel_comp = st.selectbox("Select company", companies, key="rec_explorer_sel",
+                                        label_visibility="collapsed")
+            sel_idx = companies.index(sel_comp) if sel_comp in companies else 0
+            sel_row = ok_df.iloc[sel_idx]
+            sel_sr  = shap_list[sel_idx] if sel_idx < len(shap_list) else None
             with nav1:
-                if sel_idx > 0 and st.button("← Previous", key="rec_prev"):
-                    st.session_state["rec_explorer_sel"] = companies[sel_idx-1]
+                if sel_idx > 0 and st.button("← Prev", key="rec_prev"):
+                    st.session_state["rec_explorer_sel"] = companies[sel_idx - 1]
             with nav2:
-                if sel_idx < len(companies)-1 and st.button("Next →", key="rec_next"):
-                    st.session_state["rec_explorer_sel"] = companies[sel_idx+1]
+                if sel_idx < len(companies) - 1 and st.button("Next →", key="rec_next"):
+                    st.session_state["rec_explorer_sel"] = companies[sel_idx + 1]
+            st.caption(f"Record {sel_idx + 1} of {len(companies)}")
 
-            _audit("Record Opened", f"Viewed in Record Explorer", entity=sel_comp, colour="#4299E1")
+            _audit("Record Opened", "Viewed in Record Explorer", entity=sel_comp, colour="#4299E1")
 
-            st.markdown(f"## {sel_comp}")
-            st.markdown(_kyb_banner(str(sel_row.get("KYB",""))), unsafe_allow_html=True)
+            # ── A. Entity summary ─────────────────────────────────────────────
+            st.markdown("### 🏢 Entity Summary")
+            col_name, col_jur, col_loc = st.columns(3)
+            col_name.metric("Entity Name", sel_comp)
+            col_jur.metric("Jurisdiction",  str(sel_row.get("Jurisdiction", "—")))
+            col_loc.metric("Entity Type",   str(sel_row.get("Entity Type", "—")))
+
+            cur_dec = st.session_state["decisions"].get(sel_comp, {})
+            dec_text = cur_dec.get("decision", "Unreviewed")
+            dec_col  = DEC_C.get(dec_text, "#718096")
+            st.markdown(
+                f'<span style="background:{dec_col};color:white;padding:3px 12px;border-radius:999px;'
+                f'font-size:12px;font-weight:700">Current decision: {dec_text}</span>',
+                unsafe_allow_html=True,
+            )
+
+            # ── B. Consensus banner (entity matching consensus) ───────────────
+            src_conf_vals = {
+                "OC":      float(sel_row.get("OC Confidence",  0) or 0),
+                "EFX":     float(sel_row.get("EFX Confidence", 0) or 0),
+                "ZI":      float(sel_row.get("ZI Confidence",  0) or 0),
+                "Trulioo": float(sel_row.get("TRU Confidence", 0) or 0),
+                "Liberty": float(sel_row.get("LIB Confidence", 0) or 0),
+            }
+            valid_c = [v for v in src_conf_vals.values() if v > 0]
+            max_c   = max(valid_c) if valid_c else 0
+            avg_c   = float(np.mean(valid_c)) if valid_c else 0
+            n_high  = sum(1 for v in valid_c if v >= 0.80)
+            spread  = (max(valid_c) - min(valid_c)) if len(valid_c) >= 2 else 0
+
+            if n_high >= 3:
+                banner_cls, banner_txt, banner_act = "consensus-full",    "Full Consensus",    "Auto-Approve Candidate"
+            elif n_high >= 2:
+                banner_cls, banner_txt, banner_act = "consensus-partial", "Partial Consensus", "Analyst Review Recommended"
+            elif n_high == 1:
+                banner_cls, banner_txt, banner_act = "consensus-weak",    "Weak Consensus",    "Analyst Review Recommended"
+            elif spread >= 0.30:
+                banner_cls, banner_txt, banner_act = "consensus-conflict","Conflicting Results","Escalate Due to Conflict"
+            else:
+                banner_cls, banner_txt, banner_act = "consensus-none",    "No Reliable Match", "No Match Recommended"
+
+            st.markdown(
+                f'<div class="consensus-banner {banner_cls}">'
+                f'📊 Entity Matching Consensus: <strong>{banner_txt}</strong> &nbsp;|&nbsp; '
+                f'Recommended: <strong>{banner_act}</strong> &nbsp;|&nbsp; '
+                f'Max conf: {max_c:.3f} &nbsp;|&nbsp; Avg conf: {avg_c:.3f}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+            st.divider()
+
+            # ── C. Multi-source candidate comparison ──────────────────────────
+            st.markdown("### 🔍 Multi-Source Candidate Comparison")
+            st.caption("Each card shows the Level 1 XGBoost confidence for this source, the industry code returned, reason codes, and field comparison.")
+
+            SRC_PAIRS = [
+                ("opencorporates", "OC",  "OC Confidence",  "OC Status",  "OC Code",  "#68D391"),
+                ("equifax",        "EFX", "EFX Confidence", "EFX Status", "EFX Code", "#4299E1"),
+                ("zoominfo",       "ZI",  "ZI Confidence",  "ZI Status",  "ZI Code",  "#F6E05E"),
+                ("trulioo",        "TRU", "TRU Confidence", "TRU Status", "TRU Code", "#9F7AEA"),
+                ("liberty_data",   "LIB", "LIB Confidence", "LIB Status", "",         "#FC8181"),
+            ]
+            src_tabs_inv = st.tabs([lbl for _, lbl, *_ in SRC_PAIRS])
+            for (src_key, lbl, conf_col, stat_col, code_col, colour), src_tab in zip(SRC_PAIRS, src_tabs_inv):
+                with src_tab:
+                    conf   = float(sel_row.get(conf_col, 0) or 0)
+                    status = str(sel_row.get(stat_col, "—") or "—")
+                    code   = str(sel_row.get(code_col, "—") or "—") if code_col else "—"
+                    tick   = "✅" if conf >= 0.80 else "⚠️" if conf >= 0.50 else "❌"
+                    band_lbl = ("Very High" if conf >= 0.95 else "High" if conf >= 0.85
+                                else "Medium" if conf >= 0.70 else "Low" if conf >= 0.50 else "Very Low")
+
+                    # Source card header
+                    st.markdown(
+                        f'<div style="border:2px solid {colour};border-radius:10px;padding:14px 18px;'
+                        f'background:rgba(255,255,255,0.04);margin-bottom:12px">'
+                        f'<div style="font-size:10px;color:{colour};font-weight:700;text-transform:uppercase;'
+                        f'letter-spacing:.8px;margin-bottom:6px">{lbl}</div>'
+                        f'<div style="font-size:30px;font-weight:900;color:#fff;font-family:monospace">{conf:.3f}</div>'
+                        f'<div style="margin:6px 0">'
+                        f'<span style="background:{colour};color:#000;padding:2px 10px;border-radius:20px;'
+                        f'font-size:11px;font-weight:700">{band_lbl}</span>'
+                        f' <span style="font-size:16px">{tick}</span>'
+                        f'<span style="font-size:11px;color:#A0AEC0;margin-left:10px">Status: {status}</span></div>'
+                        f'<div style="font-size:12px;color:#A0AEC0">Industry code: <code>{code}</code></div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                    # Reason codes (derived from confidence + status)
+                    reason_codes = []
+                    if conf >= 0.85:    reason_codes.append(("SOURCE_HIGH_CONFIDENCE", "chip-match"))
+                    elif conf < 0.50:   reason_codes.append(("SOURCE_LOW_CONFIDENCE",  "chip-conflict"))
+                    if status == "MATCHED":      reason_codes.append(("MATCHED",      "chip-match"))
+                    elif status == "CONFLICT":   reason_codes.append(("CONFLICT",     "chip-conflict"))
+                    elif status == "POLLUTED":   reason_codes.append(("POLLUTED",     "chip-conflict"))
+                    elif status == "INFERRED":   reason_codes.append(("INFERRED",     "chip-fuzzy"))
+                    elif status == "UNAVAILABLE":reason_codes.append(("NO_CANDIDATE", "chip-missing"))
+                    if code == "—" or not code:  reason_codes.append(("NO_CODE_RETURNED", "chip-missing"))
+                    if reason_codes:
+                        chips = "".join(f'<span class="chip {cls}">{code_}</span>'
+                                       for code_, cls in reason_codes)
+                        st.markdown(f'<div class="chip-row">{chips}</div>', unsafe_allow_html=True)
+
+                    # Field comparison table (input vs source code)
+                    st.markdown("**Field Comparison**")
+                    field_rows = [
+                        ("Company Name",   sel_comp,
+                         str(sel_row.get("Clean Name", sel_comp)),
+                         "✅ Match" if sel_comp.upper()[:6] == str(sel_row.get("Clean Name","")).upper()[:6]
+                         else "⚠️ Partial"),
+                        ("Jurisdiction",   str(sel_row.get("Jurisdiction","—")), "—", "—"),
+                        ("Industry Code",  str(sel_row.get("Prod NAICS","—")), code, "—"),
+                        ("Source Status",  "—", status,
+                         "✅ Match" if status == "MATCHED" else "❌ Conflict" if status in ("CONFLICT","POLLUTED") else "—"),
+                    ]
+                    fc_rows_html = "".join(
+                        f"<tr><td>{f}</td><td>{iv}</td><td>{sv}</td>"
+                        f"<td class=\"{'fc-match' if '✅' in st_ else 'fc-fuzzy' if '⚠' in st_ else 'fc-conflict' if '❌' in st_ else ''}\">{st_}</td></tr>"
+                        for f, iv, sv, st_ in field_rows
+                    )
+                    st.markdown(
+                        '<div class="fc-table-wrapper"><table class="fc-table">'
+                        '<thead><tr><th>Field</th><th>Input Value</th><th>Source Value</th><th>Status</th></tr></thead>'
+                        f'<tbody>{fc_rows_html}</tbody></table></div>',
+                        unsafe_allow_html=True,
+                    )
+
+            st.divider()
+
+            # ── D. Cross-source comparison summary ────────────────────────────
+            st.markdown("### ⚖️ Cross-Source Comparison Summary")
+            cross_rows = []
+            for src_key, lbl, conf_col, stat_col, code_col, _ in SRC_PAIRS:
+                c = float(sel_row.get(conf_col, 0) or 0)
+                s = str(sel_row.get(stat_col, "—") or "—")
+                cd = str(sel_row.get(code_col, "—") or "—") if code_col else "—"
+                band_lbl = ("Very High" if c >= 0.95 else "High" if c >= 0.85
+                            else "Medium" if c >= 0.70 else "Low" if c >= 0.50 else "Very Low")
+                cross_rows.append({
+                    "Source": lbl, "Confidence": f"{c:.3f}", "Band": band_lbl,
+                    "Status": s, "Industry Code": cd,
+                    "Matched ≥ 0.80": "✅" if c >= 0.80 else "❌",
+                })
+            st.dataframe(pd.DataFrame(cross_rows), use_container_width=True, hide_index=True)
 
             # Metrics row
-            m1,m2,m3,m4,m5 = st.columns(5)
-            m1.metric("Primary Code",   str(sel_row.get("Primary Code","")))
-            m2.metric("Taxonomy",       str(sel_row.get("Primary Taxonomy","")))
-            m3.metric("Probability",    f"{float(sel_row.get('Primary Prob',0)):.0%}")
-            m4.metric("Risk Score",     f"{float(sel_row.get('Risk Score',0)):.3f}")
-            m5.metric("Sources ≥ 0.80", str(sel_row.get("Sources ≥ 0.80",0)))
+            mc1, mc2, mc3, mc4 = st.columns(4)
+            mc1.metric("Sources ≥ 0.80",   str(sel_row.get("Sources ≥ 0.80", 0)))
+            mc2.metric("Best Source",       str(sel_row.get("Best Source", "—")).replace("_"," ").title())
+            mc3.metric("Best Confidence",   f"{float(sel_row.get('Avg Confidence', 0)):.3f}")
+            mc4.metric("Confidence Spread", f"{spread:.3f}" + (" ⚡" if spread >= 0.30 else ""))
+
+            if spread >= 0.30:
+                st.warning(
+                    f"**High confidence spread ({spread:.3f})** — sources disagree significantly. "
+                    "This record should be escalated for manual review.",
+                    icon="⚡",
+                )
 
             st.divider()
 
-            # Source confidence cards
-            st.markdown("#### Level 1 — Source Confidences")
-            sigs_raw = sel_row.get("_sigs_raw",[])
-            if sigs_raw:
-                card_cols = st.columns(min(len(sigs_raw),3))
-                for i, sig in enumerate(sigs_raw):
-                    with card_cols[i%len(card_cols)]:
-                        st.markdown(_src_card(sig.source, sig.confidence, sig.status, sig.raw_code), unsafe_allow_html=True)
-            else:
-                # Reconstruct from columns
-                src_pairs = [("OC","OC Confidence","OC Status","OC Code","opencorporates"),
-                             ("EFX","EFX Confidence","EFX Status","EFX Code","equifax"),
-                             ("ZI","ZI Confidence","ZI Status","ZI Code","zoominfo"),
-                             ("TRU","TRU Confidence","TRU Status","TRU Code","trulioo"),
-                             ("LIB","LIB Confidence","LIB Status","","liberty_data")]
-                card_cols = st.columns(3)
-                for i,(lbl,cc,sc,cd,src) in enumerate(src_pairs):
-                    if cc in sel_row.index:
-                        with card_cols[i%3]:
-                            st.markdown(_src_card(src,
-                                float(sel_row.get(cc,0)),
-                                str(sel_row.get(sc,"—")),
-                                str(sel_row.get(cd,"—"))), unsafe_allow_html=True)
-
-            st.divider()
-
-            # Top-5 codes + SHAP inline
-            col_codes, col_shap = st.columns(2)
+            # ── E. Level 2 Classification + SHAP side by side ─────────────────
+            st.markdown("### 🏭 Level 2 — Consensus Classification")
+            col_codes, col_shap = st.columns([3, 2])
             with col_codes:
-                st.markdown("#### Level 2 — Top-5 Classifications")
-                bars = "".join(_prob_bar(r, str(sel_row.get(f"Rank {r} Code","")),
-                                         str(sel_row.get(f"Rank {r} Label","")),
-                                         float(sel_row.get(f"Rank {r} Prob",0)),
-                                         str(sel_row.get(f"Rank {r} Tax","")))
-                               for r in range(1,6) if sel_row.get(f"Rank {r} Code"))
+                bars = "".join(
+                    _prob_bar(r, str(sel_row.get(f"Rank {r} Code", "")),
+                              str(sel_row.get(f"Rank {r} Label", "")),
+                              float(sel_row.get(f"Rank {r} Prob", 0)),
+                              str(sel_row.get(f"Rank {r} Tax", "")))
+                    for r in range(1, 6) if sel_row.get(f"Rank {r} Code")
+                )
                 st.markdown(bars, unsafe_allow_html=True)
 
+                st.markdown("**Production rule vs Consensus:**")
+                prod_w = str(sel_row.get("Prod Winner", "—"))
+                prod_c = float(sel_row.get("Prod Confidence", 0))
+                prod_n = str(sel_row.get("Prod NAICS", "—"))
+                cons_n = str(sel_row.get("Rank 1 Code", "—"))
+                agree  = prod_n == cons_n
+                st.markdown(
+                    f"- Production used **{prod_w}** (conf {prod_c:.3f}) → NAICS `{prod_n}`\n"
+                    f"- Consensus predicts → NAICS `{cons_n}` "
+                    f"{'✅ (same)' if agree else '🟡 (different — Consensus may be more accurate)'}"
+                )
+
             with col_shap:
-                st.markdown("#### SHAP — Top 5 Reasons")
+                st.markdown("**SHAP — Why this classification?**")
                 if sel_sr:
                     from shap_explainer import FEATURE_INTERPRETATIONS
                     top5 = sorted(zip(sel_sr.feature_names, sel_sr.shap_values),
                                   key=lambda x: abs(x[1]), reverse=True)[:5]
                     for fname, fval in top5:
-                        pct  = min(abs(fval)/2.0, 1.0)   # normalise for bar width
-                        col  = "#FC8181" if fval > 0 else "#4299E1"
-                        dirn = "▲" if fval > 0 else "▼"
+                        pct   = min(abs(fval) / 2.0, 1.0)
+                        colour = "#FC8181" if fval > 0 else "#4299E1"
+                        dirn  = "▲" if fval > 0 else "▼"
                         st.markdown(
                             f'<div style="margin-bottom:8px">'
-                            f'<div style="font-size:12px;color:#A0AEC0;margin-bottom:2px">{FEATURE_INTERPRETATIONS.get(fname,fname)[:45]}</div>'
+                            f'<div style="font-size:11px;color:#A0AEC0;margin-bottom:2px">'
+                            f'{FEATURE_INTERPRETATIONS.get(fname, fname)[:48]}</div>'
                             f'<div style="background:#2D3748;border-radius:4px;height:14px">'
-                            f'<div style="background:{col};height:14px;border-radius:4px;width:{pct*100:.0f}%;'
-                            f'display:flex;align-items:center;padding-left:4px">'
-                            f'<span style="font-size:10px;font-weight:700;color:white">{dirn} {fval:+.3f}</span>'
-                            f'</div></div></div>',
+                            f'<div style="background:{colour};height:14px;border-radius:4px;'
+                            f'width:{pct*100:.0f}%;display:flex;align-items:center;padding-left:4px">'
+                            f'<span style="font-size:10px;font-weight:700;color:white">'
+                            f'{dirn} {fval:+.3f}</span></div></div></div>',
                             unsafe_allow_html=True,
                         )
                 else:
@@ -908,27 +1084,35 @@ SHAP is computed using `shap.TreeExplainer` on the Consensus XGBoost model — e
 
             st.divider()
 
-            # AML signals
-            st.markdown("#### AML / KYB Risk Signals")
-            sigs_t = sel_row.get("_signals",[])
+            # ── F. AML / KYB signals ──────────────────────────────────────────
+            st.markdown("### 🚨 AML / KYB Risk Signals")
+            sigs_t = sel_row.get("_signals", [])
             if sigs_t:
-                for flag,sev,desc in sigs_t:
-                    sc = RISK_C.get(sev,"#718096")
-                    st.markdown(f'<div style="border-left:4px solid {sc};padding:8px 12px;'
-                                f'margin-bottom:6px;background:rgba(255,255,255,0.03);border-radius:0 6px 6px 0">'
-                                f'<span style="font-weight:700;color:{sc}">{sev}</span> — '
-                                f'<span style="font-weight:600">{flag}</span><br>'
-                                f'<span style="font-size:12px;color:#A0AEC0">{desc}</span></div>',
-                                unsafe_allow_html=True)
+                for flag, sev, desc in sigs_t:
+                    sc = RISK_C.get(sev, "#718096")
+                    st.markdown(
+                        f'<div style="border-left:4px solid {sc};padding:10px 14px;'
+                        f'margin-bottom:8px;background:rgba(255,255,255,0.03);border-radius:0 8px 8px 0">'
+                        f'<div style="font-weight:700;color:{sc};font-size:13px">{sev} — {flag}</div>'
+                        f'<div style="font-size:12px;color:#A0AEC0;margin-top:3px">{desc}</div></div>',
+                        unsafe_allow_html=True,
+                    )
             else:
-                st.success("✅ No AML signals detected.")
+                st.success("✅ No AML signals detected — clean profile.")
+
+            st.markdown(_kyb_banner(str(sel_row.get("KYB", ""))), unsafe_allow_html=True)
 
             st.divider()
+
+            # ── G. Analyst interpretation ─────────────────────────────────────
+            st.markdown("### 🧠 Analyst Interpretation")
             st.markdown(_analyst_card(sel_row), unsafe_allow_html=True)
+
             st.divider()
 
-            # Decision panel
-            lookup_id = str(sel_row.get("Company",sel_comp))
+            # ── H. Review decision panel ──────────────────────────────────────
+            st.markdown("### 📋 Review Decision")
+            lookup_id = str(sel_row.get("Company", sel_comp))
             _render_decision_panel(lookup_id)
 
     # ══ FULL TABLE ═══════════════════════════════════════════════════════════
