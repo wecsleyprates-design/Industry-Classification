@@ -494,6 +494,253 @@ Result: naics_code = "541511"  source=Middesk  confidence=0.95
 
 ---
 
+### Day 1 — Pipeline A: What Happens When No Source Has a Usable Code?
+
+**[PIPELINE A ONLY]**
+
+Three edge cases arise: no source returned a code at all, the winning source returned an invalid code, or no source passed the confidence threshold.
+
+#### Case 1 — No source returned any NAICS code
+
+```
+Scenario: All vendor API calls and Redshift reads returned no NAICS code.
+  ZoomInfo   → no firmographic record found
+  Equifax    → no record found
+  OC         → industry_code_uids is empty or contains no us_naics entry
+  Middesk    → SOS filing has no NAICS attached
+  Trulioo    → returned only a non-standard code
+  SERP       → could not infer a code from website content
+
+What the Fact Engine does [rules.ts line 45]:
+  fact.value === undefined → skip this candidate
+  If ALL candidates have undefined value → no winner selected yet
+  → AI Enrichment triggered (if < 3 sources already returned NAICS)
+```
+
+#### Case 2 — No source hit the confidence threshold
+
+There is **no hard minimum confidence threshold** in the Fact Engine. The code in `rules.ts`:
+
+```typescript
+// factWithHighestConfidence() [rules.ts line 36–56]:
+// It picks whoever has the HIGHEST confidence among all candidates —
+// even if that confidence is 0.01.
+// There is no "minimum confidence = X to qualify" check.
+// If a source returned a value, it is a candidate regardless of confidence.
+```
+
+**In practice this means:** If ZoomInfo matched with 0.12 confidence and that is the best available, ZoomInfo wins with 0.12 confidence. The `naics_code` fact will be stored with `source.confidence = 0.12`. The customer API will show this code alongside the low confidence score.
+
+**Exception:** If `fact.value === undefined` (the source found no candidate at all — different from low confidence), that source is excluded from selection.
+
+> ⚠️ **Implication for the user:** The API may return a NAICS code with very low confidence (e.g. 0.10). There is no automatic suppression of low-confidence results. The analyst should check `source.confidence` before trusting the code.
+
+#### Case 3 — Winning source has no industry code (confidence is fine, but NAICS is null)
+
+From `businessDetails/index.ts`, the `naics_code` fact is defined per-source with specific paths:
+
+```typescript
+naics_code: [
+  { source: sources.equifax,       path: "primnaicscode" },        // EFX field
+  { source: sources.zoominfo,      path: "firmographic.zi_c_naics6" }, // ZI field
+  { source: sources.opencorporates, fn: ... parse industry_code_uids ... },
+  { source: sources.serp,          weight: 0.3, path: "businessLegitimacyClassification.naics_code" },
+  { source: sources.business,      weight: 0.7, fn: ... extract from Trulioo ... },
+  { source: sources.businessDetails, path: "naics_code", weight: 0.2 },
+  { source: sources.AINaicsEnrichment, path: "response.naics_code", weight: 0.1 }
+]
+```
+
+If the winning source has high confidence (entity matched well) but returns `null` for the NAICS code field (e.g. Equifax matched the company but `efx_primnaicscode` is empty):
+- That source's `naics_code` candidate value is `undefined`
+- It is excluded from selection (`fact.value === undefined → skip`)
+- The next highest-confidence source that DID return a code wins
+
+**In plain English:** High entity match confidence does NOT guarantee a NAICS code. A company can be perfectly identified (confidence 0.99) but have no industry code in the vendor's database. In that case the next source down takes over.
+
+#### Case 4 — The Full AI Enrichment Trigger and Fallback Cascade
+
+**Trigger condition** (from `aiNaicsEnrichment.ts` `DEPENDENT_FACTS`):
+
+```typescript
+naics_code: {
+    maximumSources: 3,    // If 3+ sources already returned NAICS → SKIP AI (save credits)
+    minimumSources: 1,    // Must have at least 1 source to provide context to GPT
+    ignoreSources: ["AINaicsEnrichment"]  // Don't count itself
+}
+```
+
+**AI enrichment runs when:**
+- Fewer than 3 vendor sources returned a NAICS code, AND
+- At least 1 source has returned something (to give GPT context)
+
+**What GPT-5-mini receives as input:**
+```
+System prompt:
+  "Determine 6-digit NAICS 2022 + UK SIC (if GB) + 4-digit MCC.
+   If no evidence at all: return naics_code 561499 and mcc_code 5614."
+
+User prompt contains:
+  - Business name
+  - Address
+  - Website URL (if available → GPT uses web_search tool to read it)
+  - Existing NAICS/MCC from other sources (for correction context)
+  - DBA names if available
+```
+
+**What GPT-5-mini returns:**
+```json
+{
+  "reasoning":          "Company operates full-service restaurants...",
+  "naics_code":         "722511",
+  "naics_description":  "Full-Service Restaurants",
+  "uk_sic_code":        "56101",        ← only if business country = GB
+  "uk_sic_description": "Licensed restaurants",
+  "mcc_code":           "5812",
+  "mcc_description":    "Eating Places, Restaurants",
+  "confidence":         "HIGH",
+  "previous_naics_code": "561499",      ← what was there before (if anything)
+  "previous_mcc_code":   "5614",
+  "website_url_parsed":  "www.restaurant.com",
+  "website_summary":     "Full-service Italian dining...",
+  "tools_used":          ["web_search"],
+  "tools_summary":       "Website confirmed restaurant operations"
+}
+```
+
+**POST-PROCESSING — validation step** (`aiNaicsEnrichment.ts` lines 193–233):
+
+```typescript
+// After GPT returns a code, validate it actually exists:
+const naicsInfo = await internalGetNaicsCode(response.naics_code);
+if (!naicsInfo?.[0]?.naics_label) {
+    // GPT hallucinated an invalid code → replace with last resort
+    await removeNaicsCode(taskId, response);
+    // Sets: response.naics_code = "561499"
+    //       response.naics_description = undefined
+}
+await sendTaskCompleteMessage(enrichedTask.id);  // triggers re-processing
+```
+
+**The last-resort code `"561499"`** is used when:
+- GPT cannot determine the industry from any available evidence, OR
+- GPT returned a NAICS code that does not exist in `core_naics_code` table
+
+`561499` = All Other Business Support Services. This is a deliberate placeholder — it signals that the system has no reliable classification for this business. An analyst override should replace it.
+
+**Where AI results are stored:**
+```
+integration_data.request_response:
+  platform_id = 31 (AI_NAICS_ENRICHMENT)
+  response = { naics_code, mcc_code, uk_sic_code, confidence, reasoning, ... }
+  confidence = "HIGH" / "MED" / "LOW" (text — not numeric)
+
+rds_warehouse_public.facts:
+  name = "naics_code"
+  value = { "code": "722511", "description": "Full-Service Restaurants" }
+  (AI result participates as one more source with weight=0.1)
+```
+
+#### Complete Fallback Cascade — What Gets Stored and Shown
+
+```
+ALL SCENARIOS — what gets stored and what the user sees:
+
+Scenario A — Normal (2–6 sources returned NAICS):
+  → Fact Engine picks winner by confidence + weight
+  → naics_code stored in rds_warehouse_public.facts
+  → data_businesses.naics_id updated → FK to core_naics_code
+  → User sees: naics_code + confidence + alternatives in API response
+
+Scenario B — Only 1 source returned NAICS:
+  → Fact Engine picks that source (only candidate)
+  → AI enrichment runs (< 3 sources) → may override if higher confidence
+  → Same storage as Scenario A
+  → User sees: naics_code with possibly low confidence score
+
+Scenario C — No source returned any NAICS (0 candidates):
+  → AI enrichment triggers (minimumSources=1 but context is minimal)
+  → GPT tries to infer from name + address + website
+  → If GPT succeeds: stores AI-generated code (validated against core_naics_code)
+  → If GPT fails or code invalid: stores "561499" (last resort)
+  → User sees: naics_code = "561499" (All Other Business Support Services)
+               source.confidence = "LOW"
+               This signals to the analyst: no reliable classification
+
+Scenario D — No source met confidence threshold (but returned a code):
+  → factWithHighestConfidence() picks whoever had the highest confidence
+    even if that confidence is 0.05 or 0.10 — no minimum cutoff
+  → AI enrichment also runs if < 3 sources
+  → User sees: naics_code with source.confidence = 0.10 (or whatever it was)
+               The low confidence is VISIBLE in the API response
+
+Scenario E — Analyst override exists:
+  → manualOverride() ALWAYS wins — overrides any model/AI result
+  → Stored in rds_warehouse_public.facts with override: {...}
+  → User sees: naics_code with override field populated
+```
+
+---
+
+### Day 1 — Pipeline A: Which API Endpoints Expose the NAICS Code?
+
+**[PIPELINE A ONLY]**
+
+This was a documented open question. Based on reading the actual source code:
+
+#### Endpoints that DO expose naics_code
+
+**1. `GET /facts/business/{businessID}/details`** (integration-service, `routes.ts` line 15)
+- Runs `FactEngine(businessFacts)` which includes `naics_code`, `mcc_code`, `industry`, `classification_codes`
+- Returns ALL classification facts with full source lineage
+- Accessible to: ADMIN, CUSTOMER, APPLICANT roles
+- This is the **primary endpoint** for classification data
+
+**2. `GET /facts/business/{businessID}/kyb`** (integration-service, `routes.ts` line 58)
+- Runs `FactEngine(kybFacts)` — the `industry` fact is in KYB
+- Returns `naics_code` indirectly (industry derives from naics_code, see below)
+- Accessible to: ADMIN, CUSTOMER, APPLICANT
+
+**3. `GET /businesses/customers/{customerID}`** (case-service, `businesses.ts` line 988)
+- Runs a direct SQL query joining `core_naics_code` and `core_mcc_code`:
+  ```sql
+  SELECT data_businesses.*, cnc.code as naics_code, cnc.label as naics_title,
+         cmc.code as mcc_code, cmc.label as mcc_title, ...
+  FROM data_businesses
+  LEFT JOIN core_naics_code cnc ON cnc.id = data_businesses.naics_id
+  LEFT JOIN core_mcc_code   cmc ON cmc.id = data_businesses.mcc_id
+  ```
+- Returns `naics_code` + `naics_title` as flat fields
+- This is the **external-facing customer business endpoint**
+
+#### Endpoints that do NOT expose naics_code
+
+**`PATCH /businesses/customers/{customerID}/{businessID}`** (case-service, `businesses.ts` line 1206)
+- Strips naics_code from any incoming update body:
+  ```typescript
+  const unwantedKeys = ["naics_code", "naics_id", "naics_title", "mcc_code", "mcc_id", "mcc_title"];
+  unwantedKeys.forEach(key => { if (Object.hasOwn(body, key)) delete body[key]; });
+  ```
+- Customers CANNOT update naics_code via PATCH. It can only be changed via the override API or by re-running the Fact Engine.
+
+**`GET /facts/business/{businessID}/all`** (integration-service, `routes.ts` line 205)
+- Returns ALL 217 facts including naics_code
+- **Admin only** — not accessible to customers
+- Comment in code: *"The /all route is intentionally not cached and admin only. Leaks information that we do not want customers to have."*
+
+#### Summary table
+
+| Endpoint | naics_code exposed? | Who can access | Type |
+|---|---|---|---|
+| `GET /facts/business/{id}/details` | ✅ Yes — full fact with confidence + alternatives | Admin, Customer, Applicant | integration-service |
+| `GET /facts/business/{id}/kyb` | ✅ Yes — as part of KYB facts | Admin, Customer, Applicant | integration-service |
+| `GET /businesses/customers/{id}` | ✅ Yes — as `naics_code` + `naics_title` flat fields | Admin, Customer | case-service |
+| `GET /facts/business/{id}/all` | ✅ Yes — but **admin only** | Admin only | integration-service |
+| `PATCH /businesses/{id}` | ❌ Stripped from body — cannot be set via PATCH | n/a | case-service |
+| `GET /proxy/facts/business/{id}` | ✅ Yes — proxied version of details | Varies | integration-service |
+
+---
+
 ### Day 1 — Pipeline A: Kafka and Persistence
 
 **[PIPELINE A ONLY]**
