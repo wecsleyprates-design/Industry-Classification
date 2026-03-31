@@ -5,32 +5,68 @@
 
 ---
 
-## The Two Pipelines — Overview
+## The Two Pipelines — Overview, Goals, and What Users See
 
-Worth AI runs **two completely separate pipelines** for industry classification. They read some of the same source data but produce different outputs stored in different places. They have one intersection point — the `customer_files` table — but serve different purposes.
+Worth AI runs **two completely separate pipelines** for industry classification. They share some input data but have completely different goals, processing logic, outputs, and audiences.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  PIPELINE A — integration-service  (real-time, triggered per business)       │
+│  PIPELINE A — integration-service  (real-time, per business submission)      │
 │                                                                               │
-│  Inputs:  Live API calls + Redshift table reads                               │
-│  Covers:  ZoomInfo, Equifax, OC, Middesk, Trulioo, SERP, AI (all sources)   │
+│  GOAL: Deliver the best possible industry classification and KYB facts        │
+│        to the customer in real-time, using ALL available sources.             │
+│                                                                               │
+│  Inputs:  Live API calls (Middesk, Trulioo, SERP) +                          │
+│           Redshift table reads (ZoomInfo, Equifax, OC)                        │
+│  Sources: ZoomInfo, Equifax, OC, Middesk, Trulioo, SERP, AI (6+ sources)    │
+│  Confidence: XGBoost model (most sources) + task-based (Middesk)             │
+│              + heuristic similarity_index/55 (fallback)                       │
 │  Output:  rds_warehouse_public.facts (JSONB, 217 facts)                      │
-│  Used by: REST API, Worth 360 Report, case-service                           │
+│                                                                               │
+│  ✅ WHAT THE CUSTOMER/USER SEES:                                              │
+│    GET /facts/business/{id}/details → naics_code, mcc_code, industry +       │
+│      confidence score per source + alternatives from all 6 sources           │
+│    GET /businesses/customers/{id}   → simplified naics_code, naics_title     │
+│    Worth 360 Report PDF             → naics_code + industry label            │
+│    Worth AI UI                      → classification + KYB facts panel       │
+│                                                                               │
+│  The customer ONLY sees Pipeline A output. Pipeline B is internal.           │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │  PIPELINE B — warehouse-service  (batch, scheduled Redshift SQL jobs)        │
 │                                                                               │
-│  Inputs:  Pre-loaded Redshift tables only                                    │
-│  Covers:  ZoomInfo + Equifax ONLY                                            │
+│  GOAL: Build a wide, denormalized analytics table in Redshift that            │
+│        the data science team uses for model training, risk scoring,           │
+│        and bulk data exports. Speed and scale over completeness.              │
+│                                                                               │
+│  Inputs:  Pre-loaded Redshift bulk tables ONLY (no live API calls)           │
+│  Sources: ZoomInfo + Equifax ONLY (by historical design — see Gap below)     │
+│  Confidence: XGBoost entity matching model (zi_probability, efx_probability) │
+│              + heuristic similarity_index/55 fallback                         │
 │  Output:  datascience.customer_files (wide denormalized table)               │
-│  Used by: Redshift analytics, KYB risk model training, data exports           │
+│                                                                               │
+│  ⚠️  WHAT IS NOT VISIBLE TO THE CUSTOMER:                                    │
+│    customer_files is an internal Redshift analytics table.                   │
+│    Customers cannot query it directly via the Worth AI API.                  │
+│    It is used internally for: risk model training, data exports,             │
+│    Redshift analytics dashboards, global_trulioo_us_kyb training data.       │
 └──────────────────────────────────────────────────────────────────────────────┘
 
-INTERSECTION:  Both pipelines read from the same Redshift source tables
-               (zoominfo, equifax). Pipeline B writes customer_files which
-               Pipeline A's Fact Engine may also read as context.
-               The naics_code in customer_files and the naics_code Fact
-               can differ if different sources won in each pipeline.
+INTERSECTION:
+  Both pipelines read the same raw Redshift source tables (ZoomInfo, Equifax, OC).
+  The naics_code fact (Pipeline A) and primary_naics_code in customer_files
+  (Pipeline B) CAN DIFFER because Pipeline B only considers ZI vs EFX while
+  Pipeline A considers all 6 sources. If OC or Middesk had a better match,
+  the API response will show a different NAICS than the analytics table.
+
+WHAT THE USER/CUSTOMER SEES — ONLY PIPELINE A:
+  The 6 source confidence scores shown in GET /facts/business/{id}/details are:
+  - OC confidence    (XGBoost model: oc_probability from ml_model_matches)
+  - EFX confidence   (XGBoost model: efx_probability from ml_model_matches)
+  - ZI confidence    (XGBoost model: zi_probability from ml_model_matches)
+  - Middesk confidence (XGBoost via confidenceScoreMany() OR task-based score)
+  - Trulioo confidence (heuristic: match.index / 55 — no XGBoost for Trulioo)
+  - AI confidence    (GPT self-reported: HIGH/MED/LOW → numeric mapping)
+  All shown in the API response under source.confidence + alternatives[].
 ```
 
 ---
@@ -249,15 +285,24 @@ primary_naics_code =
 
 **Why only ZoomInfo and Equifax — not OC, Liberty, Middesk, Trulioo?**
 
-Verified from reading all the SQL files:
+Verified from reading all the SQL files. This is a **historical design limitation**, not a technical impossibility:
 
-1. **OC:** Has `oc_probability` in `ml_model_matches` and `oc_match_confidence` in `smb_zi_oc_efx_combined`. But OC stores industry codes as `industry_code_uids` — a pipe-delimited string (`us_naics-541110|gb_sic-62012`). The `customer_table.sql` was never extended to parse this string and extract a numeric NAICS code for the `CASE WHEN` comparison.
+1. **OC:** The XGBoost model already produces `oc_probability` in `ml_model_matches`, and `oc_match_confidence` is already computed in `smb_zi_oc_efx_combined`. **The match confidence EXISTS — it is just not used in `customer_table.sql`.** The reason: OC stores industry codes as `industry_code_uids` — a pipe-delimited multi-taxonomy string (`us_naics-541110|gb_sic-62012|nace-J6201`). The `customer_table.sql` was never extended to parse this string and extract a numeric NAICS code for the `CASE WHEN` comparison. The data is there; the SQL was never written to use it.
 
-2. **Liberty:** Exists in Redshift (`einmst_*` tables) but was never joined into `smb_zi_oc_efx_combined`. No `liberty_match_confidence` column exists anywhere in Pipeline B.
+2. **Liberty:** Exists in Redshift (`einmst_*` tables) with NAICS/SIC columns, but was never joined into `smb_zi_oc_efx_combined`. No `liberty_match_confidence` column exists anywhere in Pipeline B. The XGBoost model has never been run against Liberty data in the batch pipeline.
 
-3. **Middesk:** A live API source. Results live in `integration_data.request_response` table (integration-service PostgreSQL), not in the Redshift tables that Pipeline B reads.
+3. **Middesk:** A live API source. Results live in `integration_data.request_response` table (integration-service PostgreSQL), not in the Redshift tables that Pipeline B reads. Middesk would require a different architecture to include in a batch Redshift pipeline.
 
-4. **Trulioo:** Same — live API, integration-service PostgreSQL only.
+4. **Trulioo:** Same as Middesk — live API, integration-service PostgreSQL only. Pipeline B cannot access it.
+
+> ⚠️ **GAP AND IMPROVEMENT OPPORTUNITY — Pipeline B Source Coverage**
+>
+> Pipeline B's `customer_table.sql` compares only `zi_match_confidence vs efx_match_confidence` because when this SQL was originally written, only ZoomInfo and Equifax had clean pre-loaded Redshift tables with numeric NAICS fields. OC, Liberty, Middesk, and Trulioo were added to the system later and only integrated into Pipeline A.
+>
+> **What could be improved:**
+> - **OC in Pipeline B:** `oc_match_confidence` already exists in `smb_zi_oc_efx_combined`. The only missing piece is parsing `industry_code_uids` in `customer_table.sql` to extract `us_naics-XXXXXX`. This is a moderate SQL change that would bring OC (weight 0.9, highest among vendors) into the Pipeline B winner selection.
+> - **Liberty in Pipeline B:** The Liberty `einmst_*` tables already exist in Redshift with NAICS/SIC columns. Running the XGBoost entity matching model against Liberty and joining the result into `smb_zi_oc_efx_combined` would extend Pipeline B to a 3rd source.
+> - **Impact:** The current gap means Pipeline B's `primary_naics_code` is often less accurate than Pipeline A's `naics_code fact` — specifically for businesses where OC has a stronger match than ZI or EFX (which is common for non-US companies and businesses that are registered but not publicly traded).
 
 **`customer_files` output table columns (key ones):**
 
@@ -294,7 +339,7 @@ A customer calls `POST /businesses/customers/{customerID}`. Worth AI creates a `
 | `platform_id` | Which integration made the call (see platform IDs below) |
 | `business_id` | The submitted business UUID |
 | `response` | JSONB — raw API response from the vendor |
-| `confidence` | The computed confidence score for this response |
+| `confidence` | The computed confidence score for this response. **For ZoomInfo, Equifax, and OC: this is the XGBoost entity matching model score (`match.prediction` from `ml_model_matches`), normalized to 0–1.** For Middesk: XGBoost via `confidenceScoreMany()` or task-based (0.15 + 0.20/task). For Trulioo: heuristic `match.index / 55` only — no XGBoost. For AI (GPT): self-reported text (HIGH/MED/LOW). |
 | `request_type` | e.g. `"perform_business_enrichment"` |
 | `updated_at` | When this record was last updated |
 
@@ -502,38 +547,65 @@ data_businesses.industry   → FK to core_business_industries.id
 │  ZoomInfo:  zoominfo.comp_standard_global → zoominfo_standard_ml_2         │
 │  Equifax:   warehouse.equifax_us_latest → equifax_us_standardized           │
 │  OC:        datascience.open_corporates_standard_ml_2                       │
+│                                                                              │
+│  Both pipelines also run the SAME Worth AI XGBoost entity matching model   │
+│  to produce zi_probability, efx_probability, oc_probability                 │
+│  (stored in datascience.ml_model_matches)                                   │
 └──────────────────────────────┬──────────────────────────────────────────────┘
                                │
           ┌────────────────────┴─────────────────────┐
           ▼                                           ▼
-┌─────────────────────┐                   ┌──────────────────────────┐
-│  PIPELINE A OUTPUT  │                   │  PIPELINE B OUTPUT        │
-│                     │                   │                           │
-│  rds_warehouse      │                   │  datascience.             │
-│  _public.facts      │                   │  customer_files           │
-│  (JSONB, all 217)   │                   │  (wide denorm. table)     │
-│                     │                   │                           │
-│  naics_code fact:   │                   │  primary_naics_code:      │
-│  winner from ALL    │  ← CAN DIFFER →   │  winner from ZI vs EFX    │
-│  6 sources          │                   │  ONLY                     │
-│                     │                   │                           │
-│  Includes: OC, Middesk,│               │  Excludes: OC, Middesk,   │
-│  Trulioo, AI        │                   │  Trulioo, AI, Liberty     │
-└─────────────────────┘                   └──────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  PIPELINE A OUTPUT          │         PIPELINE B OUTPUT                     │
+│  [CUSTOMER-FACING]          │         [INTERNAL ONLY]                       │
+│                             │                                               │
+│  rds_warehouse_public.facts │         datascience.customer_files            │
+│  (JSONB, 217 facts)         │         (wide denormalized table)             │
+│                             │                                               │
+│  naics_code fact:           │         primary_naics_code:                  │
+│  winner from ALL 6 sources  │  ←CAN→  winner from ZI vs EFX ONLY           │
+│  using XGBoost confidence   │ DIFFER  using XGBoost zi/efx_match_confidence│
+│                             │                                               │
+│  Includes: OC ✅             │         OC: XGBoost runs ✅ but SQL gap ⚠️  │
+│            Middesk ✅        │         Middesk: live API, not in batch ❌   │
+│            Trulioo ✅        │         Trulioo: live API, not in batch ❌   │
+│            AI/GPT ✅         │         AI/GPT: integration-service only ❌  │
+│            Liberty ✅        │         Liberty: never joined into batch ❌  │
+└─────────────────────────────┘         └─────────────────────────────────────┘
           │                                           │
           ▼                                           ▼
-   REST API response                         Redshift analytics
-   Worth 360 Report                          Risk model training
-   Customer UI                               Data export
+   ✅ WHAT CUSTOMERS/USERS SEE:           ⚠️ INTERNAL USE ONLY:
+   REST API response                       Redshift analytics queries
+   Worth 360 Report PDF                    KYB risk model training data
+   Worth AI UI (classification panel)      datascience.global_trulioo_us_kyb
+   GET /facts/business/{id}/details        Data science experiments
+     → naics_code + confidence per source  Bulk customer data exports
+     → all 6 source confidences shown
+     → alternatives[] with all sources
+   GET /businesses/customers/{id}
+     → simplified naics_code, mcc_code
 ```
 
-**When do they show different NAICS codes?**
+**The 6 confidence scores shown to the customer (Pipeline A output):**
 
-If OC or Middesk won in Pipeline A (higher confidence than ZI or EFX), then:
-- `rds_warehouse_public.facts.naics_code` = OC or Middesk's code
-- `datascience.customer_files.primary_naics_code` = whichever of ZI or EFX won
+All sourced from `integration_data.request_response.confidence`, which is populated by:
 
-These can disagree. The API response (Pipeline A) may show a different NAICS than the Redshift analytics table (Pipeline B).
+| Source shown in API | `source.confidence` value | Produced by |
+|---|---|---|
+| OpenCorporates (platformId=23) | `oc_probability` from `ml_model_matches` | **Worth AI XGBoost model** |
+| Equifax (platformId=17) | `efx_probability` from `ml_model_matches` | **Worth AI XGBoost model** |
+| ZoomInfo (platformId=24) | `zi_probability` from `ml_model_matches` | **Worth AI XGBoost model** |
+| Middesk (platformId=16) | XGBoost via `confidenceScoreMany()` OR `0.15 + 0.20 × tasks passed` | **Worth AI XGBoost model** (preferred) or task-based fallback |
+| Trulioo (platformId=38) | `match.index / 55` (Levenshtein heuristic) | **Heuristic only — no XGBoost** |
+| AI/GPT (platformId=31) | Self-reported: `"HIGH"`→~0.70 / `"MED"`→~0.50 / `"LOW"`→~0.30 | **GPT self-assessment** |
+
+**When do Pipeline A and Pipeline B show different NAICS codes?**
+
+If OC or Middesk won in Pipeline A (higher XGBoost confidence than ZI or EFX), then:
+- Customer sees via API: `naics_code` = OC or Middesk's code (Pipeline A winner)
+- In Redshift `customer_files`: `primary_naics_code` = whichever of ZI or EFX won (Pipeline B winner)
+
+These can and do disagree. This is most common for non-US businesses (where OC has better data than ZI/EFX) and for recently registered businesses (where Middesk SOS filings have more current data than the periodic bulk loads).
 
 ---
 
