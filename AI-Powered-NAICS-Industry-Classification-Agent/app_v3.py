@@ -194,17 +194,41 @@ def _classify_rows(df: pd.DataFrame, compute_shap: bool = True,
     t0 = time.time()
     rows, shap_list = [], []
 
+    # US state code → jurisdiction code map
+    _US_STATE_JC = {
+        "AL":"us_al","AK":"us_ak","AZ":"us_az","AR":"us_ar","CA":"us_ca",
+        "CO":"us_co","CT":"us_ct","DE":"us_de","FL":"us_fl","GA":"us_ga",
+        "HI":"us_hi","ID":"us_id","IL":"us_il","IN":"us_in","IA":"us_ia",
+        "KS":"us_ks","KY":"us_ky","LA":"us_la","ME":"us_me","MD":"us_md",
+        "MA":"us_ma","MI":"us_mi","MN":"us_mn","MS":"us_ms","MO":"us_mo",
+        "MT":"us_mt","NE":"us_ne","NV":"us_nv","NH":"us_nh","NJ":"us_nj",
+        "NM":"us_nm","NY":"us_ny","NC":"us_nc","ND":"us_nd","OH":"us_oh",
+        "OK":"us_ok","OR":"us_or","PA":"us_pa","RI":"us_ri","SC":"us_sc",
+        "SD":"us_sd","TN":"us_tn","TX":"us_tx","UT":"us_ut","VT":"us_vt",
+        "VA":"us_va","WA":"us_wa","WV":"us_wv","WI":"us_wi","WY":"us_wy",
+        "DC":"us_dc","PR":"pr",
+    }
+
     for idx, row in df.iterrows():
         name    = str(row.get("company_name","") or "").strip()
         address = str(row.get("address","")      or "").strip()
         country = str(row.get("country","")      or "").strip()
-        state   = str(row.get("state","")        or "").strip()
+        state   = str(row.get("state","")        or "").strip().upper()
         if not name:
             rows.append({"_error":"empty"}); shap_list.append(None); continue
         try:
             entity = er.resolve(name, address, country or state)
+
+            # If we have a US state code, use the precise state-level jurisdiction
+            # (e.g. NJ → us_nj) rather than the country-level 'us'
+            jc = entity.jurisdiction_code or "us"
+            if state and jc in ("us", "US", "") and state in _US_STATE_JC:
+                jc = _US_STATE_JC[state]
+            elif state and not jc.startswith("us_") and country.upper() in ("US","USA",""):
+                jc = _US_STATE_JC.get(state, jc)
+
             bundle = sim.fetch(name, address, country or state,
-                               entity.jurisdiction_code, "Operating", "")
+                               jc, "Operating", "")
             cons   = ce.predict(bundle)
             risk   = rev.evaluate(bundle, cons)
 
@@ -225,7 +249,7 @@ def _classify_rows(df: pd.DataFrame, compute_shap: bool = True,
 
             row_out = {
                 "Company": name, "Clean Name": entity.clean_name,
-                "Jurisdiction": entity.jurisdiction_code,
+                "Jurisdiction": jc,   # state-level code (us_nj) when available
                 "Entity Type":  entity.detected_entity_type,
                 "OC Confidence":  src_conf.get("opencorporates",0),
                 "OC Status":      src_stat.get("opencorporates","—"),
