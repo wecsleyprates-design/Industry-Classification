@@ -746,12 +746,25 @@ Outputs a match confidence 0–1 per source using 33 pairwise text/address simil
                         "good matches. A wide box means high variability — the source is very confident "
                         "on some companies but weak on others. Points above the whiskers are outliers."
                     )
-            l1_cols = [c for c in ["Company","Jurisdiction","OC Confidence","OC Status","OC Code",
-                "EFX Confidence","EFX Status","EFX Code","ZI Confidence","ZI Status","ZI Code",
+            import jurisdiction_registry as _JR
+            def _jur_label(jc: str) -> str:
+                rec = _JR.lookup(str(jc or "").lower().strip())
+                label = rec.label if rec else ""
+                return f"{jc} — {label}" if label and label != jc else str(jc)
+
+            l1_df = ok_df.copy()
+            if "Jurisdiction" in l1_df.columns:
+                l1_df["Jurisdiction"] = l1_df["Jurisdiction"].apply(_jur_label)
+            l1_cols = [c for c in [
+                "Company","Jurisdiction",
+                "OC Confidence","OC Status","OC Code",
+                "EFX Confidence","EFX Status","EFX Code",
+                "ZI Confidence","ZI Status","ZI Code",
                 "TRU Confidence","TRU Status","LIB Confidence","LIB Status",
                 "Best Source","Avg Confidence","Sources ≥ 0.80",
-                "Prod Winner","Prod Confidence","Prod NAICS"] if c in ok_df.columns]
-            st.dataframe(ok_df[l1_cols],use_container_width=True,hide_index=True)
+                "Prod Winner","Prod Confidence","Prod NAICS",
+            ] if c in l1_df.columns]
+            st.dataframe(l1_df[l1_cols], use_container_width=True, hide_index=True)
 
     # ══ LEVEL 2 ══════════════════════════════════════════════════════════════
     with tab_l2:
@@ -809,10 +822,24 @@ as a **45-feature vector** → calibrated probabilities across all industry code
                                    title="Top-10 Primary Codes",template="plotly_dark",height=300)
                     fig_c.update_layout(margin=dict(t=40,b=10,l=80))
                     st.plotly_chart(fig_c,use_container_width=True)
-            l2_cols = [c for c in ["Company","Jurisdiction","Rank 1 Code","Rank 1 Label","Rank 1 Tax","Rank 1 Prob",
-                "Rank 2 Code","Rank 2 Label","Rank 2 Prob","Rank 3 Code","Rank 3 Label","Rank 3 Prob",
-                "Risk Score","Risk Level","KYB","AML Flags"] if c in ok_df.columns]
-            st.dataframe(ok_df[l2_cols],use_container_width=True,hide_index=True)
+            # Enrich jurisdiction column with human-readable label
+            import jurisdiction_registry as _JR
+            def _jur_label(jc: str) -> str:
+                rec = _JR.lookup(str(jc or "").lower().strip())
+                label = rec.label if rec else ""
+                return f"{jc} — {label}" if label and label != jc else str(jc)
+
+            l2_df = ok_df.copy()
+            if "Jurisdiction" in l2_df.columns:
+                l2_df["Jurisdiction"] = l2_df["Jurisdiction"].apply(_jur_label)
+            l2_cols = [c for c in [
+                "Company", "Jurisdiction",
+                "Rank 1 Code","Rank 1 Label","Rank 1 Tax","Rank 1 Prob",
+                "Rank 2 Code","Rank 2 Label","Rank 2 Prob",
+                "Rank 3 Code","Rank 3 Label","Rank 3 Prob",
+                "Risk Score","Risk Level","KYB","AML Flags",
+            ] if c in l2_df.columns]
+            st.dataframe(l2_df[l2_cols], use_container_width=True, hide_index=True)
 
     # ══ SHAP ═════════════════════════════════════════════════════════════════
     with tab_shap:
@@ -1151,11 +1178,21 @@ SHAP is computed using `shap.TreeExplainer` on the Consensus XGBoost model — e
             disp_df.insert(4, "Reviewed By", disp_df["Company"].map(
                 lambda c: decs.get(c, {}).get("reviewer", "")))
 
-        # Highlight rows with decisions
+        # Enrich Jurisdiction column with human-readable label
+        import jurisdiction_registry as _JR
+        def _jur_label_full(jc: str) -> str:
+            rec = _JR.lookup(str(jc or "").lower().strip())
+            label = rec.label if rec else ""
+            return f"{jc} — {label}" if label and label != jc else str(jc)
+
+        if "Jurisdiction" in disp_df.columns:
+            disp_df["Jurisdiction"] = disp_df["Jurisdiction"].apply(_jur_label_full)
+
         st.caption(
             "First 5 columns are analyst inputs. "
             "Override Code / Label replace the model's code when an analyst corrects it. "
-            "Analyst Notes appear here and in the download."
+            "Analyst Notes appear here and in the download. "
+            "Jurisdiction shown as code — full label (e.g. us_nj — New Jersey)."
         )
         st.dataframe(disp_df, use_container_width=True, hide_index=True, height=500)
         with st.expander("Column reference"):
