@@ -446,6 +446,123 @@ def _render_shap_single(sr, company_name: str = "") -> None:
     )
     st.plotly_chart(fig, use_container_width=True)
 
+    # ── Analyst interpretation of the SHAP chart ──────────────────────────────
+    from shap_explainer import FEATURE_INTERPRETATIONS
+
+    # Separate positive and negative contributors
+    pos_pairs = [(FEATURE_INTERPRETATIONS.get(n, n), v, fv)
+                 for (n, _), v, fv in zip(pairs, values,
+                     [sr.feature_values[sr.feature_names.index(n)]
+                      for n, _ in pairs])
+                 if v > 0]
+    neg_pairs = [(FEATURE_INTERPRETATIONS.get(n, n), v, fv)
+                 for (n, _), v, fv in zip(pairs, values,
+                     [sr.feature_values[sr.feature_names.index(n)]
+                      for n, _ in pairs])
+                 if v < 0]
+
+    # Build interpretation text
+    interp_bullets = []
+
+    # How to read this chart — always shown
+    interp_bullets.append(
+        "📊 <strong>How to read this chart:</strong> Each bar represents one input feature. "
+        "<span style='color:#FC8181'>Red bars (pointing right)</span> push the model "
+        "<strong>toward</strong> classifying this company as NAICS <code>"
+        f"{sr.predicted_class}</code>. "
+        "<span style='color:#4299E1'>Blue bars (pointing left)</span> push the model "
+        "<strong>away</strong> from this code. "
+        "The longer the bar, the stronger the influence. "
+        "The numbers are in <em>log-odds units</em> — a value of +0.5 roughly doubles "
+        "the model's probability for this code; −0.5 roughly halves it."
+    )
+
+    # Base rate
+    interp_bullets.append(
+        f"⚖️ <strong>Starting point (base rate):</strong> Before looking at any features, "
+        f"the model assigns a small baseline probability to every possible code equally. "
+        f"The SHAP values show how each feature <em>shifts</em> that starting probability "
+        f"up or down to reach the final {sr.predicted_prob:.0%} confidence."
+    )
+
+    # Top positive drivers
+    if pos_pairs:
+        top3_pos = pos_pairs[:3]
+        pos_bullets = []
+        for name, sv, fv in top3_pos:
+            pos_bullets.append(
+                f"<strong>{name}</strong> (value: {fv:.3f}) → "
+                f"<span style='color:#FC8181'>+{sv:.3f}</span> — "
+                f"this feature strongly signals that <code>{sr.predicted_class}</code> "
+                f"is the correct code"
+            )
+        interp_bullets.append(
+            "🔴 <strong>Strongest signals FOR this classification:</strong><ul style='margin:4px 0'>"
+            + "".join(f"<li style='margin:3px 0'>{b}</li>" for b in pos_bullets)
+            + "</ul>"
+        )
+
+    # Top negative drivers
+    if neg_pairs:
+        top3_neg = neg_pairs[:3]
+        neg_bullets = []
+        for name, sv, fv in top3_neg:
+            neg_bullets.append(
+                f"<strong>{name}</strong> (value: {fv:.3f}) → "
+                f"<span style='color:#4299E1'>{sv:.3f}</span> — "
+                f"this feature suggests the company may belong to a <em>different</em> industry code"
+            )
+        interp_bullets.append(
+            "🔵 <strong>Signals pushing AGAINST this classification:</strong><ul style='margin:4px 0'>"
+            + "".join(f"<li style='margin:3px 0'>{b}</li>" for b in neg_bullets)
+            + "</ul>"
+        )
+
+    # Confidence interpretation
+    total_positive = sum(v for v in values if v > 0)
+    total_negative = abs(sum(v for v in values if v < 0))
+    net = total_positive - total_negative
+    if net > 0.5:
+        conf_interp = (
+            f"✅ <strong>Strong net positive signal ({net:+.3f} net log-odds).</strong> "
+            f"The model has clear, consistent reasons for this classification. "
+            f"High confidence ({sr.predicted_prob:.0%}) is well-supported."
+        )
+    elif net > 0:
+        conf_interp = (
+            f"🟡 <strong>Moderate net signal ({net:+.3f} net log-odds).</strong> "
+            f"The model leans toward this code but there are meaningful counter-signals. "
+            f"Review the secondary codes before finalising."
+        )
+    else:
+        conf_interp = (
+            f"🔴 <strong>Weak or negative net signal ({net:+.3f} net log-odds).</strong> "
+            f"Counter-signals are strong. The model is not confident this is the right code. "
+            f"Manual review required."
+        )
+    interp_bullets.append(conf_interp)
+
+    # Special flag: if high-risk sector is top driver
+    top_feat_name = pairs[0][0] if pairs else ""
+    if "risk" in top_feat_name.lower() or "aml" in top_feat_name.lower():
+        interp_bullets.append(
+            "🚨 <strong>AML signal is the dominant driver.</strong> "
+            "The model classified this code partly because of a high-risk sector flag, "
+            "not just because the vendor codes agree. "
+            "Verify the actual business activity independently."
+        )
+
+    bhtml = "".join(f"<li style='margin-bottom:10px'>{b}</li>" for b in interp_bullets)
+    st.markdown(
+        f'<div class="interp-card" style="border-color:#9F7AEA;margin-top:4px">'
+        f'<div style="font-size:13px;font-weight:700;color:#9F7AEA;text-transform:uppercase;'
+        f'letter-spacing:.5px;margin-bottom:12px">🔬 SHAP Chart — How to Read & Interpret</div>'
+        f'<ul style="color:#E2E8F0;font-size:13px;line-height:1.8;padding-left:18px;margin:0">'
+        f'{bhtml}</ul></div>',
+        unsafe_allow_html=True,
+    )
+    st.divider()
+
     # Waterfall chart
     # Take top 8 by abs value, rest collapsed into "Other features"
     top8   = sorted(zip(sr.feature_names, sr.shap_values), key=lambda x: abs(x[1]), reverse=True)[:8]
