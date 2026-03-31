@@ -1,681 +1,594 @@
 # Industry Classification Facts — Complete End-to-End Reference
+## A Step-by-Step Storytelling of the Full Worth AI Pipeline
 
-**Purpose:** Step-by-step explanation of how classification facts are gathered from each vendor, how confidence is calculated (and by whom), how the Winning Source is selected, and what each of the 8 classification facts contains — verified against the actual source code.
-
----
-
-## CRITICAL CLARIFICATION: Who Produces the Confidence Score?
-
-> **Your question: "The confidence score is done by the Level 1 XGBoost Model, isn't it?"**
-
-**The answer is: it depends on which pipeline you are in — and there are two entirely separate pipelines running in parallel.**
-
-There are **two separate confidence systems** in Worth AI, and they are easy to confuse:
+> All content verified against the actual source code in `SIC-UK-Codes` (warehouse-service, integration-service, case-service) and `Entity-Matching-Ref`.
 
 ---
 
-### The Two Pipelines at a Glance
+## The Two Pipelines — Overview
+
+Worth AI runs **two completely separate pipelines** for industry classification. They read some of the same source data but produce different outputs stored in different places. They have one intersection point — the `customer_files` table — but serve different purposes.
 
 ```
-PIPELINE A — integration-service (real-time, per business submission)
-  → Calls vendor APIs live (Middesk, Trulioo, SERP)
-  → Reads pre-loaded Redshift tables (ZoomInfo, Equifax, OC)
-  → Each source computes its own confidence score (different formulas per source)
-  → Fact Engine selects winner from ALL sources (ZI, EFX, OC, Middesk, Trulioo, AI)
-  → Produces all 217 facts → publishes to Kafka → stored in rds_warehouse_public.facts
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  PIPELINE A — integration-service  (real-time, triggered per business)       │
+│                                                                               │
+│  Inputs:  Live API calls + Redshift table reads                               │
+│  Covers:  ZoomInfo, Equifax, OC, Middesk, Trulioo, SERP, AI (all sources)   │
+│  Output:  rds_warehouse_public.facts (JSONB, 217 facts)                      │
+│  Used by: REST API, Worth 360 Report, case-service                           │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  PIPELINE B — warehouse-service  (batch, scheduled Redshift SQL jobs)        │
+│                                                                               │
+│  Inputs:  Pre-loaded Redshift tables only                                    │
+│  Covers:  ZoomInfo + Equifax ONLY                                            │
+│  Output:  datascience.customer_files (wide denormalized table)               │
+│  Used by: Redshift analytics, KYB risk model training, data exports           │
+└──────────────────────────────────────────────────────────────────────────────┘
 
-PIPELINE B — warehouse-service (batch, Redshift-only)
-  → Reads only pre-loaded Redshift tables (ZoomInfo + Equifax only)
-  → Worth AI XGBoost entity matching model produces zi_probability + efx_probability
-  → customer_table.sql compares ONLY zi_match_confidence vs efx_match_confidence
-  → Produces datascience.customer_files → used for Redshift analytics + data export
+INTERSECTION:  Both pipelines read from the same Redshift source tables
+               (zoominfo, equifax). Pipeline B writes customer_files which
+               Pipeline A's Fact Engine may also read as context.
+               The naics_code in customer_files and the naics_code Fact
+               can differ if different sources won in each pipeline.
 ```
 
-These two pipelines run in parallel and produce separate outputs. The Fact Engine (Pipeline A) is the primary classification system customers interact with via API. The `customer_files` table (Pipeline B) is a Redshift analytics and data export table.
+---
+
+## The Story — Full Timeline From Day 0 to Fact Delivery
+
+### Day 0 — Before Any Business Is Submitted: Loading the Vendor Data
+
+Before a single business applies, Worth AI loads bulk data from vendors into Redshift. This is offline work done by the data engineering team.
+
+**What gets loaded and where:**
+
+| Vendor | Redshift table | Key industry column | How loaded |
+|---|---|---|---|
+| ZoomInfo | `zoominfo.comp_standard_global` → standardized to `datascience.zoominfo_standard_ml_2` | `zi_c_naics6` (6-digit NAICS) | Bulk file ingestion, regular cadence |
+| Equifax | `warehouse.equifax_us_latest` → standardized to `warehouse.equifax_us_standardized` | `efx_primnaicscode` (6-digit NAICS), `efx_primsic` (4-digit SIC) | Bulk file ingestion, **unknown cadence** (documented in source code as a weakness) |
+| OpenCorporates | `datascience.open_corporates_standard_ml_2` | `industry_code_uids` (pipe-delimited string) | Bulk file ingestion |
+| Liberty | `dev.liberty.einmst_20260218`, `einmst_15_5mn`, `einmst_5_3m_remaining` | NAICS, SIC columns | Bulk file ingestion |
+
+**These tables are the raw vendor data.** They contain millions of company records — one row per vendor company record, not per submitted business.
 
 ---
 
+### Day 0 — Pipeline B Setup: Building the Heuristic Similarity Tables
+
+**[PIPELINE B ONLY]**
+
+Before the XGBoost model runs, Worth AI needs to find candidate vendor records for each submitted business. This is done by building similarity tables using Levenshtein string distance.
+
+**What `similarity_index` means:**
+
+`similarity_index` is a custom composite score computed by `smb_zoominfo_standardized_joined.sql`:
+
+```sql
+similarity_index =
+    (20 - levenshtein_distance(submitted_company_name, vendor_company_name))  -- name component (max 20)
+  + (20 - levenshtein_distance(submitted_address, vendor_address))            -- address component (max 20)
+  + state_match     -- 1 if state matches, 0 otherwise
+  + city_match      -- 1 if city matches, 0 otherwise
+  + zipcode_match   -- 1 if ZIP matches, 0 otherwise
+
+-- Maximum possible: 20 + 20 + 1 + 1 + 1 = 43... but can reach 45+ with best-case matches
+```
+
+**What `MAX_CONFIDENCE_INDEX = 55` means:**
+
+`MAX_CONFIDENCE_INDEX = 55` is defined in `integration-service/lib/facts/sources.ts` (line 33). It is the denominator used to normalize the `similarity_index` into a 0–1 confidence score:
+
+```
+normalized_confidence = similarity_index / 55
+```
+
+- `similarity_index = 55` → confidence = 1.0 (perfect match on all fields)
+- `similarity_index = 44` → confidence ≈ 0.80 (threshold for being considered matched)
+- `similarity_index = 45` → confidence ≈ 0.82 (minimum threshold in SQL: `WHERE similarity_index >= 45`)
+
+This heuristic similarity is the **pre-XGBoost fallback**. It was the original matching method before the XGBoost model was built.
+
+**Tables created at this step:**
+
+| Table | What it contains |
+|---|---|
+| `datascience.smb_zoominfo_standardized_joined` | Top 1000 ZoomInfo candidate matches per business, ranked by similarity_index |
+| `datascience.smb_equifax_standardized_joined` | Top 1000 Equifax candidates per business, ranked by similarity_index |
+| `datascience.smb_open_corporate_standardized_joined` | Top 1000 OC candidates per business |
+
 ---
 
-### System 1: Source Confidence (integration-service)
+### Day 0 — Pipeline B: XGBoost Entity Matching Model Runs
 
-This is the confidence used by the **Fact Engine** to pick the winning vendor.
+**[PIPELINE B ONLY]**
 
-**Each source computes its own confidence score** using different methods:
-
-| Source | Who computes confidence | How |
-|---|---|---|
-| **Middesk** | Middesk pipeline | `0.15 base + 0.20 per successful verification task` (name, TIN, address, SOS) → max 0.95 |
-| **OpenCorporates** | Worth AI's own `confidenceScore()` function | `match.index / MAX_CONFIDENCE_INDEX (55)` — OR `match.prediction` from the XGBoost model if available |
-| **ZoomInfo** | Worth AI's own entity matching | `match.index / 55` — OR `match.prediction` from XGBoost |
-| **Equifax** | Worth AI's own entity matching | `match.prediction` (XGBoost AI score) preferred; falls back to `match.index / 55` |
-| **Verdata/SERP** | Worth AI's `confidenceScore()` function | Name + address similarity score |
-| **Canada Open** | The AI prediction score | `rawResponse.prediction` |
-| **Trulioo** | Trulioo's own confidence model | Returned directly in API response |
-| **AI Enrichment** | GPT-4o-mini self-reports | Text field: `"HIGH"` → ~0.70 / `"MED"` → ~0.50 / `"LOW"` → ~0.30 |
-
-**Source:** `integration-service/lib/facts/sources.ts`, lines 201–238, 281–391
-
-Key constant: `MAX_CONFIDENCE_INDEX = 55` (line 33 of `sources.ts`)
-
----
-
-### System 2: Entity Match Confidence (warehouse-service / Pipeline B)
-
-This is the **Redshift batch analytics pipeline**. Here the XGBoost entity matching model is central.
-
----
-
-#### Step B1 — What the XGBoost Model Does
-
-The Worth AI XGBoost entity matching model (`entity_matching_20250127 v1`, in the Entity-Matching repo) answers one question per candidate pair:
+The Worth AI XGBoost entity matching model (`entity_matching_20250127 v1`) runs on the candidate pairs from the similarity tables. It answers:
 
 > **"Is this submitted business the same real-world entity as this vendor record?"**
 
-It uses **33 pairwise text/address similarity features** — Jaccard k-grams on business name, street name, short name, plus exact matches on city, ZIP, street number, etc.
+**Model inputs (33 pairwise features per candidate pair):**
+- Jaccard k-gram similarities on business name (k=1,2,3,4, word-level)
+- Jaccard k-gram similarities on street name
+- Jaccard k-gram similarities on short name (city-stripped)
+- Exact match flags: city, ZIP, street number, address line 2
+- Street number distance: `|submitted_num - vendor_num|`
+- Block-level match: `submitted_num // 100 == vendor_num // 100`
+- Short name match (after stripping legal suffixes: LLC, INC, CORP, etc.)
 
-**Output:** A probability score 0–1 per source per business:
-- `zi_probability` → "How likely is this ZoomInfo record the same company?"
-- `efx_probability` → "How likely is this Equifax record the same company?"
-- `oc_probability` → "How likely is this OC record the same company?"
+**Model outputs:** Three probability scores written to `datascience.ml_model_matches`:
 
-These scores are written to `datascience.ml_model_matches` — the central XGBoost output table.
+| Column | What it means |
+|---|---|
+| `zi_probability` | Probability that the matched ZoomInfo record is the same business |
+| `efx_probability` | Probability that the matched Equifax record is the same business |
+| `oc_probability` | Probability that the matched OC record is the same business |
+
+`datascience.ml_model_matches` is **the central XGBoost output table**. It holds one row per business per source showing which vendor record was matched and how confident the model is.
 
 ---
 
-#### Step B2 — How zi_match_confidence and efx_match_confidence Are Built
+### Day 0 — Pipeline B: Building the Match Tables
 
-The match select procedures read from `ml_model_matches` and build the match tables. From the actual SQL (`zi_match_select.sql`, `efx_match_select.sql`):
+**[PIPELINE B ONLY]**
 
-**ZoomInfo match table** (`datascience.zoominfo_matches_custom_inc_ml`):
+Three stored procedures build the final match tables by combining XGBoost results with the heuristic fallback:
+
+**`sp_truncate_and_insert_zoominfo_matches_custom_inc_ml()` → `datascience.zoominfo_matches_custom_inc_ml`**
+
 ```sql
--- FIRST PREFERENCE: XGBoost probability (if ≥ 0.80)
-SELECT business_id, zi_c_company_id, zi_c_location_id, zi_es_location_id, zi_probability
+-- TIER 1: XGBoost matched with high confidence
+SELECT business_id, zi_c_company_id, zi_c_location_id, zi_es_location_id,
+       zi_probability
 FROM datascience.ml_model_matches
-WHERE zi_probability >= 0.8
+WHERE zi_probability >= 0.8          -- XGBoost threshold
 
 UNION ALL
 
--- FALLBACK: Heuristic similarity index (if XGBoost score < 0.80)
+-- TIER 2: Heuristic fallback (businesses XGBoost didn't match with >= 0.8)
 SELECT business_id, zi_c_company_id, zi_c_location_id, zi_es_location_id,
        NULL AS zi_probability, similarity_index
 FROM datascience.smb_zoominfo_standardized_joined
-WHERE similarity_index_rank = 1
-  AND similarity_index >= 45                -- minimum similarity threshold
-  AND business_id NOT IN (already matched by XGBoost)
+WHERE similarity_index_rank = 1      -- best heuristic match
+  AND similarity_index >= 45         -- minimum heuristic threshold
+  AND business_id NOT IN (XGBoost results)
 ```
 
-**Equifax match table** (`datascience.efx_matches_custom_inc_ml`):
-```sql
--- Same two-tier pattern:
--- FIRST: ml_model_matches.efx_probability >= 0.80
--- FALLBACK: smb_equifax_standardized_joined.similarity_index >= 45
-```
+**Same pattern for Equifax** → `datascience.efx_matches_custom_inc_ml`
+**Same pattern for OC** → `datascience.oc_matches_custom_inc_ml`
 
-**OpenCorporates match table** (`datascience.oc_matches_custom_inc_ml`):
-```sql
--- Same two-tier pattern:
--- FIRST: ml_model_matches.oc_probability >= 0.80
--- FALLBACK: smb_open_corporate_standardized_joined.similarity_index >= 45
-```
-
-**Then `zi_match_confidence` and `efx_match_confidence` are computed** in `smb_zi_oc_efx_combined.sql`:
-```sql
--- ZoomInfo confidence (zi_match_confidence):
-CASE
-    WHEN zi_probability IS NOT NULL         THEN zi_probability          -- XGBoost score
-    WHEN similarity_index IS NOT NULL
-         AND similarity_index / 55.0 >= 0.8 THEN similarity_index / 55.0 -- normalized heuristic
-    ELSE 0
-END AS zi_match_confidence
-
--- Equifax confidence (efx_match_confidence):
-CASE
-    WHEN efx_probability IS NOT NULL        THEN efx_probability         -- XGBoost score
-    WHEN similarity_index IS NOT NULL
-         AND similarity_index / 55.0 >= 0.8 THEN similarity_index / 55.0 -- normalized heuristic
-    ELSE 0
-END AS efx_match_confidence
-```
-
-**Key constant:** `MAX_CONFIDENCE_INDEX = 55` — heuristic similarity scores are normalized by dividing by 55.
+**What these tables contain:**
+- For businesses where XGBoost scored ≥ 0.80: the XGBoost probability
+- For other businesses: the heuristic similarity_index
+- For businesses where neither threshold was met: no row (business has no match)
 
 ---
 
-#### Step B3 — The Customer Table Production Rule
+### Day 0 — Pipeline B: Building the Combined Firmographic Table
 
-`smb_zi_oc_efx_combined` is joined into `smb_pr_verification_cs`, which is then read by `customer_table.sql` (the stored procedure `sp_recreate_customer_files()`). The NAICS winner-takes-all rule runs here:
+**[PIPELINE B ONLY]**
+
+`smb_zi_oc_efx_combined.sql` joins the match tables back to the vendor data tables to pull the actual firmographic fields (NAICS, address, name, etc.):
+
+**How `zi_match_confidence` and `efx_match_confidence` are built:**
 
 ```sql
--- From customer_table.sql (the actual production SQL):
-
--- NAICS code: ZoomInfo wins if its confidence > Equifax confidence
-primary_naics_code =
-  COALESCE(
+-- ZoomInfo confidence (from smb_zi_oc_efx_combined.sql):
+zi_match_confidence =
     CASE
-      WHEN COALESCE(zi_match_confidence, 0) > COALESCE(efx_match_confidence, 0)
-        THEN CAST(REGEXP_REPLACE(zi_c_naics6, '[^0-9]', '') AS INTEGER)
-      ELSE CAST(REGEXP_REPLACE(efx_primnaicscode, '[^0-9]', '') AS INTEGER)
-    END,
-    naics_code  -- fallback to existing naics_code if both are null
-  )
+        WHEN zi_probability IS NOT NULL          THEN zi_probability         -- XGBoost score (0.8–1.0)
+        WHEN similarity_index IS NOT NULL
+             AND similarity_index / 55.0 >= 0.8  THEN similarity_index / 55.0 -- heuristic (0.8–1.0)
+        ELSE 0                                                                 -- no match
+    END
 
--- The same ZI vs EFX comparison controls ALL other firmographic fields too:
--- employee_count, year_established, revenue, company_name, address, city,
--- zipcode, country, county, website_url, affiliate_parent
+-- Equifax confidence:
+efx_match_confidence =
+    CASE
+        WHEN efx_probability IS NOT NULL         THEN efx_probability
+        WHEN similarity_index IS NOT NULL
+             AND similarity_index / 55.0 >= 0.8  THEN similarity_index / 55.0
+        ELSE 0
+    END
+
+-- OC confidence (also computed, but NOT used in customer_table.sql):
+oc_match_confidence =
+    CASE
+        WHEN oc_probability IS NOT NULL          THEN oc_probability
+        WHEN similarity_index / 55.0 >= 0.8      THEN similarity_index / 55.0
+        ELSE 0
+    END
 ```
 
-**This single comparison `zi_match_confidence > efx_match_confidence` decides the winning source for EVERY field in `customer_files`** — not just NAICS.
+**Output table:** `datascience.smb_zi_oc_efx_combined` — one row per business with:
+- ZoomInfo firmographic fields (`zi_c_naics6`, `zi_c_name`, `zi_c_street`, etc.)
+- Equifax firmographic fields (`efx_primnaicscode`, `efx_name`, `efx_address`, etc.)
+- OC firmographic fields (company_number, jurisdiction_code, etc.)
+- `zi_match_confidence`, `efx_match_confidence`, `oc_match_confidence`
+
+This table then flows through `smb_pr_verification_cs` (which adds verification data from case-service) and finally into `customer_table.sql`.
 
 ---
 
-#### Step B4 — Why Only ZoomInfo and Equifax? Why Not OC or Liberty?
+### Day 0 — Pipeline B: The Production Winner-Takes-All Rule
 
-This is the most important architectural question. From reading the actual SQL:
+**[PIPELINE B ONLY]**
 
-**OC IS matched by the XGBoost model** — `oc_probability` exists in `ml_model_matches` and `oc_matches_custom_inc_ml` is built. But:
+`sp_recreate_customer_files()` runs `customer_table.sql` and creates `datascience.customer_files`. This is the production Redshift analytics table.
 
-1. **OC has no NAICS field in its Redshift table.** OC stores `industry_code_uids` (a pipe-delimited string like `us_naics-541110|gb_sic-62012`). The warehouse pipeline was never built to parse this field and extract the NAICS code for use in the `CASE WHEN zi > efx` comparison.
-
-2. **`customer_table.sql` was built when only ZI and EFX had pre-joined Redshift tables** with clean numeric NAICS fields (`zi_c_naics6`, `efx_primnaicscode`). Adding OC would require parsing `industry_code_uids` and handling multi-taxonomy codes — work that was never done in Pipeline B.
-
-3. **Liberty** has no `liberty_match_confidence` column anywhere in the Redshift pipeline. Liberty data (`einmst_*` tables) contains name, address, SIC codes — but was never incorporated into the `customer_files` production rule.
-
-4. **Middesk and Trulioo** return data via live API calls processed by the integration-service (Pipeline A). Their results are not pre-loaded into the Redshift tables that Pipeline B reads.
-
-**In summary:** `zi_match_confidence` and `efx_match_confidence` are the only two confidence scores in `customer_table.sql` because:
-- They are the only sources with clean, pre-loaded Redshift tables containing a usable numeric NAICS field
-- The SQL was written when only these two sources existed in the Redshift pipeline
-- OC, Liberty, Middesk, Trulioo were added later and only integrated into Pipeline A (the Fact Engine)
-
----
-
-**These are NOT the same as the Fact Engine confidence.** They are parallel systems serving different purposes:
-
-| | Fact Engine (Pipeline A — integration-service) | Match confidence (Pipeline B — warehouse-service) |
-|---|---|---|
-| **Runs when** | Business submitted via API (real-time) | Batch SQL job on schedule |
-| **Sources covered** | All 6+: ZI, EFX, OC, Middesk, Trulioo, AI | Only ZoomInfo and Equifax |
-| **Confidence produced by** | Each source's own logic (XGBoost where available) | Worth AI XGBoost entity matching model |
-| **Confidence stored in** | `source.confidence` field on each Fact | `datascience.ml_model_matches.zi_probability`, `efx_probability`, `oc_probability` |
-| **Denormalized to** | `rds_warehouse_public.facts` (JSONB) | `datascience.smb_zi_oc_efx_combined` → `smb_pr_verification_cs` → `customer_files` |
-| **Used for** | All 217 facts → REST API response | NAICS + ALL firmographic fields in `customer_files` |
-| **OC industry codes** | ✅ Used (`industry_code_uids` parsed) | ❌ Not used (field not parsed in SQL) |
-| **Liberty industry codes** | ✅ Available | ❌ Not in pipeline |
-| **Analyst sees in API** | GET /facts/business/{id}/details | Not directly — analysts use Redshift queries |
-
----
-
-## Part 1 — What Each Source Delivers and How Confidence Is Calculated
-
-### Source 1: ZoomInfo
-
-**Redshift table:** `dev.datascience.zoominfo_standard_ml_2`
-
-**Industry fields:**
-
-| Field | What it contains |
-|---|---|
-| `zi_c_naics6` | **Primary 6-digit NAICS code** used for classification |
-| `zi_c_sic4` | 4-digit SIC code |
-| `zi_c_industry` | Industry text label |
-
-**How confidence is computed (from `sources.ts` lines 281–290):**
-```typescript
-// ZoomInfo source confidence logic:
-weight: 0.8,
-getter: async function (businessID) {
-    // 1st preference: XGBoost prediction score from entity matching
-    // 2nd preference: match.index / 55 (heuristic similarity score)
-    // 3rd preference: metadata score / 55
-    this.confidence = match?.prediction
-        ? match.prediction
-        : match?.index
-            ? match.index / MAX_CONFIDENCE_INDEX  // MAX_CONFIDENCE_INDEX = 55
-            : queryResult.metadata?.result?.matches?.score / MAX_CONFIDENCE_INDEX;
-}
-```
-
-**The XGBoost model IS involved for ZoomInfo** — `match.prediction` comes from the entity matching XGBoost model when available.
-
-**Source weight:** `0.8`
-
----
-
-### Source 2: Equifax
-
-**Redshift table:** `dev.warehouse.equifax_us_standardized`
-
-**Industry fields:**
-
-| Field | What it contains |
-|---|---|
-| `efx_primnaicscode` | **Primary 6-digit NAICS code** |
-| `efx_primsic` | Primary SIC code |
-| `efx_primnaicsdesc` | NAICS description |
-
-**How confidence is computed (from `sources.ts` lines 315–350):**
-```typescript
-// Equifax source confidence logic:
-weight: 0.7,
-getter: async function (businessID) {
-    // match.prediction is the most recent using the AI prediction score
-    // match.index is from heuristic matching pulling rows from Redshift
-    this.confidence = match?.prediction
-        ? match.prediction
-        : match?.index / MAX_CONFIDENCE_INDEX;
-}
-```
-
-**The XGBoost model IS involved for Equifax** — same as ZoomInfo: `match.prediction` is the entity matching model score.
-
-**Source weight:** `0.7` — lowest among major sources, partly because Equifax data relies on manual file ingestion at an unknown cadence (comment in source code: `"Equifax has a low weight because it relies upon manual files being ingested at some unknown cadence"`)
-
-**Geographic exclusion:** Equifax NOT used for UK, Canada, Ireland
-
----
-
-### Source 3: OpenCorporates
-
-**Redshift table:** `dev.datascience.open_corporates_standard_ml_2`
-
-**Industry fields:**
-
-| Field | What it contains |
-|---|---|
-| `industry_code_uids` | Pipe-delimited string: `us_naics-541110\|gb_sic-62012\|nace-J6201` |
-| `jurisdiction_code` | e.g. `us_nj`, `gb`, `de` |
-
-**How confidence is computed (from `sources.ts` lines 297–307):**
-```typescript
-// OpenCorporates confidence logic:
-weight: 0.9,
-getter: async function (businessID) {
-    const [response, confidence, updatedAt] = await getFromRequestResponse(businessID, {
-        confidence: rawResponse => rawResponse?.prediction   // XGBoost prediction
-    });
-    this.confidence = confidence ?? undefined;
-}
-```
-
-**The XGBoost entity matching model IS used for OC** — `rawResponse.prediction` is the XGBoost match score.
-
-**Important:** OC's `industry_code_uids` contains codes for ALL taxonomies (US NAICS, UK SIC, NACE, etc.). The FactEngine only extracts `us_naics-` prefixed codes for the `naics_code` fact. UK SIC codes go into `classification_codes` fact but have no downstream consumer — a known gap.
-
-**Source weight:** `0.9` — highest among all sources (except Middesk)
-
----
-
-### Source 4: Middesk
-
-**Storage:** Live API → integration-service PostgreSQL → Kafka
-
-**Industry fields:** NAICS from SOS (Secretary of State) filings; entity type
-
-**How confidence is computed (from `sources.ts` lines 201–238):**
-```typescript
-// Middesk confidence — two methods:
-
-// Method A: XGBoost model
-const result = await confidenceScoreMany(submittedBusiness, middeskBusiness);
-this.confidence = Math.max(...result.map(r => r.prediction));
-
-// Method B: Task-based fallback (when XGBoost not available)
-let confidence = 0.15;          // base score
-confidence += isTaskSuccess(middeskRecord, "name")                ? 0.2 : 0;
-confidence += isTaskSuccess(middeskRecord, "tin")                 ? 0.2 : 0;
-confidence += isTaskSuccess(middeskRecord, "address_verification") ? 0.2 : 0;
-confidence += isTaskSuccess(middeskRecord, "sos_match")            ? 0.2 : 0;
-this.confidence = confidence;   // max = 0.95
-```
-
-**Middesk prefers the XGBoost model** but falls back to task counting when XGBoost is unavailable.
-
-**Source weight:** `2` — internally highest weight (weight=2 means it wins ties against weight=0.9 OC)
-
----
-
-### Source 5: Trulioo
-
-**Storage:** Live API → integration-service PostgreSQL
-
-**Industry fields:** `sicCode` (may be 4-digit — POLLUTED flag)
-
-**How confidence is computed (from `sources.ts` lines 360–375):**
-```typescript
-// Trulioo confidence:
-weight: 0.8,
-getter: async function (businessID) {
-    // match.index from the entity matching result
-    const confidenceValue = fields.response.match.index / MAX_CONFIDENCE_INDEX;
-    this.confidence = confidenceValue;
-}
-```
-
-**Trulioo uses heuristic `match.index / 55`** — not the XGBoost model. The index is a raw similarity score.
-
----
-
-### Source 6: Verdata / SERP
-
-**How confidence is computed (from `sources.ts` lines 416–440):**
-```typescript
-// Verdata/SERP — uses the Worth AI confidenceScore() function:
-weight: 0.8,
-getter: async function (businessID) {
-    const confidenceResult = await confidenceScore({
-        submittedBusiness, verdataBusinesses
-    });
-    this.confidence = confidenceResult.prediction;  // XGBoost prediction
-}
-```
-
-**Verdata uses the XGBoost entity matching model** via `confidenceScore()`.
-
----
-
-### Source 7: GPT-4o-mini AI Enrichment
-
-**How confidence is computed (from `aiNaicsEnrichment.ts` lines 120–125):**
-```typescript
-// AI source confidence:
-getter: async function (businessID) {
-    const [response, confidence, updatedAt] = await getFromRequestResponse(businessID, {
-        confidence: response => response?.confidence  // GPT-4o-mini self-reports: "HIGH"|"MED"|"LOW"
-    });
-    this.confidence = confidence ?? undefined;
-}
-```
-
-**GPT-4o-mini self-reports its confidence** as text: `"HIGH"` / `"MED"` / `"LOW"`. The system maps this to a numeric score.
-
-**Source weight:** `0.1` — lowest. Acts only as a fallback.
-
-**DEPENDENT_FACTS trigger condition (from `aiNaicsEnrichment.ts` lines 57–68):**
-```typescript
-static readonly DEPENDENT_FACTS = {
-    naics_code: {
-        maximumSources: 3,    // If already 3+ sources have naics_code, SKIP AI (save credits)
-        minimumSources: 1,    // Must have at least 1 source
-        ignoreSources: ["AINaicsEnrichment"]  // Don't count itself
-    },
-    mcc_code: {
-        maximumSources: 3,
-        minimumSources: 1,
-        ignoreSources: ["AINaicsEnrichment"]
-    }
-    // ...other facts
-}
-```
-
-**AI enrichment only runs when fewer than 3 sources have already returned a NAICS code.** This saves OpenAI credits. It returns: `naics_code`, `naics_description`, `uk_sic_code` (if GB), `mcc_code`, `mcc_description`, `confidence`, `reasoning`.
-
-**AI model used:** `gpt-5-mini` (as of current codebase — `MODEL = "gpt-5-mini"` in `aiNaicsEnrichment.ts`)
-
-**Last-resort code:** `"561499"` (All Other Business Support Services). If AI also cannot determine a code OR if the returned code is not found in `core_naics_code` table → `removeNaicsCode()` replaces it with `"561499"`.
-
----
-
-## Part 2 — The Full Data Flow
-
-```
-STEP 1 — Business submitted
-  POST /businesses/customers/{customerID}
-  → business_id (UUID) created
-  → Integration pipeline triggered
-
-STEP 2 — Vendor data collected (parallel)
-  Each source's getter() function is called:
-  
-  ZoomInfo   → reads zi_c_naics6 from Redshift table
-               confidence = XGBoost prediction OR match.index / 55
-  
-  Equifax    → reads efx_primnaicscode from Redshift table (US only)
-               confidence = XGBoost prediction OR match.index / 55
-  
-  OC         → reads industry_code_uids from Redshift table
-               confidence = XGBoost prediction via rawResponse.prediction
-  
-  Middesk    → calls live SOS verification API
-               confidence = XGBoost OR 0.15 + 0.20 per successful task
-  
-  Trulioo    → calls live API
-               confidence = match.index / 55 (heuristic)
-  
-  SERP/Verdata → scrapes website
-                 confidence = XGBoost prediction via confidenceScore()
-
-STEP 3 — Fact Engine runs (integration-service)
-  For each fact (naics_code, mcc_code, industry, etc.):
-  → Collect all source values
-  → Apply Winning Source rules (see Part 3)
-  → Produce winner + alternatives[]
-
-STEP 4 — AI Enrichment runs IF < 3 sources returned naics_code
-  → GPT-4o-mini called with business name + address + website
-  → Returns naics_code + mcc_code + confidence text
-  → Participates in Fact Engine with weight = 0.1
-  → POST-PROCESSING: validate code against core_naics_code table
-     If invalid → replace with "561499" (last resort)
-
-STEP 5 — Kafka: facts.v1 topic
-  integration-service publishes FactEnvelope
-  Events: CALCULATE_BUSINESS_FACTS, UPDATE_NAICS_CODE
-
-STEP 6 — warehouse-service persists (FactService.consume())
-  Upserts into rds_warehouse_public.facts (JSONB key-value)
-  One row per fact per business (composite PK: business_id + name)
-
-STEP 7 — case-service updates data_businesses
-  Kafka UPDATE_NAICS_CODE → addIndustryAndNaicsPlatform()
-  data_businesses.naics_code = FK to core_naics_code.id
-  data_businesses.mcc_code   = FK to core_mcc_code.id
-
-STEP 8 — Available via API and Redshift
-```
-
----
-
-## Part 3 — The 5-Step Winning Source Selection Rules
-
-All rules are from `integration-service/lib/facts/rules.ts`.
-
-### Rule 1 — Collect All Candidates
-
-```
-Example candidates for naics_code:
-  Middesk   value="541511"  confidence=0.95  weight=2.0
-  OC        value="541110"  confidence=0.89  weight=0.9
-  ZoomInfo  value="541512"  confidence=0.72  weight=0.8
-  Equifax   value="541511"  confidence=0.68  weight=0.7
-  Trulioo   value="7372"    confidence=0.55  weight=0.8  ← SIC, may be POLLUTED
-  AI        value="541511"  confidence=0.70  weight=0.1
-```
-
-### Rule 2 — factWithHighestConfidence (from `rules.ts` lines 36–56)
-
-```typescript
-export const factWithHighestConfidence: Rule = {
-    fn: (_engine, _factName, input: Fact[]): Fact | undefined => {
-        return input.reduce((acc, fact) => {
-            const factConfidence = fact.confidence ?? fact.source?.confidence ?? 0.1;
-            const accConfidence  = acc?.confidence ?? acc?.source?.confidence ?? 0.1;
-
-            if (fact.value === undefined) return acc;
-            if (acc === undefined) return fact;
-
-            if (Math.abs(factConfidence - accConfidence) <= WEIGHT_THRESHOLD) {
-                // Within 5% — use weight to break the tie
-                return weightedFactSelector(fact, acc);
-            } else if (factConfidence > accConfidence) {
-                return fact;  // Higher confidence wins
-            }
-            return acc;
-        }, undefined);
-    }
-};
-```
-
-**In plain English:**
-1. Sort by confidence (descending)
-2. If two sources are within `WEIGHT_THRESHOLD = 0.05` → go to Rule 3
-3. Otherwise the highest confidence wins outright
-
-### Rule 3 — weightedFactSelector (tie-break, `rules.ts` lines 62–74)
-
-```typescript
-export function weightedFactSelector(fact: Fact, otherFact: Fact): Fact {
-    // Each fact has its own weight (set per-fact in businessDetails/index.ts)
-    // OR falls back to the source-level weight
-    const primaryFactWeight = fact.weight !== DEFAULT_FACT_WEIGHT
-        ? fact.weight
-        : (fact.source?.weight ?? DEFAULT_FACT_WEIGHT);
-
-    const otherFactWeight = otherFact.weight !== DEFAULT_FACT_WEIGHT
-        ? otherFact.weight
-        : (otherFact.source?.weight ?? DEFAULT_FACT_WEIGHT);
-
-    return primaryFactWeight >= otherFactWeight ? fact : otherFact;
-}
-```
-
-**Weight ranking:**
-- Middesk: **2.0**
-- OpenCorporates: **0.9**
-- ZoomInfo: **0.8**
-- Trulioo: **0.8**
-- Equifax: **0.7**
-- AI Enrichment: **0.1**
-
-Note: Weights can also be set **per-fact** in `businessDetails/index.ts`. For example, `uk_sic_code` from Trulioo has `weight: 0.7` overriding the source default.
-
-### Rule 4 — manualOverride (always wins, `rules.ts` lines 108–120)
-
-```typescript
-export const manualOverride: Rule = {
-    fn: (engine, factName: FactName): Fact | undefined => {
-        const manualEntry = engine.getManualSource()?.rawResponse?.[factName];
-        if (manualEntry) {
-            return {
-                name: factName,
-                source: sources.manual,
-                value: manualEntry.value,
-                override: manualEntry ?? null
-            } as Fact;
-        }
-    }
-};
-```
-
-An analyst override set via `PATCH /facts/business/{id}/override/{factName}` **always wins**, regardless of any source confidence.
-
-### Rule 5 — No Valid Code Fallback Cascade
-
-```
-If no source returned a valid naics_code:
-
-A. AI Enrichment runs (if < 3 sources already exist):
-   → GPT-4o-mini reads business name + address + website
-   → Returns naics_code, mcc_code, confidence text
-   → Participates in selection with weight=0.1
-
-B. POST-PROCESSING: validate winning code
-   → internalGetNaicsCode(code) queries core_naics_code table
-   → If code NOT found: removeNaicsCode() → replace with "561499"
-   → "561499" = All Other Business Support Services
-   → "5614"   = the matching MCC code
-
-C. Analyst can correct via:
-   PATCH /facts/business/{id}/override/naics_code
-   Body: { "value": "722511" }
-```
-
-### Geographic Exclusions
-
-From `sources.ts` and `rules.ts`:
-
-| Country | ZoomInfo | Equifax | OC | Middesk | Trulioo |
-|---|---|---|---|---|---|
-| US | ✅ | ✅ | ✅ | ✅ | ✅ |
-| GB (UK) | ✅ | ❌ | ✅ | ❌ | ✅ |
-| CA (Canada) | ✅ | ❌ | ✅ (canada_open) | ❌ | ✅ |
-| IE (Ireland) | ✅ | ❌ | ✅ | ❌ | ✅ |
-
----
-
-## Part 4 — Storage: Three Layers
-
-### Layer 1: FactEnvelope on Kafka (facts.v1)
-
-```
-Topic: facts.v1
-Events:
-  CALCULATE_BUSINESS_FACTS
-  UPDATE_NAICS_CODE
-  FACT_OVERRIDE_CREATED_AUDIT
-  PROCESS_COMPLETION_FACTS
-
-Payload structure (from fact.py):
-  FactEnvelope {
-    scope: string
-    business_id: UUID
-    data: {
-      "naics_code": { value: "541511", source: {...}, confidence: 0.95, alternatives: [...] },
-      "mcc_code":   { value: "7372",   source: {...}, confidence: 0.95 },
-      ...
-    }
-    calculated_at: datetime
-  }
-```
-
-### Layer 2: rds_warehouse_public.facts (PostgreSQL + Redshift mirror)
-
-From `datapooler/adapters/db/models/facts.py`:
-```python
-class FactDb(TimestampMixin, Base):
-    __tablename__ = "facts"
-
-    id          = Column(BigInteger, autoincrement=True)
-    business_id = Column(String, primary_key=True, index=True)
-    name        = Column(String, primary_key=True, index=True)
-    value       = Column(JSONB)
-    received_at = Column(DateTime(timezone=True), index=True)
-
-    __table_args__ = (UniqueConstraint("business_id", "name"),)
-```
-
-**Upsert behaviour** (from `facts.py` line 84):
-```python
-session.merge(fact_db)  # SQLAlchemy merge = INSERT ON CONFLICT UPDATE
-```
-
-### Layer 3: rds_cases_public.data_businesses (denormalized FKs)
+**The classification rule — verified from actual SQL:**
 
 ```sql
--- data_businesses columns (from migration files):
-naics_code  INTEGER  → FK to core_naics_code.id
-mcc_code    INTEGER  → FK to core_mcc_code.id
-industry    INTEGER  → FK to core_business_industries.id
+-- NAICS code selection:
+primary_naics_code =
+    COALESCE(
+        CASE
+            WHEN COALESCE(zi_match_confidence, 0) > COALESCE(efx_match_confidence, 0)
+                THEN CAST(REGEXP_REPLACE(zi_c_naics6, '[^0-9]', '') AS INTEGER)
+            ELSE CAST(REGEXP_REPLACE(efx_primnaicscode, '[^0-9]', '') AS INTEGER)
+        END,
+        naics_code  -- fallback to existing stored naics_code if both are null
+    )
+```
+
+**This same ZI vs EFX comparison controls ALL firmographic fields** — not just NAICS. If ZoomInfo wins, these all come from ZoomInfo; if Equifax wins, they all come from Equifax:
+
+| Field in customer_files | ZoomInfo source | Equifax source |
+|---|---|---|
+| `primary_naics_code` | `zi_c_naics6` | `efx_primnaicscode` |
+| `employee_count` | `zi_c_employees` | `efx_corpempcnt` |
+| `year_established` | `zi_c_year_founded` | `efx_yrest` |
+| `revenue` | `zi_c_revenue × 1000` | `efx_locamount × 1000` |
+| `company_name_firmographic` | `zi_c_name` | `efx_name` |
+| `legal_company_name_firmographic` | `zi_c_company_name` | `efx_legal_name` |
+| `address` | `zi_c_street` | `efx_address` |
+| `city` | `zi_c_city` | `efx_city` |
+| `zipcode` | `LEFT(zi_c_zip, 5)` | `CAST(efx_zipcode AS VARCHAR)` |
+| `country` | `zi_c_country` | `efx_ctryname` |
+| `website_url` | `zi_c_url` | `efx_web` |
+
+**Why only ZoomInfo and Equifax — not OC, Liberty, Middesk, Trulioo?**
+
+Verified from reading all the SQL files:
+
+1. **OC:** Has `oc_probability` in `ml_model_matches` and `oc_match_confidence` in `smb_zi_oc_efx_combined`. But OC stores industry codes as `industry_code_uids` — a pipe-delimited string (`us_naics-541110|gb_sic-62012`). The `customer_table.sql` was never extended to parse this string and extract a numeric NAICS code for the `CASE WHEN` comparison.
+
+2. **Liberty:** Exists in Redshift (`einmst_*` tables) but was never joined into `smb_zi_oc_efx_combined`. No `liberty_match_confidence` column exists anywhere in Pipeline B.
+
+3. **Middesk:** A live API source. Results live in `integration_data.request_response` table (integration-service PostgreSQL), not in the Redshift tables that Pipeline B reads.
+
+4. **Trulioo:** Same — live API, integration-service PostgreSQL only.
+
+**`customer_files` output table columns (key ones):**
+
+| Column | Source | Type |
+|---|---|---|
+| `business_id` | Worth AI UUID | VARCHAR |
+| `primary_naics_code` | ZI or EFX (winner) | INTEGER |
+| `primary_naics_description` | EFX `efx_primnaicsdesc` or `naics_desc` | VARCHAR |
+| `mcc_code` | Pre-stored in source tables | VARCHAR |
+| `match_confidence` | `max(zi_match_confidence, efx_match_confidence)` | FLOAT |
+| `zi_match_confidence` | From `smb_zi_oc_efx_combined` | FLOAT |
+| `efx_match_confidence` | From `smb_zi_oc_efx_combined` | FLOAT |
+| `worth_score` | From scoring pipeline | FLOAT |
+| ... | All other firmographic fields | ... |
+
+**This is Pipeline B's final output.** It is used for:
+- Risk model training datasets (`datascience.global_trulioo_us_kyb` reads from it)
+- Redshift analytics queries
+- Data exports to customers
+
+---
+
+### Day 1+ — Pipeline A: Business Submitted (Real-Time)
+
+**[PIPELINE A ONLY]**
+
+A customer calls `POST /businesses/customers/{customerID}`. Worth AI creates a `business_id` (UUID) and triggers Pipeline A.
+
+**The `integration_data.request_response` table** is the central storage for all live API responses in Pipeline A:
+
+| Column | What it stores |
+|---|---|
+| `request_id` | UUID for this API call |
+| `platform_id` | Which integration made the call (see platform IDs below) |
+| `business_id` | The submitted business UUID |
+| `response` | JSONB — raw API response from the vendor |
+| `confidence` | The computed confidence score for this response |
+| `request_type` | e.g. `"perform_business_enrichment"` |
+| `updated_at` | When this record was last updated |
+
+**Platform IDs (from `integrations.constant.ts`):**
+
+| ID | Source |
+|---|---|
+| 16 | Middesk |
+| 17 | Equifax |
+| 22 | SERP Scrape |
+| 23 | OpenCorporates |
+| 24 | ZoomInfo |
+| 29 | Entity Matching (XGBoost) |
+| 31 | AI NAICS Enrichment (GPT) |
+| 32 | Canada Open |
+| 38 | Trulioo |
+
+When the Fact Engine reads a source's data, it queries `integration_data.request_response WHERE platform_id = X` — this is how it retrieves each vendor's raw response and confidence score.
+
+---
+
+### Day 1 — Pipeline A: Each Source's Getter Runs
+
+**[PIPELINE A ONLY]**
+
+Each source in `sources.ts` has a `getter()` function that fetches its data and computes its confidence score. This is where the **two-tier confidence system** applies.
+
+**Source 1 — ZoomInfo (platformId = 24)**
+- **What it reads:** Queries `integration_data.request_response` where `platform_id = 24`
+- **Industry code:** `zi_c_naics6` from the ZoomInfo firmographic record
+- **Confidence computation:**
+  ```typescript
+  // TIER 1: XGBoost match score (from entity matching pipeline)
+  this.confidence = match?.prediction       // XGBoost probability 0–1
+  // TIER 2: Heuristic fallback
+      ?? match?.index / 55                  // similarity_index / MAX_CONFIDENCE_INDEX
+  ```
+- **Source weight:** `0.8`
+- **Where stored:** `integration_data.request_response.confidence`
+
+**Source 2 — Equifax (platformId = 17)**
+- **What it reads:** `integration_data.request_response` where `platform_id = 17`
+- **Industry code:** `efx_primnaicscode`
+- **Confidence computation:** Same two-tier: XGBoost prediction preferred, `similarity_index / 55` fallback
+- **Source weight:** `0.7`
+- **Note from source code:** *"Equifax has a low weight because it relies upon manual files being ingested at some unknown cadence"*
+
+**Source 3 — OpenCorporates (platformId = 23)**
+- **What it reads:** `integration_data.request_response` where `platform_id = 23`
+- **Industry code:** Parses `industry_code_uids` string:
+  ```typescript
+  // From businessDetails/index.ts:
+  for (const uid of oc.firmographic.industry_code_uids.split("|")) {
+      const [codeName, code] = uid.split("-", 2);
+      if (codeName === "us_naics") return code;      // → naics_code fact
+      if (codeName === "gb_sic")   return normalized; // → uk_sic_code fact
+  }
+  ```
+- **Confidence computation:** `rawResponse?.prediction` — XGBoost model score
+- **Source weight:** `0.9`
+
+**Source 4 — Middesk (platformId = 16)**
+- **What it reads:** `integration_data.request_response` where `platform_id = 16`
+- **Industry code:** NAICS from SOS filing
+- **Confidence computation:**
+  ```typescript
+  // TIER 1: XGBoost via confidenceScoreMany()
+  this.confidence = Math.max(...confidenceScoreMany(submitted, middesk).map(r => r.prediction));
+  // TIER 2: Task-based fallback
+  let confidence = 0.15;                           // base score
+  confidence += isTaskSuccess("name")     ? 0.2 : 0; // +20% per passing task
+  confidence += isTaskSuccess("tin")      ? 0.2 : 0;
+  confidence += isTaskSuccess("address")  ? 0.2 : 0;
+  confidence += isTaskSuccess("sos")      ? 0.2 : 0; // max = 0.95
+  ```
+- **Source weight:** `2.0`
+
+**Source 5 — Trulioo (platformId = 38)**
+- **What it reads:** `integration_data.request_response` where `platform_id = 38`
+- **Industry code:** `sicCode` from API response (may be 4-digit = POLLUTED)
+- **Confidence computation:**
+  ```typescript
+  // Heuristic ONLY — no XGBoost for Trulioo:
+  const confidenceValue = fields.response.match.index / MAX_CONFIDENCE_INDEX; // index / 55
+  ```
+- **Source weight:** `0.8`
+
+**Source 6 — SERP/Verdata (platformId = 22)**
+- **What it reads:** `integration_data.request_response` where `platform_id = 22`
+- **Industry code:** AI inferred from website content
+- **Confidence computation:** XGBoost via `confidenceScore()` function
+- **Source weight:** `0.8`
+
+**Source 7 — AI NAICS Enrichment (platformId = 31)**
+- **What it reads:** `integration_data.request_response` where `platform_id = 31`
+- **Industry code:** GPT-5-mini returns naics_code + mcc_code + confidence text
+- **Confidence computation:**
+  ```typescript
+  this.confidence = response?.confidence;  // GPT self-reports "HIGH"|"MED"|"LOW"
+  ```
+- **Trigger condition:** Only runs if fewer than 3 sources already returned a NAICS code (`maximumSources: 3`)
+- **Source weight:** `0.1`
+
+---
+
+### Day 1 — Pipeline A: The Fact Engine Selects the Winner
+
+**[PIPELINE A ONLY]**
+
+After all getter functions run, the Fact Engine (`integration-service/lib/facts/rules.ts`) selects the winning source for each fact.
+
+**Example — selecting the winner for `naics_code`:**
+
+```
+Candidates collected:
+  Middesk    value="541511"  confidence=0.95  weight=2.0  ← [PIPELINE A: Middesk live API]
+  OC         value="541110"  confidence=0.89  weight=0.9  ← [PIPELINE A: OC via XGBoost]
+  ZoomInfo   value="541512"  confidence=0.72  weight=0.8  ← [PIPELINE A: ZI via XGBoost]
+  Equifax    value="541511"  confidence=0.68  weight=0.7  ← [PIPELINE A: EFX via XGBoost]
+  Trulioo    value="7372"    confidence=0.55  weight=0.8  ← [PIPELINE A: Trulioo heuristic]
+  AI         value="541511"  confidence=0.70  weight=0.1  ← [PIPELINE A: GPT fallback]
+
+Step 1 — factWithHighestConfidence() [rules.ts line 36]:
+  Sort by confidence: Middesk(0.95) > OC(0.89) > ZI(0.72) > AI(0.70) > EFX(0.68) > Trulioo(0.55)
+  Compare top two: |0.95 - 0.89| = 0.06 > WEIGHT_THRESHOLD(0.05)
+  → Middesk wins outright (confidence difference > 5%)
+
+If top two were within 5%:
+Step 2 — weightedFactSelector() [rules.ts line 62]:
+  Compare source weights → higher weight wins the tie
+
+If analyst override exists:
+Step 3 — manualOverride() [rules.ts line 108]:
+  Always wins regardless of confidence
+
+Result: naics_code = "541511"  source=Middesk  confidence=0.95
+```
+
+**The winner is stored as a Fact object with full lineage:**
+```json
+{
+  "name": "naics_code",
+  "value": "541511",
+  "source": { "confidence": 0.95, "platformId": 16 },
+  "override": null,
+  "alternatives": [
+    { "value": "541110", "source": 23, "confidence": 0.89 },
+    { "value": "541512", "source": 24, "confidence": 0.72 }
+  ]
+}
 ```
 
 ---
 
-## Part 5 — The 8 Classification Facts — Full Detail
+### Day 1 — Pipeline A: Kafka and Persistence
+
+**[PIPELINE A ONLY]**
+
+The Fact Engine publishes the FactEnvelope to **Kafka topic `facts.v1`**:
+
+```
+Key Kafka events triggered:
+  CALCULATE_BUSINESS_FACTS      → initial fact calculation complete
+  UPDATE_NAICS_CODE             → when naics_code changes
+  PROCESS_COMPLETION_FACTS      → after all verifications done
+  FACT_OVERRIDE_CREATED_AUDIT   → when analyst creates an override
+```
+
+The **warehouse-service** `FactService.consume()` subscribes to `facts.v1` and upserts each fact into:
+
+**`rds_warehouse_public.facts` — the primary fact store:**
+
+```
+Table schema (from datapooler/adapters/db/models/facts.py):
+  business_id  VARCHAR   (composite PK with name)
+  name         VARCHAR   (the fact key)
+  value        JSONB     (flexible payload)
+  received_at  TIMESTAMP
+  created_at   TIMESTAMP
+  updated_at   TIMESTAMP
+
+Upsert behaviour:
+  session.merge(fact_db)  → INSERT ON CONFLICT (business_id, name) DO UPDATE
+  → Never creates duplicate rows
+  → Always overwrites with latest value
+```
+
+**The case-service** subscribes to `UPDATE_NAICS_CODE` and calls `addIndustryAndNaicsPlatform()`, which updates:
+
+**`rds_cases_public.data_businesses`:**
+```sql
+data_businesses.naics_code → FK to core_naics_code.id (integer, NOT the code string)
+data_businesses.mcc_code   → FK to core_mcc_code.id
+data_businesses.industry   → FK to core_business_industries.id
+```
+
+---
+
+## The Intersection Between Pipeline A and Pipeline B
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  SHARED INPUT (both pipelines read the same Redshift source tables)         │
+│                                                                              │
+│  ZoomInfo:  zoominfo.comp_standard_global → zoominfo_standard_ml_2         │
+│  Equifax:   warehouse.equifax_us_latest → equifax_us_standardized           │
+│  OC:        datascience.open_corporates_standard_ml_2                       │
+└──────────────────────────────┬──────────────────────────────────────────────┘
+                               │
+          ┌────────────────────┴─────────────────────┐
+          ▼                                           ▼
+┌─────────────────────┐                   ┌──────────────────────────┐
+│  PIPELINE A OUTPUT  │                   │  PIPELINE B OUTPUT        │
+│                     │                   │                           │
+│  rds_warehouse      │                   │  datascience.             │
+│  _public.facts      │                   │  customer_files           │
+│  (JSONB, all 217)   │                   │  (wide denorm. table)     │
+│                     │                   │                           │
+│  naics_code fact:   │                   │  primary_naics_code:      │
+│  winner from ALL    │  ← CAN DIFFER →   │  winner from ZI vs EFX    │
+│  6 sources          │                   │  ONLY                     │
+│                     │                   │                           │
+│  Includes: OC, Middesk,│               │  Excludes: OC, Middesk,   │
+│  Trulioo, AI        │                   │  Trulioo, AI, Liberty     │
+└─────────────────────┘                   └──────────────────────────┘
+          │                                           │
+          ▼                                           ▼
+   REST API response                         Redshift analytics
+   Worth 360 Report                          Risk model training
+   Customer UI                               Data export
+```
+
+**When do they show different NAICS codes?**
+
+If OC or Middesk won in Pipeline A (higher confidence than ZI or EFX), then:
+- `rds_warehouse_public.facts.naics_code` = OC or Middesk's code
+- `datascience.customer_files.primary_naics_code` = whichever of ZI or EFX won
+
+These can disagree. The API response (Pipeline A) may show a different NAICS than the Redshift analytics table (Pipeline B).
+
+---
+
+## The 8 Classification Facts — Full Specification
+
+### Storage infrastructure for all 8 facts
+
+```
+PRIMARY STORE:  rds_warehouse_public.facts
+  One row per fact per business.
+  Schema: (business_id, name) → value (JSONB), received_at
+  Upsert on (business_id, name) — always latest value wins.
+
+DENORMALIZED:   rds_cases_public.data_businesses
+  naics_code → FK to core_naics_code.id
+  mcc_code   → FK to core_mcc_code.id
+  industry   → FK to core_business_industries.id
+
+LOOKUP TABLES:
+  core_naics_code           (id, code, description, sector...)
+  core_mcc_code             (id, code, description)
+  core_naics_mcc_code       (joined NAICS + MCC mappings)
+  rel_naics_mcc             (NAICS ↔ MCC crosswalk)
+  core_business_industries  (industry category labels)
+```
+
+---
 
 ### Fact 1: `naics_code`
+**[PIPELINE A — Fact Engine winner]**
 
-**What it is:** The single best 6-digit NAICS 2022 code for this business's primary activity.
+**What it is:** The single best 6-digit NAICS 2022 code for this business.
 
-**Source priority (by confidence × weight):**
-1. Middesk SOS filing — weight 2.0, XGBoost or task-based confidence
-2. OpenCorporates `us_naics-XXXXXX` from `industry_code_uids` — weight 0.9
-3. ZoomInfo `zi_c_naics6` — weight 0.8
-4. Trulioo `naicsCode` — weight 0.8 (reduced if 4-digit SIC returned = POLLUTED)
-5. Equifax `efx_primnaicscode` — weight 0.7
-6. GPT-4o-mini AI enrichment — weight 0.1 (fallback only)
-7. Hardcoded `"561499"` if all else fails
+**Winner selection priority (confidence × weight):**
 
-**JSONB payload in facts table:**
+| Priority | Source | Code field | Weight | Confidence method |
+|---|---|---|---|---|
+| 1st | Middesk | SOS filing NAICS | 2.0 | XGBoost OR task-based (0.15 + 0.20/task) |
+| 2nd | OpenCorporates | `us_naics-XXXXXX` from `industry_code_uids` | 0.9 | XGBoost prediction |
+| 3rd | ZoomInfo | `zi_c_naics6` | 0.8 | XGBoost OR similarity_index/55 |
+| 4th | Trulioo | `naicsCode` (may be POLLUTED) | 0.8 | similarity_index/55 only |
+| 5th | Equifax | `efx_primnaicscode` | 0.7 | XGBoost OR similarity_index/55 |
+| 6th | GPT-5-mini AI | AI-generated code | 0.1 | Self-reported HIGH/MED/LOW |
+| Last | Hardcoded | `"561499"` | n/a | Validation failure fallback |
+
+**Post-processing — validation step (from `aiNaicsEnrichment.ts`):**
+```typescript
+// After winner selected — validate against core_naics_code table:
+const naicsInfo = await internalGetNaicsCode(winner.naics_code);
+if (!naicsInfo?.[0]?.naics_label) {
+    removeNaicsCode();  // replace with "561499"
+}
+```
+
+**JSONB payload in `rds_warehouse_public.facts`:**
 ```json
 {
   "code": "541511",
@@ -684,25 +597,19 @@ industry    INTEGER  → FK to core_business_industries.id
   "override": null,
   "alternatives": [
     { "value": "541110", "source": 23, "confidence": 0.89 },
-    { "value": "541512", "source": 17, "confidence": 0.72 }
+    { "value": "541512", "source": 24, "confidence": 0.72 }
   ]
 }
 ```
 
-**Storage:**
-```
-rds_warehouse_public.facts  (name="naics_code", value=JSONB above)
-rds_cases_public.data_businesses.naics_code  → FK integer to core_naics_code
-```
-
-**Query:**
+**Queries:**
 ```sql
 -- From facts table:
 SELECT value FROM dev.rds_warehouse_public.facts
 WHERE business_id = '<uuid>' AND name = 'naics_code';
 
--- Decoded with lookup:
-SELECT n.code, n.description
+-- Decoded with label:
+SELECT b.id, n.code, n.description
 FROM dev.rds_cases_public.data_businesses b
 JOIN dev.rds_cases_public.core_naics_code n ON n.id = b.naics_code
 WHERE b.id = '<uuid>';
@@ -711,31 +618,43 @@ WHERE b.id = '<uuid>';
 ---
 
 ### Fact 2: `naics_description`
+**[PIPELINE A — derived from naics_code]**
 
 **What it is:** Human-readable label for the winning NAICS code.
 
-**Where it comes from:** After `naics_code` is resolved, the description is looked up from `core_naics_code` and stored as a separate fact.
+**How computed:** After `naics_code` is resolved, `internalGetNaicsCode(code)` queries `core_naics_code` and the description is stored as a separate fact.
 
-**JSONB payload:**
-```json
-{ "description": "Custom Computer Programming Services" }
-```
+**JSONB payload:** `{ "description": "Custom Computer Programming Services" }`
 
 ---
 
 ### Fact 3: `mcc_code`
+**[PIPELINE A — three possible paths]**
 
-**What it is:** 4-digit Merchant Category Code for payment network classification.
+**What it is:** 4-digit Merchant Category Code used by Visa/Mastercard to categorize businesses for interchange rates and fraud rules.
 
-**Three paths:**
-- **Path A (direct):** Middesk or Trulioo directly returns an MCC → most reliable
-- **Path B (crosswalk, most common):** After `naics_code` resolved → lookup via `rel_naics_mcc` table: `NAICS 541511 → MCC 7372`
-- **Path C (AI):** GPT-4o-mini returns `mcc_code` alongside `naics_code`
+**Three paths — in priority order:**
 
-**JSONB payload:**
-```json
-{ "code": "7372", "description": "Computer Programming, Data Processing" }
 ```
+Path A — Direct from vendor (most reliable):
+  Middesk or Trulioo directly returns an MCC code in their API response.
+  → stored immediately as mcc_code fact
+  → mcc_code_found = true
+
+Path B — Crosswalk from NAICS (most common):
+  After naics_code is resolved, look up the mapping:
+  SELECT mcc_code FROM dev.rds_cases_public.rel_naics_mcc
+  WHERE naics_code = '541511';
+  → Returns: 7372
+  → stored as mcc_code fact
+  → mcc_code_found = false, mcc_code_from_naics = "7372"
+
+Path C — AI Enrichment (fallback):
+  GPT-5-mini returns mcc_code alongside naics_code.
+  → stored as mcc_code fact
+```
+
+**JSONB payload:** `{ "code": "7372", "description": "Computer Programming, Data Processing" }`
 
 **Storage:**
 ```
@@ -746,66 +665,58 @@ rds_cases_public.data_businesses.mcc_code → FK to core_mcc_code.id
 ---
 
 ### Fact 4: `mcc_code_found`
+**[PIPELINE A — boolean flag]**
 
-**What it is:** Boolean — was MCC found directly from a vendor (not derived via crosswalk)?
+**What it is:** Was MCC found directly from a vendor source (not derived via NAICS crosswalk)?
 
-- `true` → A vendor directly returned an MCC (Middesk or Trulioo)
-- `false` → MCC was derived from NAICS via `rel_naics_mcc`
+- `true` → Middesk or Trulioo directly returned the MCC
+- `false` → MCC was derived from the NAICS→MCC crosswalk table
 
-**JSONB payload:**
-```json
-{ "value": true }
-```
+**Why it matters:** A directly found MCC is authoritative; a derived one is an approximation via a many-to-many crosswalk.
+
+**JSONB payload:** `{ "value": true }` or `{ "value": false }`
 
 ---
 
 ### Fact 5: `mcc_code_from_naics`
+**[PIPELINE A — crosswalk derivation]**
 
-**What it is:** The MCC code derived specifically from the winning NAICS code via the crosswalk table.
+**What it is:** The specific MCC code derived from the NAICS→MCC crosswalk, separately recorded.
 
-**Query used:**
+**Crosswalk query used:**
 ```sql
 SELECT mcc_code FROM dev.rds_cases_public.rel_naics_mcc
 WHERE naics_code = '541511';
--- Returns: 7372
+-- Returns: 7372 (Computer Programming)
 ```
 
-**Used when:** `mcc_code_found = false`. In this case, `mcc_code` and `mcc_code_from_naics` contain the same value.
+**When stored:** Always computed alongside mcc_code. If `mcc_code_found = false`, then `mcc_code` and `mcc_code_from_naics` contain the same value.
 
-**JSONB payload:**
-```json
-{ "code": "7372", "description": "Computer Programming, Data Processing" }
-```
+**JSONB payload:** `{ "code": "7372", "description": "Computer Programming, Data Processing" }`
 
 ---
 
 ### Fact 6: `mcc_description`
+**[PIPELINE A — derived from mcc_code]**
 
 **What it is:** Human-readable label for the MCC code.
 
-**Where it comes from:** Lookup from `core_mcc_code` after `mcc_code` is resolved.
+**How computed:** After `mcc_code` is resolved, `internalGetMccCode(code)` queries `core_mcc_code`.
 
-**JSONB payload:**
-```json
-{ "description": "Computer Programming, Data Processing" }
-```
+**JSONB payload:** `{ "description": "Computer Programming, Data Processing" }`
 
 ---
 
 ### Fact 7: `industry`
+**[PIPELINE A — Fact Engine winner]**
 
-**What it is:** High-level category label for easy display.
+**What it is:** High-level category label for easy UI display. Less precise than NAICS but more human-readable.
 
-**Where it comes from:**
+**Sources:**
 - ZoomInfo `zi_c_industry` or `zi_c_sub_industry`
 - OC industry text from `industry_code_uids`
-- SERP scrape AI interpretation
+- SERP scrape AI text interpretation
 - Derived from NAICS → mapped via `core_business_industries` lookup
-
-**JSONB payload:**
-```json
-{ "value": "Technology - Software" }
-```
 
 **Storage:**
 ```
@@ -813,13 +724,26 @@ rds_warehouse_public.facts  (name="industry")
 rds_cases_public.data_businesses.industry → FK to core_business_industries.id
 ```
 
+**Lookup:**
+```sql
+SELECT i.name AS industry_label
+FROM dev.rds_cases_public.data_businesses b
+JOIN dev.rds_cases_public.core_business_industries i ON i.id = b.industry
+WHERE b.id = '<uuid>';
+```
+
 ---
 
 ### Fact 8: `classification_codes`
+**[PIPELINE A — pre-winner snapshot, all sources]**
 
-**What it is:** All industry codes from all sources and all taxonomies — the complete pre-winner picture.
+**What it is:** The complete raw picture — every industry code from every source and every taxonomy system — captured BEFORE the Fact Engine picks a winner.
 
-**From `businessDetails/index.ts`:** The FactEngine aggregates every code before selection, including UK SIC, NACE, and Canadian NAICS from OC.
+**How populated (from `businessDetails/index.ts`):**
+Every vendor's codes are collected into this fact:
+- OC `industry_code_uids`: `us_naics-541110|gb_sic-62012|nace-J6201` → all three extracted
+- ZoomInfo: `zi_c_naics6` + `zi_c_sic4`
+- Equifax: `efx_primnaicscode` + `efx_primsic` + up to 4 secondary NAICS
 
 **JSONB payload:**
 ```json
@@ -828,129 +752,110 @@ rds_cases_public.data_businesses.industry → FK to core_business_industries.id
     { "system": "NAICS",  "code": "541511", "source": "Middesk",   "confidence": 0.95 },
     { "system": "NAICS",  "code": "541110", "source": "OC",         "confidence": 0.89 },
     { "system": "uk_sic", "code": "62012",  "source": "OC",         "confidence": 0.89 },
+    { "system": "nace",   "code": "J6201",  "source": "OC",         "confidence": 0.89 },
     { "system": "NAICS",  "code": "541512", "source": "ZoomInfo",   "confidence": 0.72 },
     { "system": "NAICS",  "code": "541511", "source": "Equifax",    "confidence": 0.68 }
   ]
 }
 ```
 
-**Known gap:** UK SIC, NACE, and Canadian NAICS codes are captured here correctly — but **no Kafka handler, API endpoint, or PDF report reads this fact**. It exists in the data but has no downstream consumer.
+**Critical known gap:** UK SIC, NACE, Canadian NAICS codes are correctly captured in this fact. But **no Kafka consumer, API endpoint, PDF report, or database column reads `classification_codes`**. The UK SIC code `62012` from OC exists in the system but is never used by any downstream process. This is one of the four confirmed gaps the Consensus Engine addresses.
 
-**Storage:** `rds_warehouse_public.facts` only — not in `data_businesses`
-
----
-
-## Part 6 — Where Facts Appear
-
-### Internal API (integration-service)
-```
-GET /facts/business/{businessId}/details
-  → naics_code, mcc_code, industry with full source + confidence + alternatives
-
-GET /facts/business/{businessId}/all  (admin only)
-  → all 217 facts
-
-PATCH /facts/business/{businessId}/override/{factName}
-  → analyst manual override
-```
-
-### External API (case-service)
-```
-GET /businesses/customers/{customerID}
-  → naics_code, naics_title, mcc_code, industry (simplified, no source lineage)
-```
-
-### Redshift
-```sql
--- All 8 classification facts:
-SELECT name, value, received_at
-FROM dev.rds_warehouse_public.facts
-WHERE business_id = '<uuid>'
-  AND name IN ('naics_code','naics_description','mcc_code','mcc_description',
-               'mcc_code_found','mcc_code_from_naics','industry','classification_codes');
-
--- Denormalized:
-SELECT b.id, n.code AS naics, m.code AS mcc, i.name AS industry
-FROM dev.rds_cases_public.data_businesses b
-JOIN dev.rds_cases_public.core_naics_code n ON n.id = b.naics_code
-JOIN dev.rds_cases_public.core_mcc_code   m ON m.id = b.mcc_code
-JOIN dev.rds_cases_public.core_business_industries i ON i.id = b.industry
-WHERE b.id = '<uuid>';
-```
+**Storage:** `rds_warehouse_public.facts` ONLY — not in `data_businesses`
 
 ---
 
-## Part 7 — Complete Workflow Summary
+## Complete Data Flow Summary
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  STEP 1: Business submitted                                          │
-│  POST /businesses/customers/{customerID} → business_id created      │
-└───────────────────────┬─────────────────────────────────────────────┘
-                        │
-┌───────────────────────▼─────────────────────────────────────────────┐
-│  STEP 2: Each source's getter() runs to collect vendor data         │
-│                                                                      │
-│  Source       Industry Code         How confidence computed          │
-│  ─────────    ──────────────────    ────────────────────────────     │
-│  Middesk      naics_code (SOS)      XGBoost OR 0.15+0.20/task        │
-│  OC           industry_code_uids    XGBoost (rawResponse.prediction) │
-│  ZoomInfo     zi_c_naics6           XGBoost OR match.index/55        │
-│  Equifax      efx_primnaicscode     XGBoost OR match.index/55        │
-│  Trulioo      sicCode (may pollute) match.index/55 (heuristic only)  │
-│  SERP         website inferred      XGBoost via confidenceScore()    │
-└───────────────────────┬─────────────────────────────────────────────┘
-                        │
-┌───────────────────────▼─────────────────────────────────────────────┐
-│  STEP 3: Fact Engine selects winner (rules.ts)                       │
-│                                                                      │
-│  factWithHighestConfidence():                                        │
-│    → Sort by confidence                                              │
-│    → If diff < 0.05: weightedFactSelector() uses source weight       │
-│    → manualOverride() always wins regardless                         │
-│                                                                      │
-│  If < 3 sources returned a code → AI enrichment runs (gpt-5-mini)   │
-│  AI output: naics_code + mcc_code + uk_sic_code + confidence text   │
-│                                                                      │
-│  POST-PROCESSING: validate code against core_naics_code              │
-│    If not found → removeNaicsCode() → replace with "561499"         │
-└───────────────────────┬─────────────────────────────────────────────┘
-                        │
-┌───────────────────────▼─────────────────────────────────────────────┐
-│  STEP 4: 8 classification facts produced                             │
-│                                                                      │
-│  naics_code          → winning 6-digit code                         │
-│  naics_description   → its label                                     │
-│  mcc_code            → 4-digit MCC (direct or crosswalk)            │
-│  mcc_description     → its label                                     │
-│  mcc_code_found      → was MCC found directly?                       │
-│  mcc_code_from_naics → MCC derived via rel_naics_mcc crosswalk      │
-│  industry            → high-level text label                         │
-│  classification_codes→ ALL codes from ALL sources (pre-winner)      │
-└───────────────────────┬─────────────────────────────────────────────┘
-                        │
-┌───────────────────────▼─────────────────────────────────────────────┐
-│  STEP 5: Kafka → facts.v1 → warehouse upsert                        │
-│                                                                      │
-│  rds_warehouse_public.facts:                                         │
-│    (business_id, name) → JSONB value + received_at                  │
-│    INSERT ON CONFLICT UPDATE (upsert, never duplicates)              │
-│                                                                      │
-│  rds_cases_public.data_businesses:                                   │
-│    naics_code → FK integer to core_naics_code.id                    │
-│    mcc_code   → FK integer to core_mcc_code.id                      │
-│    industry   → FK integer to core_business_industries.id           │
-└───────────────────────┬─────────────────────────────────────────────┘
-                        │
-┌───────────────────────▼─────────────────────────────────────────────┐
-│  STEP 6: Available to consumers                                      │
-│                                                                      │
-│  Internal:  GET /facts/business/{id}/details → full fact + lineage  │
-│  External:  GET /businesses/customers/{id}   → simplified fields    │
-│  Redshift:  SELECT FROM dev.rds_warehouse_public.facts               │
-│  PDF:       Worth 360 Report shows naics_code + industry            │
-│                                                                      │
-│  NOTE: classification_codes has no downstream consumer              │
-│  (UK SIC, Canadian NAICS captured but never read by any service)    │
-└─────────────────────────────────────────────────────────────────────┘
+T=0  Vendor data pre-loaded into Redshift (bulk, offline)
+     zoominfo_standard_ml_2 ← zi_c_naics6, zi_c_name, etc.
+     equifax_us_standardized ← efx_primnaicscode, efx_name, etc.
+     open_corporates_standard_ml_2 ← industry_code_uids, jurisdiction_code
+
+T=1  [PIPELINE B] Heuristic similarity tables built (Redshift SQL jobs)
+     smb_zoominfo_standardized_joined  ← similarity_index (Levenshtein score)
+     smb_equifax_standardized_joined   ← similarity_index
+     smb_open_corporate_standardized_joined ← similarity_index
+     NOTE: similarity_index = name_distance(max 20) + address_distance(max 20)
+            + state_match(0/1) + city_match(0/1) + zipcode_match(0/1)
+           MAX_CONFIDENCE_INDEX = 55 (used to normalize: index/55 = 0–1)
+
+T=2  [PIPELINE B] XGBoost entity matching model runs
+     Input: 33 pairwise text/address features per candidate pair
+     Output: datascience.ml_model_matches
+       → zi_probability (0–1): "Is this ZI record the same business?"
+       → efx_probability (0–1): "Is this EFX record the same business?"
+       → oc_probability (0–1): "Is this OC record the same business?"
+
+T=3  [PIPELINE B] Match tables built
+     efx_matches_custom_inc_ml: XGBoost efx_probability ≥ 0.8 UNION heuristic ≥ 45/55
+     zoominfo_matches_custom_inc_ml: XGBoost zi_probability ≥ 0.8 UNION heuristic ≥ 45/55
+     oc_matches_custom_inc_ml: XGBoost oc_probability ≥ 0.8 UNION heuristic ≥ 45/55
+
+T=4  [PIPELINE B] Combined firmographic table built
+     smb_zi_oc_efx_combined:
+       zi_match_confidence = zi_probability ?? similarity_index/55 ?? 0
+       efx_match_confidence = efx_probability ?? similarity_index/55 ?? 0
+       oc_match_confidence = oc_probability ?? similarity_index/55 ?? 0
+       + all firmographic fields joined from vendor tables
+
+T=5  [PIPELINE B] Production rule runs → customer_files created
+     WHEN zi_match_confidence > efx_match_confidence → ALL fields from ZoomInfo
+     ELSE → ALL fields from Equifax
+     Output: datascience.customer_files (NAICS, name, address, revenue, etc.)
+     Used by: analytics, risk model training, data exports
+
+===== Business Submitted (T=6, real-time) =====
+
+T=6  [PIPELINE A] Business submitted via API
+     → business_id (UUID) created in case-service PostgreSQL
+     → integration pipeline triggered
+     → integration_data.request_response table receives all API responses
+
+T=7  [PIPELINE A] Live API sources called
+     Middesk (platform_id=16): SOS verification API
+       → returns NAICS from filing, task results, confidence
+       → stored in integration_data.request_response
+     Trulioo (platform_id=38): business verification API
+       → returns sicCode (may be 4-digit = POLLUTED)
+     SERP (platform_id=22): website scrape
+
+T=8  [PIPELINE A] Redshift table sources read
+     ZoomInfo (platform_id=24): reads zoominfo_standard_ml_2
+       confidence = match.prediction (XGBoost) ?? match.index/55
+     Equifax (platform_id=17): reads equifax_us_standardized
+       confidence = match.prediction (XGBoost) ?? match.index/55
+     OC (platform_id=23): reads open_corporates_standard_ml_2
+       confidence = rawResponse.prediction (XGBoost)
+       industry = parses industry_code_uids → us_naics, gb_sic, nace
+
+T=9  [PIPELINE A] Fact Engine selects winner (integration-service)
+     factWithHighestConfidence() → sort all sources by confidence
+     If diff < 0.05 → weightedFactSelector() → use source weight
+     manualOverride() → analyst override always wins
+     AI runs IF < 3 sources returned naics_code (saves OpenAI credits)
+     POST-PROCESSING: validate code against core_naics_code → 561499 if invalid
+
+T=10 [PIPELINE A] 8 classification facts produced
+     naics_code, naics_description, mcc_code, mcc_description,
+     mcc_code_found, mcc_code_from_naics, industry, classification_codes
+     ALL stored in integration_data.request_response (source: platform_id=31)
+
+T=11 [PIPELINE A] Kafka: facts.v1 topic
+     FactEnvelope published with all 8 facts + alternatives + source lineage
+
+T=12 [PIPELINE A] warehouse-service persists
+     rds_warehouse_public.facts: (business_id, name) → JSONB value
+       Upsert: INSERT ON CONFLICT (business_id, name) DO UPDATE
+     case-service: data_businesses.naics_code → FK to core_naics_code.id
+
+T=13 [BOTH PIPELINES] Data available to consumers
+     PIPELINE A:
+       GET /facts/business/{id}/details → full fact with confidence + alternatives
+       GET /businesses/customers/{id}   → simplified naics_code, mcc_code, industry
+       Worth 360 Report PDF             → naics_code + industry
+     PIPELINE B:
+       SELECT FROM datascience.customer_files → wide table for analytics
+       SELECT FROM rds_warehouse_public.facts → JSONB fact store
 ```
