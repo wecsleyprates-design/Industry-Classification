@@ -1049,14 +1049,21 @@ def _sidebar():
     try:
         from redshift_connector import get_connector
         rc = get_connector()
-        st.sidebar.success("Redshift: LIVE",icon="✅") if rc.is_connected else st.sidebar.warning("Redshift: SIMULATED",icon="⚠️")
+        if rc.is_connected:
+            st.sidebar.success("Redshift: LIVE", icon="✅")
+        else:
+            st.sidebar.warning("Redshift: SIMULATED", icon="⚠️")
     except Exception:
-        st.sidebar.warning("Redshift: SIMULATED",icon="⚠️")
+        st.sidebar.warning("Redshift: SIMULATED", icon="⚠️")
     try:
         from config import _get_openai_key
         k = _get_openai_key()
-        st.sidebar.success("OpenAI: Configured",icon="✅") if (k and len(k)>10) else st.sidebar.info("OpenAI: Not set — LLM disabled",icon="ℹ️")
-    except Exception: pass
+        if k and len(k) > 10:
+            st.sidebar.success("OpenAI: Configured", icon="✅")
+        else:
+            st.sidebar.info("OpenAI: Not set — LLM disabled", icon="ℹ️")
+    except Exception:
+        pass
     st.sidebar.divider()
     page = st.sidebar.radio("Navigate",["Classify","Industry Lookup","📜 Audit Trail"],index=0)
     mode = None
