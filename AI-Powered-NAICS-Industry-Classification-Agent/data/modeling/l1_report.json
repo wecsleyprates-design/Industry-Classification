@@ -1,0 +1,83 @@
+{
+  "n_total": 5000,
+  "match_rates": {
+    "oc": {
+      "matched": 2482,
+      "not_matched": 2518,
+      "match_pct": 49.6
+    },
+    "efx": {
+      "matched": 1730,
+      "not_matched": 3270,
+      "match_pct": 34.6
+    },
+    "zi": {
+      "matched": 2167,
+      "not_matched": 2833,
+      "match_pct": 43.3
+    },
+    "liberty": {
+      "matched": 792,
+      "not_matched": 4208,
+      "match_pct": 15.8
+    }
+  },
+  "confidence_stats": {
+    "oc": {
+      "mean": 0.6518,
+      "median": 0.7971,
+      "std": 0.2655,
+      "p25": 0.391,
+      "p75": 0.8847,
+      "p90": 0.9333
+    },
+    "efx": {
+      "mean": 0.6074,
+      "median": 0.7327,
+      "std": 0.2498,
+      "p25": 0.3672,
+      "p75": 0.8297,
+      "p90": 0.876
+    },
+    "zi": {
+      "mean": 0.6427,
+      "median": 0.7655,
+      "std": 0.2443,
+      "p25": 0.4107,
+      "p75": 0.8549,
+      "p90": 0.9051
+    },
+    "liberty": {
+      "mean": 0.4673,
+      "median": 0.4131,
+      "std": 0.2979,
+      "p25": 0.2341,
+      "p75": 0.7678,
+      "p90": 0.8228
+    }
+  },
+  "naics_accuracy_when_matched": {
+    "efx": {
+      "n_matched": 1730,
+      "top1_exact_pct": 75.6,
+      "top1_4digit_pct": 75.8,
+      "interpretation": "When EFX matches with \u22650.8 confidence, its NAICS code is exactly correct 75.6% of the time."
+    },
+    "zi": {
+      "n_matched": 2167,
+      "top1_exact_pct": 75.6,
+      "top1_4digit_pct": 75.8,
+      "interpretation": "When ZI matches with \u22650.8 confidence, its NAICS code is exactly correct 75.6% of the time."
+    }
+  },
+  "source_agreement": {
+    "zi_vs_efx_4digit_pct": 31.7,
+    "oc_has_naics_pct": 100.0
+  },
+  "uk_sic_availability": {
+    "available_in_oc": 287,
+    "pct_of_total": 5.7,
+    "stored_in_db": 0,
+    "gap_note": "287 companies have UK SIC in OC response (5.7%) \u2014 production stores 0 (no table)."
+  }
+}
