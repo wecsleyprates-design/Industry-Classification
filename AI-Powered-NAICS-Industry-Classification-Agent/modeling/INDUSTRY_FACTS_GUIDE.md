@@ -323,6 +323,17 @@ Verified from reading all the SQL files. This is a **historical design limitatio
 - Redshift analytics queries
 - Data exports to customers
 
+**Pipeline B — What Happens in Each Scenario:**
+
+| Situation | What gets stored | What is in `customer_files` |
+|---|---|---|
+| ZI confidence > EFX confidence | All firmographic fields from ZoomInfo (`zi_c_naics6`, name, address, revenue…) | `primary_naics_code` = `zi_c_naics6`, all ZI firmographic columns |
+| EFX confidence > ZI confidence | All firmographic fields from Equifax (`efx_primnaicscode`, name, address, revenue…) | `primary_naics_code` = `efx_primnaicscode`, all EFX firmographic columns |
+| Both confidences = 0 (no match found) | `primary_naics_code` = existing `naics_code` (COALESCE fallback) or NULL | NULL — no industry code in analytics table |
+| OC had a better match than ZI or EFX | OC result is IGNORED by Pipeline B | `primary_naics_code` from ZI or EFX only — OC code not used (⚠️ known gap) |
+| Liberty, Middesk, Trulioo had a match | Also IGNORED by Pipeline B — live API sources not in batch pipeline | Same ZI vs EFX result — other sources not used (⚠️ known gap) |
+| `customer_files` table rebuilt on schedule | Overwrites previous version completely | Latest batch result always replaces the previous one |
+
 ---
 
 ### Day 1+ — Pipeline A: Business Submitted (Real-Time)
@@ -643,42 +654,18 @@ rds_warehouse_public.facts:
 
 #### Complete Fallback Cascade — What Gets Stored and Shown
 
-```
-ALL SCENARIOS — what gets stored and what the user sees:
+**Pipeline A — What Happens in Each Scenario:**
 
-Scenario A — Normal (2–6 sources returned NAICS):
-  → Fact Engine picks winner by confidence + weight
-  → naics_code stored in rds_warehouse_public.facts
-  → data_businesses.naics_id updated → FK to core_naics_code
-  → User sees: naics_code + confidence + alternatives in API response
-
-Scenario B — Only 1 source returned NAICS:
-  → Fact Engine picks that source (only candidate)
-  → AI enrichment runs (< 3 sources) → may override if higher confidence
-  → Same storage as Scenario A
-  → User sees: naics_code with possibly low confidence score
-
-Scenario C — No source returned any NAICS (0 candidates):
-  → AI enrichment triggers (minimumSources=1 but context is minimal)
-  → GPT tries to infer from name + address + website
-  → If GPT succeeds: stores AI-generated code (validated against core_naics_code)
-  → If GPT fails or code invalid: stores "561499" (last resort)
-  → User sees: naics_code = "561499" (All Other Business Support Services)
-               source.confidence = "LOW"
-               This signals to the analyst: no reliable classification
-
-Scenario D — No source met confidence threshold (but returned a code):
-  → factWithHighestConfidence() picks whoever had the highest confidence
-    even if that confidence is 0.05 or 0.10 — no minimum cutoff
-  → AI enrichment also runs if < 3 sources
-  → User sees: naics_code with source.confidence = 0.10 (or whatever it was)
-               The low confidence is VISIBLE in the API response
-
-Scenario E — Analyst override exists:
-  → manualOverride() ALWAYS wins — overrides any model/AI result
-  → Stored in rds_warehouse_public.facts with override: {...}
-  → User sees: naics_code with override field populated
-```
+| Situation | What gets stored | What the customer sees |
+|---|---|---|
+| 2–6 sources returned NAICS and agree | Winning code in `rds_warehouse_public.facts` + `data_businesses.naics_id` updated | Strong classification, winning source confidence, all alternatives listed |
+| Sources disagree (different codes) | Highest-confidence source wins | Winner code + confidence + alternatives showing the disagreement |
+| Only 1 source returned a NAICS | That source wins; AI also runs (< 3 sources) | Code with possibly low confidence; AI result in alternatives if it ran |
+| No source returned any NAICS | AI enrichment triggers; stores GPT-generated code if valid | AI-generated code or `561499` placeholder with `confidence = "LOW"` |
+| Winning code not in `core_naics_code` | Replaced with `"561499"` (last resort — `removeNaicsCode()`) | Placeholder code `561499` — signals "no reliable classification" |
+| Sources have very low confidence (e.g. 0.10) | Highest available wins — **no minimum cutoff** | Code shown with low confidence visible; analyst should verify |
+| Analyst set a manual override | Override stored in `rds_warehouse_public.facts` with `override: {…}` | Override code with `override` field populated — no alternatives shown |
+| AI runs but GPT also fails | `"561499"` stored as last resort | Placeholder `561499` — analyst override required |
 
 ---
 
