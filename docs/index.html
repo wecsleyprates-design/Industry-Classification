@@ -236,8 +236,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
     </div>
   </a>
 
-  <!-- DECK 5 — Dual Pipeline Blueprint (full-width, below Deck 4) -->
-  <a href="pipeline_facts.html" class="deck" style="text-decoration:none;background:linear-gradient(135deg,#1A365D,#2B4C7E);grid-column:1 / -1;">
+  <!-- DECK 5 — Dual Pipeline Blueprint (same width as Deck 4, beside it) -->
+  <a href="pipeline_facts.html" class="deck" style="text-decoration:none;background:linear-gradient(135deg,#1A365D,#2B4C7E);">
     <div class="deck-num">5</div>
     <div class="deck-header">
       <div class="deck-icon">🏭</div>
@@ -245,12 +245,12 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
       <div class="deck-title">Dual-Pipeline Classification Blueprint</div>
       <div class="deck-subtitle">19 slides · Where the 8 facts come from, end-to-end</div>
     </div>
-    <div class="deck-body" style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+    <div class="deck-body">
       <div class="deck-why">
         <div class="deck-why-label">Why read this</div>
         <div class="deck-why-text">This deck answers the most concrete operational question: how do the 8 classification facts (<code style="background:rgba(255,255,255,.1);padding:1px 4px;border-radius:3px">naics_code</code>, <code style="background:rgba(255,255,255,.1);padding:1px 4px;border-radius:3px">mcc_code</code>, <code style="background:rgba(255,255,255,.1);padding:1px 4px;border-radius:3px">industry</code>, and 5 more) get calculated, stored, and exposed to customers? It covers both pipelines in full — Day 0 vendor data loading, heuristic similarity scoring, the XGBoost entity matching model, the Fact Engine winner selection rules, the AI enrichment trigger logic, what happens in every edge case, and exactly which API endpoints expose each fact.</div>
       </div>
-      <div class="deck-covers" style="grid-template-columns:1fr 1fr 1fr;align-content:start;">
+      <div class="deck-covers">
         <div class="deck-tag">Day 0: vendor data loading</div>
         <div class="deck-tag">Pipeline A vs B goals and audiences</div>
         <div class="deck-tag">similarity_index / MAX_CONFIDENCE_INDEX=55</div>
