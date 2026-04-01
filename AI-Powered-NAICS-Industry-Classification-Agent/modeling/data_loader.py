@@ -273,31 +273,51 @@ class DataLoader:
             cf.company_state,
             cf.company_postalcode,
 
-            -- ── Level 1 outputs (REAL — already computed by entity_matching model) ──
-            -- OC match confidence
+            -- ── Level 1 XGBoost entity matching outputs ──────────────────────────
+            -- These are the REAL Pipeline B XGBoost scores from ml_model_matches,
+            -- materialized into the three match tables and then into customer_files.
+            -- Formula: XGBoost probability if >= 0.80, else similarity_index/55
+            --
+            -- OC match confidence (from oc_matches_custom_inc_ml.oc_probability)
             COALESCE(oc.oc_probability,       0.0) AS oc_confidence,
-            -- Equifax match confidence
+            -- Equifax match confidence (from efx_matches_custom_inc_ml.efx_probability)
             COALESCE(ef.efx_probability,      0.0) AS efx_confidence,
-            -- ZoomInfo match confidence
+            -- ZoomInfo match confidence (from zoominfo_matches_custom_inc_ml.zi_probability)
             COALESCE(zi.zi_probability,       0.0) AS zi_confidence,
-            -- Liberty: stored locally in parquet, not in Redshift → default 0
+            -- Pipeline B also has these pre-built zi/efx_match_confidence in customer_files:
+            -- These are the scores that drive the production winner-takes-all rule
+            COALESCE(cf.zi_match_confidence,  0.0) AS zi_match_confidence_pipeline_b,
+            COALESCE(cf.efx_match_confidence, 0.0) AS efx_match_confidence_pipeline_b,
+            --
+            -- Liberty: XGBoost scores stored in local parquet ({TABLE}_results.parquet)
+            -- not available in Redshift batch tables → default 0
             0.0::FLOAT                             AS liberty_confidence,
-            -- Trulioo: name_verification acts as a proxy confidence signal
-            COALESCE(tru.name_verification,   0.0) AS tru_confidence,
+            --
+            -- Trulioo: confidence comes from integration_data.request_response (Pipeline A)
+            -- NOT available in Redshift batch pipeline → using KYB signal as proxy
+            -- NOTE: name_verification (0/1) is a KYB match flag, NOT entity match confidence
+            -- Use with caution — this is an approximation only
+            COALESCE(tru.name_verification,   0.0) AS tru_confidence_proxy,
 
-            -- ── Vendor industry codes (REAL — returned by API calls, stored in Redshift) ──
-            -- OpenCorporates: pipe-delimited multi-taxonomy (us_naics-XXXX|gb_sic-XXXX|...)
+            -- ── Vendor industry codes (from Redshift source tables) ──────────────
+            -- OpenCorporates: pipe-delimited multi-taxonomy string
+            -- Format: us_naics-541110|gb_sic-62012|nace-J6201
             oc_src.industry_code_uids              AS oc_industry_uids,
             oc_src.jurisdiction_code               AS oc_jurisdiction_code,
-            -- Equifax: primary NAICS + SIC
+            -- Equifax: primary NAICS + SIC codes
             ef_src.efx_primnaicscode               AS efx_naics,
             ef_src.efx_primsic                     AS efx_sic,
             -- ZoomInfo: 6-digit NAICS
             zi_src.zi_c_naics6                     AS zi_naics,
-            -- Trulioo: SIC code returned by API
-            tru.mcc_code                           AS tru_sic,
+            -- Trulioo: KYB-focused table; mcc_code here is from the fact engine,
+            -- not a raw Trulioo SIC. Actual Trulioo SIC lives in
+            -- integration_data.request_response (platform_id=38, Pipeline A only)
+            tru.mcc_code                           AS tru_mcc_from_facts,
 
-            -- ── Production rule output (REAL — what customer_table.sql stored) ──
+            -- ── Production rule output (Pipeline B — customer_table.sql) ─────────
+            -- This is what the production winner-takes-all rule wrote to customer_files
+            -- Rule: IF zi_match_confidence > efx_match_confidence THEN zi_c_naics6
+            --       ELSE efx_primnaicscode
             cf.naics_code                          AS production_naics,
             cf.zi_match_confidence                 AS zi_match_conf_raw,
             cf.efx_match_confidence                AS efx_match_conf_raw,
@@ -334,14 +354,21 @@ class DataLoader:
         df["_data_source"] = "REDSHIFT_REAL"
 
         # Annotate each column with its source for transparency in the notebook
-        df["_src_oc_confidence"]  = "Level 1 XGBoost output (oc_matches_custom_inc_ml.oc_probability)"
-        df["_src_efx_confidence"] = "Level 1 XGBoost output (efx_matches_custom_inc_ml.efx_probability)"
-        df["_src_zi_confidence"]  = "Level 1 XGBoost output (zoominfo_matches_custom_inc_ml.zi_probability)"
-        df["_src_tru_confidence"] = "Trulioo API → global_trulioo_us_kyb.name_verification"
-        df["_src_oc_uids"]        = "OC API → open_corporates_standard_ml_2.industry_code_uids"
-        df["_src_efx_naics"]      = "Equifax API → equifax_us_standardized.efx_primnaicscode"
-        df["_src_zi_naics"]       = "ZoomInfo API → zoominfo_standard_ml_2.zi_c_naics6"
-        df["_src_prod_naics"]     = "Production rule → customer_files.naics_code"
+        df["_src_oc_confidence"]  = "Pipeline B XGBoost (oc_matches_custom_inc_ml.oc_probability)"
+        df["_src_efx_confidence"] = "Pipeline B XGBoost (efx_matches_custom_inc_ml.efx_probability)"
+        df["_src_zi_confidence"]  = "Pipeline B XGBoost (zoominfo_matches_custom_inc_ml.zi_probability)"
+        df["_src_tru_confidence"] = "PROXY ONLY: global_trulioo_us_kyb.name_verification (KYB flag, not entity match score)"
+        df["_src_liberty_confidence"] = "NOT IN REDSHIFT BATCH: stored in {TABLE}_results.parquet (local)"
+        df["_src_oc_uids"]        = "OC bulk load → open_corporates_standard_ml_2.industry_code_uids"
+        df["_src_efx_naics"]      = "Equifax bulk load → equifax_us_standardized.efx_primnaicscode"
+        df["_src_zi_naics"]       = "ZoomInfo bulk load → zoominfo_standard_ml_2.zi_c_naics6"
+        df["_src_prod_naics"]     = "Pipeline B rule: IF zi_match_confidence > efx_match_confidence THEN zi_c_naics6 ELSE efx_primnaicscode → customer_files.naics_code"
+        df["_src_prod_rule"]      = "customer_table.sql: winner-takes-all (Pipeline B)"
+
+        # Rename tru_confidence_proxy to tru_confidence for downstream compatibility
+        # but keep the _proxy suffix documented
+        if "tru_confidence_proxy" in df.columns:
+            df["tru_confidence"] = df["tru_confidence_proxy"]
 
         return df
 

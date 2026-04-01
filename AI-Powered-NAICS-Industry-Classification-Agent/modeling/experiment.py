@@ -4,22 +4,50 @@ modeling/experiment.py
 Full experiment orchestrator — runs end-to-end and saves every output the
 notebook needs. One command produces all artifacts.
 
+IMPORTANT: Two separate Worth AI pipelines are being compared here.
+
+  PIPELINE B (Production — batch Redshift):
+    - Reads datascience.customer_files + three match tables
+    - Level 1 XGBoost entity matching: oc_probability, efx_probability,
+      zi_probability from datascience.ml_model_matches (via match tables)
+    - Industry rule: IF zi_match_confidence > efx_match_confidence
+                     THEN zi_c_naics6   ELSE efx_primnaicscode
+    - Output: datascience.customer_files.naics_code
+    - Sources: ZoomInfo + Equifax ONLY (OC/Liberty industry codes ignored)
+    - No probability, no UK SIC, no AML signals, no KYB
+
+  CONSENSUS MODEL (New — what this experiment evaluates):
+    - Uses the SAME Level 1 XGBoost confidence scores from Pipeline B
+    - Adds all 6 sources as weighted features (OC, EFX, ZI, Trulioo, Liberty, AI)
+    - Trains XGBClassifier(multi:softprob) → calibrated probabilities
+    - Routes to correct taxonomy per jurisdiction (UK SIC for GB, NAICS for US)
+    - Produces 6 AML signal types + KYB recommendation
+    - Training label: rel_business_industry_naics from case-service PostgreSQL
+
+  Data sources and caveats:
+    oc_confidence  → oc_matches_custom_inc_ml.oc_probability  (REAL XGBoost)
+    efx_confidence → efx_matches_custom_inc_ml.efx_probability (REAL XGBoost)
+    zi_confidence  → zoominfo_matches_custom_inc_ml.zi_probability (REAL XGBoost)
+    tru_confidence → PROXY ONLY: global_trulioo_us_kyb.name_verification
+                     (KYB binary flag, NOT entity match score — approximation)
+    liberty_confidence → NOT IN REDSHIFT: stored in local {TABLE}_results.parquet
+
 Usage:
     python modeling/experiment.py                # connects to Redshift if reachable
     python modeling/experiment.py --synthetic    # force synthetic data
     python modeling/experiment.py --limit 5000   # cap Redshift rows
 
 Steps:
-    1. Load — Redshift Level 1 outputs + vendor industry codes (or synthetic)
-    2. Level 1 — analyse per-source match confidences (EFX, OC, ZI, Liberty)
-    3. Production — apply customer_table.sql rule, measure current output
-    4. Level 2 — train Consensus XGBoost, classify, evaluate
+    1. Load  — Pipeline B data from Redshift: match confidences + vendor codes
+    2. Level 1 — analyse per-source XGBoost confidence scores
+    3. Production — replicate customer_table.sql (Pipeline B winner-takes-all rule)
+    4. Level 2 — train Consensus XGBoost using same data, classify, evaluate
     5. Compare — side-by-side delta, save all artifacts
 
 Saved artifacts (data/modeling/):
     experiment_results.csv       — friendly display columns, loaded by the notebook
     experiment_results.xlsx      — same, Excel format for download
-    l1_report.json               — Level 1 source analysis (match rates, accuracy, UK SIC)
+    l1_report.json               — Level 1 source analysis (match rates, UK SIC gap)
     evaluation_report.json       — Level 2 XGBoost metrics (top-1, top-3, log-loss)
     comparison_report.parquet    — raw per-row comparison (programmatic use)
     consensus_model.ubj          — trained XGBoost model binary
@@ -221,29 +249,44 @@ def run_experiment(synthetic: bool = False, limit: int = 10_000) -> dict:
     logger.info(f"Rows: {n:,} | Source: {src_tag} | Labels: {lbl_tag}")
 
     # ── STEP 2: Level 1 analysis ──────────────────────────────────────────────
-    _banner("STEP 2 / 5 — Level 1 entity matching analysis")
+    _banner("STEP 2 / 5 — Level 1 entity matching analysis (Pipeline B XGBoost scores)")
     ev1      = Level1Evaluator()
     l1_report = ev1.evaluate(raw_df, ground_truth_col="label_naics")
 
-    print("\n  Per-source match rates (Level 1 XGBoost outputs):")
-    print(f"  {'Source':<16} {'Matched ≥0.80':>15} {'Match %':>10} {'Mean conf':>12}")
-    print("  " + "-" * 56)
+    print("\n  Level 1 XGBoost entity matching confidence scores:")
+    print("  (From datascience.ml_model_matches via the three match tables)")
+    print(f"  {'Source':<16} {'Matched ≥0.80':>15} {'Match %':>10} {'Mean conf':>12} {'How produced'}")
+    print("  " + "-" * 80)
+    src_notes = {
+        "oc":      "XGBoost (oc_matches_custom_inc_ml.oc_probability)",
+        "efx":     "XGBoost (efx_matches_custom_inc_ml.efx_probability)",
+        "zi":      "XGBoost (zoominfo_matches_custom_inc_ml.zi_probability)",
+        "tru":     "PROXY: name_verification KYB flag (NOT entity match score)",
+        "liberty": "NOT IN REDSHIFT: local {TABLE}_results.parquet",
+    }
     for src, stats in l1_report.get("match_rates", {}).items():
         conf_stats = l1_report.get("confidence_stats", {}).get(src, {})
         mean_c = conf_stats.get("mean", 0)
-        print(f"  {src.upper():<16} {stats['matched']:>15,} {stats['match_pct']:>9}% {mean_c:>12.3f}")
+        note = src_notes.get(src, "")
+        print(f"  {src.upper():<16} {stats['matched']:>15,} {stats['match_pct']:>9}% {mean_c:>12.3f}  {note}")
 
     print()
-    print("  Sources used by the production classification rule:")
-    print("    ZoomInfo  → NAICS code  ← selected when zi_conf > efx_conf")
-    print("    Equifax   → NAICS code  ← selected when efx_conf >= zi_conf")
-    print("    OC        → match only  ← industry_code_uids NEVER read by rule")
-    print("    Liberty   → match only  ← industry codes NEVER read by rule")
+    print("  Pipeline B winner-takes-all rule (customer_table.sql):")
+    print("    IF zi_match_confidence > efx_match_confidence")
+    print("      → ZoomInfo NAICS (zi_c_naics6) used for ALL firmographic fields")
+    print("    ELSE")
+    print("      → Equifax NAICS (efx_primnaicscode) used for ALL firmographic fields")
+    print()
+    print("  Sources EXCLUDED from Pipeline B classification rule:")
+    print("    OC        → oc_match_confidence EXISTS but industry_code_uids not parsed in SQL")
+    print("    Liberty   → never joined into smb_zi_oc_efx_combined")
+    print("    Trulioo   → live API (Pipeline A only), not in Redshift batch")
+    print("    Middesk   → live API (Pipeline A only), not in Redshift batch")
 
     uk = l1_report.get("uk_sic_availability", {})
     if uk:
         print(f"\n  UK SIC in OC industry_code_uids: {uk.get('available_in_oc',0)} ({uk.get('pct_of_total',0)}%)")
-        print(f"  UK SIC stored to production DB:  0  ← no storage table exists")
+        print(f"  UK SIC stored to production DB:  0  ← no core_uk_sic_code table in Pipeline B")
 
     # Save L1 report
     with open(ARTIFACTS_DIR / "l1_report.json", "w") as f:
@@ -251,7 +294,7 @@ def run_experiment(synthetic: bool = False, limit: int = 10_000) -> dict:
     logger.info(f"Saved: {ARTIFACTS_DIR / 'l1_report.json'}")
 
     # ── STEP 3: Production baseline ───────────────────────────────────────────
-    _banner("STEP 3 / 5 — Production baseline (customer_table.sql rule)")
+    _banner("STEP 3 / 5 — Pipeline B baseline (customer_table.sql winner-takes-all rule)")
     baseline = ProductionBaseline()
     df_a     = baseline.run(raw_df)
     eval_a   = baseline.evaluate(df_a, ground_truth_col="label_naics")
@@ -260,19 +303,37 @@ def run_experiment(synthetic: bool = False, limit: int = 10_000) -> dict:
     zi_wins   = (df_a["prod_winning_src"] == "zoominfo").sum()
     efx_wins  = (df_a["prod_winning_src"] == "equifax").sum()
 
-    print(f"\n  Rule: IF zi_confidence > efx_confidence → ZoomInfo NAICS  ELSE → Equifax NAICS")
+    print(f"\n  Replicating: sp_recreate_customer_files() → customer_table.sql")
+    print(f"  Rule: WHEN zi_match_confidence > efx_match_confidence → zi_c_naics6")
+    print(f"         ELSE efx_primnaicscode")
+    print(f"  (Same rule controls ALL firmographic fields in customer_files)")
+    print()
     print(f"  Companies with NAICS code: {n - prod_null:,} / {n:,} ({eval_a.get('coverage_pct',0)}%)")
     print(f"  ZoomInfo wins:             {zi_wins:,} ({zi_wins/n:.0%})")
     print(f"  Equifax wins:              {efx_wins:,} ({efx_wins/n:.0%})")
     if eval_a.get("accuracy_pct") is not None:
-        print(f"  Top-1 accuracy:            {eval_a['accuracy_pct']}%")
-    print(f"  UK SIC available from OC:  {eval_a.get('uk_sic_available',0):,}")
-    print(f"  UK SIC stored to DB:       0  (no core_uk_sic_code table)")
-    print(f"  AML signals produced:      0")
-    print(f"  KYB recommendations:       0")
+        print(f"  Top-1 accuracy vs labels:  {eval_a['accuracy_pct']}%")
+    print(f"  UK SIC available from OC:  {eval_a.get('uk_sic_available',0):,}  (received but DROPPED)")
+    print(f"  UK SIC stored to DB:       0  (no core_uk_sic_code table in Pipeline B)")
+    print(f"  OC industry code used:     0  (industry_code_uids not parsed in SQL)")
+    print(f"  AML signals produced:      0  (no risk engine in Pipeline B)")
+    print(f"  KYB recommendations:       0  (not produced by Pipeline B)")
 
     # ── STEP 4: Consensus Level 2 ─────────────────────────────────────────────
-    _banner("STEP 4 / 5 — Consensus Level 2 XGBoost — train + classify")
+    _banner("STEP 4 / 5 — Consensus XGBoost (Level 2) — train + classify")
+    print()
+    print("  Consensus model inputs (45 features from same Redshift data as Pipeline B):")
+    print("    Group A (6): oc/efx/zi/liberty/tru/ai weighted confidence scores")
+    print("    Group B (6): binary match flags (confidence >= 0.80)")
+    print("    Group C (6): code discrepancy/AML signals (majority agreement, pivot, etc.)")
+    print("    Group D (12): jurisdiction one-hot (US/EU/APAC/LATAM/MENA/AFR)")
+    print("    Group E (3): entity type (Holding/NGO/Partnership)")
+    print("    Group F (4): aggregate quality (avg/max confidence, source count)")
+    print()
+    print("  Training label: rel_business_industry_naics (case-service PostgreSQL)")
+    print("  (Analyst-corrected NAICS codes — highest quality training signal)")
+    print("  Fallback label: zi_naics or efx_naics when labels unavailable")
+    print()
     trainer  = Level2Trainer()
     eval_b   = trainer.fit(raw_df)
     trainer.save()
@@ -344,9 +405,13 @@ def run_experiment(synthetic: bool = False, limit: int = 10_000) -> dict:
     print(f"  {'Codes agree (A = B)':<40} {'—':>12} {f'{same_code/n:.0%}':>12}")
     print(f"  {'Avg consensus probability':<40} {'—':>12} {f'{avg_prob:.1f}%' if avg_prob else '—':>12}")
     print()
-    print(f"  Level 1 model:  entity_matching_20250127 v1")
-    print(f"  Level 2 model:  XGBClassifier(multi:softprob) — {eval_b.get('n_classes','?')} classes")
-    print(f"  Training rows:  {eval_b.get('n_train','?'):,}")
+    print(f"  Pipeline B XGBoost (entity matching): entity_matching_20250127 v1")
+    print(f"    Produces: oc/efx/zi_probability → match confidences")
+    print(f"    Rule: max(zi_conf, efx_conf) → winner → naics_code in customer_files")
+    print()
+    print(f"  Consensus XGBoost (Level 2, new): XGBClassifier(multi:softprob)")
+    print(f"    Classes: {eval_b.get('n_classes','?')} | Training rows: {eval_b.get('n_train','?'):,}")
+    print(f"    Uses: ALL 6 sources as 45 features → calibrated probabilities")
     print()
     if src_tag == "SYNTHETIC (forced)" or "SYNTHETIC" in src_tag:
         print("  ⚠  SYNTHETIC RUN — accuracy numbers reflect learning from")
