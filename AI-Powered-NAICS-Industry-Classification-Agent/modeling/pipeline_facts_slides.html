@@ -88,7 +88,7 @@
     <span class="badge badge-a" style="font-size:0.8em;padding:4px 14px">🅐 Pipeline A — Integration Service</span>
     <span class="badge badge-b" style="font-size:0.8em;padding:4px 14px">🅑 Pipeline B — Warehouse Service</span>
   </div>
-  <p style="color:#718096;font-size:0.7em;margin-top:20px">18 slides · Based on verified source code from SIC-UK-Codes &amp; Entity-Matching repos</p>
+  <p style="color:#718096;font-size:0.7em;margin-top:20px">19 slides · Based on verified source code from SIC-UK-Codes &amp; Entity-Matching repos</p>
 </section>
 
 <!-- SLIDE 2 — The Core Question -->
@@ -150,7 +150,45 @@
      SECTION 2 — PIPELINE B DEEP DIVE
      ══════════════════════════════════════════════════════════ -->
 
-<!-- SLIDE 4 — Pipeline B Step 1: Heuristic Similarity -->
+<!-- SLIDE 4 — Day 0: Loading the Vendor Data -->
+<section>
+  <div class="section-label">🅑 Pipeline B — Day 0 (Before Any Business Is Submitted)</div>
+  <h2>Loading the Vendor Data into Redshift</h2>
+  <p style="font-size:0.78em;color:#A0AEC0;margin-bottom:12px">Before a single business applies, Worth AI loads bulk data from vendors into Redshift. This is offline work done by the data engineering team. Both pipelines read from these same tables.</p>
+  <table>
+    <tr><th>Vendor</th><th>Redshift table</th><th>Key industry column</th><th>How loaded</th></tr>
+    <tr>
+      <td><strong>ZoomInfo</strong></td>
+      <td><code>zoominfo.comp_standard_global</code><br>→ standardized to<br><code>datascience.zoominfo_standard_ml_2</code></td>
+      <td><code>zi_c_naics6</code> (6-digit NAICS)</td>
+      <td>Bulk file ingestion, regular cadence</td>
+    </tr>
+    <tr>
+      <td><strong>Equifax</strong></td>
+      <td><code>warehouse.equifax_us_latest</code><br>→ standardized to<br><code>warehouse.equifax_us_standardized</code></td>
+      <td><code>efx_primnaicscode</code> (6-digit NAICS)<br><code>efx_primsic</code> (4-digit SIC)</td>
+      <td>Bulk file ingestion, <strong style="color:#FC8181">unknown cadence</strong><br>(documented in source code as a weakness)</td>
+    </tr>
+    <tr>
+      <td><strong>OpenCorporates</strong></td>
+      <td><code>datascience.open_corporates_standard_ml_2</code></td>
+      <td><code>industry_code_uids</code><br>(pipe-delimited string:<br><code>us_naics-541110|gb_sic-62012</code>)</td>
+      <td>Bulk file ingestion</td>
+    </tr>
+    <tr>
+      <td><strong>Liberty</strong></td>
+      <td><code>dev.liberty.einmst_20260218</code><br><code>einmst_15_5mn</code><br><code>einmst_5_3m_remaining</code></td>
+      <td>NAICS, SIC columns</td>
+      <td>Bulk file ingestion</td>
+    </tr>
+  </table>
+  <div class="card card-blue" style="margin-top:12px">
+    <h4>These tables are the raw vendor data</h4>
+    <p>They contain <strong>millions of company records</strong> — one row per vendor company record, not per submitted business. The XGBoost entity matching model then finds which vendor row corresponds to each submitted business.</p>
+  </div>
+</section>
+
+<!-- SLIDE 5 (was 4) — Pipeline B Step 1: Heuristic Similarity -->
 <section>
   <div class="section-label">🅑 Pipeline B — Step 1</div>
   <h2>Heuristic Similarity Scoring</h2>
