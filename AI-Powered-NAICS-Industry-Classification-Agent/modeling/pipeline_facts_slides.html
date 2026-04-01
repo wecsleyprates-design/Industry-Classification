@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Industry Classification — Dual Pipeline Blueprint</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/black.css">
+<style>
+:root { --r-main-font-size: 20px; }
+.reveal { font-family: 'Segoe UI', system-ui, sans-serif; }
+.reveal h1 { font-size: 1.7em; color: #63B3ED; margin-bottom: 8px; }
+.reveal h2 { font-size: 1.2em; color: #68D391; border-bottom: 2px solid #68D391; padding-bottom: 6px; margin-bottom: 14px; }
+.reveal h3 { font-size: 1.0em; color: #F6E05E; margin-bottom: 6px; }
+.reveal p, .reveal li { font-size: 0.88em; line-height: 1.55; }
+.reveal pre { font-size: 0.58em; }
+.reveal code { background: #1a202c; padding: 2px 6px; border-radius: 3px; color: #F6E05E; }
+.reveal table { font-size: 0.72em; width: 100%; border-collapse: collapse; }
+.reveal table th { background: #2D3748; color: #63B3ED; padding: 6px 8px; text-align: left; }
+.reveal table td { padding: 5px 8px; border-bottom: 1px solid #2D3748; vertical-align: top; }
+.reveal table tr:nth-child(even) td { background: rgba(255,255,255,0.04); }
+
+/* Layout helpers */
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+.four-col { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; }
+
+/* Cards */
+.card { border-radius: 8px; padding: 12px 14px; background: rgba(255,255,255,0.05); border-left: 4px solid; }
+.card-blue  { border-color: #4299E1; }
+.card-green { border-color: #48BB78; }
+.card-gold  { border-color: #F6E05E; }
+.card-red   { border-color: #FC8181; }
+.card-purple{ border-color: #9F7AEA; }
+.card-gray  { border-color: #718096; background: rgba(113,128,150,0.15); }
+.card h4 { font-size: 0.78em; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; margin: 0 0 6px; }
+.card p  { font-size: 0.75em; margin: 3px 0; color: #CBD5E0; }
+.card code { font-size: 0.7em; }
+
+/* Badges */
+.badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 0.65em; font-weight: 700; margin-left: 6px; }
+.badge-a  { background: #276749; color: #C6F6D5; }
+.badge-b  { background: #1A365D; color: #BEE3F8; }
+.badge-gap{ background: #742A2A; color: #FED7D7; }
+.badge-ok { background: #276749; color: #C6F6D5; }
+
+/* Pipeline boxes */
+.pipe-box { border-radius: 10px; padding: 14px 18px; }
+.pipe-a { background: rgba(72,187,120,0.12); border: 2px solid #48BB78; }
+.pipe-b { background: rgba(66,153,225,0.12); border: 2px solid #4299E1; }
+
+/* Fact anatomy grid */
+.fact-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.fact-card { border-radius: 8px; padding: 10px 12px; background: rgba(255,255,255,0.05); border: 1px solid #2D3748; }
+.fact-card .fn { font-size: 0.68em; font-weight: 800; color: #C0392B; font-family: monospace; margin-bottom: 6px; }
+.fact-card .fd { font-size: 0.65em; color: #CBD5E0; margin: 3px 0; }
+.fact-card .fs { font-size: 0.6em; color: #A0AEC0; margin: 2px 0; }
+.fact-card .fp { font-size: 0.58em; color: #68D391; font-family: monospace; background: rgba(0,0,0,0.3); padding: 3px 5px; border-radius: 3px; margin-top: 4px; }
+.fact-card-gap { border-color: #742A2A; background: rgba(116,42,42,0.2); }
+.fact-card-gap .fn { color: #FC8181; }
+
+/* Section header */
+.section-label { font-size: 0.6em; text-transform: uppercase; letter-spacing: 2px; color: #718096; margin-bottom: 4px; }
+
+/* Flow arrow */
+.arrow { color: #4299E1; font-size: 1.3em; text-align: center; padding: 2px 0; }
+
+/* Scenario table highlight */
+.gap-row td { color: #FC8181; }
+.ok-row td  { color: #68D391; }
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- ══════════════════════════════════════════════════════════
+     SECTION 1 — THE BIG PICTURE
+     ══════════════════════════════════════════════════════════ -->
+
+<!-- SLIDE 1 — Title -->
+<section>
+  <div class="section-label">Worth AI — Industry Classification</div>
+  <h1>Dual-Pipeline Classification Blueprint</h1>
+  <p style="color:#A0AEC0;font-size:0.85em">How Worth AI determines what industry a business operates in,<br>where the data comes from, and what the customer sees.</p>
+  <div style="margin-top:24px;display:flex;gap:14px;justify-content:center">
+    <span class="badge badge-a" style="font-size:0.8em;padding:4px 14px">🅐 Pipeline A — Integration Service</span>
+    <span class="badge badge-b" style="font-size:0.8em;padding:4px 14px">🅑 Pipeline B — Warehouse Service</span>
+  </div>
+  <p style="color:#718096;font-size:0.7em;margin-top:20px">18 slides · Based on verified source code from SIC-UK-Codes &amp; Entity-Matching repos</p>
+</section>
+
+<!-- SLIDE 2 — The Core Question -->
+<section>
+  <h2>The Core Question</h2>
+  <div style="text-align:center;margin:10px 0 20px">
+    <div style="background:rgba(99,179,237,0.15);border:2px solid #63B3ED;border-radius:10px;padding:14px 24px;display:inline-block;font-size:1.05em;font-weight:700;color:#E2E8F0">
+      "What industry does this business operate in?"
+    </div>
+  </div>
+  <div class="three-col" style="margin-top:16px">
+    <div class="card card-gold">
+      <h4>Why it matters</h4>
+      <p>Drives risk scoring, KYB decisions, AML flags, Worth 360 Report, and customer-facing UI</p>
+    </div>
+    <div class="card card-green">
+      <h4>What the answer looks like</h4>
+      <p><code>naics_code: "722511"</code><br>Full-Service Restaurants<br>confidence: 0.95</p>
+    </div>
+    <div class="card card-purple">
+      <h4>How many facts</h4>
+      <p><strong style="font-size:2em;color:#9F7AEA">8</strong><br>classification facts stored in <code>rds_warehouse_public.facts</code></p>
+    </div>
+  </div>
+  <div style="margin-top:16px;background:rgba(255,255,255,0.04);border-radius:8px;padding:10px 14px">
+    <p style="margin:0;font-size:0.8em;color:#A0AEC0">Worth AI runs <strong style="color:#E2E8F0">two completely separate pipelines</strong> to answer this question. They share some inputs but have different goals, different source coverage, and different audiences. Understanding both is essential to understanding where the 8 facts come from.</p>
+  </div>
+</section>
+
+<!-- SLIDE 3 — Two Pipelines Overview -->
+<section>
+  <h2>Two Pipelines — Overview &amp; Goals</h2>
+  <div class="two-col">
+    <div class="pipe-box pipe-a">
+      <div style="font-size:0.7em;font-weight:800;color:#48BB78;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">🅐 Pipeline A — Integration Service</div>
+      <p style="font-size:0.78em"><strong>Goal:</strong> Deliver the best possible industry classification in real-time using ALL available sources.</p>
+      <p style="font-size:0.75em;margin:6px 0"><strong>Runs:</strong> Every time a business is submitted</p>
+      <p style="font-size:0.75em;margin:6px 0"><strong>Sources:</strong> ZoomInfo, Equifax, OC, Middesk, Trulioo, SERP, AI (6+ sources)</p>
+      <p style="font-size:0.75em;margin:6px 0"><strong>Output:</strong> <code>rds_warehouse_public.facts</code> (JSONB, 217 facts)</p>
+      <p style="font-size:0.75em;margin:6px 0"><strong>Confidence:</strong> XGBoost model (most sources)</p>
+      <p style="margin-top:10px;font-size:0.75em">✅ <strong>Customer sees this</strong> via REST API, Worth 360 Report, Worth AI UI</p>
+    </div>
+    <div class="pipe-box pipe-b">
+      <div style="font-size:0.7em;font-weight:800;color:#4299E1;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px">🅑 Pipeline B — Warehouse Service</div>
+      <p style="font-size:0.78em"><strong>Goal:</strong> Build a wide analytics table for model training, risk scoring, and bulk data exports.</p>
+      <p style="font-size:0.75em;margin:6px 0"><strong>Runs:</strong> Scheduled batch job in Redshift</p>
+      <p style="font-size:0.75em;margin:6px 0"><strong>Sources:</strong> ZoomInfo + Equifax <strong>ONLY</strong></p>
+      <p style="font-size:0.75em;margin:6px 0"><strong>Output:</strong> <code>datascience.customer_files</code> (wide denorm. table)</p>
+      <p style="font-size:0.75em;margin:6px 0"><strong>Confidence:</strong> XGBoost entity matching model</p>
+      <p style="margin-top:10px;font-size:0.75em">⚠️ <strong>Internal only</strong> — not accessible to customers via API</p>
+    </div>
+  </div>
+  <div style="margin-top:12px;background:rgba(252,129,129,0.1);border-left:3px solid #FC8181;padding:8px 12px;border-radius:0 6px 6px 0">
+    <p style="margin:0;font-size:0.75em;color:#FEB2B2">⚡ The two pipelines can show <strong>different NAICS codes</strong> for the same business — Pipeline A uses all 6 sources while Pipeline B only compares ZoomInfo vs Equifax.</p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════
+     SECTION 2 — PIPELINE B DEEP DIVE
+     ══════════════════════════════════════════════════════════ -->
+
+<!-- SLIDE 4 — Pipeline B Step 1: Heuristic Similarity -->
+<section>
+  <div class="section-label">🅑 Pipeline B — Step 1</div>
+  <h2>Heuristic Similarity Scoring</h2>
+  <p style="font-size:0.8em;color:#A0AEC0;margin-bottom:12px">Before the XGBoost model runs, Worth AI finds candidate vendor records using Levenshtein string distance.</p>
+  <div class="two-col">
+    <div>
+      <h3>What <code>similarity_index</code> is</h3>
+      <pre><code>similarity_index =
+  (20 - levenshtein(name_submitted, name_vendor))  ← max 20
++ (20 - levenshtein(addr_submitted, addr_vendor))  ← max 20
++ state_match   (0 or 1)
++ city_match    (0 or 1)
++ zipcode_match (0 or 1)
+─────────────────────────────────
+Max achievable: ~43–45</code></pre>
+      <div class="card card-gold" style="margin-top:10px">
+        <h4>MAX_CONFIDENCE_INDEX = 55</h4>
+        <p>Defined in <code>sources.ts</code> line 33. Normalises the raw score to 0–1:</p>
+        <p><code>confidence = similarity_index / 55</code></p>
+        <p>Index 45 → confidence 0.82 (just above match threshold)</p>
+      </div>
+    </div>
+    <div>
+      <h3>Tables created</h3>
+      <table>
+        <tr><th>Table</th><th>Content</th></tr>
+        <tr><td><code>smb_zoominfo_standardized_joined</code></td><td>Top 1000 ZI candidates per business ranked by similarity_index</td></tr>
+        <tr><td><code>smb_equifax_standardized_joined</code></td><td>Top 1000 EFX candidates ranked</td></tr>
+        <tr><td><code>smb_open_corporate_standardized_joined</code></td><td>Top 1000 OC candidates ranked</td></tr>
+      </table>
+      <div class="card card-blue" style="margin-top:10px">
+        <h4>Matching threshold</h4>
+        <p><code>similarity_index &gt;= 45</code> (≈ 0.82 confidence) is the minimum to be considered a match via heuristic.<br>XGBoost threshold: <code>probability &gt;= 0.80</code></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SLIDE 5 — Pipeline B Step 2: XGBoost Entity Matching -->
+<section>
+  <div class="section-label">🅑 Pipeline B — Step 2</div>
+  <h2>XGBoost Entity Matching Model</h2>
+  <div class="two-col">
+    <div>
+      <h3>What the model answers</h3>
+      <div style="background:rgba(99,179,237,0.12);border:2px solid #63B3ED;border-radius:8px;padding:12px;text-align:center;margin-bottom:12px">
+        <p style="margin:0;font-size:0.85em">"Is this submitted business the <strong>same real-world entity</strong> as this vendor record?"</p>
+      </div>
+      <h3>33 input features per pair</h3>
+      <p style="font-size:0.75em">Jaccard k-grams on business name (k=1,2,3,4,word) · Street name k-grams · Short name (city-stripped) · Exact: city, ZIP, street number, address line 2 · Street number distance · Block-level match</p>
+    </div>
+    <div>
+      <h3>Output table</h3>
+      <div class="card card-green">
+        <h4><code>datascience.ml_model_matches</code></h4>
+        <p>The central XGBoost output table. One row per business per source.</p>
+      </div>
+      <table style="margin-top:10px">
+        <tr><th>Column</th><th>Meaning</th></tr>
+        <tr><td><code>zi_probability</code></td><td>Prob. ZoomInfo record = same business (0–1)</td></tr>
+        <tr><td><code>efx_probability</code></td><td>Prob. Equifax record = same business (0–1)</td></tr>
+        <tr><td><code>oc_probability</code></td><td>Prob. OC record = same business (0–1)</td></tr>
+      </table>
+      <div class="card card-gold" style="margin-top:10px">
+        <h4>Two-tier matching</h4>
+        <p>XGBoost ≥ 0.80 → use XGBoost score directly<br>Else → use heuristic <code>similarity_index / 55</code> if ≥ 45/55</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SLIDE 6 — Pipeline B Step 3: Building match_confidence columns -->
+<section>
+  <div class="section-label">🅑 Pipeline B — Step 3</div>
+  <h2>How <code>zi_match_confidence</code> &amp; <code>efx_match_confidence</code> Are Built</h2>
+  <p style="font-size:0.78em;color:#A0AEC0;margin-bottom:10px">Source: <code>smb_zi_oc_efx_combined.sql</code></p>
+  <div class="two-col">
+    <div>
+      <pre><code>-- ZoomInfo confidence:
+CASE
+  WHEN zi_probability IS NOT NULL
+    THEN zi_probability          ← XGBoost score
+  WHEN similarity_index/55.0 &gt;= 0.8
+    THEN similarity_index/55.0   ← heuristic fallback
+  ELSE 0
+END AS zi_match_confidence
+
+-- Equifax confidence (same pattern):
+CASE
+  WHEN efx_probability IS NOT NULL
+    THEN efx_probability
+  WHEN similarity_index/55.0 &gt;= 0.8
+    THEN similarity_index/55.0
+  ELSE 0
+END AS efx_match_confidence</code></pre>
+    </div>
+    <div>
+      <h3>The table chain</h3>
+      <div class="arrow">ml_model_matches</div>
+      <div class="arrow">↓</div>
+      <div class="card card-blue"><p style="margin:0;font-size:0.75em"><code>efx_matches_custom_inc_ml</code><br><code>zoominfo_matches_custom_inc_ml</code><br><code>oc_matches_custom_inc_ml</code></p></div>
+      <div class="arrow">↓</div>
+      <div class="card card-green"><p style="margin:0;font-size:0.75em"><code>smb_zi_oc_efx_combined</code><br>Joins match tables back to vendor data.<br>Adds <code>zi/efx/oc_match_confidence</code>.</p></div>
+      <div class="arrow">↓</div>
+      <div class="card card-gold"><p style="margin:0;font-size:0.75em"><code>smb_pr_verification_cs</code> → <code>customer_files</code><br>Final denormalized output table.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- SLIDE 7 — Pipeline B Step 4: Winner-Takes-All Rule + Scenario Table -->
+<section>
+  <div class="section-label">🅑 Pipeline B — Step 4</div>
+  <h2>The Winner-Takes-All Rule (<code>customer_table.sql</code>)</h2>
+  <pre style="margin-bottom:10px"><code>-- Controls EVERY firmographic field in customer_files:
+WHEN COALESCE(zi_match_confidence, 0) &gt; COALESCE(efx_match_confidence, 0)
+  THEN zi_c_naics6          -- ZoomInfo NAICS + ALL ZI firmographic data wins
+ELSE efx_primnaicscode      -- Equifax NAICS + ALL EFX firmographic data wins</code></pre>
+  <p style="font-size:0.75em;color:#A0AEC0;margin-bottom:8px">This one comparison controls: NAICS, employee count, revenue, company name, address, city, ZIP, country, website, affiliate flag, and more.</p>
+  <table>
+    <tr><th>Situation</th><th>What gets stored in <code>customer_files</code></th><th>Customer impact</th></tr>
+    <tr class="ok-row"><td>ZI confidence &gt; EFX confidence</td><td>All fields from ZoomInfo (<code>zi_c_naics6</code>, name, address, revenue…)</td><td>ZoomInfo data in analytics table</td></tr>
+    <tr class="ok-row"><td>EFX confidence &gt; ZI confidence</td><td>All fields from Equifax (<code>efx_primnaicscode</code>, name, address, revenue…)</td><td>Equifax data in analytics table</td></tr>
+    <tr><td>Both confidences = 0</td><td>COALESCE fallback to existing <code>naics_code</code> or NULL</td><td>NULL industry — no classification</td></tr>
+    <tr class="gap-row"><td>OC had better match than ZI/EFX</td><td>OC IGNORED — its <code>oc_match_confidence</code> exists but SQL never reads it for NAICS</td><td>⚠️ Weaker ZI/EFX code used instead</td></tr>
+    <tr class="gap-row"><td>Liberty / Middesk / Trulioo matched</td><td>IGNORED — live API sources not in batch pipeline</td><td>⚠️ Same ZI vs EFX result</td></tr>
+    <tr><td>Rebuilt on schedule</td><td>Entire table overwritten by latest batch run</td><td>Always latest batch result</td></tr>
+  </table>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════
+     SECTION 3 — PIPELINE A DEEP DIVE
+     ══════════════════════════════════════════════════════════ -->
+
+<!-- SLIDE 8 — Pipeline A: The 6 Sources -->
+<section>
+  <div class="section-label">🅐 Pipeline A — The Sources</div>
+  <h2>The 6 Vendor Sources &amp; Their Industry Codes</h2>
+  <table>
+    <tr><th>Source</th><th>Industry code field</th><th>Weight</th><th>Confidence method</th><th>Coverage</th></tr>
+    <tr><td><strong>OpenCorporates</strong></td><td><code>industry_code_uids</code> → parse <code>us_naics-XXXXXX</code></td><td>0.9 ← highest</td><td>XGBoost <code>oc_probability</code></td><td>Global</td></tr>
+    <tr><td><strong>Middesk</strong></td><td>NAICS from SOS filing</td><td>2.0 ← heaviest</td><td>XGBoost + 0.15+0.20/task</td><td>US only</td></tr>
+    <tr><td><strong>ZoomInfo</strong></td><td><code>zi_c_naics6</code></td><td>0.8</td><td>XGBoost <code>zi_probability</code> OR <code>index/55</code></td><td>Global</td></tr>
+    <tr><td><strong>Equifax</strong></td><td><code>efx_primnaicscode</code>, <code>efx_primsic</code></td><td>0.7</td><td>XGBoost <code>efx_probability</code> OR <code>index/55</code></td><td>US only</td></tr>
+    <tr><td><strong>Trulioo</strong></td><td><code>sicCode</code> (may be 4-digit = POLLUTED)</td><td>0.8</td><td>Heuristic <code>match.index/55</code> only</td><td>Global</td></tr>
+    <tr><td><strong>AI (GPT-5-mini)</strong></td><td>AI-generated NAICS + MCC</td><td>0.1 ← lowest</td><td>Self-reported HIGH/MED/LOW</td><td>Global — fallback only</td></tr>
+  </table>
+  <div style="margin-top:10px;display:flex;gap:10px">
+    <div class="card card-blue" style="flex:1"><h4>All results stored in</h4><p><code>integration_data.request_response</code> (PostgreSQL)<br>One row per API call per source per business<br>Columns: <code>platform_id</code>, <code>response</code> (JSONB), <code>confidence</code></p></div>
+    <div class="card card-gold" style="flex:1"><h4>Platform IDs</h4><p>16=Middesk · 17=Equifax · 22=SERP<br>23=OpenCorporates · 24=ZoomInfo<br>29=EntityMatching · 31=AI · 38=Trulioo</p></div>
+  </div>
+</section>
+
+<!-- SLIDE 9 — Pipeline A: Confidence — Who Produces It -->
+<section>
+  <div class="section-label">🅐 Pipeline A — Confidence Scores</div>
+  <h2>Who Produces Each Confidence Score?</h2>
+  <div class="three-col" style="margin-bottom:12px">
+    <div class="card card-green">
+      <h4>✅ XGBoost Model</h4>
+      <p>OC → <code>rawResponse.prediction</code><br>ZoomInfo → <code>match.prediction</code><br>Equifax → <code>match.prediction</code><br>Middesk → <code>confidenceScoreMany()</code><br>Verdata/SERP → <code>confidenceScore()</code></p>
+    </div>
+    <div class="card card-gold">
+      <h4>⚠️ Heuristic Only</h4>
+      <p>Trulioo → <code>match.index / 55</code><br>No XGBoost for Trulioo.<br>Raw Levenshtein similarity score divided by MAX_CONFIDENCE_INDEX.</p>
+    </div>
+    <div class="card card-red">
+      <h4>🤖 GPT Self-Report</h4>
+      <p>AI Enrichment → returns text:<br><code>"HIGH"</code> → ~0.70<br><code>"MED"</code> → ~0.50<br><code>"LOW"</code> → ~0.30<br>Not calibrated by Worth AI.</p>
+    </div>
+  </div>
+  <div class="card card-blue">
+    <h4>Important distinction — two different XGBoost scores</h4>
+    <p>The XGBoost confidence shown in the API response (<code>source.confidence</code>) measures entity identity matching — "is this the right company?"<br>
+    The <code>zi_match_confidence</code> and <code>efx_match_confidence</code> in Pipeline B are the same model's scores but stored differently for the batch Redshift pipeline.<br>
+    <strong>Same model, different storage, different usage.</strong></p>
+  </div>
+</section>
+
+<!-- SLIDE 10 — Pipeline A: Fact Engine Rules -->
+<section>
+  <div class="section-label">🅐 Pipeline A — Fact Engine</div>
+  <h2>The 6 Winner Selection Rules</h2>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+    <div class="card card-green">
+      <h4>Rule 1 — factWithHighestConfidence()</h4>
+      <p>Sort all sources by confidence. Highest wins outright if the gap between top two is &gt; 5%.</p>
+      <p><code>|conf_A - conf_B| &gt; 0.05 → higher wins</code></p>
+    </div>
+    <div class="card card-blue">
+      <h4>Rule 2 — weightedFactSelector() [tie-break]</h4>
+      <p>If top two are within <code>WEIGHT_THRESHOLD = 0.05</code>:<br>Use source weight to break the tie.</p>
+      <p>Middesk(2.0) &gt; OC(0.9) &gt; ZI(0.8) = TRU(0.8) &gt; EFX(0.7) &gt; AI(0.1)</p>
+    </div>
+    <div class="card card-gold">
+      <h4>Rule 3 — manualOverride() [always wins]</h4>
+      <p>Analyst sets via <code>PATCH /facts/.../override/{factName}</code>.<br>Stored with <code>override: {…}</code> field. Beats any model/AI result.</p>
+    </div>
+    <div class="card card-red">
+      <h4>Rule 4 — No minimum confidence cutoff</h4>
+      <p>There is no "confidence must be ≥ X" rule.<br>If only one source returned a code at confidence 0.05 — it wins.<br>Low confidence IS visible in the API response.</p>
+    </div>
+    <div class="card card-purple">
+      <h4>Rule 5 — AI safety net</h4>
+      <p>AI enrichment triggers when fewer than 3 sources returned a code.<br>Weight = 0.1 so AI rarely wins unless vendors found nothing.</p>
+    </div>
+    <div class="card card-gray">
+      <h4>Rule 6 — Last resort: <code>"561499"</code></h4>
+      <p>If winning code not in <code>core_naics_code</code> table → <code>removeNaicsCode()</code> replaces it with <code>561499</code> (All Other Business Support Services).</p>
+    </div>
+  </div>
+</section>
+
+<!-- SLIDE 11 — Pipeline A: AI Enrichment -->
+<section>
+  <div class="section-label">🅐 Pipeline A — AI Enrichment</div>
+  <h2>GPT-5-mini AI Enrichment — When &amp; What</h2>
+  <div class="two-col">
+    <div>
+      <h3>Trigger condition</h3>
+      <pre><code>DEPENDENT_FACTS.naics_code = {
+  maximumSources: 3,   // SKIP if 3+ sources already
+  minimumSources: 1,   // Need at least 1 for context
+  ignoreSources: ["AINaicsEnrichment"]
+}</code></pre>
+      <h3>What GPT receives</h3>
+      <div class="card card-blue" style="margin-top:8px">
+        <p>• Business name + address<br>
+        • Website URL → GPT uses <code>web_search</code> tool to read it<br>
+        • DBA names (if any)<br>
+        • Existing codes from other sources (for correction context)</p>
+      </div>
+    </div>
+    <div>
+      <h3>What GPT returns</h3>
+      <pre><code>{
+  "naics_code":    "722511",
+  "naics_description": "Full-Service Restaurants",
+  "uk_sic_code":   "56101",   // only if country = GB
+  "mcc_code":      "5812",
+  "confidence":    "HIGH",    // HIGH / MED / LOW
+  "reasoning":     "Website confirms restaurant...",
+  "tools_used":    ["web_search"]
+}</code></pre>
+      <div class="card card-red" style="margin-top:8px">
+        <h4>Post-processing validation</h4>
+        <p>Winning code checked against <code>core_naics_code</code> table.<br>If not found → <code>removeNaicsCode()</code> → store <code>"561499"</code>.<br>Stored in <code>request_response</code> (platform_id=31) + facts table.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SLIDE 12 — Pipeline A: Scenario Table -->
+<section>
+  <div class="section-label">🅐 Pipeline A — Scenarios</div>
+  <h2>What Happens in Each Scenario</h2>
+  <table>
+    <tr><th>Situation</th><th>What gets stored</th><th>What the customer sees</th></tr>
+    <tr class="ok-row"><td>2–6 sources returned NAICS and agree</td><td>Winning code in <code>rds_warehouse_public.facts</code> + <code>data_businesses.naics_id</code> updated</td><td>Strong classification, source confidence, all alternatives listed</td></tr>
+    <tr><td>Sources disagree (different codes)</td><td>Highest-confidence source wins</td><td>Winner + confidence + alternatives showing the disagreement</td></tr>
+    <tr><td>Only 1 source returned a NAICS</td><td>That source wins; AI also runs (&lt;3 sources)</td><td>Code with possibly low confidence; AI result in alternatives</td></tr>
+    <tr><td>No source returned any NAICS</td><td>AI triggers; stores GPT-generated code if valid</td><td>AI-generated code OR <code>561499</code> placeholder with confidence="LOW"</td></tr>
+    <tr class="gap-row"><td>Winning code not in <code>core_naics_code</code></td><td>Replaced with <code>"561499"</code> via <code>removeNaicsCode()</code></td><td>Placeholder <code>561499</code> — signals "no reliable classification"</td></tr>
+    <tr class="gap-row"><td>All sources have very low confidence (e.g. 0.10)</td><td>Highest available wins — <strong>no minimum cutoff</strong></td><td>Code shown with low confidence visible — analyst should verify</td></tr>
+    <tr><td>Analyst set a manual override</td><td>Override in <code>rds_warehouse_public.facts</code> with <code>override:{…}</code></td><td>Override code with <code>override</code> field populated</td></tr>
+    <tr class="gap-row"><td>AI also fails or hallucinated code</td><td><code>"561499"</code> stored as absolute last resort</td><td>Placeholder <code>561499</code> — analyst override required</td></tr>
+  </table>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════
+     SECTION 4 — THE 8 FACTS
+     ══════════════════════════════════════════════════════════ -->
+
+<!-- SLIDE 13 — The 8 Facts Anatomy Grid -->
+<section>
+  <div class="section-label">The 8 Classification Facts</div>
+  <h2>Anatomy of All 8 Facts</h2>
+  <div class="fact-grid">
+    <!-- naics_code -->
+    <div class="fact-card">
+      <div class="fn">naics_code</div>
+      <div class="fd">The 6-digit NAICS 2022 winner — chosen from all sources by highest XGBoost confidence.</div>
+      <div class="fs">Sources: Middesk · OC · ZI · TRU · EFX · AI</div>
+      <div class="fs">Storage: <code>facts</code> + <code>data_businesses.naics_id</code></div>
+      <div class="fp">{ "code": "722511", "source": { "confidence": 0.95, "platformId": 16 }, "alternatives": [...] }</div>
+    </div>
+    <!-- naics_description -->
+    <div class="fact-card">
+      <div class="fn">naics_description</div>
+      <div class="fd">Human-readable label for the winning NAICS code.</div>
+      <div class="fs">Derived: lookup from <code>core_naics_code</code> after naics_code resolves</div>
+      <div class="fs">Storage: <code>facts</code> only</div>
+      <div class="fp">{ "description": "Full-Service Restaurants" }</div>
+    </div>
+    <!-- mcc_code -->
+    <div class="fact-card">
+      <div class="fn">mcc_code</div>
+      <div class="fd">4-digit Merchant Category Code (Visa/Mastercard standard). Three paths: direct vendor → NAICS crosswalk → GPT.</div>
+      <div class="fs">Storage: <code>facts</code> + <code>data_businesses.mcc_id</code></div>
+      <div class="fp">{ "code": "5812", "description": "Eating Places, Restaurants" }</div>
+    </div>
+    <!-- mcc_code_found -->
+    <div class="fact-card">
+      <div class="fn">mcc_code_found</div>
+      <div class="fd">Boolean: was MCC found directly from a vendor API, or derived from the NAICS crosswalk?</div>
+      <div class="fs"><code>true</code> = Middesk/Trulioo returned it directly<br><code>false</code> = derived via <code>rel_naics_mcc</code></div>
+      <div class="fp">{ "value": true }</div>
+    </div>
+    <!-- mcc_code_from_naics -->
+    <div class="fact-card">
+      <div class="fn">mcc_code_from_naics</div>
+      <div class="fd">MCC derived by crosswalk lookup: SELECT mcc_code FROM rel_naics_mcc WHERE naics_code = '722511'</div>
+      <div class="fs">Always computed. Equals mcc_code when mcc_code_found = false.</div>
+      <div class="fp">{ "code": "5812" }</div>
+    </div>
+    <!-- mcc_description -->
+    <div class="fact-card">
+      <div class="fn">mcc_description</div>
+      <div class="fd">Human-readable label for the MCC code.</div>
+      <div class="fs">Derived: lookup from <code>core_mcc_code</code> after mcc_code resolves</div>
+      <div class="fs">Storage: <code>facts</code> only</div>
+      <div class="fp">{ "description": "Eating Places, Restaurants" }</div>
+    </div>
+    <!-- industry -->
+    <div class="fact-card">
+      <div class="fn">industry</div>
+      <div class="fd">High-level category label for UI display. Derived from first 2 digits of NAICS → core_business_industries lookup.</div>
+      <div class="fs">Also from: ZI zi_c_industry, Trulioo, OC text</div>
+      <div class="fs">Storage: <code>facts</code> + <code>data_businesses.industry</code></div>
+      <div class="fp">{ "value": "Food Service" }</div>
+    </div>
+    <!-- classification_codes -->
+    <div class="fact-card fact-card-gap">
+      <div class="fn">classification_codes <span class="badge badge-gap">⚠️ Gap</span></div>
+      <div class="fd">ALL raw codes from ALL sources before winner is chosen. Includes uk_sic, nace, ca_naics from OC.</div>
+      <div class="fs">Storage: <code>facts</code> ONLY — NOT in data_businesses</div>
+      <div class="fs" style="color:#FC8181">No Kafka handler, API, or report reads this fact. Currently unused downstream.</div>
+      <div class="fp">{ "codes": [{ "system": "uk_sic", "code": "56101", "source": "OC" }] }</div>
+    </div>
+  </div>
+</section>
+
+<!-- SLIDE 14 — NAICS → Industry Chain -->
+<section>
+  <div class="section-label">The 8 Facts — Dependency Chain</div>
+  <h2>How the Facts Derive from Each Other</h2>
+  <div class="two-col">
+    <div>
+      <h3>The NAICS chain</h3>
+      <div style="text-align:center">
+        <div class="card card-blue" style="margin-bottom:8px"><p style="margin:0"><strong>naics_code</strong> "722511"<br><span style="font-size:0.7em">→ Won by Fact Engine from all sources</span></p></div>
+        <div class="arrow">↓ first 2 digits "72" → internalGetIndustries()</div>
+        <div class="card card-green" style="margin:6px 0"><p style="margin:0"><strong>industry</strong> "Food Service"<br><span style="font-size:0.7em">→ core_business_industries lookup</span></p></div>
+        <div class="arrow">↓ full code → core_naics_code lookup</div>
+        <div class="card card-gold"><p style="margin:0"><strong>naics_description</strong> "Full-Service Restaurants"<br><span style="font-size:0.7em">→ core_naics_code table</span></p></div>
+      </div>
+    </div>
+    <div>
+      <h3>The MCC chain</h3>
+      <div style="text-align:center">
+        <div class="card card-blue" style="margin-bottom:6px"><p style="margin:0"><strong>naics_code</strong> "722511"</p></div>
+        <div class="arrow">↓ rel_naics_mcc crosswalk</div>
+        <div class="card card-purple" style="margin:4px 0"><p style="margin:0"><strong>mcc_code_from_naics</strong> "5812"</p></div>
+        <div style="font-size:0.72em;color:#A0AEC0;margin:4px 0">+ check: did Middesk/Trulioo return MCC directly?</div>
+        <div class="arrow">↓</div>
+        <div class="card card-green" style="margin:4px 0"><p style="margin:0"><strong>mcc_code_found</strong> true/false<br><strong>mcc_code</strong> "5812" (winner of direct vs derived)</p></div>
+        <div class="arrow">↓ core_mcc_code lookup</div>
+        <div class="card card-gold"><p style="margin:0"><strong>mcc_description</strong> "Eating Places, Restaurants"</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SLIDE 15 — classification_codes: The Unused Fact -->
+<section>
+  <div class="section-label">The 8 Facts — Known Gap</div>
+  <h2><code>classification_codes</code> — The Graveyard Fact</h2>
+  <div class="two-col">
+    <div>
+      <h3>What it captures</h3>
+      <p style="font-size:0.8em">Every industry code from every source and every taxonomy system — BEFORE the Fact Engine picks a winner.</p>
+      <pre><code>{
+  "codes": [
+    { "system": "NAICS",
+      "code": "722511",
+      "source": "Middesk",
+      "confidence": 0.95 },
+    { "system": "uk_sic",
+      "code": "56101",
+      "source": "OC",
+      "confidence": 0.89 },
+    { "system": "nace",
+      "code": "I5610",
+      "source": "OC",
+      "confidence": 0.89 }
+  ]
+}</code></pre>
+    </div>
+    <div>
+      <h3>The problem</h3>
+      <div class="card card-red" style="margin-bottom:10px">
+        <h4>No downstream consumer</h4>
+        <p>UK SIC codes (e.g. <code>gb_sic-56101</code>) from OC are correctly captured here. But <strong>no Kafka handler, no API endpoint, no PDF report, no database column</strong> ever reads <code>classification_codes</code>. The UK SIC code exists in the system and is silently discarded.</p>
+      </div>
+      <div class="card card-gold">
+        <h4>What the Consensus Engine fixes</h4>
+        <p>The Consensus XGBoost Level 2 model routes UK SIC as the <strong>primary output</strong> for GB companies — using the data that is already in <code>classification_codes</code> but currently ignored by the production pipeline.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════
+     SECTION 5 — INTERSECTION & WHAT USERS SEE
+     ══════════════════════════════════════════════════════════ -->
+
+<!-- SLIDE 16 — API Endpoints that expose naics_code -->
+<section>
+  <div class="section-label">What Customers See</div>
+  <h2>Which API Endpoints Expose <code>naics_code</code>?</h2>
+  <table>
+    <tr><th>Endpoint</th><th>naics_code?</th><th>Who can access</th><th>What they see</th></tr>
+    <tr class="ok-row"><td><code>GET /facts/business/{id}/details</code></td><td>✅ Yes — primary</td><td>Admin, Customer, Applicant</td><td>Full fact: code + confidence + alternatives[] from all sources</td></tr>
+    <tr class="ok-row"><td><code>GET /facts/business/{id}/kyb</code></td><td>✅ Yes — via industry</td><td>Admin, Customer, Applicant</td><td>naics_code as part of KYB fact set</td></tr>
+    <tr class="ok-row"><td><code>GET /businesses/customers/{id}</code></td><td>✅ Yes — simplified</td><td>Admin, Customer</td><td>Flat fields: <code>naics_code</code> + <code>naics_title</code></td></tr>
+    <tr class="gap-row"><td><code>GET /facts/business/{id}/all</code></td><td>⚠️ Admin only</td><td>Admin ONLY</td><td>All 217 facts — "intentionally not cached, leaks information"</td></tr>
+    <tr class="gap-row"><td><code>PATCH /businesses/{id}</code></td><td>❌ Stripped</td><td>n/a</td><td>naics_code removed from request body — cannot be set via PATCH</td></tr>
+    <tr><td><code>PATCH /facts/.../override/naics_code</code></td><td>✅ Write only</td><td>Admin, Customer</td><td>Sets analyst override — wins all future Fact Engine runs</td></tr>
+  </table>
+  <div style="margin-top:10px" class="card card-green">
+    <h4>naics_code IS exposed in the current API</h4>
+    <p style="margin:0">The full fact with source confidence and alternatives is available at <code>GET /facts/business/{id}/details</code>. Customers can see which source won and what the alternatives were.</p>
+  </div>
+</section>
+
+<!-- SLIDE 17 — Pipeline Intersection -->
+<section>
+  <div class="section-label">Pipeline Intersection</div>
+  <h2>When the Two Pipelines Disagree</h2>
+  <div class="two-col" style="margin-bottom:14px">
+    <div class="pipe-box pipe-a">
+      <div style="font-size:0.7em;font-weight:700;color:#48BB78;margin-bottom:6px">🅐 CUSTOMER SEES (Pipeline A)</div>
+      <p style="font-size:0.75em"><code>GET /facts/business/{id}/details</code></p>
+      <pre style="font-size:0.55em"><code>{
+  "naics_code": {
+    "value": "541110",        ← OC won
+    "source": {
+      "confidence": 0.89,
+      "platformId": 23        ← OpenCorporates
+    },
+    "alternatives": [
+      { "value": "541512",
+        "source": 24,         ← ZoomInfo
+        "confidence": 0.72 }
+    ]
+  }
+}</code></pre>
+    </div>
+    <div class="pipe-box pipe-b">
+      <div style="font-size:0.7em;font-weight:700;color:#4299E1;margin-bottom:6px">🅑 ANALYTICS TABLE (Pipeline B)</div>
+      <p style="font-size:0.75em"><code>datascience.customer_files</code></p>
+      <pre style="font-size:0.55em"><code>business_id: "uuid-abc"
+primary_naics_code: 541512    ← ZoomInfo won
+zi_match_confidence: 0.72
+efx_match_confidence: 0.68
+
+-- OC had 0.89 but is ignored
+-- by customer_table.sql</code></pre>
+    </div>
+  </div>
+  <p style="font-size:0.8em;color:#A0AEC0;text-align:center">Same business. OC had the best match (0.89) → Pipeline A uses it. Pipeline B ignores OC → uses ZoomInfo (0.72) instead.</p>
+  <div class="card card-red">
+    <h4>This discrepancy is most common for:</h4>
+    <p>Non-US businesses (where OC has better data than ZI/EFX) · Recently registered businesses (Middesk SOS data is more current than periodic bulk loads) · UK companies (OC has uk_sic but Pipeline B has no mechanism to use it)</p>
+  </div>
+</section>
+
+<!-- SLIDE 18 — End: The Storage Architecture -->
+<section>
+  <div class="section-label">Summary</div>
+  <h2>The Full Storage Architecture</h2>
+  <div style="display:grid;grid-template-columns:1fr 1.4fr 1fr;gap:12px;margin-bottom:12px">
+    <div>
+      <h3 style="color:#68D391;font-size:0.85em">Lookup Tables (case-service PG)</h3>
+      <div class="card card-gray" style="margin-bottom:6px"><p style="margin:0;font-size:0.72em"><code>core_naics_code</code><br>id · code · label<br>722511 → Full-Service Restaurants</p></div>
+      <div class="card card-gray" style="margin-bottom:6px"><p style="margin:0;font-size:0.72em"><code>core_mcc_code</code><br>id · code · label<br>5812 → Eating Places</p></div>
+      <div class="card card-gray" style="margin-bottom:6px"><p style="margin:0;font-size:0.72em"><code>rel_naics_mcc</code><br>NAICS → MCC crosswalk<br>722511 → 5812</p></div>
+      <div class="card card-gray"><p style="margin:0;font-size:0.72em"><code>core_business_industries</code><br>Sector labels<br>72 → Food Service</p></div>
+    </div>
+    <div>
+      <h3 style="color:#48BB78;font-size:0.85em">🅐 Pipeline A Facts Store</h3>
+      <div class="card card-green">
+        <p style="font-size:0.72em;margin:0"><code>rds_warehouse_public.facts</code><br>business_id + name → JSONB value<br>Upsert on (business_id, name)<br><br>All 8 classification facts here:<br>naics_code, naics_description,<br>mcc_code, mcc_description,<br>mcc_code_found, mcc_code_from_naics,<br>industry, classification_codes</p>
+      </div>
+      <div class="card card-blue" style="margin-top:8px">
+        <p style="font-size:0.72em;margin:0"><code>rds_cases_public.data_businesses</code><br>naics_code → FK to core_naics_code.id<br>mcc_code → FK to core_mcc_code.id<br>industry → FK to core_business_industries.id</p>
+      </div>
+    </div>
+    <div>
+      <h3 style="color:#4299E1;font-size:0.85em">🅑 Pipeline B Analytics</h3>
+      <div class="card card-blue">
+        <p style="font-size:0.72em;margin:0"><code>datascience.customer_files</code><br>Wide denormalized table.<br>primary_naics_code (ZI or EFX only)<br>zi_match_confidence<br>efx_match_confidence<br>All firmographic fields<br><br>Internal analytics + model training only.<br>Not customer-facing.</p>
+      </div>
+    </div>
+  </div>
+  <div style="background:rgba(255,255,255,0.05);border-radius:8px;padding:8px 14px;text-align:center">
+    <p style="margin:0;font-size:0.75em;color:#A0AEC0">The customer always sees <strong style="color:#E2E8F0">Pipeline A output</strong> (all 6 sources, full confidence lineage). Pipeline B is internal analytics. They can disagree. The Consensus Engine (Level 2 XGBoost) is the next step — adding calibrated probabilities, UK SIC routing, and AML signals on top of these same 8 facts.</p>
+  </div>
+</section>
+
+</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script>
+Reveal.initialize({
+  hash: true,
+  slideNumber: 'c/t',
+  transition: 'slide',
+  width: 1300,
+  height: 720,
+  margin: 0.04,
+  minScale: 0.2,
+  maxScale: 1.5,
+  controls: true,
+  progress: true,
+});
+</script>
+</body>
+</html>
