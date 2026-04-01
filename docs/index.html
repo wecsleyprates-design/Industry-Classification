@@ -105,8 +105,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
 
 <!-- ── READING ORDER ── -->
 <div class="reading-order">
-  <h2>Read in This Order — Start with 1, End with 4</h2>
-  <p>Each deck builds on the previous one. The full picture emerges across all four.</p>
+  <h2>Read in This Order — Start with 1, End with 5</h2>
+  <p>Each deck builds on the previous one. The full picture emerges across all five.</p>
 </div>
 
 <!-- ── DECK GRID ── -->
@@ -210,13 +210,13 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
     <div class="deck-num">4</div>
     <div class="deck-header">
       <div class="deck-icon">🌐</div>
-      <div class="deck-step">Read Last — The Full System</div>
+      <div class="deck-step">Read Fourth — The Full System</div>
       <div class="deck-title">System Overview — The Consensus Engine</div>
       <div class="deck-subtitle">14 slides · Architecture, taxonomies, live demo context</div>
     </div>
     <div class="deck-body">
       <div class="deck-why">
-        <div class="deck-why-label">Why read this last</div>
+        <div class="deck-why-label">Why read this fourth</div>
         <div class="deck-why-text">With all context in place, this deck shows the complete Consensus Engine architecture: the 6-source signal layer, the Unified Global Ontology (2,330 codes across 6 taxonomy systems), jurisdiction routing for 200+ codes (us_mo, ca_bc, ae_az…), the 9 AML/KYB risk signals, and what the final output looks like. This is the "what we built" deck for product and business stakeholders.</div>
       </div>
       <div class="deck-covers">
@@ -232,6 +232,39 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
     </div>
     <div class="deck-links">
       <span class="btn-slides">View Slides →</span>
+    </div>
+  </a>
+
+  <!-- DECK 5 — Dual Pipeline Blueprint -->
+  <a href="pipeline_facts.html" class="deck" style="text-decoration:none;background:linear-gradient(135deg,#1A365D,#2B4C7E);">
+    <div class="deck-num">5</div>
+    <div class="deck-header">
+      <div class="deck-icon">🏭</div>
+      <div class="deck-step">Read Last — The 8 Facts &amp; Both Pipelines</div>
+      <div class="deck-title">Dual-Pipeline Classification Blueprint</div>
+      <div class="deck-subtitle">18 slides · Where the 8 facts come from, end-to-end</div>
+    </div>
+    <div class="deck-body">
+      <div class="deck-why">
+        <div class="deck-why-label">Why read this</div>
+        <div class="deck-why-text">This deck answers the most concrete operational question: how do the 8 classification facts (<code style="background:rgba(255,255,255,.1);padding:1px 4px;border-radius:3px">naics_code</code>, <code style="background:rgba(255,255,255,.1);padding:1px 4px;border-radius:3px">mcc_code</code>, <code style="background:rgba(255,255,255,.1);padding:1px 4px;border-radius:3px">industry</code>, and 5 more) get calculated, stored, and exposed to customers? It covers both pipelines in full — heuristic similarity scoring, the XGBoost entity matching model, the Fact Engine winner selection rules, the AI enrichment trigger logic, what happens in every edge case, and exactly which API endpoints expose each fact.</div>
+      </div>
+      <div class="deck-covers">
+        <div class="deck-tag">Pipeline A vs B goals and audiences</div>
+        <div class="deck-tag">similarity_index / MAX_CONFIDENCE_INDEX=55</div>
+        <div class="deck-tag">ml_model_matches XGBoost output</div>
+        <div class="deck-tag">zi/efx_match_confidence — how built</div>
+        <div class="deck-tag">Winner-takes-all rule (all fields)</div>
+        <div class="deck-tag">The 6 Fact Engine selection rules</div>
+        <div class="deck-tag">AI enrichment trigger + 561499 fallback</div>
+        <div class="deck-tag">All 8 facts anatomy + scenario tables</div>
+        <div class="deck-tag">API endpoint exposure table</div>
+        <div class="deck-tag">The classification_codes gap</div>
+      </div>
+    </div>
+    <div class="deck-links">
+      <span class="btn-slides">View Slides →</span>
+      <a href="https://github.com/wecsleyprates-design/Industry-Classification/blob/main/AI-Powered-NAICS-Industry-Classification-Agent/modeling/INDUSTRY_FACTS_GUIDE.md" onclick="event.stopPropagation()" class="btn-doc">Read Document</a>
     </div>
   </a>
 
@@ -260,6 +293,11 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
       <strong>Deck 4</strong>
       <span>System Overview<br/>The full new system</span>
     </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-box" style="background:rgba(43,76,126,.4);border-color:#4299E1;">
+      <strong>Deck 5</strong>
+      <span style="color:#90CDF4">8 Facts Blueprint<br/>Where facts come from</span>
+    </div>
   </div>
   <br/>
   <div class="flow-row" style="font-size:0.72em;color:#546E7A;margin-top:8px">
@@ -270,6 +308,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
     <span>"Phase 4B uses all of it, as 38 features"</span>
     <span style="margin:0 12px">→</span>
     <span style="color:#A5D6A7">"The full Consensus output"</span>
+    <span style="margin:0 12px">→</span>
+    <span style="color:#90CDF4">"The 8 facts: how they are built &amp; exposed"</span>
   </div>
 </div>
 
@@ -291,6 +331,11 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
       <div style="font-size:1.3em;margin-bottom:6px">🔄</div>
       <div style="font-weight:700;font-size:0.80em;margin-bottom:4px">Pipeline Phases (Full Document)</div>
       <div style="font-size:0.66em;color:#90CAF9">All 4 phases in written detail with actual code examples, Redshift queries, and the complete 38-feature breakdown.</div>
+    </a>
+    <a href="https://github.com/wecsleyprates-design/Industry-Classification/blob/main/AI-Powered-NAICS-Industry-Classification-Agent/modeling/INDUSTRY_FACTS_GUIDE.md" style="background:rgba(43,76,126,.3);border:1px solid #4299E1;border-radius:8px;padding:14px;text-decoration:none;color:white;display:block;">
+      <div style="font-size:1.3em;margin-bottom:6px">🏭</div>
+      <div style="font-weight:700;font-size:0.80em;margin-bottom:4px">Industry Facts Guide (Full Document)</div>
+      <div style="font-size:0.66em;color:#90CDF4">Complete reference for both pipelines, the 8 classification facts, XGBoost confidence scores, AI enrichment trigger, API exposure, and scenario tables. Verified against source code.</div>
     </a>
   </div>
 </div>
