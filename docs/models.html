@@ -14,56 +14,56 @@ html,body{margin:0;padding:0;overflow:hidden;}
 .reveal h1{font-size:1.7em;color:var(--dk);font-weight:800;margin:0 0 8px;}
 .reveal h2{font-size:1.1em;color:var(--b);font-weight:700;border-bottom:3px solid var(--b);padding-bottom:4px;margin:0 0 10px;}
 .reveal h3{font-size:0.72em;color:var(--gr);font-weight:600;text-transform:uppercase;letter-spacing:1px;margin:0 0 6px;}
-.reveal p,.reveal li{font-size:0.60em;line-height:1.5;color:#2c2c2c;margin:2px 0;}
+.reveal p,.reveal li{font-size:0.82em;line-height:1.5;color:#E2E8F0;margin:2px 0;}
 .reveal ul{list-style:none;padding:0;margin:0;}
 .reveal ul li::before{content:"›";color:var(--b);font-weight:bold;margin-right:6px;}
-.reveal table{font-size:0.50em;border-collapse:collapse;width:100%;}
+.reveal table{font-size:0.72em;border-collapse:collapse;width:100%;}
 .reveal table th{background:var(--b);color:white;padding:5px 8px;text-align:left;}
-.reveal table td{padding:4px 8px;border-bottom:1px solid #ddd;}
-.reveal table tr:nth-child(even) td{background:#f5f9ff;}
-.reveal code{font-size:0.78em;background:#f0f4f8;padding:1px 4px;border-radius:3px;color:var(--b);}
+.reveal table td{padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.15);}
+.reveal table tr:nth-child(even) td{background:rgba(255,255,255,0.05);}
+.reveal code{font-size:0.78em;background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:3px;color:var(--b);}
 .reveal pre{margin:4px 0;}
-.reveal pre code{background:#0D1B2A;color:#90CAF9;font-size:0.55em;line-height:1.4;}
+.reveal pre code{background:#0D1B2A;color:#90CAF9;font-size:0.77em;line-height:1.4;}
 
 .title-slide{background:linear-gradient(135deg,#0D1B2A 0%,#1565C0 100%) !important;}
 .title-slide h1{color:white !important;font-size:1.6em;}
 .title-slide h2{color:#90CAF9 !important;border-color:rgba(255,255,255,.3);font-size:0.9em;}
-.title-slide p{color:#B0BEC5 !important;font-size:0.62em;}
+.title-slide p{color:#B0BEC5 !important;font-size:0.82em;}
 
 .sec-slide{background:linear-gradient(135deg,#0D1B2A 0%,#1565C0 100%) !important;}
 .sec-slide h2{color:white !important;border-color:rgba(255,255,255,.3);font-size:1.5em;}
 .sec-slide p{color:#90CAF9 !important;font-size:0.82em;}
 .sec-num{font-size:4em;font-weight:900;color:rgba(255,255,255,.07);position:absolute;top:10px;right:30px;}
 
-.m1-slide{background:#E8F5E9 !important;}
-.m1-slide h2{color:#2E7D32 !important;border-color:#2E7D32;}
-.m2-slide{background:#E3F2FD !important;}
-.m2-slide h2{color:#1565C0 !important;border-color:#1565C0;}
+.m1-slide{background:rgba(72,187,120,0.15) !important;}
+.m1-slide h2{color:#68D391 !important;border-color:#68D391;}
+.m2-slide{background:rgba(66,153,225,0.15) !important;}
+.m2-slide h2{color:#63B3ED !important;border-color:#63B3ED;}
 
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
 .three-col{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
-.card{background:white;border-radius:6px;padding:8px 12px;box-shadow:0 2px 8px rgba(0,0,0,.08);border-left:3px solid var(--b);}
+.card{background:rgba(255,255,255,0.06);border-radius:6px;padding:8px 12px;box-shadow:0 2px 8px rgba(0,0,0,.08);border-left:3px solid var(--b);}
 .card-r{border-left-color:var(--r);}
 .card-g{border-left-color:var(--g);}
 .card-o{border-left-color:var(--o);}
 .card-gd{border-left-color:var(--gd);}
-.card-m1{border-left-color:#2E7D32;background:#F9FBE7;}
-.card-m2{border-left-color:#1565C0;background:#E3F2FD;}
-.chip{display:inline-block;padding:1px 7px;border-radius:8px;font-size:0.48em;font-weight:700;margin:1px;vertical-align:middle;}
-.chip-g{background:#E8F5E9;color:#2E7D32;border:1px solid #A5D6A7;}
-.chip-r{background:#FFEBEE;color:#C62828;border:1px solid #EF9A9A;}
-.chip-o{background:#FFF3E0;color:#E65100;border:1px solid #FFCC80;}
-.chip-b{background:#E3F2FD;color:#1565C0;border:1px solid #90CAF9;}
+.card-m1{border-left-color:#68D391;background:#F9FBE7;}
+.card-m2{border-left-color:#63B3ED;background:rgba(66,153,225,0.15);}
+.chip{display:inline-block;padding:1px 7px;border-radius:8px;font-size:0.70em;font-weight:700;margin:1px;vertical-align:middle;}
+.chip-g{background:rgba(72,187,120,0.15);color:#68D391;border:1px solid #A5D6A7;}
+.chip-r{background:rgba(252,129,129,0.15);color:#FC8181;border:1px solid #EF9A9A;}
+.chip-o{background:rgba(237,137,54,0.15);color:#ED8936;border:1px solid #FFCC80;}
+.chip-b{background:rgba(66,153,225,0.15);color:#63B3ED;border:1px solid #90CAF9;}
 .stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;}
-.stat-box{text-align:center;background:white;border-radius:6px;padding:10px;box-shadow:0 2px 6px rgba(0,0,0,.08);}
+.stat-box{text-align:center;background:rgba(255,255,255,0.06);border-radius:6px;padding:10px;box-shadow:0 2px 6px rgba(0,0,0,.08);}
 .stat-num{font-size:1.7em;font-weight:900;color:var(--b);display:block;}
-.stat-lbl{font-size:0.48em;color:var(--gr);margin-top:2px;}
-.flow{background:var(--lt);border:2px solid var(--b);border-radius:5px;padding:5px 10px;font-size:0.52em;font-weight:600;color:var(--dk);text-align:center;}
-.flow-g{background:#E8F5E9;border-color:#2E7D32;color:#2E7D32;}
+.stat-lbl{font-size:0.70em;color:var(--gr);margin-top:2px;}
+.flow{background:var(--lt);border:2px solid var(--b);border-radius:5px;padding:5px 10px;font-size:0.74em;font-weight:600;color:var(--dk);text-align:center;}
+.flow-g{background:rgba(72,187,120,0.15);border-color:#68D391;color:#68D391;}
 .arrow{text-align:center;color:var(--b);font-size:1em;line-height:1;}
-td.yes{color:#2E7D32;font-weight:700;}
-td.no{color:#C62828;font-weight:700;}
-td.par{color:#E65100;font-weight:700;}
+td.yes{color:#68D391;font-weight:700;}
+td.no{color:#FC8181;font-weight:700;}
+td.par{color:#ED8936;font-weight:700;}
 /* ── DARK THEME READABILITY OVERRIDE ── */
 :root{--b:#4299E1;--dk:#0D1B2A;--g:#48BB78;--r:#FC8181;--o:#ED8936;--gd:#ECC94B;--gr:#A0AEC0;--lt:rgba(66,153,225,0.15);--p:#9F7AEA;}
 .reveal{font-size:20px !important;}
@@ -77,7 +77,7 @@ td.par{color:#E65100;font-weight:700;}
 .reveal table td{padding:5px 10px !important;border-bottom:1px solid #2D3748 !important;color:#E2E8F0 !important;}
 .reveal table tr:nth-child(even) td{background:rgba(255,255,255,0.04) !important;}
 .reveal code{background:#1a202c !important;color:#F6E05E !important;padding:2px 5px !important;border-radius:3px !important;}
-.reveal pre code{font-size:0.62em !important;line-height:1.5 !important;background:#1a202c !important;color:#90CDF4 !important;}
+.reveal pre code{font-size:0.82em !important;line-height:1.5 !important;background:#1a202c !important;color:#90CDF4 !important;}
 .card{background:rgba(255,255,255,0.07) !important;box-shadow:none !important;border-left:3px solid var(--b) !important;}
 .card-r{border-left-color:var(--r) !important;}
 .card-g{border-left-color:var(--g) !important;}
@@ -90,7 +90,7 @@ td.par{color:#E65100;font-weight:700;}
 .phase2 h2{color:#63B3ED !important;border-color:#63B3ED !important;}
 .phase3 h2{color:#ED8936 !important;border-color:#ED8936 !important;}
 .phase4a h2{color:#FC8181 !important;border-color:#FC8181 !important;}
-.chip{font-size:0.60em !important;}
+.chip{font-size:0.82em !important;}
 .chip-g{background:rgba(72,187,120,0.2) !important;color:#68D391 !important;border:1px solid #48BB78 !important;}
 .chip-r{background:rgba(252,129,129,0.2) !important;color:#FC8181 !important;border:1px solid #FC8181 !important;}
 .chip-o{background:rgba(237,137,54,0.2) !important;color:#ED8936 !important;border:1px solid #ED8936 !important;}
@@ -102,6 +102,83 @@ td.par{color:#E65100;font-weight:700;}
 .flow-r{background:rgba(252,129,129,0.15) !important;border-color:#FC8181 !important;color:#FC8181 !important;}
 .reveal .title-slide p{color:#A0AEC0 !important;font-size:0.78em !important;}
 
+
+/* ═══════════════════════════════════════════════════════════
+   MASTER READABILITY OVERRIDE — matches pipeline_facts.html
+   ═══════════════════════════════════════════════════════════ */
+:root {
+  --b:#4299E1; --dk:#0D1B2A; --g:#48BB78; --r:#FC8181;
+  --o:#ED8936; --gd:#ECC94B; --gr:#A0AEC0; --lt:rgba(66,153,225,0.15); --p:#9F7AEA;
+}
+.reveal { font-size: 19px !important; font-family:'Segoe UI',system-ui,sans-serif !important; }
+.reveal h1 { font-size: 1.65em !important; color: #63B3ED !important; font-weight: 800 !important; }
+.reveal h2 { font-size: 1.1em !important; color: #68D391 !important; border-bottom: 2px solid #68D391 !important;
+             padding-bottom: 5px !important; margin-bottom: 12px !important; font-weight: 700 !important; }
+.reveal h3 { font-size: 0.85em !important; color: #F6E05E !important; font-weight: 600 !important;
+             text-transform: uppercase !important; letter-spacing: 0.5px !important; }
+.reveal p, .reveal li { font-size: 0.80em !important; line-height: 1.6 !important;
+                         color: #E2E8F0 !important; margin: 3px 0 !important; }
+.reveal ul li::before { color: #4299E1 !important; }
+.reveal table { font-size: 0.72em !important; border-collapse: collapse !important; width: 100% !important; }
+.reveal table th { background: #2D3748 !important; color: #63B3ED !important;
+                   padding: 6px 10px !important; text-align: left !important; }
+.reveal table td { padding: 5px 10px !important; border-bottom: 1px solid rgba(255,255,255,0.12) !important;
+                   color: #E2E8F0 !important; vertical-align: top !important; }
+.reveal table tr:nth-child(even) td { background: rgba(255,255,255,0.04) !important; }
+.reveal table td.yes { color: #68D391 !important; font-weight: 600 !important; }
+.reveal table td.no  { color: #FC8181 !important; font-weight: 600 !important; }
+.reveal code { background: #1a202c !important; color: #F6E05E !important;
+               padding: 2px 5px !important; border-radius: 3px !important; font-size: 0.82em !important; }
+.reveal pre  { margin: 4px 0 !important; }
+.reveal pre code { font-size: 0.68em !important; line-height: 1.5 !important;
+                   background: #1a202c !important; color: #90CDF4 !important;
+                   padding: 8px 12px !important; border-radius: 6px !important; }
+
+/* Slide type backgrounds */
+.title-slide, .sec-slide { background: linear-gradient(135deg,#0D1B2A,#1565C0) !important; }
+.title-slide h1 { color: white !important; }
+.title-slide h2 { color: #90CAF9 !important; border-color: rgba(255,255,255,.3) !important; }
+.title-slide p, .sec-slide p { color: #A0AEC0 !important; font-size: 0.82em !important; }
+.sec-slide h2 { color: white !important; border-color: rgba(255,255,255,.3) !important; font-size: 1.3em !important; }
+.phase0, .phase1, .phase2, .phase3, .phase4a, .phase4b { background: transparent !important; }
+.phase0 h2 { color: #B794F4 !important; border-color: #B794F4 !important; }
+.phase1 h2, .phase4b h2 { color: #68D391 !important; border-color: #68D391 !important; }
+.phase2 h2 { color: #63B3ED !important; border-color: #63B3ED !important; }
+.phase3 h2 { color: #ED8936 !important; border-color: #ED8936 !important; }
+.phase4a h2 { color: #FC8181 !important; border-color: #FC8181 !important; }
+
+/* Cards */
+.card { background: rgba(255,255,255,0.07) !important; box-shadow: none !important;
+        border-left: 3px solid #4299E1 !important; border-radius: 6px !important;
+        padding: 8px 12px !important; }
+.card-r { border-left-color: #FC8181 !important; }
+.card-g { border-left-color: #48BB78 !important; }
+.card-o { border-left-color: #ED8936 !important; }
+.card-p { border-left-color: #9F7AEA !important; }
+.card-gd { border-left-color: #ECC94B !important; }
+
+/* Chips */
+.chip { font-size: 0.62em !important; padding: 2px 8px !important; }
+.chip-g { background: rgba(72,187,120,0.2) !important; color: #68D391 !important; border: 1px solid #48BB78 !important; }
+.chip-r { background: rgba(252,129,129,0.2) !important; color: #FC8181 !important; border: 1px solid #FC8181 !important; }
+.chip-o { background: rgba(237,137,54,0.2) !important; color: #ED8936 !important; border: 1px solid #ED8936 !important; }
+.chip-b { background: rgba(66,153,225,0.2) !important; color: #63B3ED !important; border: 1px solid #4299E1 !important; }
+.chip-p { background: rgba(159,122,234,0.2) !important; color: #B794F4 !important; border: 1px solid #9F7AEA !important; }
+.chip-gd { background: rgba(236,201,75,0.2) !important; color: #ECC94B !important; border: 1px solid #ECC94B !important; }
+
+/* Flow boxes */
+.flow { background: rgba(66,153,225,0.15) !important; border: 2px solid #4299E1 !important;
+        color: #63B3ED !important; font-size: 0.72em !important; }
+.flow-g { background: rgba(72,187,120,0.15) !important; border-color: #48BB78 !important; color: #68D391 !important; }
+.flow-r { background: rgba(252,129,129,0.15) !important; border-color: #FC8181 !important; color: #FC8181 !important; }
+
+/* Section number overlay */
+.sec-num { color: rgba(255,255,255,0.07) !important; }
+
+/* Worth AI specific */
+.worth-box  { background: rgba(252,129,129,0.15) !important; border-color: #FC8181 !important; }
+.consensus-box { background: rgba(72,187,120,0.15) !important; border-color: #48BB78 !important; }
+
 </style>
 </head>
 <body>
@@ -110,14 +187,14 @@ td.par{color:#E65100;font-weight:700;}
 
 <!-- ═══════════ SLIDE 1 — TITLE ═══════════ -->
 <section class="title-slide" data-background-color="#0D1B2A">
-  <div style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.2);border-radius:20px;padding:6px 20px;display:inline-block;font-size:0.55em;color:#90CAF9;margin-bottom:16px;">
+  <div style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.2);border-radius:20px;padding:6px 20px;display:inline-block;font-size:0.77em;color:#90CAF9;margin-bottom:16px;">
     📚 Deck 3 of 4 — Read after Technical Briefing
   </div>
   <h1>The Two XGBoost Models</h1>
   <h2>Industry Classification — A Deep Dive</h2>
   <br/>
   <p>What Worth AI has · What is missing · Why the Consensus Engine needs both</p>
-  <p style="font-size:0.52em;color:#546E7A;margin-top:10px">
+  <p style="font-size:0.74em;color:#A0AEC0;margin-top:10px">
     Prerequisite: Deck 1 (Phases) + Deck 2 (Technical Briefing) · Full portal: <strong style="color:#90CAF9">wecsleyprates-design.github.io/Industry-Classification</strong>
   </p>
 </section>
@@ -128,9 +205,9 @@ td.par{color:#E65100;font-weight:700;}
   <div class="two-col" style="margin-top:14px">
     <div class="card card-m1" style="padding:16px;text-align:center">
       <div style="font-size:1.8em">🔍</div>
-      <div style="font-weight:800;font-size:0.80em;color:#2E7D32;margin:8px 0">Model 1 — Entity Matching</div>
-      <div style="font-size:0.62em;font-style:italic;color:#2E7D32;margin-bottom:10px">"Is this database record the same company as the input?"</div>
-      <div style="font-size:0.58em;color:#555">
+      <div style="font-weight:800;font-size:0.80em;color:#68D391;margin:8px 0">Model 1 — Entity Matching</div>
+      <div style="font-size:0.82em;font-style:italic;color:#68D391;margin-bottom:10px">"Is this database record the same company as the input?"</div>
+      <div style="font-size:0.80em;color:#555">
         Compares name + address similarity<br/>
         between input and each candidate record<br/>
         Outputs: <code>match_confidence</code> 0–1<br/><br/>
@@ -140,9 +217,9 @@ td.par{color:#E65100;font-weight:700;}
     </div>
     <div class="card card-m2" style="padding:16px;text-align:center">
       <div style="font-size:1.8em">🎯</div>
-      <div style="font-weight:800;font-size:0.80em;color:#1565C0;margin:8px 0">Model 2 — Classification Consensus</div>
-      <div style="font-size:0.62em;font-style:italic;color:#1565C0;margin-bottom:10px">"Given all vendor evidence, what industry code is most likely — and how confident are we?"</div>
-      <div style="font-size:0.58em;color:#555">
+      <div style="font-weight:800;font-size:0.80em;color:#63B3ED;margin:8px 0">Model 2 — Classification Consensus</div>
+      <div style="font-size:0.82em;font-style:italic;color:#63B3ED;margin-bottom:10px">"Given all vendor evidence, what industry code is most likely — and how confident are we?"</div>
+      <div style="font-size:0.80em;color:#555">
         Aggregates 38 signals across all vendors,<br/>
         jurisdiction, history, AML patterns<br/>
         Outputs: probability distribution over all codes<br/><br/>
@@ -151,7 +228,7 @@ td.par{color:#E65100;font-weight:700;}
       </div>
     </div>
   </div>
-  <div class="card card-gd" style="margin-top:12px;text-align:center;font-size:0.60em">
+  <div class="card card-gd" style="margin-top:12px;text-align:center;font-size:0.82em">
     <strong>Key insight:</strong> These are not alternatives — they are sequential. Model 1 finds the right records. Model 2 decides what to do with the codes those records contain.
   </div>
 </section>
@@ -166,22 +243,22 @@ td.par{color:#E65100;font-weight:700;}
 <!-- ═══════════ SLIDE 3 — M1 PROBLEM ═══════════ -->
 <section class="m1-slide">
   <h2>Model 1 — The Problem It Solves</h2>
-  <p style="font-size:0.60em;margin-bottom:10px">When "Apple Inc" is submitted, vendor databases return hundreds of candidates. Which one is the real Apple Inc?</p>
+  <p style="font-size:0.82em;margin-bottom:10px">When "Apple Inc" is submitted, vendor databases return hundreds of candidates. Which one is the real Apple Inc?</p>
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
     <div>
-      <div class="card" style="margin-bottom:7px;font-size:0.58em">
+      <div class="card" style="margin-bottom:7px;font-size:0.80em">
         <strong>OpenCorporates:</strong> 200+ "Apple" records in California alone<br/>
         "Apple Inc", "Apple Computer Inc", "Apple Bank for Savings", "Apple Valley USD"…
       </div>
-      <div class="card" style="margin-bottom:7px;font-size:0.58em">
+      <div class="card" style="margin-bottom:7px;font-size:0.80em">
         <strong>Equifax:</strong> Millions of US business records<br/>
         Name variations, address changes, merged entities
       </div>
-      <div class="card" style="margin-bottom:7px;font-size:0.58em">
+      <div class="card" style="margin-bottom:7px;font-size:0.80em">
         <strong>ZoomInfo:</strong> 100M+ global company records<br/>
         Subsidiaries, branches, rebranded companies
       </div>
-      <div class="card" style="font-size:0.58em">
+      <div class="card" style="font-size:0.80em">
         <strong>Liberty Data:</strong> Commercial intelligence overlay<br/>
         Different name normalisation standards
       </div>
@@ -193,7 +270,7 @@ td.par{color:#E65100;font-weight:700;}
       <div class="flow" style="margin-bottom:6px">Compute 26 similarity features per candidate pair</div>
       <div class="arrow">↓ XGBoost predict_proba</div>
       <div class="flow flow-g" style="margin-bottom:6px">Apple Inc. (CIK 320193, CA) → 0.97 ✅ MATCHED</div>
-      <div class="card card-r" style="font-size:0.56em">Apple Bank for Savings (NY) → 0.12 ❌<br/>Apple Valley USD (CA) → 0.08 ❌</div>
+      <div class="card card-r" style="font-size:0.78em">Apple Bank for Savings (NY) → 0.12 ❌<br/>Apple Valley USD (CA) → 0.08 ❌</div>
     </div>
   </div>
 </section>
@@ -203,7 +280,7 @@ td.par{color:#E65100;font-weight:700;}
   <h2>Model 1 — The 26 Input Features</h2>
   <div class="two-col" style="margin-top:10px">
     <div>
-      <h3 style="color:#2E7D32">Name Similarity (10 features)</h3>
+      <h3 style="color:#68D391">Name Similarity (10 features)</h3>
       <table>
         <tr><th>Feature</th><th>What it measures</th></tr>
         <tr><td><code>jaccard_1/2/3/4</code></td><td>Character k-gram overlap (catches typos, transpositions)</td></tr>
@@ -211,13 +288,13 @@ td.par{color:#E65100;font-weight:700;}
         <tr><td><code>sim_norm_jac_1/2/3/4</code></td><td>Normalised overlap coefficient — better for short names</td></tr>
         <tr><td><code>sim_norm_jac_word</code></td><td>Word-level normalised overlap</td></tr>
       </table>
-      <div style="font-size:0.52em;margin-top:8px;color:#555">
+      <div style="font-size:0.74em;margin-top:8px;color:#555">
         <strong>Jaccard</strong> = |A∩B| / |A∪B|<br/>
         <strong>Overlap</strong> = |A∩B| / min(|A|,|B|) — better for short names matching long ones
       </div>
     </div>
     <div>
-      <h3 style="color:#2E7D32">Address Similarity (10 features)</h3>
+      <h3 style="color:#68D391">Address Similarity (10 features)</h3>
       <table>
         <tr><th>Feature</th><th>What it measures</th></tr>
         <tr><td><code>match_zipcode</code></td><td>Exact postal code match (binary)</td></tr>
@@ -228,8 +305,8 @@ td.par{color:#E65100;font-weight:700;}
         <tr><td><code>match_address_line_2</code></td><td>Exact suite/unit match</td></tr>
         <tr><td><code>street_name_1/2</code></td><td>Jaccard k-gram on street name</td></tr>
       </table>
-      <h3 style="color:#2E7D32;margin-top:8px">Short Name (6 features)</h3>
-      <div style="font-size:0.54em">Jaccard + overlap coefficient on derived "short name" (removes city names, common words)</div>
+      <h3 style="color:#68D391;margin-top:8px">Short Name (6 features)</h3>
+      <div style="font-size:0.76em">Jaccard + overlap coefficient on derived "short name" (removes city names, common words)</div>
     </div>
   </div>
 </section>
@@ -240,8 +317,8 @@ td.par{color:#E65100;font-weight:700;}
   <div class="two-col" style="margin-top:12px">
     <div>
       <div class="card card-m1" style="margin-bottom:10px">
-        <div style="font-weight:700;font-size:0.66em;color:#2E7D32">Output: match_confidence per source</div>
-        <pre style="font-size:0.48em"><code>model.predict_proba(features)[:, 1]
+        <div style="font-weight:700;font-size:0.66em;color:#68D391">Output: match_confidence per source</div>
+        <pre style="font-size:0.70em"><code>model.predict_proba(features)[:, 1]
 
 # Apple Inc across 4 Redshift sources:
 opencorporates: 0.97  → MATCHED ✅
@@ -252,8 +329,8 @@ trulioo:        0.62  → CONFLICT ⚠️
 ai_semantic:    n/a   → INFERRED 🔵</code></pre>
       </div>
       <div class="card card-m1">
-        <div style="font-weight:700;font-size:0.62em;color:#2E7D32">Threshold: ≥ 0.80 = MATCHED</div>
-        <div style="font-size:0.55em;margin-top:4px">Below 0.80 → do not trust this source's industry code for this company</div>
+        <div style="font-weight:700;font-size:0.82em;color:#68D391">Threshold: ≥ 0.80 = MATCHED</div>
+        <div style="font-size:0.77em;margin-top:4px">Below 0.80 → do not trust this source's industry code for this company</div>
       </div>
     </div>
     <div>
@@ -265,7 +342,7 @@ ai_semantic:    n/a   → INFERRED 🔵</code></pre>
         <tr><td>Trulioo</td><td>0.80×0.70</td><td>0.62</td><td>0.347</td></tr>
         <tr><td>Equifax</td><td>0.70</td><td>0.91</td><td>0.637</td></tr>
       </table>
-      <div class="card card-r" style="margin-top:10px;font-size:0.55em">
+      <div class="card card-r" style="margin-top:10px;font-size:0.77em">
         <strong>The gap:</strong> Worth AI uses match_confidence only to pick a winner. The Consensus Engine also uses it as a <em>feature input for Model 2</em> — so the model can learn that high OC confidence + low Trulioo confidence means OC's code should dominate.
       </div>
     </div>
@@ -285,8 +362,8 @@ ai_semantic:    n/a   → INFERRED 🔵</code></pre>
   <div class="two-col" style="margin-top:12px">
     <div>
       <div class="card" style="margin-bottom:10px">
-        <div style="font-weight:700;font-size:0.64em;color:var(--b)">The Rule</div>
-        <pre style="font-size:0.48em"><code>factWithHighestConfidence():
+        <div style="font-weight:700;font-size:0.84em;color:var(--b)">The Rule</div>
+        <pre style="font-size:0.70em"><code>factWithHighestConfidence():
   winner = argmax(
     source.confidence × source.weight
   )
@@ -297,20 +374,20 @@ ai_semantic:    n/a   → INFERRED 🔵</code></pre>
 
 # Result: exactly ONE code, no probability</code></pre>
       </div>
-      <div class="card card-gd" style="font-size:0.58em">
+      <div class="card card-gd" style="font-size:0.80em">
         <strong>This rule was the right choice</strong> when Worth AI only needed to classify US companies with NAICS. It is fast, deterministic, and auditable.<br/><br/>
         It becomes insufficient as soon as you need probabilities, multi-taxonomy output, AML signals, or jurisdiction routing.
       </div>
     </div>
     <div>
       <h3 style="color:var(--r)">The 7 Structural Gaps</h3>
-      <div class="card card-r" style="margin-bottom:5px;font-size:0.56em"><strong>1. No probability output</strong> — always one winner, no uncertainty signal</div>
-      <div class="card card-r" style="margin-bottom:5px;font-size:0.56em"><strong>2. Cannot learn</strong> — manual overrides in <code>rel_business_industry_naics</code> are ignored</div>
-      <div class="card card-r" style="margin-bottom:5px;font-size:0.56em"><strong>3. Source conflict is silent</strong> — OC says Restaurant, Equifax says Holding Co → rule picks one, flags nothing</div>
-      <div class="card card-r" style="margin-bottom:5px;font-size:0.56em"><strong>4. Agreement not aggregated</strong> — 5/5 sources agree = same format as 1/5</div>
-      <div class="card card-r" style="margin-bottom:5px;font-size:0.56em"><strong>5. No jurisdiction routing</strong> — GB company still gets NAICS, not UK SIC</div>
-      <div class="card card-r" style="margin-bottom:5px;font-size:0.56em"><strong>6. No temporal awareness</strong> — code changed 3x this year = normal classification</div>
-      <div class="card card-r" style="font-size:0.56em"><strong>7. One taxonomy only</strong> — structurally impossible to output NAICS + UK SIC + MCC simultaneously</div>
+      <div class="card card-r" style="margin-bottom:5px;font-size:0.78em"><strong>1. No probability output</strong> — always one winner, no uncertainty signal</div>
+      <div class="card card-r" style="margin-bottom:5px;font-size:0.78em"><strong>2. Cannot learn</strong> — manual overrides in <code>rel_business_industry_naics</code> are ignored</div>
+      <div class="card card-r" style="margin-bottom:5px;font-size:0.78em"><strong>3. Source conflict is silent</strong> — OC says Restaurant, Equifax says Holding Co → rule picks one, flags nothing</div>
+      <div class="card card-r" style="margin-bottom:5px;font-size:0.78em"><strong>4. Agreement not aggregated</strong> — 5/5 sources agree = same format as 1/5</div>
+      <div class="card card-r" style="margin-bottom:5px;font-size:0.78em"><strong>5. No jurisdiction routing</strong> — GB company still gets NAICS, not UK SIC</div>
+      <div class="card card-r" style="margin-bottom:5px;font-size:0.78em"><strong>6. No temporal awareness</strong> — code changed 3x this year = normal classification</div>
+      <div class="card card-r" style="font-size:0.78em"><strong>7. One taxonomy only</strong> — structurally impossible to output NAICS + UK SIC + MCC simultaneously</div>
     </div>
   </div>
 </section>
@@ -321,25 +398,25 @@ ai_semantic:    n/a   → INFERRED 🔵</code></pre>
   <div class="two-col" style="margin-top:14px">
     <div>
       <h3 style="color:var(--r)">Without probability (Worth AI today)</h3>
-      <div class="card card-r" style="margin-bottom:8px;font-size:0.60em">
+      <div class="card card-r" style="margin-bottom:8px;font-size:0.82em">
         Company A: 5/5 sources agree → NAICS 334118<br/>
         Company B: 1/5 sources respond → NAICS 334118<br/><br/>
         <strong>Both output: NAICS 334118 — no difference visible</strong>
       </div>
-      <div class="card card-r" style="font-size:0.60em">
+      <div class="card card-r" style="font-size:0.82em">
         Underwriter sees the same output for a well-matched Apple Inc and an unknown startup with one data point. Both get treated identically. Risk is invisible.
       </div>
     </div>
     <div>
       <h3 style="color:var(--g)">With calibrated probability (Consensus Engine)</h3>
-      <div class="card card-g" style="margin-bottom:8px;font-size:0.60em">
+      <div class="card card-g" style="margin-bottom:8px;font-size:0.82em">
         Company A: P(NAICS 334118) = <strong>0.92</strong> → AUTO-APPROVE<br/>
         Company B: P(NAICS 334118) = <strong>0.14</strong> → MANUAL REVIEW
       </div>
-      <div class="card card-g" style="margin-bottom:8px;font-size:0.60em">
+      <div class="card card-g" style="margin-bottom:8px;font-size:0.82em">
         Underwriters focus attention on the 14% confidence cases. High-confidence classifications flow through automatically. Risk is quantified and actionable.
       </div>
-      <div class="card card-g" style="font-size:0.60em">
+      <div class="card card-g" style="font-size:0.82em">
         <strong>What "calibrated" means:</strong> If the model says 0.90, roughly 90% of companies with similar features are correctly classified at that code. Not just a relative ranking — an absolute probability.
       </div>
     </div>
@@ -359,8 +436,8 @@ ai_semantic:    n/a   → INFERRED 🔵</code></pre>
   <div class="two-col" style="margin-top:12px">
     <div>
       <div class="card card-m2" style="margin-bottom:10px">
-        <div style="font-weight:700;font-size:0.64em;color:var(--b)">XGBoost Configuration</div>
-        <pre style="font-size:0.48em"><code>XGBClassifier(
+        <div style="font-weight:700;font-size:0.84em;color:var(--b)">XGBoost Configuration</div>
+        <pre style="font-size:0.70em"><code>XGBClassifier(
   objective    = "multi:softprob",
   # → outputs probability per class
   # → all probs sum to 1.0 (softmax)
@@ -373,7 +450,7 @@ ai_semantic:    n/a   → INFERRED 🔵</code></pre>
   colsample    = 0.8, # feature sampling
 )</code></pre>
       </div>
-      <div class="card card-m2" style="font-size:0.56em">
+      <div class="card card-m2" style="font-size:0.78em">
         <strong>Why XGBoost and not a neural network?</strong><br/>
         • Handles mixed numeric features natively<br/>
         • Works with small training sets (starts synthetic, grows with overrides)<br/>
@@ -384,8 +461,8 @@ ai_semantic:    n/a   → INFERRED 🔵</code></pre>
     </div>
     <div>
       <h3>What multi:softprob means</h3>
-      <div style="font-size:0.58em;margin-bottom:8px">For each company, the model outputs one probability per industry code, where all probabilities sum to 1.0:</div>
-      <pre style="font-size:0.50em"><code>probs = model.predict_proba(X)
+      <div style="font-size:0.80em;margin-bottom:8px">For each company, the model outputs one probability per industry code, where all probabilities sum to 1.0:</div>
+      <pre style="font-size:0.72em"><code>probs = model.predict_proba(X)
 # → [0.92, 0.04, 0.02, 0.01, 0.01, ...]
 #    ^NAICS    ^541  ^519   ^551  ^423
 #    334118   512   290    112   690
@@ -394,7 +471,7 @@ top_5 = argsort(probs)[::-1][:5]
 # Primary:   334118 → 92%
 # Secondary: 541512 → 4%
 # Tertiary:  519290 → 2%</code></pre>
-      <div class="card card-m2" style="margin-top:8px;font-size:0.56em">
+      <div class="card card-m2" style="margin-top:8px;font-size:0.78em">
         <strong>Training data:</strong> Synthetic multi-vendor samples covering all 200+ jurisdictions → replaced by real manual overrides from <code>rel_business_industry_naics WHERE platform='manual'</code>
       </div>
     </div>
@@ -404,7 +481,7 @@ top_5 = argsort(probs)[::-1][:5]
 <!-- ═══════════ SLIDE 9 — M2 FEATURES GROUP A ═══════════ -->
 <section class="m2-slide">
   <h2>Model 2 — Features Group A: Source Quality (12 features, idx 0–11)</h2>
-  <p style="font-size:0.58em;margin-bottom:10px">These encode <strong>how reliable each of the 6 vendor signals is for THIS specific company</strong>. A source that matched at 97% confidence deserves far more weight than one that matched at 62%.</p>
+  <p style="font-size:0.80em;margin-bottom:10px">These encode <strong>how reliable each of the 6 vendor signals is for THIS specific company</strong>. A source that matched at 97% confidence deserves far more weight than one that matched at 62%.</p>
   <table>
     <tr><th>Index</th><th>Feature</th><th>Formula</th><th>Why it matters</th></tr>
     <tr><td>0</td><td>OC weighted confidence</td><td><code>0.90 × OC_match_conf</code></td><td>Highest authority — gov registry × entity match quality</td></tr>
@@ -416,7 +493,7 @@ top_5 = argsort(probs)[::-1][:5]
     <tr><td>6–10</td><td>MATCHED flags (per source)</td><td>1 if match_conf ≥ 0.80</td><td>Binary "trust this source on this company" signal</td></tr>
     <tr><td>11</td><td>AI INFERRED flag</td><td>1 if AI status = INFERRED</td><td>AI never MATCHED — always inferred from web/LLM</td></tr>
   </table>
-  <div class="card card-m2" style="margin-top:8px;font-size:0.54em">
+  <div class="card card-m2" style="margin-top:8px;font-size:0.76em">
     <strong>Key difference from the rule:</strong> The rule uses <code>weight × confidence</code> to pick one winner. Model 2 receives ALL weighted confidences as features simultaneously — the model learns how to aggregate them, which is fundamentally different from simple maximisation.
   </div>
 </section>
@@ -427,12 +504,12 @@ top_5 = argsort(probs)[::-1][:5]
   <div class="two-col" style="margin-top:12px">
     <div>
       <div class="card card-m2" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.64em;color:var(--b)">Feature 12 — Trulioo Pollution Flag</div>
-        <div style="font-size:0.56em;margin-top:4px">1 if Trulioo returned a 4-digit SIC code in a jurisdiction that uses 5–6 digit codes. Known data quality issue — automatically detected and down-weighted.</div>
+        <div style="font-weight:700;font-size:0.84em;color:var(--b)">Feature 12 — Trulioo Pollution Flag</div>
+        <div style="font-size:0.78em;margin-top:4px">1 if Trulioo returned a 4-digit SIC code in a jurisdiction that uses 5–6 digit codes. Known data quality issue — automatically detected and down-weighted.</div>
       </div>
       <div class="card card-r" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.64em;color:var(--r)">Feature 13 — Web↔Registry Semantic Distance</div>
-        <div style="font-size:0.56em;margin-top:4px">
+        <div style="font-weight:700;font-size:0.84em;color:var(--r)">Feature 13 — Web↔Registry Semantic Distance</div>
+        <div style="font-size:0.78em;margin-top:4px">
           <strong>Formula:</strong> cosine_distance(embed(registry_label), embed(ai_label))<br/>
           Registry says: "Holding Company" (NAICS 551112)<br/>
           AI infers from website: "restaurant food service"<br/>
@@ -443,8 +520,8 @@ top_5 = argsort(probs)[::-1][:5]
     </div>
     <div>
       <div class="card card-r" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.64em;color:var(--r)">Feature 14 — Temporal Pivot Score</div>
-        <div style="font-size:0.56em;margin-top:4px">
+        <div style="font-weight:700;font-size:0.84em;color:var(--r)">Feature 14 — Temporal Pivot Score</div>
+        <div style="font-size:0.78em;margin-top:4px">
           <strong>Formula:</strong> unique_codes / total_snapshots (3 quarters)<br/><br/>
           Stable restaurant: Q1=722511, Q2=722511, Q3=722511 → score=0.00<br/>
           Suspicious pivot: Q1=722511, Q2=551112, Q3=541511 → score=1.00<br/><br/>
@@ -452,8 +529,8 @@ top_5 = argsort(probs)[::-1][:5]
         </div>
       </div>
       <div class="card card-m2">
-        <div style="font-weight:700;font-size:0.64em;color:var(--b)">Feature 15 — Cross-Taxonomy Agreement</div>
-        <div style="font-size:0.56em;margin-top:4px">Fraction of 6 taxonomy systems (NAICS/UK SIC/NACE/ISIC/SIC/MCC) that map to the same semantic cluster via UGO FAISS. High = high confidence. All 6 agree → near certainty.</div>
+        <div style="font-weight:700;font-size:0.84em;color:var(--b)">Feature 15 — Cross-Taxonomy Agreement</div>
+        <div style="font-size:0.78em;margin-top:4px">Fraction of 6 taxonomy systems (NAICS/UK SIC/NACE/ISIC/SIC/MCC) that map to the same semantic cluster via UGO FAISS. High = high confidence. All 6 agree → near certainty.</div>
       </div>
     </div>
   </div>
@@ -462,7 +539,7 @@ top_5 = argsort(probs)[::-1][:5]
 <!-- ═══════════ SLIDE 11 — M2 FEATURES GROUP D ═══════════ -->
 <section class="m2-slide">
   <h2>Model 2 — Features Group D: Jurisdiction One-Hot (12 features, idx 19–30)</h2>
-  <p style="font-size:0.58em;margin-bottom:10px">This is how the model learns taxonomy routing — which taxonomy system is correct for which jurisdiction — without any hard-coded rules.</p>
+  <p style="font-size:0.80em;margin-bottom:10px">This is how the model learns taxonomy routing — which taxonomy system is correct for which jurisdiction — without any hard-coded rules.</p>
   <div class="two-col">
     <div>
       <table>
@@ -482,11 +559,11 @@ top_5 = argsort(probs)[::-1][:5]
       </table>
     </div>
     <div>
-      <div class="card card-m2" style="margin-bottom:8px;font-size:0.58em">
+      <div class="card card-m2" style="margin-bottom:8px;font-size:0.80em">
         <strong>Why 10 buckets instead of 200 columns?</strong><br/>
         200 one-hot columns for every country would create a sparse feature space. The 10 buckets capture the taxonomically meaningful distinctions (US→NAICS, EU/UK→SIC/NACE, global→ISIC) while keeping the model manageable.
       </div>
-      <div class="card card-gd" style="font-size:0.58em">
+      <div class="card card-gd" style="font-size:0.80em">
         <strong>This is the routing fix for Worth AI's core gap.</strong> Worth AI has <code>jurisdiction_code</code> in Redshift for 16M+ GB companies — it just never uses it to change the output taxonomy. Model 2 encodes this routing as learned feature weights. When feature 23 (EU) = 1, the model assigns higher probability to UK SIC and NACE codes. No hard-coded rules needed.
       </div>
     </div>
@@ -499,8 +576,8 @@ top_5 = argsort(probs)[::-1][:5]
   <div class="three-col" style="margin-top:12px">
     <div>
       <div class="card card-m2" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.62em;color:var(--b)">Feature 31 — Majority Code Agreement</div>
-        <div style="font-size:0.54em;margin-top:4px">
+        <div style="font-weight:700;font-size:0.82em;color:var(--b)">Feature 31 — Majority Code Agreement</div>
+        <div style="font-size:0.76em;margin-top:4px">
           most_common_code_count / total_sources<br/><br/>
           5/5 agree on 334118 → 1.00 → HIGH confidence<br/>
           All 5 different codes → 0.20 → LOW confidence<br/><br/>
@@ -510,8 +587,8 @@ top_5 = argsort(probs)[::-1][:5]
     </div>
     <div>
       <div class="card card-r" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.62em;color:var(--r)">Feature 32 — High-Risk NAICS Prefix</div>
-        <div style="font-size:0.54em;margin-top:4px">
+        <div style="font-weight:700;font-size:0.82em;color:var(--r)">Feature 32 — High-Risk NAICS Prefix</div>
+        <div style="font-size:0.76em;margin-top:4px">
           1 if any source returns a code starting with AML-elevated 4-digit prefix:<br/><br/>
           5221/5222 — Banking intermediation<br/>
           5511 — Holding companies<br/>
@@ -523,16 +600,16 @@ top_5 = argsort(probs)[::-1][:5]
     </div>
     <div>
       <div class="card card-m2" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.62em;color:var(--b)">Feature 33 — Unique Code Diversity</div>
-        <div style="font-size:0.54em;margin-top:4px">unique_codes / total_codes<br/>High diversity = high disagreement = low confidence</div>
+        <div style="font-weight:700;font-size:0.82em;color:var(--b)">Feature 33 — Unique Code Diversity</div>
+        <div style="font-size:0.76em;margin-top:4px">unique_codes / total_codes<br/>High diversity = high disagreement = low confidence</div>
       </div>
       <div class="card card-m2" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.62em;color:var(--b)">Features 35–36 — Confidence Stats</div>
-        <div style="font-size:0.54em;margin-top:4px">Mean and max match confidence across all sources. Overall data quality indicator.</div>
+        <div style="font-weight:700;font-size:0.82em;color:var(--b)">Features 35–36 — Confidence Stats</div>
+        <div style="font-size:0.76em;margin-top:4px">Mean and max match confidence across all sources. Overall data quality indicator.</div>
       </div>
       <div class="card card-m2">
-        <div style="font-weight:700;font-size:0.62em;color:var(--b)">Feature 37 — Source Count</div>
-        <div style="font-size:0.54em;margin-top:4px">sources_returning_data / 6<br/>Fewer sources = less reliable classification</div>
+        <div style="font-weight:700;font-size:0.82em;color:var(--b)">Feature 37 — Source Count</div>
+        <div style="font-size:0.76em;margin-top:4px">sources_returning_data / 6<br/>Fewer sources = less reliable classification</div>
       </div>
     </div>
   </div>
@@ -544,8 +621,8 @@ top_5 = argsort(probs)[::-1][:5]
   <div class="two-col" style="margin-top:12px">
     <div>
       <div class="card card-m2" style="margin-bottom:10px">
-        <div style="font-weight:700;font-size:0.62em;color:var(--b)">Raw probability output</div>
-        <pre style="font-size:0.50em"><code>probs = model.predict_proba(features)
+        <div style="font-weight:700;font-size:0.82em;color:var(--b)">Raw probability output</div>
+        <pre style="font-size:0.72em"><code>probs = model.predict_proba(features)
 # Apple Inc (jurisdiction=us):
 NAICS 334118 → 0.92  PRIMARY ✅
 NAICS 541512 → 0.04  secondary
@@ -562,8 +639,8 @@ NAICS 541511 → 0.11
     </div>
     <div>
       <div class="card card-m2" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.62em;color:var(--b)">Multi-taxonomy final output</div>
-        <pre style="font-size:0.48em"><code>{
+        <div style="font-weight:700;font-size:0.82em;color:var(--b)">Multi-taxonomy final output</div>
+        <pre style="font-size:0.70em"><code>{
   "primary_industry": {
     "taxonomy": "US_NAICS_2022",
     "code":     "334118",
@@ -584,7 +661,7 @@ NAICS 541511 → 0.11
   ]
 }</code></pre>
       </div>
-      <div class="card card-g" style="font-size:0.55em">
+      <div class="card card-g" style="font-size:0.77em">
         <strong>What prob=0.92 means:</strong> Of all companies with similar 38-feature signatures, 92% are correctly classified at NAICS 334118. This is calibrated — actionable for threshold-based auto-approval.
       </div>
     </div>
@@ -594,17 +671,17 @@ NAICS 541511 → 0.11
 <!-- ═══════════ SLIDE 14 — AML RISK ═══════════ -->
 <section>
   <h2>Model 2 Enables 9 AML/KYB Risk Signals</h2>
-  <p style="font-size:0.58em;margin-bottom:10px">The 38 features do double duty: they drive the classification probability AND feed directly into the Risk Engine. Worth AI has zero risk signals from classification.</p>
+  <p style="font-size:0.80em;margin-bottom:10px">The 38 features do double duty: they drive the classification probability AND feed directly into the Risk Engine. Worth AI has zero risk signals from classification.</p>
   <table>
     <tr><th>Signal</th><th>Severity</th><th>Driven by features</th><th>Worth AI</th></tr>
-    <tr><td><code>SHELL_COMPANY_SIGNAL</code></td><td style="color:#C62828;font-weight:700">HIGH</td><td>Feature 13 (semantic distance) + entity type=Holding</td><td class="no">❌</td></tr>
-    <tr><td><code>REGISTRY_DISCREPANCY</code></td><td style="color:#C62828;font-weight:700">HIGH</td><td>Feature 13 distance &gt; 0.55</td><td class="no">❌</td></tr>
-    <tr><td><code>STRUCTURE_CHANGE</code></td><td style="color:#C62828;font-weight:700">HIGH</td><td>Feature 14 (pivot score) = 1.0</td><td class="no">❌</td></tr>
-    <tr><td><code>HIGH_RISK_SECTOR</code></td><td style="color:#C62828;font-weight:700">HIGH</td><td>Feature 32 (AML NAICS prefix flag)</td><td class="no">❌</td></tr>
-    <tr><td><code>SOURCE_CONFLICT</code></td><td style="color:#E65100;font-weight:700">MED</td><td>Feature 31 majority agreement &lt; 0.40</td><td class="no">❌</td></tr>
-    <tr><td><code>LOW_CONSENSUS_PROBABILITY</code></td><td style="color:#E65100;font-weight:700">MED</td><td>Model output: top prob &lt; 0.40</td><td class="no">❌</td></tr>
-    <tr><td><code>TEMPORAL_PIVOT</code></td><td style="color:#E65100;font-weight:700">MED</td><td>Feature 14 (pivot score) &gt; 0.30</td><td class="no">❌</td></tr>
-    <tr><td><code>HOLDING_MISMATCH</code></td><td style="color:#E65100;font-weight:700">MED</td><td>Feature 16 entity=Holding + Operating code</td><td class="no">❌</td></tr>
+    <tr><td><code>SHELL_COMPANY_SIGNAL</code></td><td style="color:#FC8181;font-weight:700">HIGH</td><td>Feature 13 (semantic distance) + entity type=Holding</td><td class="no">❌</td></tr>
+    <tr><td><code>REGISTRY_DISCREPANCY</code></td><td style="color:#FC8181;font-weight:700">HIGH</td><td>Feature 13 distance &gt; 0.55</td><td class="no">❌</td></tr>
+    <tr><td><code>STRUCTURE_CHANGE</code></td><td style="color:#FC8181;font-weight:700">HIGH</td><td>Feature 14 (pivot score) = 1.0</td><td class="no">❌</td></tr>
+    <tr><td><code>HIGH_RISK_SECTOR</code></td><td style="color:#FC8181;font-weight:700">HIGH</td><td>Feature 32 (AML NAICS prefix flag)</td><td class="no">❌</td></tr>
+    <tr><td><code>SOURCE_CONFLICT</code></td><td style="color:#ED8936;font-weight:700">MED</td><td>Feature 31 majority agreement &lt; 0.40</td><td class="no">❌</td></tr>
+    <tr><td><code>LOW_CONSENSUS_PROBABILITY</code></td><td style="color:#ED8936;font-weight:700">MED</td><td>Model output: top prob &lt; 0.40</td><td class="no">❌</td></tr>
+    <tr><td><code>TEMPORAL_PIVOT</code></td><td style="color:#ED8936;font-weight:700">MED</td><td>Feature 14 (pivot score) &gt; 0.30</td><td class="no">❌</td></tr>
+    <tr><td><code>HOLDING_MISMATCH</code></td><td style="color:#ED8936;font-weight:700">MED</td><td>Feature 16 entity=Holding + Operating code</td><td class="no">❌</td></tr>
     <tr><td><code>TRULIOO_POLLUTION</code></td><td style="color:#388E3C;font-weight:700">LOW</td><td>Feature 12 (Trulioo pollution flag)</td><td class="no">❌</td></tr>
   </table>
 </section>
@@ -615,8 +692,8 @@ NAICS 541511 → 0.11
   <div class="two-col" style="margin-top:12px">
     <div>
       <div class="card card-r" style="margin-bottom:10px">
-        <div style="font-weight:700;font-size:0.64em;color:var(--r)">Without Model 1 (entity matching)</div>
-        <div style="font-size:0.56em;margin-top:5px">
+        <div style="font-weight:700;font-size:0.84em;color:var(--r)">Without Model 1 (entity matching)</div>
+        <div style="font-size:0.78em;margin-top:5px">
           Cannot reliably find the right vendor record.<br/>
           "Apple Inc" might match "Apple Bank for Savings"<br/>
           → Wrong industry code fed to Model 2<br/><br/>
@@ -624,8 +701,8 @@ NAICS 541511 → 0.11
         </div>
       </div>
       <div class="card card-r">
-        <div style="font-weight:700;font-size:0.64em;color:var(--r)">Without Model 2 (consensus)</div>
-        <div style="font-size:0.56em;margin-top:5px">
+        <div style="font-weight:700;font-size:0.84em;color:var(--r)">Without Model 2 (consensus)</div>
+        <div style="font-size:0.78em;margin-top:5px">
           Finds the right records but cannot aggregate intelligently.<br/>
           Source conflict → silent tie-breaking, not a flag.<br/>
           No probability → no threshold-based auto-approval.<br/>
@@ -639,7 +716,7 @@ NAICS 541511 → 0.11
       <div class="flow flow-g" style="margin-bottom:5px">Model 1: "OC record is Apple Inc at 97% match confidence"<br/>"Equifax record is Apple Inc at 91%"<br/>"ZoomInfo at 94%, Liberty Data at 88%"</div>
       <div class="arrow">↓ build 38-feature vector from these confidences<br/>+ jurisdiction (us) + entity type (Operating)<br/>+ pivot score (0.00) + source agreement (4/5→334118)</div>
       <div class="flow" style="margin-bottom:5px">Model 2: P(NAICS 334118) = 0.92 ← top-5 codes<br/>Primary: NAICS 334118 · Secondary: UK SIC 26400<br/>Risk: LOW · KYB: APPROVE</div>
-      <div class="card card-g" style="margin-top:8px;font-size:0.56em">
+      <div class="card card-g" style="margin-top:8px;font-size:0.78em">
         <strong>The result is greater than the sum of parts:</strong> Model 1 provides reliable evidence. Model 2 synthesises it into an actionable, multi-taxonomy, risk-annotated classification.
       </div>
     </div>
@@ -675,13 +752,13 @@ NAICS 541511 → 0.11
 <section>
   <h2>By the Numbers</h2>
   <div class="stat-grid" style="margin-top:18px">
-    <div class="stat-box"><span class="stat-num" style="color:#2E7D32">26</span><div class="stat-lbl">Features in Model 1 — Entity Matching (name + address similarity)</div></div>
+    <div class="stat-box"><span class="stat-num" style="color:#68D391">26</span><div class="stat-lbl">Features in Model 1 — Entity Matching (name + address similarity)</div></div>
     <div class="stat-box"><span class="stat-num">38</span><div class="stat-lbl">Features in Model 2 — Classification Consensus (all vendor signals + AML + jurisdiction)</div></div>
-    <div class="stat-box"><span class="stat-num" style="color:#C62828">0</span><div class="stat-lbl">Numeric features in Worth AI's classification "model" — it's a deterministic rule</div></div>
+    <div class="stat-box"><span class="stat-num" style="color:#FC8181">0</span><div class="stat-lbl">Numeric features in Worth AI's classification "model" — it's a deterministic rule</div></div>
     <div class="stat-box"><span class="stat-num">9</span><div class="stat-lbl">AML/KYB risk signals enabled by Model 2 features (Worth AI: zero)</div></div>
   </div>
   <div class="stat-grid" style="margin-top:14px">
-    <div class="stat-box"><span class="stat-num" style="color:#2E7D32">4</span><div class="stat-lbl">Redshift sources for Model 1 (OC · Equifax · ZoomInfo · Liberty Data)</div></div>
+    <div class="stat-box"><span class="stat-num" style="color:#68D391">4</span><div class="stat-lbl">Redshift sources for Model 1 (OC · Equifax · ZoomInfo · Liberty Data)</div></div>
     <div class="stat-box"><span class="stat-num">6</span><div class="stat-lbl">Vendor signals aggregated in Model 2's 38-feature vector</div></div>
     <div class="stat-box"><span class="stat-num">6</span><div class="stat-lbl">Taxonomy systems Model 2 outputs simultaneously</div></div>
     <div class="stat-box"><span class="stat-num">200+</span><div class="stat-lbl">Jurisdiction codes encoded in Model 2's one-hot features for taxonomy routing</div></div>
@@ -697,7 +774,7 @@ NAICS 541511 → 0.11
     <div style="color:#EF9A9A;font-size:0.75em;margin-bottom:12px">🔴 <strong style="color:white">Worth AI classification:</strong> Not a model — a deterministic rule. Picks one NAICS winner. No probability. No learning. No jurisdiction routing. No AML signals.</div>
     <div style="color:#90CAF9;font-size:0.75em;margin-bottom:12px">🔵 <strong style="color:white">Model 2 (Classification Consensus):</strong> New in Consensus Engine. 38 features encode ALL vendor signals, data quality, jurisdiction context, AML patterns. XGBoost multi:softprob outputs calibrated probability distribution → multi-taxonomy output + 9 risk signals.</div>
     <div style="color:#FFE082;font-size:0.75em;margin-bottom:14px">🚀 <strong style="color:white">Why both are needed:</strong> Model 1 finds the right evidence. Model 2 synthesises it into an actionable, probability-weighted, risk-annotated classification across all jurisdictions and taxonomies simultaneously.</div>
-    <div style="border-top:1px solid rgba(255,255,255,.15);padding-top:12px;font-size:0.58em;color:#90CAF9">
+    <div style="border-top:1px solid rgba(255,255,255,.15);padding-top:12px;font-size:0.80em;color:#90CAF9">
       <a href="presentation.html" style="color:#90CAF9">→ Deck 4: System Overview</a> — the complete Consensus Engine architecture, taxonomies, and live output<br/>
       <a href="index.html" style="color:#FFE082">→ Learning Portal</a> — all 4 decks with full reading guide
     </div>
@@ -709,10 +786,17 @@ NAICS 541511 → 0.11
 <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
 <script>
   Reveal.initialize({
-    hash:true, slideNumber:'c/t', transition:'slide', transitionSpeed:'fast',
-    controls:true, progress:true, center:true,
-    width:1600, height:900, margin:0.05, minScale:0.1, maxScale:2.0,
-  });
+  hash: true,
+  slideNumber: 'c/t',
+  transition: 'slide',
+  width: 1300,
+  height: 720,
+  margin: 0.04,
+  minScale: 0.2,
+  maxScale: 1.5,
+  controls: true,
+  progress: true,
+});
 </script>
 </body>
 </html>

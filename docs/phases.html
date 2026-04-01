@@ -14,70 +14,70 @@ html,body{margin:0;padding:0;overflow:hidden;}
 .reveal h1{font-size:1.7em;color:var(--dk);font-weight:800;margin:0 0 8px;}
 .reveal h2{font-size:1.1em;color:var(--b);font-weight:700;border-bottom:3px solid var(--b);padding-bottom:4px;margin:0 0 8px;}
 .reveal h3{font-size:0.70em;color:var(--gr);font-weight:600;text-transform:uppercase;letter-spacing:1px;margin:0 0 5px;}
-.reveal p,.reveal li{font-size:0.58em;line-height:1.5;color:#2c2c2c;margin:2px 0;}
+.reveal p,.reveal li{font-size:0.80em;line-height:1.5;color:#E2E8F0;margin:2px 0;}
 .reveal ul{list-style:none;padding:0;margin:0;}
 .reveal ul li::before{content:"›";color:var(--b);font-weight:bold;margin-right:6px;}
-.reveal table{font-size:0.49em;border-collapse:collapse;width:100%;}
+.reveal table{font-size:0.72em;border-collapse:collapse;width:100%;}
 .reveal table th{background:var(--b);color:white;padding:5px 8px;text-align:left;}
-.reveal table td{padding:4px 8px;border-bottom:1px solid #ddd;}
-.reveal table tr:nth-child(even) td{background:#f5f9ff;}
-.reveal code{font-size:0.78em;background:#f0f4f8;padding:1px 4px;border-radius:3px;color:var(--b);}
+.reveal table td{padding:4px 8px;border-bottom:1px solid rgba(255,255,255,0.15);}
+.reveal table tr:nth-child(even) td{background:rgba(255,255,255,0.05);}
+.reveal code{font-size:0.78em;background:rgba(255,255,255,0.06);padding:1px 4px;border-radius:3px;color:var(--b);}
 .reveal pre{margin:3px 0;}
-.reveal pre code{background:#0D1B2A;color:#90CAF9;font-size:0.52em;line-height:1.4;}
+.reveal pre code{background:#0D1B2A;color:#90CAF9;font-size:0.74em;line-height:1.4;}
 
 /* Slide types */
 .title-slide{background:linear-gradient(135deg,#0D1B2A 0%,#1565C0 100%) !important;}
 .title-slide h1{color:white !important;font-size:1.6em;}
 .title-slide h2{color:#90CAF9 !important;border-color:rgba(255,255,255,.3);font-size:0.88em;}
-.title-slide p{color:#B0BEC5 !important;font-size:0.60em;}
+.title-slide p{color:#B0BEC5 !important;font-size:0.82em;}
 
 .sec-slide{background:linear-gradient(135deg,#0D1B2A 0%,#1565C0 100%) !important;}
 .sec-slide h2{color:white !important;border-color:rgba(255,255,255,.3);font-size:1.4em;}
 .sec-slide p{color:#90CAF9 !important;font-size:0.82em;}
 .sec-num{font-size:4em;font-weight:900;color:rgba(255,255,255,.07);position:absolute;top:10px;right:30px;}
 
-.phase0{background:#F3E5F5 !important;}
-.phase0 h2{color:#6A1B9A !important;border-color:#6A1B9A;}
-.phase1{background:#E8F5E9 !important;}
-.phase1 h2{color:#2E7D32 !important;border-color:#2E7D32;}
-.phase2{background:#E3F2FD !important;}
-.phase2 h2{color:#1565C0 !important;border-color:#1565C0;}
-.phase3{background:#FFF3E0 !important;}
-.phase3 h2{color:#E65100 !important;border-color:#E65100;}
-.phase4a{background:#FFEBEE !important;}
-.phase4a h2{color:#C62828 !important;border-color:#C62828;}
-.phase4b{background:#E8F5E9 !important;}
-.phase4b h2{color:#2E7D32 !important;border-color:#2E7D32;}
+.phase0{background:rgba(159,122,234,0.15) !important;}
+.phase0 h2{color:#B794F4 !important;border-color:#B794F4;}
+.phase1{background:rgba(72,187,120,0.15) !important;}
+.phase1 h2{color:#68D391 !important;border-color:#68D391;}
+.phase2{background:rgba(66,153,225,0.15) !important;}
+.phase2 h2{color:#63B3ED !important;border-color:#63B3ED;}
+.phase3{background:rgba(237,137,54,0.15) !important;}
+.phase3 h2{color:#ED8936 !important;border-color:#ED8936;}
+.phase4a{background:rgba(252,129,129,0.15) !important;}
+.phase4a h2{color:#FC8181 !important;border-color:#FC8181;}
+.phase4b{background:rgba(72,187,120,0.15) !important;}
+.phase4b h2{color:#68D391 !important;border-color:#68D391;}
 
 /* Utilities */
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
 .three-col{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
-.card{background:white;border-radius:6px;padding:8px 12px;box-shadow:0 2px 8px rgba(0,0,0,.08);border-left:3px solid var(--b);}
+.card{background:rgba(255,255,255,0.06);border-radius:6px;padding:8px 12px;box-shadow:0 2px 8px rgba(0,0,0,.08);border-left:3px solid var(--b);}
 .card-r{border-left-color:var(--r);}
 .card-g{border-left-color:var(--g);}
 .card-o{border-left-color:var(--o);}
 .card-p{border-left-color:var(--p);}
 .card-gd{border-left-color:var(--gd);}
-.chip{display:inline-block;padding:1px 7px;border-radius:8px;font-size:0.47em;font-weight:700;margin:1px;vertical-align:middle;}
-.chip-g{background:#E8F5E9;color:#2E7D32;border:1px solid #A5D6A7;}
-.chip-r{background:#FFEBEE;color:#C62828;border:1px solid #EF9A9A;}
-.chip-o{background:#FFF3E0;color:#E65100;border:1px solid #FFCC80;}
-.chip-b{background:#E3F2FD;color:#1565C0;border:1px solid #90CAF9;}
-.chip-p{background:#F3E5F5;color:#6A1B9A;border:1px solid #CE93D8;}
-.chip-gd{background:#FFFDE7;color:#F57F17;border:1px solid #FFE082;}
-.flow{background:var(--lt);border:2px solid var(--b);border-radius:5px;padding:5px 10px;font-size:0.52em;font-weight:600;color:var(--dk);text-align:center;}
-.flow-g{background:#E8F5E9;border-color:#2E7D32;color:#2E7D32;}
-.flow-r{background:#FFEBEE;border-color:#C62828;color:#C62828;}
-.flow-o{background:#FFF3E0;border-color:#E65100;color:#E65100;}
-.flow-p{background:#F3E5F5;border-color:#6A1B9A;color:#6A1B9A;}
-.flow-gd{background:#FFFDE7;border-color:#F57F17;color:#F57F17;}
+.chip{display:inline-block;padding:1px 7px;border-radius:8px;font-size:0.68em;font-weight:700;margin:1px;vertical-align:middle;}
+.chip-g{background:rgba(72,187,120,0.15);color:#68D391;border:1px solid #A5D6A7;}
+.chip-r{background:rgba(252,129,129,0.15);color:#FC8181;border:1px solid #EF9A9A;}
+.chip-o{background:rgba(237,137,54,0.15);color:#ED8936;border:1px solid #FFCC80;}
+.chip-b{background:rgba(66,153,225,0.15);color:#63B3ED;border:1px solid #90CAF9;}
+.chip-p{background:rgba(159,122,234,0.15);color:#B794F4;border:1px solid #CE93D8;}
+.chip-gd{background:rgba(236,201,75,0.15);color:#ECC94B;border:1px solid #FFE082;}
+.flow{background:var(--lt);border:2px solid var(--b);border-radius:5px;padding:5px 10px;font-size:0.74em;font-weight:600;color:var(--dk);text-align:center;}
+.flow-g{background:rgba(72,187,120,0.15);border-color:#68D391;color:#68D391;}
+.flow-r{background:rgba(252,129,129,0.15);border-color:#FC8181;color:#FC8181;}
+.flow-o{background:rgba(237,137,54,0.15);border-color:#ED8936;color:#ED8936;}
+.flow-p{background:rgba(159,122,234,0.15);border-color:#B794F4;color:#B794F4;}
+.flow-gd{background:rgba(236,201,75,0.15);border-color:#ECC94B;color:#ECC94B;}
 .arrow{text-align:center;color:var(--b);font-size:1.1em;line-height:1;}
 .arrow-r{color:var(--r);}
 .arrow-g{color:var(--g);}
-td.yes{color:#2E7D32;font-weight:700;}
-td.no{color:#C62828;font-weight:700;}
-td.par{color:#E65100;font-weight:700;}
-.phase-badge{display:inline-block;width:28px;height:28px;border-radius:50%;text-align:center;line-height:28px;font-weight:900;font-size:0.65em;color:white;margin-right:8px;}
+td.yes{color:#68D391;font-weight:700;}
+td.no{color:#FC8181;font-weight:700;}
+td.par{color:#ED8936;font-weight:700;}
+.phase-badge{display:inline-block;width:28px;height:28px;border-radius:50%;text-align:center;line-height:28px;font-weight:900;font-size:0.85em;color:white;margin-right:8px;}
 .badge0{background:#6A1B9A;}
 .badge1{background:#2E7D32;}
 .badge2{background:#1565C0;}
@@ -98,7 +98,7 @@ td.par{color:#E65100;font-weight:700;}
 .reveal table td{padding:5px 10px !important;border-bottom:1px solid #2D3748 !important;color:#E2E8F0 !important;}
 .reveal table tr:nth-child(even) td{background:rgba(255,255,255,0.04) !important;}
 .reveal code{background:#1a202c !important;color:#F6E05E !important;padding:2px 5px !important;border-radius:3px !important;}
-.reveal pre code{font-size:0.62em !important;line-height:1.5 !important;background:#1a202c !important;color:#90CDF4 !important;}
+.reveal pre code{font-size:0.82em !important;line-height:1.5 !important;background:#1a202c !important;color:#90CDF4 !important;}
 .card{background:rgba(255,255,255,0.07) !important;box-shadow:none !important;border-left:3px solid var(--b) !important;}
 .card-r{border-left-color:var(--r) !important;}
 .card-g{border-left-color:var(--g) !important;}
@@ -111,7 +111,7 @@ td.par{color:#E65100;font-weight:700;}
 .phase2 h2{color:#63B3ED !important;border-color:#63B3ED !important;}
 .phase3 h2{color:#ED8936 !important;border-color:#ED8936 !important;}
 .phase4a h2{color:#FC8181 !important;border-color:#FC8181 !important;}
-.chip{font-size:0.60em !important;}
+.chip{font-size:0.82em !important;}
 .chip-g{background:rgba(72,187,120,0.2) !important;color:#68D391 !important;border:1px solid #48BB78 !important;}
 .chip-r{background:rgba(252,129,129,0.2) !important;color:#FC8181 !important;border:1px solid #FC8181 !important;}
 .chip-o{background:rgba(237,137,54,0.2) !important;color:#ED8936 !important;border:1px solid #ED8936 !important;}
@@ -123,6 +123,83 @@ td.par{color:#E65100;font-weight:700;}
 .flow-r{background:rgba(252,129,129,0.15) !important;border-color:#FC8181 !important;color:#FC8181 !important;}
 .reveal .title-slide p{color:#A0AEC0 !important;font-size:0.78em !important;}
 
+
+/* ═══════════════════════════════════════════════════════════
+   MASTER READABILITY OVERRIDE — matches pipeline_facts.html
+   ═══════════════════════════════════════════════════════════ */
+:root {
+  --b:#4299E1; --dk:#0D1B2A; --g:#48BB78; --r:#FC8181;
+  --o:#ED8936; --gd:#ECC94B; --gr:#A0AEC0; --lt:rgba(66,153,225,0.15); --p:#9F7AEA;
+}
+.reveal { font-size: 19px !important; font-family:'Segoe UI',system-ui,sans-serif !important; }
+.reveal h1 { font-size: 1.65em !important; color: #63B3ED !important; font-weight: 800 !important; }
+.reveal h2 { font-size: 1.1em !important; color: #68D391 !important; border-bottom: 2px solid #68D391 !important;
+             padding-bottom: 5px !important; margin-bottom: 12px !important; font-weight: 700 !important; }
+.reveal h3 { font-size: 0.85em !important; color: #F6E05E !important; font-weight: 600 !important;
+             text-transform: uppercase !important; letter-spacing: 0.5px !important; }
+.reveal p, .reveal li { font-size: 0.80em !important; line-height: 1.6 !important;
+                         color: #E2E8F0 !important; margin: 3px 0 !important; }
+.reveal ul li::before { color: #4299E1 !important; }
+.reveal table { font-size: 0.72em !important; border-collapse: collapse !important; width: 100% !important; }
+.reveal table th { background: #2D3748 !important; color: #63B3ED !important;
+                   padding: 6px 10px !important; text-align: left !important; }
+.reveal table td { padding: 5px 10px !important; border-bottom: 1px solid rgba(255,255,255,0.12) !important;
+                   color: #E2E8F0 !important; vertical-align: top !important; }
+.reveal table tr:nth-child(even) td { background: rgba(255,255,255,0.04) !important; }
+.reveal table td.yes { color: #68D391 !important; font-weight: 600 !important; }
+.reveal table td.no  { color: #FC8181 !important; font-weight: 600 !important; }
+.reveal code { background: #1a202c !important; color: #F6E05E !important;
+               padding: 2px 5px !important; border-radius: 3px !important; font-size: 0.82em !important; }
+.reveal pre  { margin: 4px 0 !important; }
+.reveal pre code { font-size: 0.68em !important; line-height: 1.5 !important;
+                   background: #1a202c !important; color: #90CDF4 !important;
+                   padding: 8px 12px !important; border-radius: 6px !important; }
+
+/* Slide type backgrounds */
+.title-slide, .sec-slide { background: linear-gradient(135deg,#0D1B2A,#1565C0) !important; }
+.title-slide h1 { color: white !important; }
+.title-slide h2 { color: #90CAF9 !important; border-color: rgba(255,255,255,.3) !important; }
+.title-slide p, .sec-slide p { color: #A0AEC0 !important; font-size: 0.82em !important; }
+.sec-slide h2 { color: white !important; border-color: rgba(255,255,255,.3) !important; font-size: 1.3em !important; }
+.phase0, .phase1, .phase2, .phase3, .phase4a, .phase4b { background: transparent !important; }
+.phase0 h2 { color: #B794F4 !important; border-color: #B794F4 !important; }
+.phase1 h2, .phase4b h2 { color: #68D391 !important; border-color: #68D391 !important; }
+.phase2 h2 { color: #63B3ED !important; border-color: #63B3ED !important; }
+.phase3 h2 { color: #ED8936 !important; border-color: #ED8936 !important; }
+.phase4a h2 { color: #FC8181 !important; border-color: #FC8181 !important; }
+
+/* Cards */
+.card { background: rgba(255,255,255,0.07) !important; box-shadow: none !important;
+        border-left: 3px solid #4299E1 !important; border-radius: 6px !important;
+        padding: 8px 12px !important; }
+.card-r { border-left-color: #FC8181 !important; }
+.card-g { border-left-color: #48BB78 !important; }
+.card-o { border-left-color: #ED8936 !important; }
+.card-p { border-left-color: #9F7AEA !important; }
+.card-gd { border-left-color: #ECC94B !important; }
+
+/* Chips */
+.chip { font-size: 0.62em !important; padding: 2px 8px !important; }
+.chip-g { background: rgba(72,187,120,0.2) !important; color: #68D391 !important; border: 1px solid #48BB78 !important; }
+.chip-r { background: rgba(252,129,129,0.2) !important; color: #FC8181 !important; border: 1px solid #FC8181 !important; }
+.chip-o { background: rgba(237,137,54,0.2) !important; color: #ED8936 !important; border: 1px solid #ED8936 !important; }
+.chip-b { background: rgba(66,153,225,0.2) !important; color: #63B3ED !important; border: 1px solid #4299E1 !important; }
+.chip-p { background: rgba(159,122,234,0.2) !important; color: #B794F4 !important; border: 1px solid #9F7AEA !important; }
+.chip-gd { background: rgba(236,201,75,0.2) !important; color: #ECC94B !important; border: 1px solid #ECC94B !important; }
+
+/* Flow boxes */
+.flow { background: rgba(66,153,225,0.15) !important; border: 2px solid #4299E1 !important;
+        color: #63B3ED !important; font-size: 0.72em !important; }
+.flow-g { background: rgba(72,187,120,0.15) !important; border-color: #48BB78 !important; color: #68D391 !important; }
+.flow-r { background: rgba(252,129,129,0.15) !important; border-color: #FC8181 !important; color: #FC8181 !important; }
+
+/* Section number overlay */
+.sec-num { color: rgba(255,255,255,0.07) !important; }
+
+/* Worth AI specific */
+.worth-box  { background: rgba(252,129,129,0.15) !important; border-color: #FC8181 !important; }
+.consensus-box { background: rgba(72,187,120,0.15) !important; border-color: #48BB78 !important; }
+
 </style>
 </head>
 <body>
@@ -130,14 +207,14 @@ td.par{color:#E65100;font-weight:700;}
 
 <!-- ═══ SLIDE 1 — TITLE ═══ -->
 <section class="title-slide" data-background-color="#0D1B2A">
-  <div style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.2);border-radius:20px;padding:6px 20px;display:inline-block;font-size:0.58em;color:#90CAF9;margin-bottom:16px;">
+  <div style="background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.2);border-radius:20px;padding:6px 20px;display:inline-block;font-size:0.80em;color:#90CAF9;margin-bottom:16px;">
     📚 Deck 1 of 4 — Read this first
   </div>
   <h1>Pipeline Phases</h1>
   <h2>The Complete Data Journey — Worth AI vs. Consensus Engine</h2>
   <br/>
   <p>From government registries → Redshift → vendor APIs → Phase 4 decision</p>
-  <p style="font-size:0.55em;color:#546E7A;margin-top:10px">
+  <p style="font-size:0.77em;color:#A0AEC0;margin-top:10px">
     After this deck: read Deck 2 (Technical Briefing) → Deck 3 (XGBoost Models) → Deck 4 (System Overview)<br/>
     Full learning portal: <strong style="color:#90CAF9">wecsleyprates-design.github.io/Industry-Classification</strong>
   </p>
@@ -147,14 +224,14 @@ td.par{color:#E65100;font-weight:700;}
 <section style="background:#1B5E20 !important;">
   <h2 style="color:#A5D6A7 !important;border-color:#66BB6A;">The Most Important Insight — Before Any Phase</h2>
   <div style="margin-top:10px">
-    <div style="background:rgba(255,255,255,.1);border-radius:10px;padding:16px;margin-bottom:10px;font-size:0.62em;color:#C8E6C9;line-height:1.7">
+    <div style="background:rgba(255,255,255,.1);border-radius:10px;padding:16px;margin-bottom:10px;font-size:0.82em;color:#C8E6C9;line-height:1.7">
       <strong style="color:white;font-size:1.1em">Worth AI already receives all the data it needs for complete global industry classification.</strong><br/>
       The pipeline collects it, stores a fraction of it, and discards the rest at Phase 4.
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
       <div>
-        <h3 style="color:#A5D6A7;font-size:0.62em;margin-bottom:8px">DATA ALREADY IN THE PIPELINE — NOT USED</h3>
-        <div style="font-size:0.54em;display:grid;gap:5px">
+        <h3 style="color:#A5D6A7;font-size:0.82em;margin-bottom:8px">DATA ALREADY IN THE PIPELINE — NOT USED</h3>
+        <div style="font-size:0.76em;display:grid;gap:5px">
           <div style="background:rgba(198,40,40,.2);border:1px solid rgba(198,40,40,.4);border-radius:6px;padding:7px 10px;color:#FFCDD2"><code>uk_sic-62012</code> in OpenCorporates <code>industry_code_uids</code> — loop only reads <code>us_naics</code></div>
           <div style="background:rgba(198,40,40,.2);border:1px solid rgba(198,40,40,.4);border-radius:6px;padding:7px 10px;color:#FFCDD2">Trulioo returns <code>{ naicsCode, sicCode }</code> — <code>.sicCode</code> is adjacent, never read</div>
           <div style="background:rgba(198,40,40,.2);border:1px solid rgba(198,40,40,.4);border-radius:6px;padding:7px 10px;color:#FFCDD2">Equifax: 25 industry columns available — only <code>primnaicscode</code> used (24 dropped)</div>
@@ -164,8 +241,8 @@ td.par{color:#E65100;font-weight:700;}
         </div>
       </div>
       <div>
-        <h3 style="color:#A5D6A7;font-size:0.62em;margin-bottom:8px">WHAT THE CONSENSUS ENGINE DOES WITH IT</h3>
-        <div style="font-size:0.54em;display:grid;gap:5px">
+        <h3 style="color:#A5D6A7;font-size:0.82em;margin-bottom:8px">WHAT THE CONSENSUS ENGINE DOES WITH IT</h3>
+        <div style="font-size:0.76em;display:grid;gap:5px">
           <div style="background:rgba(46,125,50,.3);border:1px solid rgba(102,187,106,.4);border-radius:6px;padding:7px 10px;color:#C8E6C9">Reads ALL entries from <code>industry_code_uids</code> → routes uk_sic to UK SIC 2007 output</div>
           <div style="background:rgba(46,125,50,.3);border:1px solid rgba(102,187,106,.4);border-radius:6px;padding:7px 10px;color:#C8E6C9">Reads Trulioo <code>.sicCode</code> alongside <code>.naicsCode</code> — 2nd UK SIC source immediately</div>
           <div style="background:rgba(46,125,50,.3);border:1px solid rgba(102,187,106,.4);border-radius:6px;padding:7px 10px;color:#C8E6C9">Uses Equifax secondary NAICS + SIC as additional taxonomy outputs</div>
@@ -184,7 +261,7 @@ td.par{color:#E65100;font-weight:700;}
   <div style="margin-top:14px">
     <div class="card card-gd" style="text-align:center;padding:18px;margin-bottom:14px">
       <div style="font-size:1.0em;font-weight:900;color:var(--gd);margin-bottom:8px">The Consensus Engine Replaces ONLY Phase 4</div>
-      <div style="font-size:0.62em">Everything that collects data (Phases 0–3) is <strong>identical</strong> in both systems.<br/>Only what happens <strong>after</strong> collection changes.</div>
+      <div style="font-size:0.82em">Everything that collects data (Phases 0–3) is <strong>identical</strong> in both systems.<br/>Only what happens <strong>after</strong> collection changes.</div>
     </div>
     <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px">
       <div class="flow flow-p" style="padding:12px">
@@ -219,7 +296,7 @@ td.par{color:#E65100;font-weight:700;}
 <!-- ═══ SLIDE 3 — PHASE 0 ═══ -->
 <section class="phase0">
   <h2><span class="phase-badge badge0">0</span>Phase 0 — Offline Bulk Data Pre-Loading</h2>
-  <p style="font-size:0.60em;margin-bottom:10px">Runs on a schedule (daily/weekly). NOT triggered by individual applicants. The industry codes are already in Redshift before any company submits.</p>
+  <p style="font-size:0.82em;margin-bottom:10px">Runs on a schedule (daily/weekly). NOT triggered by individual applicants. The industry codes are already in Redshift before any company submits.</p>
   <div class="two-col">
     <div>
       <h3 style="color:var(--p)">What gets loaded into Redshift</h3>
@@ -233,7 +310,7 @@ td.par{color:#E65100;font-weight:700;}
     </div>
     <div>
       <h3 style="color:var(--p)">Where industry_code_uids comes from</h3>
-      <div style="font-size:0.54em;display:grid;grid-template-columns:1fr;gap:4px">
+      <div style="font-size:0.76em;display:grid;grid-template-columns:1fr;gap:4px">
         <div class="flow flow-p">Apple Inc registers with California Secretary of State</div>
         <div class="arrow">↓ CA assigns NAICS 334118 to Apple's business type</div>
         <div class="flow flow-p">UK Companies House assigns SIC 26400 to Apple UK</div>
@@ -244,7 +321,7 @@ td.par{color:#E65100;font-weight:700;}
       </div>
     </div>
   </div>
-  <div class="card card-gd" style="margin-top:10px;font-size:0.54em">
+  <div class="card card-gd" style="margin-top:10px;font-size:0.76em">
     <strong>Key insight:</strong> Worth AI doesn't compute industry codes — it reads them from government registries via OpenCorporates. Model 1's job is simply to find which pre-loaded row belongs to the current applicant.
   </div>
 </section>
@@ -252,7 +329,7 @@ td.par{color:#E65100;font-weight:700;}
 <!-- ═══ SLIDE 4 — PHASE 1 ═══ -->
 <section class="phase1">
   <h2><span class="phase-badge badge1">1</span>Phase 1 — Applicant Submits</h2>
-  <p style="font-size:0.60em;margin-bottom:10px">The only data the system receives from the applicant. Everything else comes from vendors in Phases 2–3.</p>
+  <p style="font-size:0.82em;margin-bottom:10px">The only data the system receives from the applicant. Everything else comes from vendors in Phases 2–3.</p>
   <div class="two-col">
     <div>
       <h3 style="color:var(--g)">Fields provided by applicant</h3>
@@ -270,7 +347,7 @@ td.par{color:#E65100;font-weight:700;}
     </div>
     <div>
       <h3 style="color:var(--g)">What gets created in the database</h3>
-      <pre style="font-size:0.50em"><code>INSERT INTO data_businesses (
+      <pre style="font-size:0.72em"><code>INSERT INTO data_businesses (
   id,       -- new UUID
   name,     -- "Apple Inc"
   industry, -- FK to core_business_industries
@@ -279,10 +356,10 @@ td.par{color:#E65100;font-weight:700;}
   mcc_id    -- NULL at this point
   -- uk_sic_id DOES NOT EXIST (the gap)
 )</code></pre>
-      <div class="card card-g" style="margin-top:8px;font-size:0.54em">
+      <div class="card card-g" style="margin-top:8px;font-size:0.76em">
         Integration tasks queued via Kafka → triggers Phase 2 (live API calls run in parallel)
       </div>
-      <div class="card card-r" style="margin-top:6px;font-size:0.54em">
+      <div class="card card-r" style="margin-top:6px;font-size:0.76em">
         The applicant's self-reported industry has weight 0.20 — deliberately low because customers often select incorrect categories.
       </div>
     </div>
@@ -292,7 +369,7 @@ td.par{color:#E65100;font-weight:700;}
 <!-- ═══ SLIDE 5 — PHASE 2 ═══ -->
 <section class="phase2">
   <h2><span class="phase-badge badge2">2</span>Phase 2 — Live Vendor API Calls (6 sources in parallel)</h2>
-  <p style="font-size:0.58em;margin-bottom:8px">All 6 sources queried simultaneously. Responses stored as raw JSONB in <code>integration_data.request_response</code>. Everything after this reads from that table.</p>
+  <p style="font-size:0.80em;margin-bottom:8px">All 6 sources queried simultaneously. Responses stored as raw JSONB in <code>integration_data.request_response</code>. Everything after this reads from that table.</p>
   <table>
     <tr><th>Source</th><th>Call type</th><th>What it returns for industry</th><th>Gap / Issue</th></tr>
     <tr>
@@ -343,10 +420,10 @@ td.par{color:#E65100;font-weight:700;}
 <!-- ═══ SLIDE 6 — PHASE 3 ═══ -->
 <section class="phase3">
   <h2><span class="phase-badge badge3">3</span>Phase 3 — Entity Matching XGBoost (Model 1)</h2>
-  <p style="font-size:0.58em;margin-bottom:8px">Runs for Equifax, ZoomInfo, Liberty Data (bulk Redshift files). OC and Trulioo already returned the right company in Phase 2.</p>
+  <p style="font-size:0.80em;margin-bottom:8px">Runs for Equifax, ZoomInfo, Liberty Data (bulk Redshift files). OC and Trulioo already returned the right company in Phase 2.</p>
   <div class="two-col">
     <div>
-      <div style="font-size:0.54em;display:grid;gap:4px">
+      <div style="font-size:0.76em;display:grid;gap:4px">
         <div class="flow flow-o"><strong>INPUT:</strong> company_name + address + country (from applicant)</div>
         <div class="arrow">↓</div>
         <div class="flow flow-o">STEP 1: Canonise name<br/>"Apple Inc" → strip "Inc" → uppercase → "APPLE"</div>
@@ -362,7 +439,7 @@ td.par{color:#E65100;font-weight:700;}
     </div>
     <div>
       <h3 style="color:var(--o)">Output per vendor source</h3>
-      <pre style="font-size:0.50em"><code># What comes out of Phase 3:
+      <pre style="font-size:0.72em"><code># What comes out of Phase 3:
 {
   source:           "equifax",
   raw_code:         "334118",
@@ -383,7 +460,7 @@ td.par{color:#E65100;font-weight:700;}
   match_confidence: 0.62,      ← low match
   status:           "CONFLICT"
 }</code></pre>
-      <div class="card card-gd" style="margin-top:8px;font-size:0.52em">
+      <div class="card card-gd" style="margin-top:8px;font-size:0.74em">
         <strong>Phase 3 does NOT choose between codes.</strong> It only matches records and reports match_confidence. The decision of which code wins happens in Phase 4.
       </div>
     </div>
@@ -393,12 +470,12 @@ td.par{color:#E65100;font-weight:700;}
 <!-- ═══ SLIDE 7 — DIVERGENCE ═══ -->
 <section>
   <h2>Phase 4 — The Divergence Point</h2>
-  <p style="font-size:0.60em;margin-bottom:10px">Same inputs enter Phase 4. Completely different algorithms. Completely different outputs.</p>
+  <p style="font-size:0.82em;margin-bottom:10px">Same inputs enter Phase 4. Completely different algorithms. Completely different outputs.</p>
   <div class="two-col">
     <div>
       <div class="flow flow-r" style="text-align:left;padding:12px;margin-bottom:8px">
         <div style="font-weight:800;font-size:0.68em;margin-bottom:6px">Phase 4A — Worth AI: Deterministic Rule</div>
-        <div style="font-size:0.56em">
+        <div style="font-size:0.78em">
           <code>factWithHighestConfidence()</code><br/>
           winner = argmax(confidence × weight)<br/><br/>
           OC: 0.97 × 0.90 = 0.873 ← WINS<br/>
@@ -415,7 +492,7 @@ td.par{color:#E65100;font-weight:700;}
     <div>
       <div class="flow flow-g" style="text-align:left;padding:12px;margin-bottom:8px">
         <div style="font-weight:800;font-size:0.68em;margin-bottom:6px">Phase 4B — Consensus Engine: 5-Step Stacking</div>
-        <div style="font-size:0.56em">
+        <div style="font-size:0.78em">
           Step A: 38-feature vector from all signals<br/>
           Step B: XGBoost → P(334118)=0.92, P(541512)=0.04…<br/>
           Step C: SEC EDGAR → SIC 3571 (ground truth)<br/>
@@ -429,7 +506,7 @@ td.par{color:#E65100;font-weight:700;}
       </div>
     </div>
   </div>
-  <div class="card card-gd" style="text-align:center;font-size:0.58em;padding:10px">
+  <div class="card card-gd" style="text-align:center;font-size:0.80em;padding:10px">
     <strong>No vendor contracts change. No Redshift tables change. No Kafka topics change. No entity matching model changes.</strong><br/>
     Only the decision algorithm in Phase 4 is replaced.
   </div>
@@ -441,8 +518,8 @@ td.par{color:#E65100;font-weight:700;}
   <div class="two-col" style="margin-top:10px">
     <div>
       <div class="card card-r" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.64em;color:var(--r)">The Algorithm</div>
-        <pre style="font-size:0.48em"><code>factWithHighestConfidence():
+        <div style="font-weight:700;font-size:0.84em;color:var(--r)">The Algorithm</div>
+        <pre style="font-size:0.70em"><code>factWithHighestConfidence():
   for each fact (naics_code, industry, mcc):
     candidates = all source values
     winner = argmax(confidence × weight)
@@ -457,7 +534,7 @@ TRU:0.62 × 0.70 = 0.434  ← CONFLICT silently ignored
 SERP:0.75 × 0.30= 0.225
 AI: 0.20 × 0.10 = 0.020</code></pre>
       </div>
-      <div class="card card-r" style="font-size:0.54em">
+      <div class="card card-r" style="font-size:0.76em">
         <strong>After the rule:</strong><br/>
         Kafka <code>UPDATE_NAICS_CODE</code> event<br/>
         → <code>handleNaicsData()</code> resolves <code>naics_id</code> from <code>core_naics_code</code><br/>
@@ -466,13 +543,13 @@ AI: 0.20 × 0.10 = 0.020</code></pre>
     </div>
     <div>
       <h3 style="color:var(--r)">7 Things the Rule Cannot Do</h3>
-      <div class="card card-r" style="margin-bottom:5px;font-size:0.54em">❌ <strong>No probability</strong> — always picks one winner, uncertainty invisible</div>
-      <div class="card card-r" style="margin-bottom:5px;font-size:0.54em">❌ <strong>Cannot learn</strong> — manual overrides in <code>rel_business_industry_naics</code> ignored</div>
-      <div class="card card-r" style="margin-bottom:5px;font-size:0.54em">❌ <strong>Conflict is silent</strong> — Trulioo says 541511, OC says 334118 → rule picks one, no flag</div>
-      <div class="card card-r" style="margin-bottom:5px;font-size:0.54em">❌ <strong>Agreement ignored</strong> — 5/5 agree = same format as 1/5</div>
-      <div class="card card-r" style="margin-bottom:5px;font-size:0.54em">❌ <strong>No taxonomy routing</strong> — GB company still gets NAICS, not UK SIC</div>
-      <div class="card card-r" style="margin-bottom:5px;font-size:0.54em">❌ <strong>No AML signals</strong> — code changed 3× this year = treated as normal</div>
-      <div class="card card-r" style="font-size:0.54em">❌ <strong>Single taxonomy only</strong> — cannot output NAICS + UK SIC + MCC simultaneously</div>
+      <div class="card card-r" style="margin-bottom:5px;font-size:0.76em">❌ <strong>No probability</strong> — always picks one winner, uncertainty invisible</div>
+      <div class="card card-r" style="margin-bottom:5px;font-size:0.76em">❌ <strong>Cannot learn</strong> — manual overrides in <code>rel_business_industry_naics</code> ignored</div>
+      <div class="card card-r" style="margin-bottom:5px;font-size:0.76em">❌ <strong>Conflict is silent</strong> — Trulioo says 541511, OC says 334118 → rule picks one, no flag</div>
+      <div class="card card-r" style="margin-bottom:5px;font-size:0.76em">❌ <strong>Agreement ignored</strong> — 5/5 agree = same format as 1/5</div>
+      <div class="card card-r" style="margin-bottom:5px;font-size:0.76em">❌ <strong>No taxonomy routing</strong> — GB company still gets NAICS, not UK SIC</div>
+      <div class="card card-r" style="margin-bottom:5px;font-size:0.76em">❌ <strong>No AML signals</strong> — code changed 3× this year = treated as normal</div>
+      <div class="card card-r" style="font-size:0.76em">❌ <strong>Single taxonomy only</strong> — cannot output NAICS + UK SIC + MCC simultaneously</div>
     </div>
   </div>
 </section>
@@ -483,8 +560,8 @@ AI: 0.20 × 0.10 = 0.020</code></pre>
   <div class="two-col" style="margin-top:10px">
     <div>
       <div class="card card-g" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.64em;color:var(--g)">Step A — 38-Feature Engineering</div>
-        <div style="font-size:0.54em;margin-top:5px">
+        <div style="font-weight:700;font-size:0.84em;color:var(--g)">Step A — 38-Feature Engineering</div>
+        <div style="font-size:0.76em;margin-top:5px">
           All vendor signals → numeric vector:<br/><br/>
           <strong>Features 0–11: Source quality</strong><br/>
           Weighted confidence per source (0.90×0.97=0.873…)<br/>
@@ -505,8 +582,8 @@ AI: 0.20 × 0.10 = 0.020</code></pre>
     </div>
     <div>
       <div class="card card-g" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.64em;color:var(--g)">Step B — XGBoost Model 2 (multi:softprob)</div>
-        <pre style="font-size:0.48em"><code># Input: 38-feature vector
+        <div style="font-weight:700;font-size:0.84em;color:var(--g)">Step B — XGBoost Model 2 (multi:softprob)</div>
+        <pre style="font-size:0.70em"><code># Input: 38-feature vector
 # Output: probability distribution over all codes
 
 probs = model.predict_proba(features)
@@ -522,7 +599,7 @@ P(NAICS 423690) = 0.01
 P(NAICS 722511) = 0.14  ← LOW CONFIDENCE ⚠️
 → LOW_CONSENSUS_PROBABILITY risk signal fired
 → KYB: REVIEW (not APPROVE)</code></pre>
-        <div style="font-size:0.52em;margin-top:6px;color:var(--g)">
+        <div style="font-size:0.74em;margin-top:6px;color:var(--g)">
           <strong>0.92 means:</strong> 92% of companies with similar 38-feature signatures were correctly classified at 334118. Actionable: threshold ≥ 0.70 → auto-approve.
         </div>
       </div>
@@ -536,8 +613,8 @@ P(NAICS 722511) = 0.14  ← LOW CONFIDENCE ⚠️
   <div class="two-col" style="margin-top:10px">
     <div>
       <div class="card card-g" style="margin-bottom:8px">
-        <div style="font-weight:700;font-size:0.64em;color:var(--g)">Step C — External Registry Lookup (not in Worth AI)</div>
-        <div style="font-size:0.54em;margin-top:5px">
+        <div style="font-weight:700;font-size:0.84em;color:var(--g)">Step C — External Registry Lookup (not in Worth AI)</div>
+        <div style="font-size:0.76em;margin-top:5px">
           Before the LLM runs, the engine queries free government registries:<br/><br/>
           <strong>SEC EDGAR (US companies, free, no key)</strong><br/>
           <code>data.sec.gov/submissions/CIK0000320193.json</code><br/>
@@ -552,8 +629,8 @@ P(NAICS 722511) = 0.14  ← LOW CONFIDENCE ⚠️
     </div>
     <div>
       <div class="card card-g">
-        <div style="font-weight:700;font-size:0.64em;color:var(--g)">Step D — LLM as Referee (GPT-4o-mini)</div>
-        <div style="font-size:0.52em;margin-top:5px">
+        <div style="font-weight:700;font-size:0.84em;color:var(--g)">Step D — LLM as Referee (GPT-4o-mini)</div>
+        <div style="font-size:0.74em;margin-top:5px">
           LLM receives 5 evidence blocks in priority order:<br/><br/>
           <strong>1. Registry data:</strong> "SEC EDGAR (AAPL): SIC 3571 — Electronic Computers"<br/>
           <strong>2. Vendor signals:</strong> OC=334118 ✅ EFX=334118 ✅ TRU=541511 ⚠️ ZI=334118 ✅<br/>
@@ -574,7 +651,7 @@ P(NAICS 722511) = 0.14  ← LOW CONFIDENCE ⚠️
 <!-- ═══ SLIDE 11 — PHASE 4B STEP E ═══ -->
 <section class="phase4b">
   <h2><span class="phase-badge badge4b">4B</span>Phase 4B — Consensus Engine: Step E — Risk Engine</h2>
-  <p style="font-size:0.58em;margin-bottom:8px">9 AML/KYB signal detectors run on the same 38-feature vector. Worth AI produces zero risk signals from classification.</p>
+  <p style="font-size:0.80em;margin-bottom:8px">9 AML/KYB signal detectors run on the same 38-feature vector. Worth AI produces zero risk signals from classification.</p>
   <table>
     <tr><th>Signal</th><th>Severity</th><th>Triggered by</th><th>Apple Inc result</th></tr>
     <tr><td><code>REGISTRY_DISCREPANCY</code></td><td style="color:var(--r);font-weight:700">HIGH</td><td>Feature 13: web↔registry distance &gt; 0.55</td><td class="yes">✅ NO — distance=0.04</td></tr>
@@ -587,7 +664,7 @@ P(NAICS 722511) = 0.14  ← LOW CONFIDENCE ⚠️
     <tr><td><code>HYBRID_ENTITY</code></td><td style="color:var(--g);font-weight:700">LOW</td><td>Secondary codes span 2+ unrelated sectors</td><td class="yes">✅ NO — same sector</td></tr>
     <tr><td><code>HOLDING_MISMATCH</code></td><td style="color:var(--o);font-weight:700">MED</td><td>entity_type=Holding + Operating code</td><td class="yes">✅ NO — entity=Operating</td></tr>
   </table>
-  <div class="card card-g" style="margin-top:10px;text-align:center;font-size:0.58em">
+  <div class="card card-g" style="margin-top:10px;text-align:center;font-size:0.80em">
     Risk score: 0.00 → Risk level: <strong>LOW</strong> → KYB recommendation: <strong>APPROVE</strong>
   </div>
 </section>
@@ -595,7 +672,7 @@ P(NAICS 722511) = 0.14  ← LOW CONFIDENCE ⚠️
 <!-- ═══ SLIDE 12 — FULL DIAGRAM ═══ -->
 <section>
   <h2>The Complete Pipeline — Both Systems Side by Side</h2>
-  <div style="margin-top:8px;display:grid;grid-template-columns:1fr 30px 1fr;gap:4px;font-size:0.50em">
+  <div style="margin-top:8px;display:grid;grid-template-columns:1fr 30px 1fr;gap:4px;font-size:0.72em">
 
     <div style="display:grid;gap:3px">
       <div class="flow flow-p" style="padding:6px"><strong>PHASE 0</strong> — Bulk Redshift Pre-loading<br/>OC · Equifax · ZoomInfo · Liberty Data<br/>industry_code_uids already in tables</div>
@@ -627,7 +704,7 @@ P(NAICS 722511) = 0.14  ← LOW CONFIDENCE ⚠️
 <!-- ═══ SLIDE 13 — OUTPUT COMPARISON ═══ -->
 <section>
   <h2>Same Input, Same Evidence — Completely Different Output</h2>
-  <p style="font-size:0.56em;margin-bottom:8px">Input: Apple Inc, 1 Infinite Loop, Cupertino CA, US — all 5 sources return NAICS 334118 (Trulioo returns 541511)</p>
+  <p style="font-size:0.78em;margin-bottom:8px">Input: Apple Inc, 1 Infinite Loop, Cupertino CA, US — all 5 sources return NAICS 334118 (Trulioo returns 541511)</p>
   <table>
     <tr><th>Output field</th><th style="background:var(--r)">Worth AI (Phase 4A)</th><th style="background:var(--g)">Consensus Engine (Phase 4B)</th></tr>
     <tr><td>Primary code</td><td>NAICS 334118 (string)</td><td class="yes">NAICS 334118 with probability 0.92</td></tr>
@@ -649,25 +726,25 @@ P(NAICS 722511) = 0.14  ← LOW CONFIDENCE ⚠️
   <div class="two-col" style="margin-top:14px">
     <div>
       <h3 style="color:var(--g)">No changes needed</h3>
-      <div class="card card-g" style="margin-bottom:6px;font-size:0.56em">✅ Redshift tables (OC, Equifax, ZoomInfo, Liberty Data) — same tables, same schemas</div>
-      <div class="card card-g" style="margin-bottom:6px;font-size:0.56em">✅ Vendor API credentials and integrations — same Trulioo, OC, Equifax calls</div>
-      <div class="card card-g" style="margin-bottom:6px;font-size:0.56em">✅ <code>integration_data.request_response</code> — same raw storage table</div>
-      <div class="card card-g" style="margin-bottom:6px;font-size:0.56em">✅ Entity Matching XGBoost (Model 1) — same algorithm, same 26 features</div>
-      <div class="card card-g" style="margin-bottom:6px;font-size:0.56em">✅ Kafka topics and producers — same events triggered</div>
-      <div class="card card-g" style="font-size:0.56em">✅ Onboarding form — same applicant inputs</div>
+      <div class="card card-g" style="margin-bottom:6px;font-size:0.78em">✅ Redshift tables (OC, Equifax, ZoomInfo, Liberty Data) — same tables, same schemas</div>
+      <div class="card card-g" style="margin-bottom:6px;font-size:0.78em">✅ Vendor API credentials and integrations — same Trulioo, OC, Equifax calls</div>
+      <div class="card card-g" style="margin-bottom:6px;font-size:0.78em">✅ <code>integration_data.request_response</code> — same raw storage table</div>
+      <div class="card card-g" style="margin-bottom:6px;font-size:0.78em">✅ Entity Matching XGBoost (Model 1) — same algorithm, same 26 features</div>
+      <div class="card card-g" style="margin-bottom:6px;font-size:0.78em">✅ Kafka topics and producers — same events triggered</div>
+      <div class="card card-g" style="font-size:0.78em">✅ Onboarding form — same applicant inputs</div>
     </div>
     <div>
       <h3 style="color:var(--o)">What changes (Phase 4 only)</h3>
-      <div class="card card-o" style="margin-bottom:6px;font-size:0.56em">⚡ Replace <code>factWithHighestConfidence()</code> with <code>ConsensusEngine.predict()</code></div>
-      <div class="card card-o" style="margin-bottom:6px;font-size:0.56em">⚡ Add <code>core_uk_sic_code</code> table + <code>uk_sic_id</code> column (P0 — one migration)</div>
-      <div class="card card-o" style="margin-bottom:6px;font-size:0.56em">⚡ Read <code>gb_sic</code> entries from OC loop (P0 — one line of code)</div>
-      <div class="card card-o" style="margin-bottom:6px;font-size:0.56em">⚡ Read Trulioo <code>.sicCode</code> (P0 — one missing field access)</div>
-      <div class="card card-o" style="margin-bottom:6px;font-size:0.56em">⚡ Add XGBoost Model 2 (38 features → classification)</div>
-      <div class="card card-o" style="margin-bottom:6px;font-size:0.56em">⚡ Add LLM enrichment layer (GPT-4o-mini referee)</div>
-      <div class="card card-o" style="font-size:0.56em">⚡ Add Risk Engine (9 AML/KYB signal detectors)</div>
+      <div class="card card-o" style="margin-bottom:6px;font-size:0.78em">⚡ Replace <code>factWithHighestConfidence()</code> with <code>ConsensusEngine.predict()</code></div>
+      <div class="card card-o" style="margin-bottom:6px;font-size:0.78em">⚡ Add <code>core_uk_sic_code</code> table + <code>uk_sic_id</code> column (P0 — one migration)</div>
+      <div class="card card-o" style="margin-bottom:6px;font-size:0.78em">⚡ Read <code>gb_sic</code> entries from OC loop (P0 — one line of code)</div>
+      <div class="card card-o" style="margin-bottom:6px;font-size:0.78em">⚡ Read Trulioo <code>.sicCode</code> (P0 — one missing field access)</div>
+      <div class="card card-o" style="margin-bottom:6px;font-size:0.78em">⚡ Add XGBoost Model 2 (38 features → classification)</div>
+      <div class="card card-o" style="margin-bottom:6px;font-size:0.78em">⚡ Add LLM enrichment layer (GPT-4o-mini referee)</div>
+      <div class="card card-o" style="font-size:0.78em">⚡ Add Risk Engine (9 AML/KYB signal detectors)</div>
     </div>
   </div>
-  <div class="card card-gd" style="margin-top:10px;text-align:center;font-size:0.60em">
+  <div class="card card-gd" style="margin-top:10px;text-align:center;font-size:0.82em">
     <strong>The single sentence:</strong> Replace one function call in Phase 4. Everything before it is unchanged.
   </div>
 </section>
@@ -682,7 +759,7 @@ P(NAICS 722511) = 0.14  ← LOW CONFIDENCE ⚠️
     <div style="color:#EF9A9A;font-size:0.72em;margin-bottom:10px">🔴 <strong style="color:white">Phase 4A (Worth AI):</strong> Deterministic rule picks one NAICS winner. No probability. No UK SIC. No AML signals. No jurisdiction routing.</div>
     <div style="color:#90CAF9;font-size:0.72em;margin-bottom:10px">🔵 <strong style="color:white">Phase 4B (Consensus):</strong> 5-step stacking — 38 features → XGBoost probabilities → external registry → LLM referee → Risk Engine. Replaces only Phase 4.</div>
     <div style="color:#FFE082;font-size:0.72em;margin-bottom:14px">🚀 <strong style="color:white">Implementation:</strong> Replace <code style="color:#FFE082">factWithHighestConfidence()</code> with <code style="color:#FFE082">ConsensusEngine.predict()</code>. Add one migration + two one-liners for UK SIC. Everything else is unchanged.</div>
-    <div style="border-top:1px solid rgba(255,255,255,.15);padding-top:14px;font-size:0.62em;color:#90CAF9">
+    <div style="border-top:1px solid rgba(255,255,255,.15);padding-top:14px;font-size:0.82em;color:#90CAF9">
       <strong style="color:white">Continue reading:</strong><br/>
       <a href="slides.html" style="color:#90CAF9">→ Deck 2: Technical Briefing</a> — every source, every gap, every confirmed fix<br/>
       <a href="models.html" style="color:#90CAF9">→ Deck 3: XGBoost Models</a> — how Model 1 and Model 2 work, the 38 features<br/>
@@ -696,10 +773,17 @@ P(NAICS 722511) = 0.14  ← LOW CONFIDENCE ⚠️
 <script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
 <script>
   Reveal.initialize({
-    hash:true, slideNumber:'c/t', transition:'slide', transitionSpeed:'fast',
-    controls:true, progress:true, center:true,
-    width:1600, height:900, margin:0.05, minScale:0.1, maxScale:2.0,
-  });
+  hash: true,
+  slideNumber: 'c/t',
+  transition: 'slide',
+  width: 1300,
+  height: 720,
+  margin: 0.04,
+  minScale: 0.2,
+  maxScale: 1.5,
+  controls: true,
+  progress: true,
+});
 </script>
 </body>
 </html>
