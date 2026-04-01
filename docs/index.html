@@ -237,19 +237,13 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
   </a>
 
   <!-- DECK 5 — Dual Pipeline Blueprint (full-width, below Deck 4) -->
-  <div class="deck" style="background:linear-gradient(135deg,#1A365D,#2B4C7E);grid-column:1 / -1;cursor:pointer;" onclick="window.location='pipeline_facts.html'">
+  <a href="pipeline_facts.html" class="deck" style="text-decoration:none;background:linear-gradient(135deg,#1A365D,#2B4C7E);grid-column:1 / -1;">
     <div class="deck-num">5</div>
-    <div class="deck-header" style="display:flex;align-items:flex-start;justify-content:space-between;gap:20px;">
-      <div>
-        <div class="deck-icon">🏭</div>
-        <div class="deck-step">Read Last — The 8 Facts &amp; Both Pipelines</div>
-        <div class="deck-title">Dual-Pipeline Classification Blueprint</div>
-        <div class="deck-subtitle">19 slides · Where the 8 facts come from, end-to-end</div>
-      </div>
-      <div style="display:flex;gap:10px;flex-shrink:0;padding-top:6px;">
-        <a href="pipeline_facts.html" onclick="event.stopPropagation()" class="btn-slides" style="white-space:nowrap">View Slides →</a>
-        <a href="https://github.com/wecsleyprates-design/Industry-Classification/blob/main/AI-Powered-NAICS-Industry-Classification-Agent/modeling/INDUSTRY_FACTS_GUIDE.md" onclick="event.stopPropagation()" class="btn-doc" style="white-space:nowrap">Read Document</a>
-      </div>
+    <div class="deck-header">
+      <div class="deck-icon">🏭</div>
+      <div class="deck-step">Read Last — The 8 Facts &amp; Both Pipelines</div>
+      <div class="deck-title">Dual-Pipeline Classification Blueprint</div>
+      <div class="deck-subtitle">19 slides · Where the 8 facts come from, end-to-end</div>
     </div>
     <div class="deck-body" style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
       <div class="deck-why">
@@ -271,7 +265,11 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
         <div class="deck-tag">When pipelines show different NAICS</div>
       </div>
     </div>
-  </div>
+    <div class="deck-links">
+      <span class="btn-slides">View Slides →</span>
+      <a href="https://github.com/wecsleyprates-design/Industry-Classification/blob/main/AI-Powered-NAICS-Industry-Classification-Agent/modeling/INDUSTRY_FACTS_GUIDE.md" onclick="event.stopPropagation()" class="btn-doc">Read Document</a>
+    </div>
+  </a>
 
 </div>
 

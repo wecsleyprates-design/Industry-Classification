@@ -4,8 +4,9 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>The Two XGBoost Models — Industry Classification Deep Dive</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.css"/>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/theme/white.min.css"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css"/>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/black.css"/>
 <style>
 :root{--b:#1565C0;--dk:#0D1B2A;--g:#2E7D32;--r:#C62828;--o:#E65100;--gd:#F57F17;--gr:#546E7A;--lt:#E3F2FD;}
 html,body{margin:0;padding:0;overflow:hidden;}
@@ -63,6 +64,44 @@ html,body{margin:0;padding:0;overflow:hidden;}
 td.yes{color:#2E7D32;font-weight:700;}
 td.no{color:#C62828;font-weight:700;}
 td.par{color:#E65100;font-weight:700;}
+/* ── DARK THEME READABILITY OVERRIDE ── */
+:root{--b:#4299E1;--dk:#0D1B2A;--g:#48BB78;--r:#FC8181;--o:#ED8936;--gd:#ECC94B;--gr:#A0AEC0;--lt:rgba(66,153,225,0.15);--p:#9F7AEA;}
+.reveal{font-size:20px !important;}
+.reveal h1{color:#63B3ED !important;font-size:1.7em !important;}
+.reveal h2{color:#68D391 !important;border-color:#68D391 !important;font-size:1.15em !important;}
+.reveal h3{color:#F6E05E !important;font-size:0.82em !important;}
+.reveal p,.reveal li{font-size:0.78em !important;line-height:1.6 !important;color:#E2E8F0 !important;margin:3px 0 !important;}
+.reveal ul li::before{color:#4299E1 !important;}
+.reveal table{font-size:0.70em !important;}
+.reveal table th{background:#2D3748 !important;color:#63B3ED !important;padding:6px 10px !important;}
+.reveal table td{padding:5px 10px !important;border-bottom:1px solid #2D3748 !important;color:#E2E8F0 !important;}
+.reveal table tr:nth-child(even) td{background:rgba(255,255,255,0.04) !important;}
+.reveal code{background:#1a202c !important;color:#F6E05E !important;padding:2px 5px !important;border-radius:3px !important;}
+.reveal pre code{font-size:0.62em !important;line-height:1.5 !important;background:#1a202c !important;color:#90CDF4 !important;}
+.card{background:rgba(255,255,255,0.07) !important;box-shadow:none !important;border-left:3px solid var(--b) !important;}
+.card-r{border-left-color:var(--r) !important;}
+.card-g{border-left-color:var(--g) !important;}
+.card-o{border-left-color:var(--o) !important;}
+.card-p{border-left-color:var(--p) !important;}
+.card-gd{border-left-color:var(--gd) !important;}
+.phase0,.phase1,.phase2,.phase3,.phase4a,.phase4b{background:transparent !important;}
+.phase0 h2{color:#CE93D8 !important;border-color:#CE93D8 !important;}
+.phase1 h2,.phase4b h2{color:#68D391 !important;border-color:#68D391 !important;}
+.phase2 h2{color:#63B3ED !important;border-color:#63B3ED !important;}
+.phase3 h2{color:#ED8936 !important;border-color:#ED8936 !important;}
+.phase4a h2{color:#FC8181 !important;border-color:#FC8181 !important;}
+.chip{font-size:0.60em !important;}
+.chip-g{background:rgba(72,187,120,0.2) !important;color:#68D391 !important;border:1px solid #48BB78 !important;}
+.chip-r{background:rgba(252,129,129,0.2) !important;color:#FC8181 !important;border:1px solid #FC8181 !important;}
+.chip-o{background:rgba(237,137,54,0.2) !important;color:#ED8936 !important;border:1px solid #ED8936 !important;}
+.chip-b{background:rgba(66,153,225,0.2) !important;color:#63B3ED !important;border:1px solid #4299E1 !important;}
+.chip-p{background:rgba(159,122,234,0.2) !important;color:#B794F4 !important;border:1px solid #9F7AEA !important;}
+.chip-gd{background:rgba(236,201,75,0.2) !important;color:#ECC94B !important;border:1px solid #ECC94B !important;}
+.flow{background:rgba(66,153,225,0.15) !important;border:2px solid var(--b) !important;color:#63B3ED !important;}
+.flow-g{background:rgba(72,187,120,0.15) !important;border-color:#48BB78 !important;color:#68D391 !important;}
+.flow-r{background:rgba(252,129,129,0.15) !important;border-color:#FC8181 !important;color:#FC8181 !important;}
+.reveal .title-slide p{color:#A0AEC0 !important;font-size:0.78em !important;}
+
 </style>
 </head>
 <body>
@@ -667,7 +706,7 @@ NAICS 541511 → 0.11
 
 </div>
 </div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.6.1/reveal.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
 <script>
   Reveal.initialize({
     hash:true, slideNumber:'c/t', transition:'slide', transitionSpeed:'fast',
