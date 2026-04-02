@@ -1744,6 +1744,1135 @@ table(
     fs=8.5,
 )
 
+doc.add_page_break()
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECTION 12 — NEW UI ELEMENTS FROM SCREENSHOTS (DEEP DIVE)
+# ════════════════════════════════════════════════════════════════════════════
+
+H1('Section 12 — New UI Elements: KYC No Match, Fraud Report, Addresses, Watchlists', c=PURPLE, pb=False)
+
+H2('12.1 — KYC "No Match" Badge (Marcus Lopez — Home Address)')
+callout(
+    'The red "No Match" badge on Home Address means the address submitted by the applicant '
+    'was compared against official third-party data (Trulioo Comprehensive View) and '
+    'the addresses DID NOT match. This is a meaningful KYC risk signal: the person '
+    'may not actually live at the submitted address.'
+)
+table(
+    ['Badge', 'Meaning', 'Technical source', 'What triggers it'],
+    [
+        ['✅ Match (green)',
+         'Submitted field value confirmed by Trulioo or Plaid IDV as matching official records',
+         'Trulioo DatasourceFields[].Status = "match"\nOR Plaid IDV field comparison',
+         'Integration-service: extractAddressMatchStatusFromDatasourceFields()\n'
+         'Uses "Comprehensive View" datasource exclusively as primary signal.\n'
+         'Returns "match" if all address fields are match or missing.'],
+        ['🔴 No Match (red)',
+         'Submitted value explicitly contradicted by official records',
+         'Trulioo DatasourceFields[].Status = "nomatch" on any address field',
+         'If ANY address field (street, city, state, ZIP) returns "nomatch"\n'
+         'in the Comprehensive View → overall status = "nomatch"\n'
+         '→ address_verification review task status = "failure"\n'
+         '→ UI shows red "No Match" badge'],
+        ['(no badge)',
+         'Field not verified — IDV disabled or verification service returned no data',
+         'No IDV record for this owner\nOR IDV_STATUS = PENDING/CANCELED/EXPIRED',
+         'Integration settings: identity_verification.status = "INACTIVE"\n'
+         'OR Plaid IDV not completed\nOR Trulioo returned no DatasourceFields for this field'],
+    ],
+    col_widths=[1.4, 2.5, 2.8, 3.0],
+)
+
+H3('Where "No Match" is stored and queried')
+code_block([
+    '-- address_verification review task (Trulioo result):',
+    'SELECT key, status, message, sublabel',
+    'FROM integration_data.business_entity_review_task',
+    "WHERE business_entity_verification_id = '<uuid>'",
+    "  AND key = 'address_verification';",
+    '-- status = "success" -> Match  |  status = "failure" -> No Match',
+    '',
+    '-- business_entity_address_source (submitted vs reported addresses):',
+    'SELECT address_line_1, city, state, postal_code, submitted, deliverable',
+    'FROM integration_data.business_entity_address_source',
+    "WHERE business_entity_verification_id = '<uuid>';",
+    '-- submitted = true  -> Submitted Address (what the business owner entered)',
+    '-- submitted = false -> Reported Address (what Trulioo/Middesk found in registry)',
+])
+
+H2('12.2 — Fraud Report (Marcus Lopez: Synthetic Identity Risk Score, Stolen Identity Risk Score)')
+callout(
+    'The Fraud Report section under KYC is powered exclusively by Plaid IDV (platform_id = 18). '
+    'It appears ONLY when Plaid IDV is enabled for the customer. '
+    'Plaid runs a "risk check" as part of the identity verification flow, '
+    'analyzing behavioral signals and identity abuse patterns.'
+)
+table(
+    ['Fraud Report field', 'Value shown', 'Plaid API field', 'What it means'],
+    [
+        ['Name', 'MARCUS LOPEZ',
+         'risk_check.name',
+         'The name extracted and confirmed by Plaid from the submitted ID document'],
+        ['User Interactions', 'N/A',
+         'risk_check.user_interactions',
+         'Behavioral signal: how the user interacted with the IDV flow '
+         '(e.g., unusual copy-paste patterns, atypical mouse movements). '
+         'N/A = not enough signal or not detected.'],
+        ['Fraud Ring', 'N/A',
+         'risk_check.fraud_ring_detected',
+         'Whether Plaid detected signals that this device/identity has been used '
+         'in coordinated fraud ring activity. N/A = not detected.'],
+        ['Bot Presence', 'N/A',
+         'risk_check.bot_detected',
+         'Whether automated/bot behavior was detected during IDV session. '
+         'N/A = no bot signal detected.'],
+        ['Synthetic Identity Risk Score', '3 (Low Risk)',
+         'risk_check.identity_abuse_signals.synthetic_identity.score',
+         'Score 0-100: likelihood this identity was synthetically fabricated '
+         '(combining real and fake information to create a "Frankenstein identity"). '
+         'Score 3 = very low synthetic identity risk. Scores > 70 = High Risk.'],
+        ['Stolen Identity Risk Score', '1 (Low Risk)',
+         'risk_check.identity_abuse_signals.stolen_identity.score',
+         'Score 0-100: likelihood that this identity was stolen from a real person. '
+         'Score 1 = very low stolen identity risk. Scores > 70 = High Risk.'],
+    ],
+    col_widths=[2.4, 1.3, 2.8, 3.1],
+)
+
+H3('Email Report (the other section under KYC)')
+table(
+    ['Email Report field', 'Plaid API field', 'What it means'],
+    [
+        ['Is Deliverable', 'risk_check.email.is_deliverable',
+         'Whether the submitted email address can actually receive email '
+         '(i.e., it\'s a real, active mailbox — not a fake or disposable address)'],
+        ['Breach Count', 'risk_check.email.breach_count',
+         'Number of times this email appeared in known data breach databases '
+         '(e.g., Have I Been Pwned). High count = elevated fraud risk.'],
+        ['First / Last Breached At', 'risk_check.email.first_breached_at / last_breached_at',
+         'Dates when this email was first and most recently seen in a breach'],
+        ['Domain Is Free Provider', 'risk_check.email.domain_is_free_provider',
+         'Whether the email is from a free provider (Gmail, Yahoo, etc.) vs a business domain. '
+         'Free provider emails = slightly higher fraud risk for business applications.'],
+        ['Domain Is Disposable', 'risk_check.email.domain_is_disposable',
+         'Whether the domain is a known disposable/temporary email service '
+         '(e.g., mailinator.com). Disposable email = strong fraud signal.'],
+        ['TLD Is Suspicious', 'risk_check.email.top_level_domain_is_suspicious',
+         'Whether the top-level domain (e.g. .xyz, .tk) is known to be associated with spam/fraud'],
+        ['IP Spam List Count', 'risk_check.ip_spam_list_count',
+         'Number of spam/fraud blacklists the applicant\'s IP address appeared on'],
+    ],
+    col_widths=[2.2, 2.8, 4.6],
+)
+
+H3('Fraud Report data flow')
+lineage([
+    'Plaid IDV session: applicant completes photo ID + selfie',
+    '  -> Plaid runs risk_check on submitted identity',
+    '  -> Plaid API returns risk_check.identity_abuse_signals.* in IDV result',
+    '       |',
+    'integration-service/lib/plaid/plaidIdv.ts:',
+    '  getApplicantVerificationResponse(owner.id)',
+    '  -> extracts risk_check from Plaid IDV response',
+    '  -> Maps to Worth AI schema:',
+    '     synthetic_identity_risk_score = risk_check.identity_abuse_signals.synthetic_identity.score',
+    '     stolen_identity_risk_score    = risk_check.identity_abuse_signals.stolen_identity.score',
+    '     fraud_ring_detected           = risk_check.fraud_ring_detected',
+    '     bot_detected                  = risk_check.bot_detected',
+    '       |',
+    'Stored in: integration_data.data_identity_verifications',
+    '  (applicant_risk_check_result JSONB column)',
+    '       |',
+    'Fact Engine sources.ownerVerification reads from data_identity_verifications',
+    '  -> Creates owner_verification fact:',
+    '     { owner_id: { email_report: {...}, fraud_report: {...} } }',
+    '  -> Stored in rds_warehouse_public.facts name="owner_verification"',
+    '       |',
+    'UI reads owner_verification fact via GET /facts/business/{id}/details',
+    '  -> Displays Email Report and Fraud Report panels per owner',
+])
+
+H2('12.3 — KYB Contact Information: Submitted vs Reported Addresses')
+callout(
+    'The Contact Information tab shows multiple address types: '
+    '"Submitted Address" (what the business owner typed in the form) and '
+    '"Reported Address" (what Trulioo/Middesk found in official registries). '
+    'The key insight: these may be DIFFERENT addresses — and the difference matters for risk.'
+)
+
+table(
+    ['Address type', 'Badge', 'What it means', 'Source', 'Technical field'],
+    [
+        ['Submitted Address',
+         'Business Registration: Verified / Unverified\nGoogle Profile: Verified / Unverified',
+         'The address the business owner typed during onboarding.\n'
+         '"Verified" = this address was confirmed by Middesk SOS as matching the filing.\n'
+         '"Unverified" = Trulioo/Middesk could not confirm this is the SOS-registered address.',
+         'data_businesses.address_* (submitted by applicant)\n'
+         'Verified via: Middesk review_task key="name" + Trulioo Comprehensive View',
+         'integration_data.business_entity_address_source WHERE submitted = true'],
+        ['Reported Address (with Deliverable badge)',
+         'Business Registration: Verified / Unverified\n(green "Deliverable" tag)',
+         'An address Middesk or Trulioo found in official registry as the registered address.\n'
+         '"Deliverable" = USPS confirms mail can be delivered to this address.\n'
+         '"Verified" = matches what the applicant submitted.\n'
+         '"Unverified" = an additional registry address that doesn\'t match submitted.',
+         'Middesk addressSources[].submitted = false\n'
+         '+ Middesk addressSources[].deliverable = true/false\n'
+         '+ Trulioo StandardizedLocations',
+         'integration_data.business_entity_address_source WHERE submitted = false'],
+        ['Google Profile: Verified',
+         'Blue "Verified" badge',
+         'The business address was found and confirmed on Google Maps/Google Business.\n'
+         'SERP Google Profile integration checked if the address matches Google\'s data.',
+         'SERP_GOOGLE_PROFILE (platform_id = 39)\n'
+         'caseTabValuesManager.ts: googleProfileStatus = "passed"',
+         'integration_data.request_response (platform_id=39)\n'
+         'value.google_address compared to submitted address'],
+        ['Google Profile: Unverified',
+         'Yellow "Unverified" badge',
+         'Address was submitted but Google Profile could not confirm it.\n'
+         'The business may not have a Google Business listing, or the address differs.',
+         'Same source — googleProfileStatus = "missing" (address present but not confirmed)',
+         'integration_data.request_response (platform_id=39)'],
+    ],
+    col_widths=[1.8, 2.0, 2.8, 2.0, 1.6],
+)
+
+H3('Why are there multiple Reported Addresses?')
+body(
+    'Middesk and Trulioo search official SOS databases which may have MULTIPLE '
+    'addresses on file for the same entity (e.g., registered agent address, '
+    'principal office, mailing address, historical addresses). '
+    'All of them are shown. The one marked "Deliverable" is the USPS-confirmed '
+    'current deliverable address. "Unverified" reported addresses are additional registry '
+    'entries that don\'t match the submitted address — useful for analyst review.'
+)
+
+H3('address_source table lineage')
+lineage([
+    'SOURCES for Submitted Address:',
+    '  data_businesses.address_line_1, address_city, address_state, address_postal_code',
+    '  (entered by business owner during onboarding form)',
+    '',
+    'SOURCES for Reported Addresses:',
+    '  Middesk API response -> businessEntityVerification.addressSources[]',
+    '    { full_address, submitted: false, deliverable: true/false }',
+    '  Trulioo API response -> StandardizedLocations[]',
+    '    { Address1, City, Province, PostalCode }',
+    '',
+    'STORAGE:',
+    '  integration_data.business_entity_address_source',
+    '    business_entity_verification_id  FK',
+    '    address_line_1, city, state, postal_code',
+    '    submitted (boolean: true=applicant submitted, false=registry reported)',
+    '    deliverable (boolean: USPS-confirmed deliverable)',
+    '',
+    'ADDRESS VERIFICATION STATUS:',
+    '  integration_data.business_entity_review_task',
+    '    key = "address_verification"',
+    '    status = "success" (Verified) | "failure" (Unverified)',
+    '  -> Determined by: extractAddressMatchStatusFromDatasourceFields()',
+    '     Trulioo Comprehensive View DatasourceFields match/nomatch',
+    '',
+    'GOOGLE PROFILE VERIFICATION:',
+    '  integration_data.request_response (platform_id = 39)',
+    '  -> SERP_GOOGLE_PROFILE integration scrapes Google Maps for business address',
+    '  -> caseTabValuesManager.ts computes googleProfileStatus:',
+    '     "passed" = Google address matches submitted -> "Verified" badge',
+    '     "missing" = address present but not confirmed -> "Unverified" badge',
+])
+
+H2('12.4 — KYB Business Registration: EIN/Tax ID Verification')
+body(
+    '"Business Registration ✓ Verified" and "Tax ID Number (EIN): 931667813" '
+    'shown in the Business Registration tab for Pizza and a Chef LLC. '
+    'This shows the EIN was verified, not just submitted.'
+)
+table(
+    ['Field', 'Source', 'Verification process', 'Storage'],
+    [
+        ['Business Name', 'data_businesses.name (submitted)',
+         'Middesk: review_task key="name"\n'
+         'Trulioo: DatasourceFields where FieldName=BusinessName, Status=match',
+         'integration_data.business_entity_review_task key="name"'],
+        ['Tax ID Number (EIN)', 'data_businesses.tin (submitted, AES-256 encrypted)',
+         'Middesk: review_task key="tin"\n'
+         '  status="success" = EIN matches IRS records for this business\n'
+         '  status="failure" = EIN does not match registry\n'
+         'Trulioo: extractRegistrationNumberFromTruliooResponse()\n'
+         '  Compares submitted TIN against registry registration number',
+         'data_businesses.tin (encrypted)\n'
+         'integration_data.business_entity_review_task key="tin"\n'
+         '  { status, message, sublabel }'],
+        ['Secretary of State Filings ✓ Verified',
+         'Middesk SOS API call',
+         'Middesk successfully found and confirmed an SOS filing matching\n'
+         'the submitted business name and EIN in the state\'s official registry.\n'
+         'integration_data.business_entity_verification.status = "success"',
+         'integration_data.business_entity_verification\n'
+         '(name, entity_type, incorporation_date, status, sos_status)'],
+        ['Filing Status: Active', 'Middesk SOS response',
+         'SOS registry reports business status as "Active" (in good standing)\n'
+         'vs "Inactive", "Dissolved", "Revoked", "Suspended"',
+         'integration_data.business_entity_verification.sos_status'],
+        ['Entity Jurisdiction: Domestic / Primary',
+         'Middesk SOS response',
+         '"Domestic" = business is registered in its home state (FL).\n'
+         '"Primary" = this is the primary state of registration\n'
+         '(vs "Foreign" = registered in a different state than where incorporated).',
+         'integration_data.business_entity_verification.entity_jurisdiction_type'],
+        ['Registration Date', 'Middesk SOS response',
+         'The date the business entity was first registered with the state.\n'
+         'Pizza and a Chef LLC: 05/31/2023 (registered in FL).',
+         'integration_data.business_entity_verification.incorporation_date'],
+        ['Corporate Officers', 'Middesk SOS response',
+         'Officially registered officers/managers as listed in the SOS filing.\n'
+         '"William A. Bergez, MANAGER & REGISTERED AGENT"\n'
+         'Cross-referenced with KYC owners to check for discrepancies.',
+         'integration_data.business_entity_verification.officers JSONB'],
+    ],
+    col_widths=[2.0, 1.8, 3.3, 2.5],
+)
+
+H2('12.5 — KYB Business Names: Submitted Names vs Reported Names')
+table(
+    ['Name type', 'Example', 'Source', 'Purpose'],
+    [
+        ['Submitted Name (legal)', 'PIZZA AND A CHEF LLC',
+         'data_businesses.name — submitted via onboarding form as legal name',
+         'Primary submitted entity name'],
+        ['Submitted Name (DBA)', 'Pizza and a chef',
+         'data_businesses.dba_name — submitted via onboarding as "doing business as"',
+         'Alternative trading name submitted by applicant'],
+        ['Reported Name', 'ARI\'s Deli & Pizza',
+         'Middesk SOS: businessEntityVerification.name\n'
+         'Additional DBA names found in registry under same EIN',
+         'What official registries have on record — may differ from submitted.\n'
+         'Discrepancy between submitted and reported = name mismatch risk signal.'],
+        ['Reported Name', 'PIZZA AND A CHEF LLC',
+         'Trulioo: DatasourceFields FieldName=BusinessName from Comprehensive View',
+         'Confirming name — Trulioo also found same legal name in its registry,\n'
+         'which corroborates Middesk\'s SOS data.'],
+    ],
+    col_widths=[1.8, 2.2, 2.8, 2.8],
+)
+body(
+    '"Business Names ✓ Verified" means the Fact Engine resolved a consistent legal name '
+    'across Middesk and Trulioo sources. The name_verification review task status = "success". '
+    'The presence of "ARI\'s Deli & Pizza" as a Reported Name is noteworthy — this is '
+    'an additional DBA that Worth AI found in the registry, which the applicant did not '
+    'disclose. This is visible to analysts for manual review.'
+)
+
+H2('12.6 — KYC "Verification Pending" Badge (Leslie Knope)')
+callout(
+    '"Verification Pending" (yellow badge) is different from "Unverified" and "Verified".\n\n'
+    'It means: IDV was triggered for this owner, the applicant STARTED the Plaid IDV flow, '
+    'but has NOT yet completed it.\n\n'
+    'IDV_STATUS = PENDING (status_id = 2) — the applicant clicked the IDV link, '
+    'started the identity session, but the photo ID + selfie upload is incomplete '
+    'or awaiting Plaid\'s processing.'
+)
+table(
+    ['KYC owner badge', 'Condition', 'IDV_STATUS value', 'Table field'],
+    [
+        ['✅ Verified',
+         'Plaid IDV flow completed successfully — all required fields matched',
+         'SUCCESS (1)',
+         'data_identity_verifications.status_id = 1'],
+        ['⏳ Verification Pending',
+         'IDV flow started but not completed (applicant in progress)',
+         'PENDING (2)',
+         'data_identity_verifications.status_id = 2'],
+        ['❌ Unverified (IDV Disabled)',
+         'IDV feature is not active for this customer — never triggered',
+         'n/a — no IDV record exists',
+         'data_integration_settings.settings.identity_verification.status = "INACTIVE"'],
+        ['❌ Unverified (Expired)',
+         'IDV link expired before applicant completed the flow',
+         'EXPIRED (4)',
+         'data_identity_verifications.status_id = 4'],
+        ['❌ Unverified (Canceled)',
+         'Applicant canceled the IDV session',
+         'CANCELED (3)',
+         'data_identity_verifications.status_id = 3'],
+        ['❌ Unverified (Failed)',
+         'IDV completed but identity could not be verified (failed checks)',
+         'FAILED (99)',
+         'data_identity_verifications.status_id = 99'],
+    ],
+    col_widths=[2.2, 2.8, 1.5, 3.1],
+)
+
+H2('12.7 — KYB Watchlists Tab: Which Lists Are Scanned and How')
+body(
+    'The Watchlists tab shows screening results for the business AND all owners '
+    'against every major sanctions and regulatory watchlist. '
+    'Data comes from TWO sources: Trulioo KYB (business screening) and Trulioo PSC (owner screening).'
+)
+
+H3('Which watchlists are scanned (from the UI right panel)')
+table(
+    ['Agency', 'List name', 'List type in Trulioo', 'Risk meaning if hit'],
+    [
+        ['Office of Foreign Assets Control (OFAC)',
+         'Capta List Foreign Sanctions Evaders', 'SANCTIONS',
+         'Individual evaded US financial sanctions — extreme risk'],
+        ['OFAC', 'Non-SDN Menu-Based Sanctions', 'SANCTIONS',
+         'Entity subject to sectoral/menu-based OFAC restrictions'],
+        ['OFAC', 'Non-SDN Iranian Sanctions', 'SANCTIONS',
+         'Entity linked to Iran sanctions program'],
+        ['OFAC', 'Non-SDN Chinese Military-Industrial Complex Companies List', 'SANCTIONS',
+         'Entity listed as Chinese military company — US investment restrictions'],
+        ['OFAC', 'Non-SDN Palestine Legislative Council List', 'SANCTIONS',
+         'Entities linked to Palestinian Legislative Council'],
+        ['OFAC', 'Specially Designated Nationals (SDN)', 'SANCTIONS',
+         'Highest severity — entity on US blacklist; cannot transact with US persons'],
+        ['OFAC', 'Sectoral Sanctions Identifications List (SSI)', 'SANCTIONS',
+         'Entity in sanctioned sector (Russian finance, energy, defense)'],
+        ['Bureau of Industry and Security (BIS)', 'Entity List', 'SANCTIONS',
+         'Entity prohibited from receiving US exports without license'],
+        ['BIS', 'Denied Persons List (DPL)', 'SANCTIONS',
+         'Entity denied US export privileges'],
+        ['BIS', 'Unverified List', 'SANCTIONS',
+         'Entity whose bona fides BIS could not verify in prior transactions'],
+        ['Various', 'PEP (Politically Exposed Persons)', 'PEP',
+         'Individual is or is related to a government official — higher corruption risk'],
+        ['Various', 'Adverse Media', 'ADVERSE_MEDIA',
+         'Negative news coverage linking entity to crime, fraud, corruption'],
+    ],
+    col_widths=[2.5, 2.8, 1.5, 3.4],
+)
+
+H3('Watchlist data flow')
+lineage([
+    'BUSINESS SCREENING (KYB):',
+    '  integration-service triggers Trulioo KYB API (platform_id=38)',
+    '  Trulioo screens business name + address against ALL watchlists above',
+    '  -> Returns watchlistResults: TruliooWatchlistHit[]',
+    '     { listType, listName, sourceAgencyName, listCountry, url }',
+    '  -> transformTruliooHitToWatchlistMetadata() maps hits to WatchlistValueMetadatum',
+    '  -> storeBusinessWatchlistResults() writes to:',
+    '     integration_data.business_entity_review_task',
+    '       key = "watchlist"',
+    '       metadata = JSON array of WatchlistValueMetadatum[]',
+    '       status = "success" (no hits) | "failure" (hits found)',
+    '',
+    'OWNER SCREENING (PSC — Persons with Significant Control):',
+    '  integration-service triggers Trulioo PSC API (platform_id=42)',
+    '  Screens each beneficial owner (>25% ownership) against PEP + sanctions lists',
+    '  -> extractWatchlistHitsFromScreenedPeople()',
+    '  -> entity_type = WATCHLIST_ENTITY_TYPE.PERSON (vs BUSINESS for KYB)',
+    '  -> Same storage: integration_data.business_entity_review_task',
+    '',
+    'CONSOLIDATED WATCHLIST FACT:',
+    '  consolidatedWatchlist.ts: calculateConsolidatedWatchlist()',
+    '  Merges KYB hits (BUSINESS type) + PSC hits (PERSON type)',
+    '  Deduplication: createWatchlistDedupKey() by title + agency + entity_name',
+    '  -> Stored in rds_warehouse_public.facts name="watchlist"',
+    '',
+    'UI displays:',
+    '  "Hits for Lisa\'s Nail Salon" (BUSINESS entity hits)',
+    '  "Hits for Lisa\'s Nail Salon, L.l.c." (alternate legal name screened)',
+    '  "Hits for Thanh Ngoc Nguyen" (PERSON PSC hits)',
+    '  Each: ✓ No Hits | or list of matched watchlist entries',
+])
+
+doc.add_page_break()
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECTION 13 — CUSTOMER DETAILS PAGE & STANDALONE CASES
+# ════════════════════════════════════════════════════════════════════════════
+
+H1('Section 13 — Customer Details Page, Standalone Cases, Tenants', c=PURPLE, pb=False)
+
+H2('13.1 — Customer Details Page (Joannah SB)')
+callout(
+    'The Customer Details page is the admin\'s view of a specific CUSTOMER (the bank/lender '
+    'using Worth AI). It has 4 tabs: Overview, Cases, Businesses, Users. '
+    'This is distinct from a Case Details page (which shows a specific business application).'
+)
+
+table(
+    ['UI element', 'Value', 'Source table', 'Notes'],
+    [
+        ['Customer name', 'Joannah SB',
+         'data_customers.name (case-service PostgreSQL)',
+         'Set when the Worth AI admin creates the customer account'],
+        ['Customer ID (UUID)', 'Shown with eye+copy icons',
+         'data_customers.id',
+         'Primary UUID key for this customer. Used in all API calls.'],
+        ['Created date', '03/27/2026, 1:52 PM',
+         'data_customers.created_at',
+         'Timestamp when customer was provisioned in Worth AI'],
+        ['Account Type: SANDBOX',
+         'Yellow "SANDBOX" badge',
+         'data_customers.customer_type = "SANDBOX"',
+         'Per Section 8 — set at provisioning, controls which vendor strategies are used'],
+        ['Account Status: Active',
+         'Green "Active ✓" badge',
+         'data_customers.status (or data_customers.is_active)',
+         'Active = customer is live and can submit applications.\n'
+         'Other states: Inactive, Suspended.'],
+        ['Account Owner', 'Joannah Sesebo',
+         'data_users linked to data_customers via rel_customer_users',
+         'The Worth AI internal user responsible for this customer account'],
+        ['April Onboarding Count: 0 New Onboardings',
+         'Counter + donut chart',
+         'onboarding_schema.data_customer_onboarding_limits\n'
+         '(current_count, limit, reset_at)',
+         'Tracks how many businesses were onboarded THIS MONTH.\n'
+         '"0 New Onboardings" + "no monthly limit set" = no cap configured.\n'
+         'When limit is set: displays usage vs limit.\n'
+         'Monthly reset: cron job monthly-onboarding-limit-reset\n'
+         'resets current_count = 0 every month (run-cron.ts).'],
+    ],
+    col_widths=[2.2, 1.8, 2.8, 2.8],
+)
+
+H2('13.2 — Customer Details → Cases Tab')
+body(
+    'Shows all cases submitted under this customer. '
+    'Each row is a data_cases record linked to this customer via data_cases.customer_id.'
+)
+table(
+    ['Column', 'Source field', 'Notes'],
+    [
+        ['Case #', 'data_cases.id (UUID, truncated)',
+         'Unique case identifier. Links to the Case Details page.'],
+        ['Date', 'data_cases.created_at',
+         'When the case was created (business submitted application)'],
+        ['Type', 'data_cases.case_type_id -> CASE_TYPE enum',
+         'ONBOARDING (1) = new business application\n'
+         'APPLICATION_EDIT (2) = business updated their application\n'
+         'RISK (3) = ongoing risk monitoring case'],
+        ['Business Name', 'data_businesses.name WHERE id = data_cases.business_id',
+         'The business that submitted this application'],
+        ['Status', 'data_cases.status_id -> CASE_STATUS constants',
+         'Under Manual Review (4), Auto Approved (6), Archived (9), etc.\n'
+         'See Section 7 for full 20-status breakdown'],
+        ['Integrations', '"Complete" or "In Progress"',
+         'Derived from business_integration_tasks WHERE business_id = X\n'
+         'Complete = all tasks finished (completed or failed)\n'
+         'In Progress = at least one task still running'],
+        ['Assignee', 'data_cases.assigned_to_user_id -> data_users',
+         'Analyst assigned to review. "-" = unassigned.'],
+    ],
+    col_widths=[1.5, 2.5, 5.6],
+)
+
+H3('Case status differences seen in screenshot')
+table(
+    ['Business', 'Status', 'What happened', 'Why this status'],
+    [
+        ['LADYBIRD ACADEMY OF ST...', 'Under Manual Review',
+         'Worth Score was in the medium-risk range\nOR analyst manually triggered review',
+         'score_decision_matrix returned decision="UNDER_MANUAL_REVIEW"\n'
+         'OR PATCH /cases/{id} { status: "UNDER_MANUAL_REVIEW" }'],
+        ['Tech Systems Inc', 'Archived',
+         'Case was closed without a final approval/rejection',
+         'PATCH /cases/{id} { status: "ARCHIVED" } — manual analyst action\n'
+         'OR automated archiving policy after inactivity period'],
+        ['Lisa\'s Nail Salon', 'Auto Approved',
+         'Worth Score 819/850 met the auto-approve threshold in score_decision_matrix',
+         'manual-score-service: score_decision = "AUTO_APPROVED"\n'
+         '-> UPDATE data_cases SET status_id = 6 (AUTO_APPROVED)'],
+    ],
+    col_widths=[2.2, 1.8, 2.8, 2.8],
+)
+
+H2('13.3 — Standalone Cases: What They Are and Why They Exist')
+callout(
+    'The left sidebar has TWO separate navigation items: "Customers" and "Standalone Cases".\n\n'
+    'A Standalone Case is a case where data_cases.customer_id IS NULL — '
+    'there is NO associated customer/tenant. The business submitted directly '
+    'without being invited by a specific customer.\n\n'
+    'This is a feature flag gated concept: FEATURE_FLAGS.BEST_60_STANDALONE_CASE'
+)
+
+table(
+    ['Case type', 'customer_id', 'applicant_id', 'How created', 'Use case'],
+    [
+        ['Customer case (standard)',
+         'SET — UUID of the customer (bank/lender)',
+         'SET — UUID of the business owner',
+         'Customer invites business via onboarding portal',
+         'Normal onboarding flow: bank invites merchant to apply'],
+        ['Standalone case',
+         'NULL',
+         'SET — UUID of the business owner who self-submitted',
+         'Business submits directly without customer invitation\n'
+         'INSERT INTO data_cases WHERE customer_id IS NULL',
+         'Business owner wants Worth AI score without being linked to a specific lender.\n'
+         'Used for self-service credit assessment or pre-qualification.'],
+    ],
+    col_widths=[1.8, 1.5, 1.5, 2.5, 2.3],
+)
+
+code_block([
+    '-- Find standalone cases:',
+    'SELECT * FROM data_cases WHERE customer_id IS NULL;',
+    '',
+    '-- Standalone cases for a specific business:',
+    'SELECT * FROM data_cases',
+    "WHERE business_id = '<uuid>' AND customer_id IS NULL AND applicant_id = '<applicant_uuid>';",
+    '',
+    '-- When a business later gets a customer invitation, both cases co-exist:',
+    '-- standalone case (customer_id=NULL) + invited case (customer_id=<uuid>)',
+    '-- The scoring pipeline links them via cases_to_link in the score trigger payload.',
+])
+
+H2('13.4 — Tenants: What They Are')
+callout(
+    '"Tenants" in the left sidebar is a SEPARATE concept from "Customers". '
+    'A Tenant is a top-level organizational entity — typically the parent organization '
+    'that owns and manages multiple Customer accounts.\n\n'
+    'Hierarchy: Tenant -> Customer (child) -> Case -> Business\n\n'
+    'Example: "Worldpay" might be the Tenant, with "Worldpay KYC 3" and "Worldpay POC KYC rerun" '
+    'being two separate Customer accounts (different environments/configurations) owned by the same Tenant.'
+)
+
+table(
+    ['Concept', 'Worth AI term', 'Table', 'Relationship'],
+    [
+        ['Top-level org owning Worth AI account', 'Tenant',
+         'data_tenants (or equivalent top-level table)',
+         'Parent of one or more Customers'],
+        ['Bank/lender/fintech using Worth AI', 'Customer',
+         'data_customers',
+         'Child of Tenant. Has customer_type (SANDBOX/PRODUCTION).\n'
+         'Can inherit settings from parent customer via parent_customer_data Kafka payload.'],
+        ['Business applying for services', 'Business',
+         'data_businesses',
+         'Linked to Customer via data_cases.customer_id'],
+        ['Integration settings inheritance',
+         'Customer hierarchy',
+         'integration_data.data_integration_settings',
+         'When a child Customer is created with parent_customer_data.parent_id,\n'
+         'integration settings are copied from parent to child customer.\n'
+         'Source: integration-service/src/messaging/kafka/consumers/handlers/business.ts\n'
+         'customerIntegrationSettings.copyCustomerIntegrationSettingsFromParent()'],
+    ],
+    col_widths=[2.2, 1.5, 2.3, 3.6],
+)
+
+doc.add_page_break()
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECTION 14 — UNANSWERED QUESTIONS: COMPLETE Q&A
+# ════════════════════════════════════════════════════════════════════════════
+
+H1('Section 14 — All Questions Worth Asking: Complete Q&A', c=PURPLE, pb=False)
+callout(
+    'This section covers every important question about Worth AI that was NOT explicitly '
+    'in the screenshots — questions that any analyst, engineer, or executive working with '
+    'this system should understand. Each question is answered with full technical lineage.'
+)
+
+H2('Q1: How does Worth AI know which vendor\'s NAICS code to trust?')
+body(
+    'The Fact Engine uses a two-part decision system (from integration-service/lib/facts/rules.ts):'
+)
+bullet('Step 1: factWithHighestConfidence()', ' — If the top source\'s confidence exceeds the next by >0.05, it wins outright')
+bullet('Step 2: weightedFactSelector()', ' — If scores are within 0.05, source weight (Middesk=2.0, OC=0.9, ZI=0.8, Trulioo=0.8, EFX=0.7, AI=0.1) breaks the tie')
+body('Confidence is produced by:')
+bullet('XGBoost entity-matching model', ' for OC, ZI, EFX (probability that the vendor record = same business)')
+bullet('XGBoost confidenceScoreMany()', ' or task-based score for Middesk')
+bullet('similarity_index / 55', ' (heuristic Levenshtein) for Trulioo and fallback')
+bullet('Self-reported HIGH/MED/LOW', ' mapped to 0.70/0.50/0.30 for AI')
+
+H2('Q2: What happens when two vendors give completely different NAICS codes?')
+body(
+    'This is a source conflict. The Fact Engine still picks a winner via the weight/confidence rules above. '
+    'The losing codes appear in facts.alternatives[]. '
+    'The UI shows source.confidence for each, allowing an analyst to judge. '
+    'If no source reaches a minimum confidence (there is NO minimum cutoff in the code), '
+    'the lowest-confidence result still wins. '
+    'The analyst can override via PATCH /facts/business/{id}/override/naics_code.'
+)
+
+H2('Q3: How long does the entire onboarding pipeline take from submission to Worth Score?')
+table(
+    ['Stage', 'Typical duration', 'What happens'],
+    [
+        ['Case creation + Kafka dispatch', '< 1 second',
+         'POST /businesses/customers/{id} -> data_cases created -> Kafka BUSINESS_SUBMITTED'],
+        ['Middesk SOS lookup', '2–10 seconds',
+         'Live API call to Secretary of State registry (varies by state)'],
+        ['OpenCorporates + ZoomInfo + Equifax', '1–3 seconds',
+         'Redshift queries (pre-loaded data — no external API call)'],
+        ['Trulioo KYB + watchlist screening', '3–15 seconds',
+         'Live API call — varies by country and number of watchlists'],
+        ['NPI lookup (if enabled)', '1–5 seconds',
+         'NPPES public API call'],
+        ['SERP scraping (if configured)', '5–30 seconds',
+         'Web crawling — highly variable depending on site'],
+        ['Plaid IDV (if enabled)', 'Minutes to hours',
+         'Requires applicant to complete photo ID + selfie flow — human-dependent'],
+        ['Score computation (after all integrations)', '1–3 seconds',
+         'Kafka GENERATE_AI_SCORE -> calculateBankingScore + calculatePublicRecordsScore + calculateFinancialScore'],
+        ['Total (without Plaid IDV)', '~15–60 seconds typical',
+         'Depends on slowest integration (usually Trulioo or Middesk for complex businesses)'],
+    ],
+    col_widths=[2.5, 1.8, 5.3],
+)
+
+H2('Q4: What is the complete list of database schemas and who owns them?')
+table(
+    ['Schema / Database', 'Owner service', 'Key tables'],
+    [
+        ['public (case-service PostgreSQL)', 'case-service',
+         'data_cases, data_businesses, data_applicants, data_owners, data_customers,\n'
+         'business_scores, business_score_factors, score_decision_matrix,\n'
+         'score_config_history, data_current_scores, rel_case_applicants'],
+        ['onboarding_schema (case-service PostgreSQL)', 'case-service',
+         'data_customer_onboarding_limits, data_customer_stage_fields_config,\n'
+         'rel_customer_setup_countries'],
+        ['integration_data (integration-service PostgreSQL)', 'integration-service',
+         'business_entity_verification, business_entity_review_task,\n'
+         'business_entity_address_source, business_entity_people,\n'
+         'business_integration_tasks, request_response, data_integration_settings,\n'
+         'data_identity_verifications, data_connections'],
+        ['rds_warehouse_public (warehouse-service PostgreSQL + Redshift mirror)', 'warehouse-service',
+         'facts (all 217 JSONB facts per business)'],
+        ['rds_cases_public (case-service PostgreSQL + Redshift mirror)', 'case-service',
+         'data_businesses, data_cases, core_naics_code, core_mcc_code,\n'
+         'core_business_industries, rel_naics_mcc'],
+        ['datascience (Redshift)', 'warehouse-service + data engineering',
+         'customer_files (Pipeline B), ml_model_matches (XGBoost output),\n'
+         'zoominfo_standard_ml_2, open_corporates_standard_ml_2,\n'
+         'smb_zi_oc_efx_combined, business_score_triggers'],
+        ['warehouse (Redshift)', 'data engineering',
+         'equifax_us_standardized, equifax_us_latest'],
+        ['zoominfo (Redshift)', 'data engineering',
+         'comp_standard_global (raw ZoomInfo dump)'],
+        ['subscriptions (case-service PostgreSQL)', 'case-service',
+         'data_customers (Stripe subscription context)'],
+        ['s3 (AWS S3)', 'integration-service (lib/aws)',
+         'Documents, bank statements, signed PDFs, uploaded files\n'
+         'References in: s3_documents table (integration-service)'],
+    ],
+    col_widths=[2.8, 2.2, 4.6],
+)
+
+H2('Q5: What is the difference between the "facts" table and data_businesses?')
+table(
+    ['Aspect', 'rds_warehouse_public.facts', 'rds_cases_public.data_businesses'],
+    [
+        ['Structure', 'Key-value JSONB store\n(business_id, name, value JSONB)',
+         'Wide denormalized relational table\n(one row per business, many columns)'],
+        ['Content', '217 computed facts with full source lineage,\nconfidence scores, alternatives[], overrides',
+         'Basic submitted fields: name, address, tin (encrypted),\ntax_id, industry (FK), website, mobile'],
+        ['Data origin', 'Pipeline A Fact Engine — aggregates all vendors\nand selects winner per fact',
+         'Submitted directly by applicant during onboarding form\n(NOT enriched by vendor data)'],
+        ['NAICS storage', 'name="naics_code" -> value.code (vendor-enriched winner)',
+         'industry column = FK to core_business_industries.id\n(sector level only, not 6-digit NAICS)'],
+        ['Updated by', 'warehouse-service FactService (Kafka consumer)\n'
+         'UPSERT on (business_id, name)',
+         'case-service API on form submission and application edits'],
+        ['Used for', 'Customer-facing API responses (all enriched data)\nWorth 360 Report',
+         'Internal joins, search, basic business metadata'],
+    ],
+    col_widths=[1.5, 3.8, 4.3],
+)
+
+H2('Q6: How is a business matched to a vendor record? (The entity matching problem)')
+body(
+    'This is the core challenge: when a merchant submits "Lisa\'s Nail Salon, 7554 Louisiana 182, '
+    'Morgan City, LA", how does Worth AI find the right ZoomInfo, Equifax, or OC record?'
+)
+lineage([
+    'STEP 1 — Heuristic similarity (Levenshtein):',
+    '  For each vendor (ZI, EFX, OC), compute similarity_index against all vendor records:',
+    '    similarity_index = (20 - levenshtein(submitted_name, vendor_name))',
+    '                     + (20 - levenshtein(submitted_address, vendor_address))',
+    '                     + state_match + city_match + zip_match',
+    '  Keep top 1,000 candidates per business per vendor.',
+    '  Stored in: smb_zoominfo_standardized_joined, smb_equifax_standardized_joined, etc.',
+    '',
+    'STEP 2 — XGBoost entity matching model (entity_matching_20250127 v1):',
+    '  For each candidate pair, compute 33 pairwise features:',
+    '    - Jaccard k-gram similarities on name (k=1,2,3,4, word-level)',
+    '    - Jaccard k-gram similarities on street, short name',
+    '    - Exact match flags: city, ZIP, street number, address line 2',
+    '    - Street number distance, block-level match',
+    '  Output: zi_probability, efx_probability, oc_probability (0-1)',
+    '  Stored in: datascience.ml_model_matches',
+    '',
+    'STEP 3 — Combined confidence score:',
+    '  zi_match_confidence = zi_probability (if >= 0.8 from XGBoost)',
+    '                      ELSE similarity_index/55 (if >= 0.8)',
+    '                      ELSE 0',
+    '  Stored in: datascience.smb_zi_oc_efx_combined',
+    '',
+    'STEP 4 — Fact Engine uses confidence as source weight:',
+    '  integration_data.request_response.confidence = zi_match_confidence',
+    '  factWithHighestConfidence() picks the vendor with highest confidence',
+    '  -> That vendor\'s industry code (naics, sic, etc.) wins',
+])
+
+H2('Q7: What happens if a business has NO match in any vendor database?')
+body('This is handled gracefully at each level:')
+table(
+    ['Level', 'What happens', 'Result in UI'],
+    [
+        ['ZoomInfo no match', 'similarity_index < 45 for all ZI records\nOR XGBoost probability < 0.8',
+         'ZI source: confidence = 0, does not participate in Fact Engine winner selection'],
+        ['Equifax no match', 'Same — confidence = 0',
+         'EFX source not used for Fact Engine winner'],
+        ['OC no match', 'oc_probability < 0.8 and no heuristic match',
+         'OC source not used'],
+        ['Middesk no SOS record', 'No SOS filing found in any state for this business name + EIN',
+         'Business Registration: "Not Verified" / "No records found"\n'
+         'NAICS from Middesk: not contributed'],
+        ['Trulioo no match', 'Trulioo returns no Comprehensive View data',
+         'KYB Watchlists: "No data available"\n'
+         'Address: not verified'],
+        ['ALL vendors fail', 'No vendor provided NAICS code',
+         'AI enrichment (GPT-5-mini) triggers as safety net.\n'
+         'If AI also fails -> naics_code = "561499" (All Other Business Support Services)\n'
+         'Worth Score: Public Records category scores as minimum (no SOS = risk factor)'],
+    ],
+    col_widths=[1.8, 3.2, 4.6],
+)
+
+H2('Q8: Can a business have multiple cases? How does Worth AI handle that?')
+body(
+    'YES. One business (data_businesses record) can have MULTIPLE cases — one per customer '
+    'who invited them, plus one standalone case. '
+    'Example: The same business might apply to Worldpay AND Branch (two separate customers). '
+    'Each creates a separate data_cases row with the same business_id but different customer_id.'
+)
+code_block([
+    '-- All cases for a business:',
+    'SELECT id AS case_id, customer_id, status_id, created_at, case_type_id',
+    'FROM data_cases',
+    "WHERE business_id = '<uuid>'",
+    'ORDER BY created_at DESC;',
+    '',
+    '-- One business may have:',
+    '-- case 1: customer_id = Worldpay_UUID, status_id = 6 (Auto Approved)',
+    '-- case 2: customer_id = Branch_UUID,   status_id = 4 (Under Manual Review)',
+    '-- case 3: customer_id = NULL,           status_id = 7 (Score Calculated) <- standalone',
+    '',
+    '-- The Worth Score is shared:',
+    '-- data_current_scores stores ONE score per (business_id, customer_id)',
+    '-- Each customer sees their own score (may differ based on their score_decision_matrix)',
+])
+
+H2('Q9: How does risk monitoring work? What triggers RISK_ALERT status?')
+body(
+    'Risk monitoring is a continuous post-onboarding service. '
+    'After a business is onboarded (AUTO_APPROVED or MANUALLY_APPROVED), '
+    'Worth AI can continue monitoring it for changes in risk signals.'
+)
+table(
+    ['Risk monitoring trigger', 'What causes it', 'Result'],
+    [
+        ['Scheduled monitoring refresh',
+         'Cron job triggers MONITORING_REFRESH score trigger for all monitored businesses',
+         'New Worth Score computed with fresh vendor data.\n'
+         'If new score drops below threshold -> RISK_ALERT triggered.'],
+        ['Subscription refresh',
+         'New vendor data received via Kafka SUBSCRIPTION_REFRESH',
+         'Score recomputed with updated data (e.g., new ZoomInfo data)'],
+        ['Watchlist hit detected',
+         'Trulioo ongoing screening returns a new watchlist match\n'
+         '(OFAC, BIS, PEP, etc.)',
+         'Kafka risk alert event fired -> data_cases.status_id = RISK_ALERT (14)'],
+        ['Adverse media hit',
+         'Adverse Media integration (platform_id=27) finds new negative news',
+         'data_risk_alerts table updated -> case status updated -> analyst notified'],
+        ['Analyst-triggered',
+         'Admin manually triggers a risk review via UI action',
+         'PATCH /cases/{id} { status: "RISK_ALERT" }'],
+    ],
+    col_widths=[2.5, 3.3, 3.8],
+)
+
+H2('Q10: What does the Worth 360 Report contain? Where does each section\'s data come from?')
+table(
+    ['Report section', 'Data source', 'Table / fact'],
+    [
+        ['Executive Summary / Risk Level',
+         'manual-score-service score result',
+         'business_scores.risk_level + score_decision'],
+        ['Worth Score breakdown',
+         'manual-score-service per-factor results',
+         'business_score_factors table'],
+        ['Company Profile',
+         'Pipeline A Fact Engine winners',
+         'rds_warehouse_public.facts (naics_code, legal_name, address, employee_count, revenue...)'],
+        ['Business Registration (SOS)',
+         'Middesk SOS API',
+         'integration_data.business_entity_verification'],
+        ['Watchlist screening',
+         'Trulioo KYB + PSC',
+         'integration_data.business_entity_review_task key="watchlist"'],
+        ['Financial Trends',
+         'Plaid + Rutter',
+         'plaid_transactions + accounting_statements'],
+        ['Public Records (NPI, adverse media)',
+         'NPI (NPPES) + Adverse Media integration',
+         'integration_data.request_response (platform_id=28, 27)'],
+        ['Owners (KYC)',
+         'Case-service data + Plaid IDV + Trulioo PSC',
+         'data_owners + data_identity_verifications + owner_verification fact'],
+        ['The report itself (PDF)',
+         'Generated by report.ts Kafka handler in case-service',
+         'S3 document storage. Kafka event: GENERATE_REPORT'],
+    ],
+    col_widths=[2.2, 2.5, 4.9],
+)
+
+H2('Q11: How does Worth AI handle non-US businesses? (M Supply Guam case)')
+callout(
+    'The M Supply Guam case (jurisdiction: GU — Guam, US territory) is a good example. '
+    'Guam uses US business registration (SOS via Guam DCCA) but is a US territory, '
+    'not a state. Worth AI handles this via jurisdiction-aware fact extraction.'
+)
+table(
+    ['Element', 'For US states', 'For territories / international'],
+    [
+        ['SOS lookup', 'Middesk covers all 50 US states + DC',
+         'Middesk also covers US territories (GU, PR, VI, etc.).\n'
+         'For non-US: OpenCorporates (global), Canada Open (platform_id=32), Trulioo (global KYB)'],
+        ['Address format', 'Standard US format (state code, 5-digit ZIP)',
+         'Jurisdiction-specific. Guam: ZIP 96910 is valid US ZIP.\n'
+         'International: country code + local postal format'],
+        ['NAICS vs SIC', 'NAICS preferred (US standard)',
+         'UK businesses: UK SIC 2007 from OC (gb_sic- prefix in industry_code_uids)\n'
+         'EU: NACE Rev2 (nace- prefix). Canada: ca_naics- prefix.\n'
+         'These are captured in classification_codes fact but NOT yet exposed in UI.'],
+        ['Watchlist screening', 'US OFAC lists + global lists',
+         'Same global lists (OFAC, BIS, UN, EU) apply regardless of jurisdiction.\n'
+         'Trulioo screens against all applicable lists for any country.'],
+        ['Worth Score', 'Full score (banking + public records + financial)',
+         'May have partial scores if some integrations don\'t cover the territory/country.\n'
+         'E.g., no Plaid banking for some international businesses.'],
+    ],
+    col_widths=[1.8, 2.8, 4.6],
+)
+
+H2('Q12: What is the "control_person" designation and how is it set?')
+body(
+    '"Control Person" is a regulatory term (from FinCEN Customer Due Diligence rules). '
+    'It refers to the individual with significant control over the business '
+    '(e.g., CEO, Managing Member). Worth AI tracks this separately from beneficial owners.'
+)
+table(
+    ['Designation', 'Who it applies to', 'How it is set', 'Table / field'],
+    [
+        ['Control Person',
+         'The individual with significant managerial control (CEO, President, Managing Member).\n'
+         'Required under FinCEN CDD rule for legal entity customers.',
+         'Applicant self-designates during onboarding form.\n'
+         'Customer config sets: max_control_persons (default 1).',
+         'data_owners.is_control_person = true\n'
+         'data_owners.title (e.g., "Partner", "CEO", "Managing Member")'],
+        ['Beneficial Owner',
+         'Any individual owning >= 25% of the business.\n'
+         'FinCEN requires collecting all >= 25% owners.',
+         'Applicant submits all owners >= 25% during onboarding.\n'
+         'Ownership percentage stored in data_owners.ownership_percentage',
+         'data_owners.ownership_percentage\n'
+         'Validation: max_beneficial_owners config setting'],
+        ['Applicant (submitter)',
+         'The person who actually filled out and submitted the application.\n'
+         'May or may not be a beneficial owner or control person.',
+         'The logged-in user at the time of form submission.',
+         'data_applicants.id linked to data_cases.applicant_id'],
+    ],
+    col_widths=[1.8, 2.8, 2.5, 2.5],
+)
+
+H2('Q13: How does the EIN/TIN get stored and is it visible to analysts?')
+table(
+    ['Aspect', 'Detail'],
+    [
+        ['Storage format', 'AES-256 encrypted at rest in data_businesses.tin column.\n'
+         'The raw EIN string is never stored in plaintext in any table.'],
+        ['Decryption', 'case-service decryptEin() utility function decrypts for authorized API calls.\n'
+         'Only returned to roles with DATA_PERMISSION for TIN.'],
+        ['Display in UI', 'Shown partially masked: last 4 digits visible (e.g., ***-**-3874 for SSN,\n'
+         '***-667813 for EIN). Full value visible to admin analysts with permissions.'],
+        ['Verification', 'Middesk review_task key="tin" confirms if submitted EIN matches IRS + SOS records.\n'
+         'status="success" = EIN matches; status="failure" = mismatch.'],
+        ['Compliance', 'EIN handling complies with IRS Publication 1075 (tax data security requirements).\n'
+         'Separate from SSN which has additional PII protection under GLBA.'],
+    ],
+    col_widths=[2.0, 7.6],
+)
+
+H2('Q14: What is the complete Kafka topic map? Which service writes/reads which topic?')
+table(
+    ['Kafka topic', 'Who publishes', 'Who consumes', 'Key events'],
+    [
+        ['facts.v1', 'integration-service (Fact Engine)',
+         'warehouse-service (FactService)',
+         'CALCULATE_BUSINESS_FACTS, UPDATE_NAICS_CODE, UPDATE_MCC_CODE,\n'
+         'UPDATE_INDUSTRY, FACT_OVERRIDE_CREATED_AUDIT, PROCESS_COMPLETION_FACTS'],
+        ['ai_scores (AI_SCORES)', 'manual-score-service (taskHandler)',
+         'AI scoring service (external)',
+         'GENERATE_AI_SCORE — triggers Worth Score computation'],
+        ['integration_data', 'integration-service (per task completion)',
+         'manual-score-service (taskQueue)',
+         'UPDATE_INTEGRATION_DATA_FOR_SCORE — feeds integration results into scoring'],
+        ['business_events', 'case-service (on form submit)',
+         'integration-service',
+         'BUSINESS_SUBMITTED — triggers all integrations'],
+        ['case_events', 'case-service (on status changes)',
+         'Webhooks service, integration-service',
+         'STATUS_CHANGED, MANUALLY_APPROVED, AUTO_APPROVED, etc.'],
+        ['risk_alerts', 'integration-service (risk monitoring)',
+         'case-service',
+         'RISK_ALERT_TRIGGERED — creates RISK_ALERT status on case'],
+        ['playground_ai_scores', 'manual-score-service (when BEST_56_PLAYGROUND_ENABLED)',
+         'Playground scoring service',
+         'Same as AI_SCORES but for experimental scoring environment'],
+    ],
+    col_widths=[2.2, 2.2, 2.2, 3.0],
+)
+
+H2('Q15: What exactly is Pipeline A vs Pipeline B and can they contradict each other?')
+callout(
+    'YES — they can and DO produce different NAICS codes for the same business. '
+    'This is one of the most important architectural facts in Worth AI.'
+)
+table(
+    ['Dimension', 'Pipeline A (Integration Service)', 'Pipeline B (Warehouse Service)'],
+    [
+        ['Purpose', 'Deliver best classification to customer in real time', 'Internal analytics, risk model training, data exports'],
+        ['Sources', 'ALL 6+ vendors: Middesk, OC, ZI, EFX, Trulioo, AI', 'ZoomInfo + Equifax ONLY'],
+        ['Winner rule', 'factWithHighestConfidence() -> weightedFactSelector()\n(confidence × weight across all 6 sources)',
+         'CASE WHEN zi_match_confidence > efx_match_confidence\n  THEN ZoomInfo ELSE Equifax'],
+        ['Customer sees?', 'YES — REST API, Worth 360 Report, Worth AI admin UI', 'NO — internal Redshift only'],
+        ['NAICS stored in', 'rds_warehouse_public.facts name="naics_code"', 'datascience.customer_files.primary_naics_code'],
+        ['Example divergence', 'Middesk SOS returns NAICS 812113 (Nail Salons) -> wins (weight 2.0)\nPipeline A shows 812113',
+         'ZoomInfo has 812990 (Other Personal Care Services) with zi_confidence=0.85\nEFX has 812113 with efx_confidence=0.72\n-> ZI wins -> Pipeline B shows 812990'],
+        ['Implication', 'Customer sees Middesk\'s more accurate SOS-verified code',
+         'Redshift analytics table has ZoomInfo\'s less accurate code\nRisk model trained on potentially wrong NAICS'],
+    ],
+    col_widths=[1.8, 3.6, 4.2],
+)
+
+H2('Q16: How does the Worth Score change over time? Can it go up or down?')
+body('YES — the Worth Score is recalculated on multiple triggers:')
+table(
+    ['Trigger', 'Constant name', 'When it fires'],
+    [
+        ['Initial onboarding', 'ONBOARDING_INVITE', 'First submission — standard flow'],
+        ['Application edit', 'APPLICATION_EDIT', 'Business updates their application (new data submitted)'],
+        ['Manual refresh', 'MANUAL_REFRESH', 'Analyst clicks "Refresh Score" in admin UI'],
+        ['Monitoring refresh', 'MONITORING_REFRESH', 'Scheduled cron job for ongoing risk monitoring'],
+        ['Subscription refresh', 'SUBSCRIPTION_REFRESH', 'New vendor data available (subscription update)'],
+    ],
+    col_widths=[2.2, 2.5, 4.9],
+)
+body(
+    'Each recalculation creates a new business_score_triggers row and a new business_scores row. '
+    'data_current_scores is updated to point to the latest score. '
+    'Historical scores are preserved in business_score_history. '
+    'A business that was AUTO_APPROVED at score 750 could drop to RISK_ALERT if a monitoring refresh '
+    'returns a score of 450 (new watchlist hit, bank account overdrafts, etc.).'
+)
+
+H2('Q17: What is the Integrations Complete / In Progress status based on?')
+code_block([
+    '-- Check integration completion status:',
+    'SELECT platform_id, task_code, status, updated_at',
+    'FROM integration_data.business_integration_tasks',
+    "WHERE business_id = '<uuid>'",
+    'ORDER BY updated_at DESC;',
+    '',
+    '-- "Integrations Complete" = ALL tasks have status IN ("completed", "failed", "skipped")',
+    '-- "In Progress"           = at least one task has status IN ("pending", "in_progress")',
+    '',
+    '-- Source code: integration-service/src/helpers/integrationsCompletionTracker.ts',
+    '-- Also reflected as "Integrations Complete" banner in Case Details header.',
+])
+
+doc.add_page_break()
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECTION 15 — FULL DATA ENTITY RELATIONSHIP MAP
+# ════════════════════════════════════════════════════════════════════════════
+
+H1('Section 15 — Full Data Entity Relationship Map', c=PURPLE, pb=False)
+
+H2('Core Business Object Relationships')
+lineage([
+    'HIERARCHY (top to bottom):',
+    '',
+    'data_tenants (top-level org owning Worth AI access)',
+    '  |',
+    '  +-- data_customers (bank/lender/fintech using Worth AI)',
+    '        customer_id, name, customer_type (SANDBOX/PRODUCTION)',
+    '        |',
+    '        +-- rel_customer_users (which Worth AI users can see this customer)',
+    '        |',
+    '        +-- data_integration_settings (which vendors enabled, SANDBOX/PROD mode per vendor)',
+    '        |',
+    '        +-- score_decision_matrix (customer-specific score thresholds)',
+    '        |',
+    '        +-- onboarding_schema.data_customer_onboarding_limits (monthly onboarding cap)',
+    '        |',
+    '        +-- data_cases (one per business per customer)',
+    '               case_id, business_id, customer_id, status_id, case_type_id',
+    '               score_trigger_id -> business_score_triggers -> business_scores',
+    '               |',
+    '               +-- data_businesses (the merchant being verified)',
+    '                    business_id, name, address, tin (encrypted), industry FK',
+    '                    |',
+    '                    +-- data_owners (beneficial owners >= 25% + control persons)',
+    '                    |    owner_id, first_name, last_name, dob, ssn (encrypted)',
+    '                    |    ownership_percentage, is_control_person',
+    '                    |    |',
+    '                    |    +-- data_identity_verifications (Plaid IDV per owner)',
+    '                    |         status_id (SUCCESS=1, PENDING=2, FAILED=99)',
+    '                    |',
+    '                    +-- rds_warehouse_public.facts (217 vendor-enriched facts)',
+    '                    |    (business_id, name, value JSONB, received_at)',
+    '                    |    Written by Pipeline A Fact Engine',
+    '                    |',
+    '                    +-- integration_data.business_entity_verification (KYB per vendor)',
+    '                    |    (business_id, platform_id, status, incorporation_date,',
+    '                    |     entity_type, officers, watchlist_hits, address_sources)',
+    '                    |',
+    '                    +-- integration_data.request_response (raw API responses)',
+    '                    |    (business_id, platform_id, response JSONB, confidence)',
+    '                    |',
+    '                    +-- business_scores (Worth Score per score trigger)',
+    '                         (score_trigger_id, weighted_score_850, risk_level,',
+    '                          score_decision, status)',
+    '                         |',
+    '                         +-- business_score_factors (per-factor breakdown)',
+    '                         +-- score_inputs (raw data snapshot for audit)',
+    '                         +-- data_current_scores (latest score per business+customer)',
+])
+
+H2('Pipeline Responsibility Matrix')
+table(
+    ['Question', 'Pipeline A', 'Pipeline B', 'Neither (applicant/analyst)'],
+    [
+        ['Who provides the NAICS code the customer sees?', 'YES', 'NO', 'NO'],
+        ['Who drives the Worth Score?', 'Provides input data', 'NO', 'manual-score-service'],
+        ['Who decides Auto Approve vs Manual Review?', 'Provides input data', 'NO', 'manual-score-service'],
+        ['Who produces the KYB background fields?', 'YES (Fact Engine winner)', 'NO', 'NO'],
+        ['Who does watchlist screening?', 'YES (Trulioo KYB)', 'NO', 'NO'],
+        ['Who verifies KYC Match badges?', 'YES (Plaid IDV + Trulioo PSC)', 'NO', 'NO'],
+        ['Who powers risk model training?', 'NO', 'YES (customer_files)', 'NO'],
+        ['Who sets case status to Archived?', 'NO', 'NO', 'Analyst (manual)'],
+        ['Who handles banking (Plaid)?', 'YES', 'NO', 'Applicant connects bank'],
+        ['Who writes the Worth 360 Report?', 'Provides data', 'NO', 'case-service generates PDF'],
+        ['Who tracks monthly onboarding limits?', 'NO', 'NO', 'case-service cron job'],
+        ['Who provides ZI vs EFX winner for analytics?', 'NO', 'YES', 'NO'],
+    ],
+    col_widths=[4.2, 1.5, 1.5, 2.4],
+)
+
 # ── Save ──────────────────────────────────────────────────────────────────────
 out = ('/workspace/AI-Powered-NAICS-Industry-Classification-Agent/'
        'modeling/Worth_AI_Admin_UI_Lineage.docx')
