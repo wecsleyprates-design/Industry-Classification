@@ -115,50 +115,41 @@ def spacer(pts=6):
     p.paragraph_format.space_after  = Pt(pts)
 
 
-def H1(text, colour=PURPLE, page_break=False):
+def _heading(level: int, text: str, colour: RGBColor,
+             size_pt: float, space_before: float, space_after: float,
+             page_break: bool = False):
+    """
+    Use doc.add_heading() so Google Docs recognises the built-in
+    Heading 1/2/3/4 styles and shows them in the document outline.
+    Then override font colour and size on the run.
+    """
     if page_break:
         doc.add_page_break()
-    p = doc.add_paragraph()
-    p.paragraph_format.space_before = Pt(16)
-    p.paragraph_format.space_after  = Pt(6)
+    p = doc.add_heading('', level=level)
+    p.paragraph_format.space_before   = Pt(space_before)
+    p.paragraph_format.space_after    = Pt(space_after)
     p.paragraph_format.keep_with_next = True
     r = p.add_run(text)
     r.bold = True
-    r.font.size  = Pt(20)
+    r.font.size      = Pt(size_pt)
     r.font.color.rgb = colour
+    return p
+
+
+def H1(text, colour=PURPLE, page_break=False):
+    return _heading(1, text, colour, 20, 16, 6, page_break)
 
 
 def H2(text, colour=BLUE):
-    p = doc.add_paragraph()
-    p.paragraph_format.space_before = Pt(14)
-    p.paragraph_format.space_after  = Pt(5)
-    p.paragraph_format.keep_with_next = True
-    r = p.add_run(text)
-    r.bold = True
-    r.font.size  = Pt(14)
-    r.font.color.rgb = colour
+    return _heading(2, text, colour, 14, 14, 5)
 
 
 def H3(text, colour=TEAL):
-    p = doc.add_paragraph()
-    p.paragraph_format.space_before = Pt(10)
-    p.paragraph_format.space_after  = Pt(3)
-    p.paragraph_format.keep_with_next = True
-    r = p.add_run(text)
-    r.bold = True
-    r.font.size  = Pt(11.5)
-    r.font.color.rgb = colour
+    return _heading(3, text, colour, 11.5, 10, 3)
 
 
 def H4(text, colour=SLATE):
-    p = doc.add_paragraph()
-    p.paragraph_format.space_before = Pt(8)
-    p.paragraph_format.space_after  = Pt(2)
-    p.paragraph_format.keep_with_next = True
-    r = p.add_run(text)
-    r.bold = True
-    r.font.size  = Pt(10.5)
-    r.font.color.rgb = colour
+    return _heading(4, text, colour, 10.5, 8, 2)
 
 
 def body(text, size=10.5, colour=SLATE, space_after=5, bold=False):
