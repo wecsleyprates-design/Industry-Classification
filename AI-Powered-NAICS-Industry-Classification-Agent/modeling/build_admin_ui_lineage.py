@@ -2873,6 +2873,347 @@ table(
     col_widths=[4.2, 1.5, 1.5, 2.4],
 )
 
+doc.add_page_break()
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECTION 16 — TRANSCRIPT VERIFICATION: CORRECTIONS & ADDITIONS
+# Source: Team training session "Learning Admin and the Proj Mgt Tools", Apr 2 2026
+# Attendees: Craig Snodgrass, Mats Lunde, Kali Franklin, Allison Nejame,
+#            Raj Gangavarapu, Wecsley Prates, Matt Karp
+# ════════════════════════════════════════════════════════════════════════════
+
+H1('Section 16 — Transcript Verification: Corrections & Confirmed Facts', c=PURPLE, pb=False)
+callout(
+    'This section cross-references every claim in the document against the April 2, 2026 '
+    'team training transcript ("Learning Admin and the Proj Mgt Tools"). '
+    'Items are classified as: CONFIRMED (matches transcript), CORRECTED (document was wrong), '
+    'or ADDED (new information from transcript not previously documented).'
+)
+
+H2('CONFIRMED — Items the Transcript Validates')
+table(
+    ['Topic', 'Document claim', 'Transcript confirmation'],
+    [
+        ['admin.joinworth.com vs customer.joinworth.com',
+         'Internal staff use admin.joinworth.com; customers use customer.joinworth.com',
+         '00:05:07 — Allison: "customer.joinworth.com is how our customers come to us '
+         '...admin.joinworth.com is how we would go in"'],
+        ['249 customers in the list',
+         'Customers list shows all customer entries',
+         '00:03:03 — Craig: "it says one to 10 of 249 results...249 entries in a customer ID table"'],
+        ['Customer ID in URL matches warehouse ID',
+         'URL customer ID equals the ID in the warehouse tables',
+         '00:14:57 — Craig: "the customer ID that is in the warehouse...we can use SQL '
+         'and literally produce a link"'],
+        ['Three IDs drive the platform: customer ID, case ID, business ID',
+         'Section 5 and throughout: three UUID identifiers',
+         '00:30:20 — Craig: "the three IDs that drive the business are those three IDs"'],
+        ['Business ID is the primary ID for daily analysis',
+         'Section 7 Q8: Business ID leveraged more than Case ID',
+         '00:33:18 — Allison: "I am looking at stuff at the business level 99.9% of the time"'],
+        ['Case ID is for auditability, traceability, compliance',
+         'Section 7, Q8: Case ID for audit/compliance',
+         '00:33:18 — Raj: "Case ID is meant for auditability, traceability...regulators will come '
+         'and check...HSBC was asked to shut down...TD Bank got similar scenario"'],
+        ['Two types of cases: onboarding and risk',
+         'CASE_TYPE: ONBOARDING=1, RISK=3',
+         '00:09:00 — Allison: "we have two different types of cases...onboarding...risk case"'],
+        ['New case triggered by Worth Score refresh or risk monitoring',
+         'Section 7, Q16: Score trigger types',
+         '00:09:00 — Allison: "a new case can be generated if you manually refresh the score '
+         '...if risk monitoring runs and it flags for score change"'],
+        ['Both internal (admin) and external (customer) users can refresh the score',
+         'Section 7, Q16: MANUAL_REFRESH trigger',
+         '00:10:03 — Allison: "I can refresh the score this way"  '
+         'Craig: "our customers can redo the score as well"'],
+        ['Confidence is per-source, not per-address; winner shown at top, alternatives below',
+         'Section 11 Q2: winner + alternatives[]',
+         '00:25:08 — Wecsley: "I think it\'s per source. You have a confidence per source at the end. '
+         'You have the winning source."  Allison: "We put the winner at the top and '
+         'then anything in alternatives is like what didn\'t make the cut."'],
+        ['Middesk has higher weight/ranking than OpenCorporates',
+         'Winner priority: Middesk (2.0) > OC (0.9)',
+         '00:25:08 — Allison: "we did some fancy rigging at one point to sort Middesk above '
+         'Open Corporates just given...weighting"'],
+        ['Submitted address vs Reported addresses from suppliers',
+         'Contact Information tab: submitted = applicant typed, reported = vendor returned',
+         '00:20:19 — Craig: "the submitted address would be during the application...all these '
+         'different reported addresses is what we\'re getting back from our suppliers '
+         'Middesk, Trulioo, Baselayer, whoever"'],
+        ['KYC tab NOT auto-filled from vendor data; owner must self-complete',
+         'Section 6: yellow highlight = applicant-submitted, not vendor-sourced',
+         '00:19:06 — Allison: "we wouldn\'t get her date of birth and home address and fill it '
+         'in for her. This is user entered"'],
+        ['Tenants implemented for SSO (Repay / Okta)',
+         'Section 13.4: Tenants for SSO management',
+         '00:13:47 — Allison: "this was for when we were doing SSO for Repay. '
+         'We had to set up Okto for them"'],
+        ['For internal users, Tenants have no impact on viewing all customers',
+         'Section 13.4: internal users always see all customers',
+         '00:13:47 — Craig: "for us it doesn\'t mean anything because no matter what '
+         'the tenant is, we will always see all the customers inside of the customer tab"'],
+        ['Standalone Cases tab should be deprecated; contains old SMB data',
+         'Section 13.3: standalone cases for SMB, now focusing on enterprise',
+         '00:12:03 — Allison: "we should just deprecate this tab. When we were initially '
+         'talking about doing SMBs...We\'re not doing that anymore"'],
+        ['Businesses tab shows only TIN-verified businesses by default',
+         'Section 5: Businesses tab, filtered',
+         '00:12:59 — Allison: "it is filtered to only show verified businesses '
+         'which is somebody who has had their TIN verified"'],
+        ['API/UI uses same externalized APIs internally and for customers (mostly)',
+         'Section 11 Q13: consistent data across endpoints',
+         '00:26:16 — Mats: "we internally use the same API pretty much that '
+         'the external users would use for KYB for instance"'],
+        ['KYB is system-generated business info; KYC is owner self-entered',
+         'Sections 5 and 6: KYB vs KYC distinction',
+         '00:17:58 — Allison: "KYB...all of the information about the business '
+         'including information they input and stuff we\'re pre-filling"  '
+         '00:19:06 — "the applicant would have to fill out this information herself"'],
+        ['Corporate officers from Middesk appear in Business Registration tab, not KYC',
+         'Section 5: KYB Business Registration — SOS officers',
+         '00:19:06 — Allison: "associated people would show up in the contact information '
+         'tab or business registration — it would show up in corporate officers"'],
+        ['Case = point-in-time snapshot of onboarding or risk monitoring verifications',
+         'Section 3, Section 7: case definition',
+         '00:09:00 — Allison: "it\'s a point in time of onboarding or risk monitoring '
+         '...just pulling all of the verifications at a given point in time"'],
+        ['URL structure lacks standardisation between business view and case view',
+         'Section 13.2: URL patterns',
+         '00:15:47 — Allison: "there is no seemingly standard for how we\'re building '
+         'out these URL strings...it does change when you go from the business\'s view '
+         'to the case view"'],
+        ['Source name (e.g. Middesk) not exposed to customers; customers only see platform ID',
+         'Section 1: Sandbox/Production table, source name hidden',
+         '00:02:06 — Allison: "we don\'t expose to our customers that this came from Middesk '
+         '...we might give them the platform ID but not the name of the vendor"'],
+    ],
+    col_widths=[2.2, 2.8, 4.6],
+    fs=8.5,
+)
+
+H2('CORRECTED — Items the Transcript Contradicts or Adds Nuance To')
+gap(
+    'CORRECTION 1: Section 8 (Sandbox vs Production) was INCOMPLETE regarding Verdata/SER.\n\n'
+    'Document stated: "Middesk, OC, ZoomInfo have no sandbox mode — they always use same data"\n\n'
+    'Transcript (00:08:02) adds a critical clarification:\n'
+    '"if it\'s marked as account type of sandbox, it IS hitting sandbox environments — '
+    'EXCEPT for Verdata (Ver Data) or SER where they don\'t have a sandbox."\n\n'
+    'ALSO important (00:08:02): "We are still hitting the data warehouse like anything that\'s '
+    'internally owned. So if it\'s OpenCorporates or ZoomInfo, all that stuff we\'re still hitting '
+    'even in sandbox." — This means OC and ZI ARE queried from the same Redshift tables in both '
+    'sandbox and production. The sandbox distinction only applies to EXTERNAL vendor API calls.'
+)
+gap(
+    'CORRECTION 2: Section 13.3 (Standalone Cases) framing was incorrect.\n\n'
+    'Document stated: Standalone Cases are a self-service flow for businesses without a customer invitation.\n\n'
+    'Transcript (00:12:03) clarifies: Standalone Cases are an OLD concept from when Worth AI '
+    'was targeting SMBs (small businesses) who would join directly without a customer/enterprise context. '
+    'The company has PIVOTED to enterprise-only. This tab should be deprecated. '
+    'The only data in there is QA test data (e.g., "Pizza and a Chef" cases from March 10). '
+    'There is NO use case where the team should use the Standalone Cases tab today.'
+)
+gap(
+    'CORRECTION 3: Section 2 (Customers List) said "Invited" status appears in the customer list.\n\n'
+    'Transcript (00:03:03, 00:06:53) clarifies: some of the 249 entries are internal sandboxes or '
+    'Proof of Concept (POC) instances — NOT real production customers. These can be identified by '
+    'the "account type" field. The document should not present all 249 as live customers.'
+)
+warn(
+    'NUANCE: Confidence score is at the SOURCE level, not per individual address or name variant.\n\n'
+    'Transcript (00:22:50-00:25:08) explicitly clarifies this:\n'
+    'Craig: "is there a confidence score for each individual one that is returned?"\n'
+    'Allison: "for each individual source" — i.e., one confidence score for the whole Middesk source,\n'
+    'not one score per each of the 10 reported addresses Middesk returned.\n'
+    'Wecsley confirmed: "I think it\'s per source. You have a confidence per source at the end."\n\n'
+    'The document correctly states this in Section Q1, but it needs to be emphasised in Section 5 '
+    '(KYB Contact Information tab) where multiple reported addresses are shown: ALL those addresses '
+    'from Middesk share a single Middesk source confidence score.'
+)
+
+H2('ADDED — New Information from Transcript Not Previously in Document')
+table(
+    ['New fact', 'Transcript timestamp', 'What it means for the document'],
+    [
+        ['Network tab in the browser reveals API response data including source names',
+         '00:00:57',
+         'Analysts can open Chrome DevTools → Network tab → refresh the page → inspect '
+         'the API responses to see source names, confidence, and alternatives — data '
+         'not visible in the UI directly. Allison noted Postman is faster for this.'],
+        ['Customers with "Sandbox" account type still hit Redshift-based vendor data '
+         '(OC, ZoomInfo) — only external API vendors change to sandbox',
+         '00:08:02',
+         'Sandbox instances still query the Redshift pre-loaded tables for OC and ZoomInfo. '
+         'Only externally-called APIs (Equifax, Plaid, GIACT, KYX, Trulioo) switch to sandbox. '
+         'This means: Redshift-based data comparisons between sandbox and production WILL match '
+         'for OC/ZI facts. Only external-API-based facts will differ.'],
+        ['VerData / SER have NO sandbox environment',
+         '00:08:02',
+         'VerData (platform for bankruptcies, judgments, liens) and SER (SERP scraping) '
+         'do not offer a sandbox environment. Even for customers flagged as "Sandbox", '
+         'these two integrations call PRODUCTION endpoints. '
+         'This means BYL/public records data from VerData IS live data even in sandbox.'],
+        ['Businesses tab is filtered to TIN-verified businesses only by default',
+         '00:12:59',
+         'To see ALL businesses (including unverified), analyst must filter to "unverified". '
+         'Recommended path: go through Customer → Cases → Business, not the Businesses tab directly.'],
+        ['Recommended workflow: start in Customer tab or use business ID directly in URL',
+         '00:12:59, 00:24:14',
+         'Craig: "if we have a business ID, all we got to do is put the slash business ID '
+         'beside it and we can go jump to a screen." '
+         'Direct URL pattern: admin.joinworth.com/{business_id}'],
+        ['Auto-decisioning workflow rules (pass/fail) only visible in customer instance, '
+         'not in admin.joinworth.com',
+         '00:06:01',
+         'This is a known gap in the admin portal. If an analyst needs to see which '
+         'auto-decisioning rules passed or failed for a specific case, they must log in '
+         'to the customer\'s own instance (customer.joinworth.com), not admin.joinworth.com.'],
+        ['KYC tab shows pre-populated owners from Middesk/Trulioo for applicant to CONFIRM, '
+         'not auto-filled',
+         '00:19:06',
+         'During onboarding, the applicant can SELECT from a pre-populated list of '
+         'potential owners returned by Middesk/Trulioo (e.g., "is this one of your control owners?") '
+         'but the KYC tab is ONLY populated when the owner fills in their own information. '
+         'Worth AI does NOT auto-populate DOB, home address, SSN into KYC from vendor data.'],
+        ['KYC match/no-match: not yet fully explained in the transcript; flagged as future work',
+         '00:35:48',
+         'Wecsley asked: "match and no match — is this done for our side in terms of comparison '
+         'with vendors?" Craig: "that\'s what Raj can answer...we\'re putting together the documents '
+         'to explain exactly what the KYC process is." — Confirms the document\'s answer '
+         'in Section 6 (IDV + Trulioo PSC for match badges) is the correct technical answer, '
+         'but the team plans to document this more fully in Worthipedia.'],
+        ['Immediate team priorities confirmed in transcript',
+         '00:31:21',
+         '1. Industry classification (Wecsley)\n'
+         '2. KYC/fraud components for global launch (Raj)\n'
+         '3. Worth Score questions (self-serve)\n'
+         '4. Secretaries of State nuances across states (e.g., NJ/Delaware status availability)\n'
+         '5. Risk components: bankruptcy, criminal litigation, watchlist, PEP, adverse media'],
+        ['Case snapshot does not necessarily recalculate ALL facts when a new case is created',
+         '00:35:48',
+         'Craig: "it doesn\'t recalculate all the facts necessarily" — '
+         'A Worth Score refresh creates a new case and rescores, but not all vendor '
+         'integrations re-run (depends on what changed). '
+         'This nuance is not documented in Section 7 (Q16) which implies full re-run.'],
+        ['VerData is the primary source for BYL (bankruptcy, judgments, liens) data',
+         '00:31:21',
+         'Allison: "there\'s been more than normal questions about liens and judgments and bankruptcies '
+         '...the source that\'s coming back on it is VerData." '
+         'VerData = platform_id=4 (VERDATA) in INTEGRATION_ID constants. '
+         'BYL data appears in the Public Records tab of the admin portal.'],
+    ],
+    col_widths=[3.2, 1.2, 5.2],
+    fs=8.5,
+)
+
+H2('Updated: Sandbox Behavior Table (Corrected from Section 8)')
+callout(
+    'This replaces/supplements the Sandbox table in Section 8. '
+    'Source: transcript 00:08:02 (Allison Nejame).'
+)
+table(
+    ['Integration', 'In Sandbox customer: API called', 'Redshift data affected?',
+     'Source: no sandbox env?'],
+    [
+        ['Equifax', 'Equifax SANDBOX API endpoint', 'NO — same Redshift query',
+         'NO — has sandbox'],
+        ['Plaid (banking)', 'Plaid SANDBOX environment', 'NO', 'NO — has sandbox'],
+        ['Plaid IDV', 'Plaid IDV SANDBOX', 'NO', 'NO — has sandbox'],
+        ['GIACT gVerify/gAuthenticate', 'GIACT SANDBOX API', 'NO', 'NO — has sandbox'],
+        ['KYX', 'KYX SANDBOX endpoints', 'NO', 'NO — has sandbox'],
+        ['Trulioo', 'Trulioo test environment (if configured)', 'NO', 'Partial — no explicit sandbox'],
+        ['Middesk', 'SAME Middesk API (no sandbox distinction)', 'NO',
+         'NO sandbox — always PRODUCTION API, even for sandbox customers'],
+        ['OpenCorporates', 'SAME Redshift query (no external API call)', 'YES — same data',
+         'N/A — Redshift-based, no external API'],
+        ['ZoomInfo', 'SAME Redshift query', 'YES — same data',
+         'N/A — Redshift-based, no external API'],
+        ['VerData (VERDATA)', 'PRODUCTION VerData API — NO SANDBOX',
+         'NO', 'CONFIRMED NO SANDBOX — always hits production (transcript 00:08:02)'],
+        ['SERP (SER)', 'PRODUCTION SERP — NO SANDBOX',
+         'NO', 'CONFIRMED NO SANDBOX — always hits production (transcript 00:08:02)'],
+        ['AI (GPT-5-mini)', 'SAME OpenAI API (no sandbox)', 'NO',
+         'N/A — no vendor sandbox for OpenAI'],
+    ],
+    col_widths=[1.8, 2.4, 1.8, 3.6],
+    fs=8.5,
+)
+callout(
+    'KEY IMPLICATION (from transcript 00:08:02):\n'
+    'If comparing data between the Redshift warehouse and the admin UI for SANDBOX customers:\n'
+    '  ✅ OC and ZoomInfo facts WILL match (same Redshift source)\n'
+    '  ✅ VerData BYL data WILL match (production endpoint in both)\n'
+    '  ✅ SERP data WILL match (production endpoint in both)\n'
+    '  ⚠️ Equifax, Plaid, GIACT, IDV data will DIFFER (sandbox API returns test data)\n'
+    '  ⚠️ Worth Score will differ (computed from the above mix of real + test data)',
+    bg='F0FDF4', border='059669', tc=RGBColor(0x06,0x5F,0x46)
+)
+
+H2('Updated: URL Navigation Patterns (from Section 13.2 + Transcript)')
+table(
+    ['Navigation path', 'URL pattern', 'What you see'],
+    [
+        ['Customer list', 'admin.joinworth.com/customers',
+         'All 249 customers. Some are sandbox/POC instances.'],
+        ['Customer detail', 'admin.joinworth.com/customers/{customer_id}',
+         'Customer overview with Cases, Businesses, Users tabs.\n'
+         'customer_id in URL = same UUID as in the Redshift data warehouse.'],
+        ['Case detail (from customer)', 'admin.joinworth.com/customers/{customer_id}/cases/{case_id}',
+         'KYB, KYC, Public Records, Banking, etc. tabs for this case.'],
+        ['Business direct URL (recommended shortcut)',
+         'admin.joinworth.com/{business_id}',
+         'Business view directly. Fastest way if you have the business_id.\n'
+         '(Transcript 00:15:47 — Craig: "all we got to do is put the slash business ID beside it")'],
+        ['Business within case', 'admin.joinworth.com/{business_id}/cases/{case_id}',
+         'Business+case combined view. URL structure differs from customer→case path.'],
+        ['Customer portal (external)', 'customer.joinworth.com',
+         'What customers see: dashboard, holistic portfolio view, auto-decisioning rules.\n'
+         'Internal access needed to see auto-decisioning pass/fail detail.'],
+    ],
+    col_widths=[2.4, 3.0, 4.2],
+)
+
+H2('Worthipedia: Future Documentation Topics (from Transcript 00:31:21 and 00:36:52)')
+body(
+    'Craig identified these as immediate documentation priorities for the Worthipedia. '
+    'This document covers most of them, but these specific sub-topics need deeper coverage:'
+)
+table(
+    ['Topic', 'Owner (transcript)', 'Current document coverage', 'What is still needed'],
+    [
+        ['Industry classification',
+         'Wecsley (00:31:21)',
+         'Covered in depth in Industry_Classification_Worthopedia.docx',
+         'Already documented — NAICS, MCC, 8 facts, Pipeline A vs B, confidence rules'],
+        ['KYC / fraud components for global launch',
+         'Raj (00:31:21)',
+         'Section 6 (KYC), Section 12.2 (Fraud Report), UK Screening doc',
+         'KYC match badge logic, Plaid IDV vs Trulioo PSC for UK, global country coverage'],
+        ['Worth Score questions',
+         'Self-serve (00:31:21)',
+         'Section 3 (Worth Score deep dive), Q16 (score change over time)',
+         'Specific "why did score drop?" or "why is my score X?" case investigation guide'],
+        ['Secretary of State nuances (NJ/Delaware/status gaps)',
+         'Team (00:32:17)',
+         'Partially in Section 5 (Business Registration), Section 9 (US multi-state)',
+         'Per-state Middesk coverage gaps, status field availability by state'],
+        ['Risk components: BYL, watchlist, PEP, adverse media',
+         'Team (00:32:17)',
+         'Section 12.7 (Watchlists), Section 14 (PEP), Section 15 (Adverse Media)',
+         'BYL from VerData: source, table, API exposure. Watchlist deep dive done.'],
+        ['Auto-decisioning workflow rules (pass/fail)',
+         'Allison flagged (00:06:01)',
+         'NOT documented — admin portal gap',
+         'Only visible in customer.joinworth.com customer instance. '
+         'Need to document what rules exist, how they are configured, and where stored.'],
+        ['KYC match/no-match: how comparison works',
+         'Wecsley asked, Raj to answer (00:35:48)',
+         'Section 6 and Section 12.1 explain this technically',
+         'Consumer-facing explanation: "what does Match mean for me as an analyst?"'],
+    ],
+    col_widths=[2.0, 1.5, 2.5, 3.6],
+    fs=8.5,
+)
+
 # ── Save ──────────────────────────────────────────────────────────────────────
 out = ('/workspace/AI-Powered-NAICS-Industry-Classification-Agent/'
        'modeling/Worth_AI_Admin_UI_Lineage.docx')
