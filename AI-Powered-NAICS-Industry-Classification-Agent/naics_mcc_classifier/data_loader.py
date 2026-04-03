@@ -464,6 +464,112 @@ def load_naics_mcc_crosswalk() -> pd.DataFrame:
         return pd.DataFrame(columns=["naics_code", "mcc_code"])
 
 
+def load_naics_lookup() -> pd.DataFrame:
+    """
+    Returns every NAICS code with its human-readable label.
+
+    Primary source: public.core_naics_code (case-service PostgreSQL).
+    Fallback: queries Redshift mirror rds_cases_public.core_naics_code.
+
+    Columns returned:
+      naics_code   — 6-digit NAICS string
+      naics_label  — human-readable description  (e.g. "Full-Service Restaurants")
+      naics_sector — 2-digit sector code         (e.g. "72")
+      naics_group  — 4-digit industry group code (e.g. "7225")
+    """
+    # Try case-service PostgreSQL first
+    try:
+        from .config import CASESERVICE_PG, PG_TABLES
+        import psycopg2 as _pg
+        conn = _pg.connect(**CASESERVICE_PG)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                SELECT id AS naics_id, code AS naics_code, label AS naics_label
+                FROM {PG_TABLES['core_naics']}
+                ORDER BY code
+                """)
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+        finally:
+            conn.close()
+        df = pd.DataFrame(rows, columns=cols)
+        df["naics_sector"] = df["naics_code"].astype(str).str[:2]
+        df["naics_group"]  = df["naics_code"].astype(str).str[:4]
+        logger.info("Loaded %d NAICS codes from case-service PG", len(df))
+        return df
+    except Exception as pg_err:
+        logger.warning("Could not load NAICS lookup from PG (%s). Trying Redshift mirror...", pg_err)
+
+    # Fallback: Redshift mirror of case-service DB
+    try:
+        df_pl = redshift_query("""
+            SELECT
+                CAST(code AS VARCHAR) AS naics_code,
+                label                 AS naics_label
+            FROM "rds_cases_public"."core_naics_code"
+            ORDER BY code
+        """)
+        df = df_pl.to_pandas()
+        df["naics_sector"] = df["naics_code"].astype(str).str[:2]
+        df["naics_group"]  = df["naics_code"].astype(str).str[:4]
+        logger.info("Loaded %d NAICS codes from Redshift mirror", len(df))
+        return df
+    except Exception as rs_err:
+        logger.warning("Could not load NAICS lookup from Redshift either (%s). Returning empty.", rs_err)
+        return pd.DataFrame(columns=["naics_code", "naics_label", "naics_sector", "naics_group"])
+
+
+def load_mcc_lookup() -> pd.DataFrame:
+    """
+    Returns every MCC code with its human-readable label.
+
+    Primary source: public.core_mcc_code (case-service PostgreSQL).
+    Fallback: queries Redshift mirror rds_cases_public.core_mcc_code.
+
+    Columns returned:
+      mcc_code  — 4-digit MCC string  (e.g. "5812")
+      mcc_label — human-readable label (e.g. "Eating Places, Restaurants")
+    """
+    # Try case-service PostgreSQL first
+    try:
+        from .config import CASESERVICE_PG, PG_TABLES
+        import psycopg2 as _pg
+        conn = _pg.connect(**CASESERVICE_PG)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                SELECT id AS mcc_id, code AS mcc_code, label AS mcc_label
+                FROM {PG_TABLES['core_mcc']}
+                ORDER BY code
+                """)
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+        finally:
+            conn.close()
+        df = pd.DataFrame(rows, columns=cols)
+        logger.info("Loaded %d MCC codes from case-service PG", len(df))
+        return df
+    except Exception as pg_err:
+        logger.warning("Could not load MCC lookup from PG (%s). Trying Redshift mirror...", pg_err)
+
+    # Fallback: Redshift mirror
+    try:
+        df_pl = redshift_query("""
+            SELECT
+                CAST(code AS VARCHAR) AS mcc_code,
+                label                 AS mcc_label
+            FROM "rds_cases_public"."core_mcc_code"
+            ORDER BY code
+        """)
+        df = df_pl.to_pandas()
+        logger.info("Loaded %d MCC codes from Redshift mirror", len(df))
+        return df
+    except Exception as rs_err:
+        logger.warning("Could not load MCC lookup from Redshift either (%s). Returning empty.", rs_err)
+        return pd.DataFrame(columns=["mcc_code", "mcc_label"])
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 6. MASTER DATASET BUILDER
 # ═════════════════════════════════════════════════════════════════════════════
