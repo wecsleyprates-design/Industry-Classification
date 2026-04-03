@@ -269,6 +269,73 @@ else:
     print("⚠️  Synthetic data — switch USE_SYNTHETIC=False for real production results.")
 """))
 
+# ── Cell 3b: Data Quality Check ───────────────────────────────────────────────
+cells.append(nbf.v4.new_markdown_cell("""### Data Quality Check
+
+**Why match confidence zeros are expected (not a bug):**
+
+Businesses get their NAICS from multiple pipelines:
+- **Middesk / Trulioo / AI** (live API calls) → `zi_match_confidence = 0` because
+  these businesses were NOT matched via ZoomInfo/Equifax/OC entity matching.
+- **ZI / EFX / OC entity matching** → `zi_match_confidence > 0`
+
+A confidence of 0 means "no ZI/EFX/OC entity match was found for this business" — not that matching failed.
+~40% of businesses get their NAICS from Middesk/Trulioo/AI and will always show 0 for all three match confidences.
+
+The model uses the `has_zi_match`, `has_efx_match`, `has_oc_match` binary features
+to distinguish these two groups and weight the vendor NAICS signals accordingly.
+"""))
+
+cells.append(nbf.v4.new_code_cell("""\
+# ── Entity-match coverage check ───────────────────────────────────────────────
+# Run this after loading data to verify all three sources are present.
+# If all three show 0% it indicates a problem with the match table queries.
+print("=" * 65)
+print("ENTITY-MATCH COVERAGE (training set)")
+print("=" * 65)
+n_train = len(train_df)
+print(f"Total training businesses: {n_train:,}")
+print()
+
+for col, label in [
+    ("zi_match_confidence",  "ZoomInfo"),
+    ("efx_match_confidence", "Equifax"),
+    ("oc_match_confidence",  "OpenCorporates"),
+]:
+    if col not in train_df.columns:
+        print(f"  {label:<18} ⚠️  column missing")
+        continue
+    n_nonzero = (train_df[col].fillna(0) > 0).sum()
+    n_zero    = n_train - n_nonzero
+    avg_conf  = train_df.loc[train_df[col].fillna(0) > 0, col].mean() if n_nonzero > 0 else 0.0
+    print(f"  {label:<18} matched: {n_nonzero:>6,} ({100*n_nonzero/n_train:5.1f}%)  "
+          f"no-match: {n_zero:>6,} ({100*n_zero/n_train:5.1f}%)  "
+          f"avg confidence (non-zero): {avg_conf:.3f}")
+
+print()
+print("Interpretation:")
+print("  'matched' businesses had a ZI/EFX/OC record linked by the XGBoost entity-matching model.")
+print("  'no-match' businesses got their NAICS from Middesk, Trulioo, or AI enrichment — confidence=0 is EXPECTED.")
+print()
+
+# Vendor NAICS coverage (separate from match confidence)
+print("VENDOR NAICS SIGNAL COVERAGE (how many businesses have a NAICS from each vendor):")
+for col, label in [
+    ("zi_c_naics6",       "ZoomInfo zi_c_naics6"),
+    ("efx_naics_primary", "Equifax efx_naics_primary"),
+    ("oc_naics_primary",  "OC oc_naics_primary"),
+]:
+    if col not in train_df.columns:
+        print(f"  {label:<30} ⚠️  column missing")
+        continue
+    n_has = train_df[col].notna().sum() - (train_df[col].fillna("") == "").sum()
+    print(f"  {label:<30} {n_has:>6,} ({100*n_has/n_train:.1f}%)")
+
+print()
+print("NOTE: A business can have a NAICS from a vendor even if match_confidence=0")
+print("  (it means a record was found but the XGBoost entity score was below the 0.8 threshold).")
+"""))
+
 # ── Cell 4: EDA - Fallback Distribution ───────────────────────────────────────
 cells.append(nbf.v4.new_markdown_cell("""## Section 3 — Exploratory Data Analysis"""))
 
