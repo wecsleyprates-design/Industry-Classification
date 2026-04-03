@@ -125,18 +125,22 @@ else:
 if result["connected"]:
     print()
     print("Quick table check — counting facts rows...")
-    df_check = redshift_query(
-        'SELECT COUNT(*) AS n_rows FROM "rds_warehouse_public"."facts" '
+
+    sql_total = (
+        "SELECT COUNT(*) AS n_rows "
+        "FROM rds_warehouse_public.facts "
         "WHERE name = 'naics_code'"
     )
+    df_check = redshift_query(sql_total)
     print(f"  rds_warehouse_public.facts (naics_code rows): {df_check['n_rows'][0]:,}")
-    
-    df_fallback_check = redshift_query(
+
+    sql_fallback = (
         "SELECT COUNT(*) AS n_fallback "
-        "FROM \"rds_warehouse_public\".\"facts\" "
+        "FROM rds_warehouse_public.facts "
         "WHERE name = 'naics_code' "
         "  AND JSON_EXTRACT_PATH_TEXT(value, 'code') = '561499'"
     )
+    df_fallback_check = redshift_query(sql_fallback)
     print(f"  of which are fallback 561499: {df_fallback_check['n_fallback'][0]:,}")
 """))
 
