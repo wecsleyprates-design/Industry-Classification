@@ -221,82 +221,94 @@ def load_production_naics() -> pl.DataFrame:
 # 2. ENTITY-MATCH CONFIDENCE — XGBoost Level 1 outputs
 # ═════════════════════════════════════════════════════════════════════════════
 
-def load_entity_match_confidences() -> pl.DataFrame:
+def load_entity_match_confidences() -> pd.DataFrame:
     """
     Loads entity-matching confidence scores from the XGBoost Level 1 model outputs.
 
-    Actual columns in each match table (verified from warehouse-service SQL):
+    Actual columns in each match table (verified from warehouse-service stored procedures):
       zoominfo_matches_custom_inc_ml: business_id, zi_c_company_id, zi_c_location_id,
                                        zi_es_location_id, zi_probability, similarity_index
       efx_matches_custom_inc_ml:      business_id, efx_id, efx_probability, similarity_index
       oc_matches_custom_inc_ml:       business_id, company_number, jurisdiction_code,
                                        oc_probability, similarity_index
 
-    zi/efx/oc_match_confidence are NOT stored columns — they are computed in
-    smb_zi_oc_efx_ver_combined.sql using the same CASE expression reproduced here:
-      WHEN {source}_probability IS NOT NULL        THEN {source}_probability
-      WHEN similarity_index / 55.0 >= 0.8          THEN similarity_index / 55.0
+    zi/efx/oc_match_confidence are NOT stored columns in those tables. They are computed
+    in smb_zi_oc_efx_ver_combined.sql. We reproduce that exact CASE expression here:
+      WHEN {source}_probability IS NOT NULL  → use XGBoost probability
+      WHEN similarity_index / 55.0 >= 0.8   → use heuristic fallback
       ELSE 0
 
-    This exactly mirrors the warehouse-service computation.
+    Each match table may have MULTIPLE rows per business_id (candidate matches).
+    We take the MAX confidence per business_id before joining.
+
+    Returns a pandas DataFrame (not Polars) to avoid Polars outer-join key collision.
     """
-    # ZoomInfo: zi_probability is the XGBoost score; similarity_index is the heuristic fallback
+    # ── ZoomInfo ──────────────────────────────────────────────────────────────
     schema_zi, table_zi = TABLES["zi_matches"].split(".")
     sql_zi = f"""
     SELECT
         LOWER(CAST(business_id AS VARCHAR)) AS business_id,
-        CASE
-            WHEN zi_probability IS NOT NULL          THEN zi_probability
-            WHEN similarity_index / 55.0 >= 0.8     THEN similarity_index / 55.0
+        MAX(CASE
+            WHEN zi_probability IS NOT NULL      THEN zi_probability
+            WHEN similarity_index / 55.0 >= 0.8 THEN similarity_index / 55.0
             ELSE 0
-        END AS zi_match_confidence
+        END) AS zi_match_confidence
     FROM "{schema_zi}"."{table_zi}"
+    GROUP BY business_id
     """
-    df_zi = redshift_query(sql_zi)
+    df_zi = redshift_query(sql_zi).to_pandas()
 
-    # Equifax: efx_probability is the XGBoost score
+    # ── Equifax ───────────────────────────────────────────────────────────────
     schema_efx, table_efx = TABLES["efx_matches"].split(".")
     sql_efx = f"""
     SELECT
         LOWER(CAST(business_id AS VARCHAR)) AS business_id,
-        CASE
-            WHEN efx_probability IS NOT NULL         THEN efx_probability
-            WHEN similarity_index / 55.0 >= 0.8     THEN similarity_index / 55.0
+        MAX(CASE
+            WHEN efx_probability IS NOT NULL     THEN efx_probability
+            WHEN similarity_index / 55.0 >= 0.8 THEN similarity_index / 55.0
             ELSE 0
-        END AS efx_match_confidence
+        END) AS efx_match_confidence
     FROM "{schema_efx}"."{table_efx}"
+    GROUP BY business_id
     """
-    df_efx = redshift_query(sql_efx)
+    df_efx = redshift_query(sql_efx).to_pandas()
 
-    # OpenCorporates: oc_probability is the XGBoost score
+    # ── OpenCorporates ────────────────────────────────────────────────────────
     schema_oc, table_oc = TABLES["oc_matches"].split(".")
     sql_oc = f"""
     SELECT
         LOWER(CAST(business_id AS VARCHAR)) AS business_id,
-        CASE
-            WHEN oc_probability IS NOT NULL          THEN oc_probability
-            WHEN similarity_index / 55.0 >= 0.8     THEN similarity_index / 55.0
+        MAX(CASE
+            WHEN oc_probability IS NOT NULL      THEN oc_probability
+            WHEN similarity_index / 55.0 >= 0.8 THEN similarity_index / 55.0
             ELSE 0
-        END AS oc_match_confidence
+        END) AS oc_match_confidence
     FROM "{schema_oc}"."{table_oc}"
+    GROUP BY business_id
     """
-    df_oc = redshift_query(sql_oc)
+    df_oc = redshift_query(sql_oc).to_pandas()
 
-    # Outer-join all three on business_id
+    # ── Outer-merge all three using pandas (avoids Polars key collision) ──────
     df = (
         df_zi
-        .join(df_efx, on="business_id", how="outer")
-        .join(df_oc,  on="business_id", how="outer")
+        .merge(df_efx, on="business_id", how="outer")
+        .merge(df_oc,  on="business_id", how="outer")
     )
-    df = df.with_columns([
-        pl.col("zi_match_confidence").fill_null(0.0),
-        pl.col("efx_match_confidence").fill_null(0.0),
-        pl.col("oc_match_confidence").fill_null(0.0),
-        (pl.col("zi_match_confidence").fill_null(0.0)  > 0.0).cast(pl.Int8).alias("has_zi_match"),
-        (pl.col("efx_match_confidence").fill_null(0.0) > 0.0).cast(pl.Int8).alias("has_efx_match"),
-        (pl.col("oc_match_confidence").fill_null(0.0)  > 0.0).cast(pl.Int8).alias("has_oc_match"),
-    ])
-    logger.info("Loaded entity-match confidences for %d businesses", len(df))
+    df["zi_match_confidence"]  = pd.to_numeric(df["zi_match_confidence"],  errors="coerce").fillna(0.0)
+    df["efx_match_confidence"] = pd.to_numeric(df["efx_match_confidence"], errors="coerce").fillna(0.0)
+    df["oc_match_confidence"]  = pd.to_numeric(df["oc_match_confidence"],  errors="coerce").fillna(0.0)
+    df["has_zi_match"]  = (df["zi_match_confidence"]  > 0.0).astype(int)
+    df["has_efx_match"] = (df["efx_match_confidence"] > 0.0).astype(int)
+    df["has_oc_match"]  = (df["oc_match_confidence"]  > 0.0).astype(int)
+
+    logger.info(
+        "Loaded entity-match confidences for %d businesses "
+        "(ZI: %d matches, EFX: %d matches, OC: %d matches)",
+        len(df),
+        df["has_zi_match"].sum(),
+        df["has_efx_match"].sum(),
+        df["has_oc_match"].sum(),
+    )
     return df
 
 
@@ -660,99 +672,121 @@ def build_training_dataset(
         )
         return _generate_synthetic_dataset(n=limit or 10_000)
 
-    # ── Step 1-3: Load from Redshift ──────────────────────────────────────────
+    # ── Step 1-3: Load from Redshift — convert to pandas immediately ─────────
+    # All joins are done in pandas to avoid Polars outer-join key collisions.
     logger.info("Loading production facts (current NAICS/MCC from Pipeline A)...")
-    prod = load_production_naics()
+    prod_pl = load_production_naics()
+    prod = prod_pl.to_pandas()
 
     logger.info("Loading entity-match confidences (XGBoost Level 1 outputs)...")
-    conf = load_entity_match_confidences()
+    conf = load_entity_match_confidences()      # already returns pandas
 
     logger.info("Loading Pipeline B NAICS winner (ZI vs EFX rule)...")
-    pipeB = load_customer_files_naics()
+    pipeB = load_customer_files_naics().to_pandas()
 
-    # ── Step 4: Join all three ────────────────────────────────────────────────
-    df = (
+    # ── Step 4: Merge all three on business_id (pandas left-merge) ────────────
+    pdf = (
         prod
-        .join(conf,  on="business_id", how="left")
-        .join(pipeB, on="business_id", how="left")
+        .merge(conf,  on="business_id", how="left")
+        .merge(pipeB, on="business_id", how="left")
     )
 
-    # ── Step 5: Join vendor signals via match tables ──────────────────────────
-    # We join ZI/EFX/OC NAICS codes using the match table company IDs
-    # to pull the NAICS for the specific matched vendor record.
-    logger.info("Loading ZoomInfo NAICS signals...")
-    zi = load_zoominfo_signals()
-    logger.info("Loading Equifax NAICS signals...")
-    efx = load_equifax_signals()
-    logger.info("Loading OpenCorporates NAICS signals...")
-    oc = load_oc_signals()
-
-    # Join match tables to get vendor company IDs, then join vendor NAICS signals.
-    # Actual columns in match tables (verified from warehouse-service stored procedures):
+    # ── Step 5: Pull vendor NAICS signals and attach via match table IDs ──────
+    # Each match table has one row per (business_id, vendor_record) candidate.
+    # We take the best candidate per business (highest confidence) in Redshift,
+    # then join the vendor source table for NAICS details.
+    #
+    # Actual match-table columns (from warehouse-service stored procedures):
     #   zoominfo_matches_custom_inc_ml: business_id, zi_c_company_id, zi_c_location_id,
     #                                   zi_es_location_id, zi_probability, similarity_index
     #   efx_matches_custom_inc_ml:      business_id, efx_id, efx_probability, similarity_index
     #   oc_matches_custom_inc_ml:       business_id, company_number, jurisdiction_code,
     #                                   oc_probability, similarity_index
-    # The *_match_confidence columns do NOT exist in these tables; they are computed in
-    # smb_zi_oc_efx_ver_combined.sql (and already loaded via load_entity_match_confidences).
+
+    logger.info("Loading ZoomInfo NAICS signals...")
+    zi_pd = load_zoominfo_signals().to_pandas()
 
     schema_zi, table_zi = TABLES["zi_matches"].split(".")
+    # Best ZI match per business: row with highest zi_probability, else highest similarity_index
     sql_zi_ids = f"""
     SELECT
-        LOWER(CAST(business_id AS VARCHAR)) AS business_id,
+        LOWER(CAST(business_id AS VARCHAR))       AS business_id,
         CAST(zi_c_company_id AS VARCHAR) || '|' ||
-        CAST(zi_c_location_id AS VARCHAR)   AS zi_key
-    FROM "{schema_zi}"."{table_zi}"
-    WHERE zi_probability IS NOT NULL OR similarity_index IS NOT NULL
+        CAST(zi_c_location_id AS VARCHAR)         AS zi_key
+    FROM (
+        SELECT business_id, zi_c_company_id, zi_c_location_id,
+               COALESCE(zi_probability, 0) + COALESCE(similarity_index / 55.0, 0) AS score,
+               ROW_NUMBER() OVER (
+                   PARTITION BY business_id
+                   ORDER BY COALESCE(zi_probability, 0) DESC,
+                            COALESCE(similarity_index, 0) DESC
+               ) AS rn
+        FROM "{schema_zi}"."{table_zi}"
+    ) t WHERE rn = 1
     """
-    zi_ids = redshift_query(sql_zi_ids)
-    zi_with_naics = zi_ids.join(zi.select(["zi_key","zi_c_naics6","zi_c_naics4",
-                                            "zi_c_naics2","zi_c_naics_confidence_score",
-                                            "zi_c_sic4","zi_c_total_employee_count",
-                                            "zi_c_annual_revenue"]),
-                                on="zi_key", how="left")
+    zi_ids = redshift_query(sql_zi_ids).to_pandas()
+    zi_cols = ["zi_key","zi_c_naics6","zi_c_naics4","zi_c_naics2",
+               "zi_c_naics_confidence_score","zi_c_sic4",
+               "zi_c_total_employee_count","zi_c_annual_revenue"]
+    zi_with_naics = zi_ids.merge(zi_pd[[c for c in zi_cols if c in zi_pd.columns]],
+                                  on="zi_key", how="left")
+    pdf = pdf.merge(zi_with_naics.drop(columns=["zi_key"], errors="ignore"),
+                    on="business_id", how="left")
+
+    logger.info("Loading Equifax NAICS signals...")
+    efx_pd = load_equifax_signals().to_pandas()
 
     schema_efx, table_efx = TABLES["efx_matches"].split(".")
     sql_efx_ids = f"""
     SELECT
         LOWER(CAST(business_id AS VARCHAR)) AS business_id,
         CAST(efx_id AS VARCHAR)             AS efx_id
-    FROM "{schema_efx}"."{table_efx}"
-    WHERE efx_probability IS NOT NULL OR similarity_index IS NOT NULL
+    FROM (
+        SELECT business_id, efx_id,
+               ROW_NUMBER() OVER (
+                   PARTITION BY business_id
+                   ORDER BY COALESCE(efx_probability, 0) DESC,
+                            COALESCE(similarity_index, 0) DESC
+               ) AS rn
+        FROM "{schema_efx}"."{table_efx}"
+    ) t WHERE rn = 1
     """
-    efx_ids = redshift_query(sql_efx_ids)
-    efx_with_naics = efx_ids.join(efx.select(["efx_id","efx_naics_primary","efx_naics_sector",
-                                               "efx_naics_secondary_1","efx_naics_secondary_2",
-                                               "efx_sic_primary","efx_employee_count",
-                                               "efx_annual_sales"]),
-                                  on="efx_id", how="left")
+    efx_ids = redshift_query(sql_efx_ids).to_pandas()
+    efx_cols = ["efx_id","efx_naics_primary","efx_naics_sector",
+                "efx_naics_secondary_1","efx_naics_secondary_2",
+                "efx_sic_primary","efx_employee_count","efx_annual_sales"]
+    efx_with_naics = efx_ids.merge(efx_pd[[c for c in efx_cols if c in efx_pd.columns]],
+                                    on="efx_id", how="left")
+    pdf = pdf.merge(efx_with_naics.drop(columns=["efx_id"], errors="ignore"),
+                    on="business_id", how="left")
 
-    df = (
-        df
-        .join(zi_with_naics.drop("zi_key"),  on="business_id", how="left")
-        .join(efx_with_naics.drop("efx_id"), on="business_id", how="left")
-    )
+    logger.info("Loading OpenCorporates NAICS signals...")
+    oc_pd = load_oc_signals().to_pandas()
 
-    # OC: actual columns are company_number and jurisdiction_code (not oc_company_number)
     schema_oc, table_oc = TABLES["oc_matches"].split(".")
     sql_oc_ids = f"""
     SELECT
-        LOWER(CAST(business_id AS VARCHAR))             AS business_id,
+        LOWER(CAST(business_id AS VARCHAR))         AS business_id,
         CAST(company_number AS VARCHAR) || '|' ||
-        CAST(jurisdiction_code AS VARCHAR)              AS oc_key
-    FROM "{schema_oc}"."{table_oc}"
-    WHERE oc_probability IS NOT NULL OR similarity_index IS NOT NULL
+        CAST(jurisdiction_code AS VARCHAR)           AS oc_key
+    FROM (
+        SELECT business_id, company_number, jurisdiction_code,
+               ROW_NUMBER() OVER (
+                   PARTITION BY business_id
+                   ORDER BY COALESCE(oc_probability, 0) DESC,
+                            COALESCE(similarity_index, 0) DESC
+               ) AS rn
+        FROM "{schema_oc}"."{table_oc}"
+    ) t WHERE rn = 1
     """
-    oc_ids = redshift_query(sql_oc_ids)
-    oc_with_naics = oc_ids.join(oc.select(["oc_key","oc_naics_primary","oc_naics_sector",
-                                            "oc_gb_sic"]),
-                                on="oc_key", how="left")
-    df = df.join(oc_with_naics.drop("oc_key"), on="business_id", how="left")
+    oc_ids = redshift_query(sql_oc_ids).to_pandas()
+    oc_cols = ["oc_key","oc_naics_primary","oc_naics_sector","oc_gb_sic"]
+    oc_with_naics = oc_ids.merge(oc_pd[[c for c in oc_cols if c in oc_pd.columns]],
+                                  on="oc_key", how="left")
+    pdf = pdf.merge(oc_with_naics.drop(columns=["oc_key"], errors="ignore"),
+                    on="business_id", how="left")
 
     # ── Step 6: Assign labels ─────────────────────────────────────────────────
-    # Convert to pandas for label logic (cleaner with .loc masking)
-    pdf = df.to_pandas()
 
     # Start with current Pipeline A NAICS as candidate label
     pdf["label_naics6"] = pdf["current_naics_code"].fillna(NAICS_FALLBACK)
