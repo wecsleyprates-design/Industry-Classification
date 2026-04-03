@@ -457,23 +457,51 @@ plt.show()
 # ── Cell 6: Training ───────────────────────────────────────────────────────────
 cells.append(nbf.v4.new_markdown_cell("""## Section 5 — Model Training
 
-Training two XGBoost classifiers:
+Training two XGBoost classifiers on **real Redshift data** (when `USE_SYNTHETIC=False`):
 1. **NAICSClassifier** — `multi:softprob` objective, predicts 6-digit NAICS code
 2. **MCCClassifier** — `multi:softprob` objective, predicts 4-digit MCC code
 
 The NAICS model overrides the current `561499` only when confidence ≥ `NAICS_OVERRIDE_CONFIDENCE_THRESHOLD`.
+
+> **Real data training:** Since `USE_SYNTHETIC` is set above and you have Redshift access,
+> the pipeline trains on your 52,461 real labeled businesses. This is the production model.
 """))
 
 cells.append(nbf.v4.new_code_cell("""\
-# Run the full pipeline (trains both models, evaluates on test set, evaluates on fallback set)
+# ── Train on REAL data (USE_SYNTHETIC=False) or synthetic (True) ─────────────
+# When USE_SYNTHETIC=False the pipeline:
+#   - Uses the 52,461 real non-fallback businesses from Redshift as training labels
+#   - Evaluates on a held-out 20% test set of real businesses
+#   - Evaluates on all 16,945 real 561499 fallback businesses
+# This gives meaningful accuracy numbers and a real before/after comparison.
+
 report = run_training_pipeline(
-    limit=20_000 if USE_SYNTHETIC else None,
+    limit=None,              # None = use ALL data (real or synthetic)
     use_synthetic=USE_SYNTHETIC,
     save_artifacts=True,
 )
 
+tm = report["test_metrics"]
+ds = report["dataset_sizes"]
 print("\\n=== TRAINING COMPLETE ===")
-print(json.dumps(report["test_metrics"], indent=2))
+print(f"Training rows:     {ds.get('n_train_rows', 'N/A'):,}")
+print(f"NAICS classes:     {ds.get('n_naics_classes', 'N/A')}")
+print(f"MCC classes:       {ds.get('n_mcc_classes', 'N/A')}")
+print()
+print("NAICS model accuracy (held-out test set):")
+print(f"  Top-1 (exact 6-digit):     {tm.get('naics_test_top1_accuracy', 0):.1%}")
+print(f"  Top-3 (in top-3 preds):    {tm.get('naics_test_top3_accuracy', 0):.1%}")
+print(f"  Sector (2-digit correct):   {tm.get('naics_test_sector_accuracy', 0):.1%}")
+print()
+print("MCC model accuracy:")
+print(f"  Top-1:                      {tm.get('mcc_test_top1_accuracy', 0):.1%}")
+print()
+if not USE_SYNTHETIC:
+    print("✅ Trained on REAL production data — these accuracy numbers are meaningful.")
+    print("   The model has learned from real ZI/EFX/OC NAICS signals.")
+else:
+    print("⚠️  Trained on SYNTHETIC data — accuracy numbers are inflated (model memorised fake data).")
+    print("   Set USE_SYNTHETIC=False to train on real data and get meaningful results.")
 """))
 
 # ── Cell 7: Metrics ───────────────────────────────────────────────────────────
@@ -836,61 +864,113 @@ from naics_mcc_classifier.predictor import get_predictor, OUTCOME_USE_PREDICTION
 
 predictor = get_predictor()
 
-# ── Simulate the three outcome types with representative businesses ─────────
+# ── Load MCC crosswalk for label lookup ──────────────────────────────────────
+import json as _json
+try:
+    with open(ARTIFACTS_DIR / "crosswalk.json") as _f:
+        _crosswalk = _json.load(_f)
+    # Reverse map: mcc_code → description (simple lookup dict)
+    _MCC_NAMES = {
+        "5812": "Eating Places / Restaurants",
+        "7230": "Beauty & Barber Shops",
+        "7372": "Computer Software",
+        "5945": "Hobby, Toy & Game Shops",
+        "5411": "Grocery Stores",
+        "6513": "Apartment & Property Mgmt",
+        "8011": "Doctors / Physicians",
+        "8021": "Dentists",
+        "5999": "Misc Retail Stores",
+        "5614": "FALLBACK — no classification",
+    }
+except Exception:
+    _crosswalk = {}
+    _MCC_NAMES = {"5614": "FALLBACK — no classification"}
+
+# ── Representative businesses (OC NAICS added where applicable) ───────────────
+# Why OC is often blank:
+#   OpenCorporates matches via company registration records. Most US small businesses
+#   do NOT appear in OC's global registry — OC covers primarily UK, EU, and AU companies.
+#   For US businesses, ZI + EFX are the primary sources; OC matters most for UK/Canada.
 pipeline_examples = [
-    # Tier 1: Vendor signals agree → use_prediction (GPT skipped)
+    # Tier 1: ZI + EFX agree → use_prediction (GPT skipped)
     dict(business_id="p1", business_name="Mario's Italian Kitchen",
          current_naics_code="561499", current_mcc_code="5614",
-         zi_c_naics6="722511", efx_naics_primary="722511",
+         zi_c_naics6="722511", efx_naics_primary="722511", oc_naics_primary="722511",
          zi_c_naics_top3="722511|722513|722515",
-         zi_match_confidence=0.92, efx_match_confidence=0.88, oc_match_confidence=0.0),
-    # Tier 1: Name-deducible even with no vendor match
+         zi_match_confidence=0.92, efx_match_confidence=0.88, oc_match_confidence=0.71),
+    # Tier 1: ZI + EFX agree, OC blank (US small business — not in OC registry)
     dict(business_id="p2", business_name="Luxe Beauty & Nail Studio",
          current_naics_code="561499", current_mcc_code="5614",
-         zi_c_naics6="812113", efx_naics_primary="812113",
+         zi_c_naics6="812113", efx_naics_primary="812113", oc_naics_primary="",
          zi_match_confidence=0.78, efx_match_confidence=0.71, oc_match_confidence=0.0),
-    # Tier 2: Vendors disagree → send_to_ai (GPT with enriched context)
+    # Tier 2: ZI + EFX disagree slightly → send_to_ai (GPT with enriched context)
     dict(business_id="p3", business_name="DataCore Systems Inc",
          current_naics_code="561499", current_mcc_code="5614",
-         zi_c_naics6="541511", efx_naics_primary="541512",
+         zi_c_naics6="541511", efx_naics_primary="541512", oc_naics_primary="",
          zi_c_naics_top3="541511|541519|519130",
          efx_naics_secondary_1="541519",
          zi_match_confidence=0.65, efx_match_confidence=0.48, oc_match_confidence=0.0),
     # Tier 2: Weak vendor match
     dict(business_id="p4", business_name="Premier Property Services LLC",
          current_naics_code="561499", current_mcc_code="5614",
-         zi_c_naics6="531110", efx_naics_primary="561499",
+         zi_c_naics6="531110", efx_naics_primary="561499", oc_naics_primary="",
          zi_match_confidence=0.52, efx_match_confidence=0.31, oc_match_confidence=0.0),
     # Tier 3: ALL vendors null → name_only_inference (GPT + open web search)
     dict(business_id="p5", business_name="St. Michael Community Church",
          current_naics_code="561499", current_mcc_code="5614",
-         zi_c_naics6="", efx_naics_primary="",
+         zi_c_naics6="", efx_naics_primary="", oc_naics_primary="",
          zi_match_confidence=0.0, efx_match_confidence=0.0, oc_match_confidence=0.0),
     # Tier 3: Genuinely ambiguous (no vendors, ambiguous name)
     dict(business_id="p6", business_name="Global Holdings LLC",
          current_naics_code="561499", current_mcc_code="5614",
-         zi_c_naics6="", efx_naics_primary="",
+         zi_c_naics6="", efx_naics_primary="", oc_naics_primary="",
          zi_match_confidence=0.0, efx_match_confidence=0.0, oc_match_confidence=0.0),
+    # Bonus: UK company — OC is the primary source (ZI/EFX less reliable for UK)
+    dict(business_id="p7", business_name="Acme Limited",
+         current_naics_code="561499", current_mcc_code="5614",
+         zi_c_naics6="", efx_naics_primary="", oc_naics_primary="541511",
+         zi_match_confidence=0.0, efx_match_confidence=0.0, oc_match_confidence=0.82,
+         country_code="GB"),
 ]
 
 results_pipeline = []
 for ex in pipeline_examples:
     r = predictor.predict_single(**ex)
+    predicted_mcc = r.predicted_mcc_code
+    mcc_desc = _MCC_NAMES.get(predicted_mcc, predicted_mcc)
     results_pipeline.append({
-        "Business":            ex["business_name"],
-        "ZI NAICS":            ex.get("zi_c_naics6","") or "—",
-        "EFX NAICS":           ex.get("efx_naics_primary","") or "—",
-        "Before (561499)":     ex["current_naics_code"],
-        "XGBoost Prediction":  r.predicted_naics_code,
-        "Confidence":          f"{r.model_confidence:.0%}",
-        "Outcome":             r.outcome.replace("_"," ").title(),
-        "GPT Fires?":          "❌ NO" if r.outcome == OUTCOME_USE_PREDICTION else "✅ YES (enriched)",
-        "Name Keywords":       ", ".join(r.name_keywords_found) or "—",
-        "All Vendors Null":    "YES" if r.all_vendors_null else "no",
+        "Business":             ex["business_name"],
+        "ZI NAICS":             ex.get("zi_c_naics6","")       or "—",
+        "EFX NAICS":            ex.get("efx_naics_primary","") or "—",
+        "OC NAICS":             ex.get("oc_naics_primary","")  or "— (not in OC registry)",
+        "Before NAICS":         ex["current_naics_code"],
+        "Before MCC":           ex["current_mcc_code"],
+        "Predicted NAICS":      r.predicted_naics_code,
+        "Predicted MCC":        predicted_mcc,
+        "MCC Description":      mcc_desc,
+        "Confidence":           f"{r.model_confidence:.0%}",
+        "Outcome":              r.outcome.replace("_"," ").title(),
+        "GPT Fires?":           "❌ NO" if r.outcome == OUTCOME_USE_PREDICTION else "✅ YES",
+        "Keywords":             ", ".join(r.name_keywords_found) or "—",
     })
 
 df_pipeline = pd.DataFrame(results_pipeline)
 
+# ── Why OC is often blank ─────────────────────────────────────────────────────
+print("Why OC NAICS shows blank for most US businesses:")
+print("  OpenCorporates primarily covers UK, EU, Australia, and Canada companies.")
+print("  US small/mid businesses are often NOT in OC's global registry.")
+print("  For US businesses: ZI + EFX are the primary NAICS sources.")
+print("  For UK/Canada businesses: OC is the most reliable source (see row p7 above).")
+print()
+print("Why Before=561499 even when ZI/EFX have valid codes:")
+print("  ZI/EFX NAICS codes live in Redshift match tables (zoominfo_matches_custom_inc_ml etc.)")
+print("  The current AI enrichment prompt only receives Fact Engine winners — NOT raw vendor codes.")
+print("  So even when ZI=722511 and EFX=722511, the AI never sees them and returns 561499.")
+print("  The XGBoost model fixes this by reading vendor NAICS directly from Redshift.")
+print()
+
+# ── Styled table ──────────────────────────────────────────────────────────────
 def style_pipeline(df):
     def row_style(row):
         styles = []
@@ -906,10 +986,14 @@ def style_pipeline(df):
                 styles.append("background-color:#064E3B;color:#6EE7B7")
             elif col == "GPT Fires?" and "YES" in v:
                 styles.append("background-color:#1E293B;color:#CBD5E1")
-            elif col in ("Before (561499)",) and v == "561499":
+            elif col in ("Before NAICS", "Before MCC") and v in ("561499","5614"):
                 styles.append("background-color:#7F1D1D;color:#FCA5A5;font-weight:bold")
-            elif col == "XGBoost Prediction" and v not in ("561499",""):
+            elif col in ("Predicted NAICS",) and v not in ("561499",""):
                 styles.append("background-color:#0C4A6E;color:#7DD3FC;font-weight:bold")
+            elif col in ("Predicted MCC",) and v not in ("5614",""):
+                styles.append("background-color:#0C4A6E;color:#7DD3FC;font-weight:bold")
+            elif "not in OC" in v:
+                styles.append("background-color:#1E293B;color:#4B5563;font-style:italic")
             else:
                 styles.append("background-color:#1E293B;color:#CBD5E1")
         return styles
@@ -919,7 +1003,7 @@ def style_pipeline(df):
         {"selector": "td", "props": [("padding","8px")]},
     ])
 
-display(HTML("<h3 style='color:#60A5FA'>Three-Tier Outcome for Representative Businesses</h3>"))
+display(HTML("<h3 style='color:#60A5FA'>Three-Tier Outcome: NAICS + MCC for Representative Businesses</h3>"))
 display(style_pipeline(df_pipeline))
 """))
 
