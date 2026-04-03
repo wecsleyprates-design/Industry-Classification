@@ -134,14 +134,26 @@ if result["connected"]:
     df_check = redshift_query(sql_total)
     print(f"  rds_warehouse_public.facts (naics_code rows): {df_check['n_rows'][0]:,}")
 
+    # The facts table stores JSON with key "value" (not "code"):
+    #   {"name":"naics_code", "value":"561499", "source.confidence":0.1, ...}
+    # JSON_EXTRACT_PATH_TEXT(value, 'code') returns NULL → wrong → count=0
+    # JSON_EXTRACT_PATH_TEXT(value, 'value') returns "561499" → correct
     sql_fallback = (
         "SELECT COUNT(*) AS n_fallback "
-        "FROM rds_warehouse_public.facts "   # trailing space is required
+        "FROM rds_warehouse_public.facts "
         "WHERE name = 'naics_code' "
-        "  AND JSON_EXTRACT_PATH_TEXT(value, 'code') = '561499'"
+        "  AND JSON_EXTRACT_PATH_TEXT(value, 'value') = '561499'"
     )
     df_fallback_check = redshift_query(sql_fallback)
-    print(f"  of which are fallback 561499: {df_fallback_check['n_fallback'][0]:,}")
+    n_fallback = df_fallback_check['n_fallback'][0]
+    n_null     = redshift_query(
+        "SELECT COUNT(*) AS n_null FROM rds_warehouse_public.facts "
+        "WHERE name = 'naics_code' "
+        "  AND JSON_EXTRACT_PATH_TEXT(value, 'value') IS NULL"
+    )['n_null'][0]
+    print(f"  of which are fallback 561499:  {n_fallback:,}  ({100*n_fallback/max(df_check['n_rows'][0],1):.1f}%)")
+    print(f"  of which have NULL naics value: {n_null:,}  ({100*n_null/max(df_check['n_rows'][0],1):.1f}%)")
+    print(f"  Total needing classification:   {n_fallback + n_null:,}  (these are the businesses our model targets)")
 """))
 
 # ── Cell 2: Current State (What the problem looks like) ───────────────────────
