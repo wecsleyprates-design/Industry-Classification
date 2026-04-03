@@ -693,6 +693,477 @@ cells.append(nbf.v4.new_markdown_cell("""## Section 10 — Summary & Recommendat
 4. **Add UK SIC:** For GB businesses, parse `oc_industry_code_uids` for `gb_sic-` entries and add as features.
 """))
 
+# ── Sections 11–15: XGBoost-first pipeline comparison ─────────────────────────
+
+cells.append(nbf.v4.new_markdown_cell("""## Section 11 — The New Three-Tier Pipeline
+
+The previous sections showed the XGBoost classifier working in isolation.
+This section shows how it integrates with AI enrichment into a **three-tier decision system**
+that replaces the current "AI always fires → 561499 if unsure" approach.
+
+### Before (current system)
+```
+All vendors → Fact Engine → if <3 sources → GPT always → 561499 if no evidence
+```
+
+### After (new system)
+```
+All vendors → Fact Engine → if <3 sources
+  → XGBoost classifier (vendor top-3, secondary codes, SIC cross-agreement, name keywords)
+    ├─ Confidence ≥ 0.55  → OUTCOME: use_prediction  → apply directly, SKIP GPT (save cost)
+    ├─ Confidence < 0.55, some vendor signals  → OUTCOME: send_to_ai
+    │     → GPT receives: vendor signals + XGBoost top-5 + "resolve the conflict"
+    └─ ALL vendors null   → OUTCOME: name_only_inference
+          → GPT with OPEN web search + "infer from name before returning 561499"
+```
+
+### Key improvements vs original AI enrichment
+| Aspect | Before | After |
+|---|---|---|
+| When does GPT fire? | Always (when <3 vendor sources) | Only when XGBoost confidence < 0.55 |
+| What context does GPT receive? | Business name + address only | Vendor NAICS breakdown + XGBoost top-5 + conflict analysis |
+| Zero-evidence businesses | GPT returns 561499 immediately | GPT searches web first; only 561499 if web finds nothing AND name is ambiguous |
+| Name-deducible businesses | May return 561499 despite clear name | XGBoost classifies from name keywords; GPT told "do NOT return 561499 for name-deducible" |
+| GPT cost per 561499 business | 1 GPT call always | 0 calls if XGBoost confident; 1 enriched call otherwise |
+"""))
+
+cells.append(nbf.v4.new_code_cell("""\
+from naics_mcc_classifier.predictor import get_predictor, OUTCOME_USE_PREDICTION, OUTCOME_SEND_TO_AI, OUTCOME_NAME_ONLY, OUTCOME_KEEP_EXISTING
+
+predictor = get_predictor()
+
+# ── Simulate the three outcome types with representative businesses ─────────
+pipeline_examples = [
+    # Tier 1: Vendor signals agree → use_prediction (GPT skipped)
+    dict(business_id="p1", business_name="Mario's Italian Kitchen",
+         current_naics_code="561499", current_mcc_code="5614",
+         zi_c_naics6="722511", efx_naics_primary="722511",
+         zi_c_naics_top3="722511|722513|722515",
+         zi_match_confidence=0.92, efx_match_confidence=0.88, oc_match_confidence=0.0),
+    # Tier 1: Name-deducible even with no vendor match
+    dict(business_id="p2", business_name="Luxe Beauty & Nail Studio",
+         current_naics_code="561499", current_mcc_code="5614",
+         zi_c_naics6="812113", efx_naics_primary="812113",
+         zi_match_confidence=0.78, efx_match_confidence=0.71, oc_match_confidence=0.0),
+    # Tier 2: Vendors disagree → send_to_ai (GPT with enriched context)
+    dict(business_id="p3", business_name="DataCore Systems Inc",
+         current_naics_code="561499", current_mcc_code="5614",
+         zi_c_naics6="541511", efx_naics_primary="541512",
+         zi_c_naics_top3="541511|541519|519130",
+         efx_naics_secondary_1="541519",
+         zi_match_confidence=0.65, efx_match_confidence=0.48, oc_match_confidence=0.0),
+    # Tier 2: Weak vendor match
+    dict(business_id="p4", business_name="Premier Property Services LLC",
+         current_naics_code="561499", current_mcc_code="5614",
+         zi_c_naics6="531110", efx_naics_primary="561499",
+         zi_match_confidence=0.52, efx_match_confidence=0.31, oc_match_confidence=0.0),
+    # Tier 3: ALL vendors null → name_only_inference (GPT + open web search)
+    dict(business_id="p5", business_name="St. Michael Community Church",
+         current_naics_code="561499", current_mcc_code="5614",
+         zi_c_naics6="", efx_naics_primary="",
+         zi_match_confidence=0.0, efx_match_confidence=0.0, oc_match_confidence=0.0),
+    # Tier 3: Genuinely ambiguous (no vendors, ambiguous name)
+    dict(business_id="p6", business_name="Global Holdings LLC",
+         current_naics_code="561499", current_mcc_code="5614",
+         zi_c_naics6="", efx_naics_primary="",
+         zi_match_confidence=0.0, efx_match_confidence=0.0, oc_match_confidence=0.0),
+]
+
+results_pipeline = []
+for ex in pipeline_examples:
+    r = predictor.predict_single(**ex)
+    results_pipeline.append({
+        "Business":            ex["business_name"],
+        "ZI NAICS":            ex.get("zi_c_naics6","") or "—",
+        "EFX NAICS":           ex.get("efx_naics_primary","") or "—",
+        "Before (561499)":     ex["current_naics_code"],
+        "XGBoost Prediction":  r.predicted_naics_code,
+        "Confidence":          f"{r.model_confidence:.0%}",
+        "Outcome":             r.outcome.replace("_"," ").title(),
+        "GPT Fires?":          "❌ NO" if r.outcome == OUTCOME_USE_PREDICTION else "✅ YES (enriched)",
+        "Name Keywords":       ", ".join(r.name_keywords_found) or "—",
+        "All Vendors Null":    "YES" if r.all_vendors_null else "no",
+    })
+
+df_pipeline = pd.DataFrame(results_pipeline)
+
+def style_pipeline(df):
+    def row_style(row):
+        styles = []
+        for col in df.columns:
+            v = str(row[col])
+            if col == "Outcome" and "Use Prediction" in v:
+                styles.append("background-color:#064E3B;color:#6EE7B7;font-weight:bold")
+            elif col == "Outcome" and "Send To Ai" in v:
+                styles.append("background-color:#1E3A5F;color:#93C5FD;font-weight:bold")
+            elif col == "Outcome" and "Name Only" in v:
+                styles.append("background-color:#78350F;color:#FDE68A;font-weight:bold")
+            elif col == "GPT Fires?" and "NO" in v:
+                styles.append("background-color:#064E3B;color:#6EE7B7")
+            elif col == "GPT Fires?" and "YES" in v:
+                styles.append("background-color:#1E293B;color:#CBD5E1")
+            elif col in ("Before (561499)",) and v == "561499":
+                styles.append("background-color:#7F1D1D;color:#FCA5A5;font-weight:bold")
+            elif col == "XGBoost Prediction" and v not in ("561499",""):
+                styles.append("background-color:#0C4A6E;color:#7DD3FC;font-weight:bold")
+            else:
+                styles.append("background-color:#1E293B;color:#CBD5E1")
+        return styles
+    return df.style.apply(row_style, axis=1).set_table_styles([
+        {"selector": "th", "props": [("background-color","#1E3A5F"),("color","#93C5FD"),
+                                      ("font-weight","bold"),("padding","8px")]},
+        {"selector": "td", "props": [("padding","8px")]},
+    ])
+
+display(HTML("<h3 style='color:#60A5FA'>Three-Tier Outcome for Representative Businesses</h3>"))
+display(style_pipeline(df_pipeline))
+"""))
+
+# ── Section 12: Outcome distribution on full fallback set ─────────────────────
+cells.append(nbf.v4.new_markdown_cell("""## Section 12 — Outcome Distribution on Full Fallback Set
+
+Running the predictor on all businesses currently stuck on 561499 to see how they split
+across the three tiers. This tells us how much GPT cost the new system saves.
+"""))
+
+cells.append(nbf.v4.new_code_cell("""\
+# Run predictor on the entire fallback_df loaded in Section 2
+# (uses the real Redshift data when USE_SYNTHETIC=False)
+
+outcomes = []
+for _, row in fallback_df.iterrows():
+    try:
+        r = predictor.predict_single(
+            business_id       = str(row.get("business_id", "")),
+            business_name     = str(row.get("business_name", row.get("zi_c_name", ""))),
+            current_naics_code= str(row.get("current_naics_code", "561499")),
+            current_mcc_code  = str(row.get("current_mcc_code",  "5614")),
+            zi_c_naics6       = str(row.get("zi_c_naics6",       "") or ""),
+            zi_c_naics_top3   = str(row.get("zi_c_naics_top3",   "") or ""),
+            zi_c_sic4         = str(row.get("zi_c_sic4",         "") or ""),
+            zi_c_sic_top3     = str(row.get("zi_c_sic_top3",     "") or ""),
+            zi_naics_confidence   = float(row.get("zi_c_naics_confidence_score") or 0),
+            zi_match_confidence   = float(row.get("zi_match_confidence")         or 0),
+            efx_naics_primary     = str(row.get("efx_naics_primary",    "") or ""),
+            efx_naics_secondary_1 = str(row.get("efx_naics_secondary_1","") or ""),
+            efx_naics_secondary_2 = str(row.get("efx_naics_secondary_2","") or ""),
+            efx_sic_primary       = str(row.get("efx_sic_primary",      "") or ""),
+            efx_match_confidence  = float(row.get("efx_match_confidence") or 0),
+            oc_naics_primary      = str(row.get("oc_naics_primary",      "") or ""),
+            oc_match_confidence   = float(row.get("oc_match_confidence")  or 0),
+            state      = str(row.get("state", row.get("zi_state", "MISSING")) or "MISSING"),
+            has_website= bool(row.get("ai_has_website", False)),
+            ai_enrichment_confidence = str(row.get("ai_enrichment_confidence","") or ""),
+        )
+        outcomes.append({
+            "outcome":           r.outcome,
+            "predicted_naics":   r.predicted_naics_code,
+            "model_confidence":  r.model_confidence,
+            "all_vendors_null":  r.all_vendors_null,
+            "name_keywords":     ", ".join(r.name_keywords_found) if r.name_keywords_found else "",
+        })
+    except Exception as e:
+        outcomes.append({"outcome": "error", "predicted_naics": "561499",
+                         "model_confidence": 0.0, "all_vendors_null": True, "name_keywords": ""})
+
+outcomes_df = pd.DataFrame(outcomes)
+
+# ── Summary statistics ─────────────────────────────────────────────────────────
+n_total   = len(outcomes_df)
+n_use     = (outcomes_df["outcome"] == OUTCOME_USE_PREDICTION).sum()
+n_send_ai = (outcomes_df["outcome"] == OUTCOME_SEND_TO_AI).sum()
+n_name    = (outcomes_df["outcome"] == OUTCOME_NAME_ONLY).sum()
+n_error   = (outcomes_df["outcome"] == "error").sum()
+
+gpt_calls_before = n_total
+gpt_calls_after  = n_send_ai + n_name   # only these tiers fire GPT
+gpt_saved        = n_use
+gpt_savings_pct  = 100 * gpt_saved / max(n_total, 1)
+
+print("=" * 65)
+print(f"OUTCOME DISTRIBUTION (n={n_total:,} fallback businesses)")
+print("=" * 65)
+print(f"  use_prediction   (XGBoost confident → GPT SKIPPED): {n_use:>6,}  ({100*n_use/n_total:.1f}%)")
+print(f"  send_to_ai       (vendors conflict  → enriched GPT): {n_send_ai:>6,}  ({100*n_send_ai/n_total:.1f}%)")
+print(f"  name_only        (ALL null          → GPT+web search): {n_name:>6,}  ({100*n_name/n_total:.1f}%)")
+if n_error: print(f"  errors:                                            {n_error:>6,}")
+print()
+print(f"GPT calls BEFORE new system:  {gpt_calls_before:,}  (every fallback business)")
+print(f"GPT calls AFTER  new system:  {gpt_calls_after:,}   (only uncertain cases)")
+print(f"GPT calls SAVED:              {gpt_saved:,}  ({gpt_savings_pct:.1f}% reduction)")
+
+# ── Confidence distribution for use_prediction tier ───────────────────────────
+fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+fig.suptitle("Outcome Distribution on Fallback (561499) Businesses", color="#E2E8F0", fontsize=14, fontweight="bold")
+
+# 1. Outcome pie
+ax = axes[0]
+sizes   = [n_use, n_send_ai, n_name]
+labels  = [
+    f"XGBoost decides\\n(GPT skipped)\\n{n_use:,} ({100*n_use/n_total:.0f}%)",
+    f"Enriched GPT\\n(vendor conflict)\\n{n_send_ai:,} ({100*n_send_ai/n_total:.0f}%)",
+    f"GPT + web search\\n(all vendors null)\\n{n_name:,} ({100*n_name/n_total:.0f}%)",
+]
+colours = [GREEN, BLUE, AMBER]
+wedges, texts = ax.pie(sizes, colors=colours, startangle=90,
+                        textprops={"color":"white","fontsize":8},
+                        wedgeprops={"width":0.6})
+ax.set_title("Outcome Tier Split", color="#E2E8F0")
+ax.legend(labels, loc="lower center", bbox_to_anchor=(0.5,-0.25),
+          facecolor="#1E293B", labelcolor="white", fontsize=7)
+
+# 2. Confidence histogram for use_prediction tier
+ax = axes[1]
+conf_vals = outcomes_df[outcomes_df["outcome"]==OUTCOME_USE_PREDICTION]["model_confidence"]
+ax.hist(conf_vals, bins=20, color=GREEN, alpha=0.85)
+ax.axvline(x=conf_vals.mean(), color=AMBER, linestyle="--", label=f"Mean {conf_vals.mean():.2f}")
+ax.set_xlabel("Model Confidence"); ax.set_ylabel("Business Count")
+ax.set_title("Confidence Distribution\\n(use_prediction tier)", color="#E2E8F0")
+ax.legend(facecolor="#1E293B", labelcolor="white")
+
+# 3. Top predicted NAICS codes for use_prediction
+ax = axes[2]
+top_predicted = (
+    outcomes_df[outcomes_df["outcome"]==OUTCOME_USE_PREDICTION]["predicted_naics"]
+    .value_counts()
+    .head(10)
+)
+if len(top_predicted):
+    ax.barh(top_predicted.index, top_predicted.values, color=PURPLE, alpha=0.85)
+    ax.invert_yaxis()
+    ax.set_xlabel("Count")
+    ax.set_title("Top Predicted NAICS\\n(for use_prediction businesses)", color="#E2E8F0")
+
+plt.tight_layout()
+plt.show()
+"""))
+
+# ── Section 13: Name keyword analysis ─────────────────────────────────────────
+cells.append(nbf.v4.new_markdown_cell("""## Section 13 — Name Keyword Analysis
+
+Which fraction of 561499 businesses can be classified from their name alone (zero vendor match)?
+These are the businesses the current AI returns 561499 for, even though their name clearly implies an industry.
+"""))
+
+cells.append(nbf.v4.new_code_cell("""\
+# Businesses where all vendors are null but name keywords were found
+name_only_df = outcomes_df[
+    (outcomes_df["outcome"] == OUTCOME_NAME_ONLY) &
+    (outcomes_df["name_keywords"] != "")
+].copy()
+
+vendor_null_df = outcomes_df[outcomes_df["all_vendors_null"] == True]
+n_vendor_null   = len(vendor_null_df)
+n_name_deducible= len(name_only_df)
+
+print(f"Businesses with ALL vendor signals null:           {n_vendor_null:,}")
+print(f"  → name keywords detected (deducible from name): {n_name_deducible:,}  "
+      f"({100*n_name_deducible/max(n_vendor_null,1):.1f}%)")
+print(f"  → genuinely ambiguous (no keywords either):     {n_vendor_null - n_name_deducible:,}  "
+      f"({100*(n_vendor_null-n_name_deducible)/max(n_vendor_null,1):.1f}%)")
+print()
+print("Keyword categories detected in name-only businesses:")
+if len(name_only_df):
+    from collections import Counter
+    all_kws = []
+    for kw_str in name_only_df["name_keywords"].dropna():
+        all_kws.extend([k.strip() for k in kw_str.split(",") if k.strip()])
+    kw_counts = Counter(all_kws).most_common(12)
+    for kw, cnt in kw_counts:
+        bar = "█" * (cnt * 30 // max(c for _,c in kw_counts))
+        print(f"  {kw:<20} {bar} {cnt:,}")
+
+# Show example: name-only businesses that the new system can now classify
+if len(name_only_df):
+    fig, ax = plt.subplots(figsize=(10, 4))
+    if kw_counts:
+        kw_names = [k for k,_ in kw_counts]
+        kw_vals  = [v for _,v in kw_counts]
+        ax.barh(kw_names, kw_vals, color=AMBER, alpha=0.85)
+        ax.invert_yaxis()
+        ax.set_xlabel("Business Count")
+        ax.set_title(
+            f"Name-Deducible Industries (ALL vendors null, {n_name_deducible:,} businesses)\\n"
+            f"These currently all get 561499 — new system identifies them from name keywords",
+            color="#E2E8F0"
+        )
+    plt.tight_layout()
+    plt.show()
+"""))
+
+# ── Section 14: Full before/after comparison ──────────────────────────────────
+cells.append(nbf.v4.new_markdown_cell("""## Section 14 — Full Before vs After: The Complete Picture
+
+This section combines all three tiers to show the complete improvement over the current system.
+
+| State | What the current system does | What the new system does |
+|---|---|---|
+| ZI + EFX agree on NAICS, high confidence | 561499 (AI ignores vendor data in prompt) | **use_prediction**: XGBoost uses vendor signals → real code, GPT skipped |
+| Vendors disagree | 561499 (AI has no breakdown of the conflict) | **send_to_ai**: GPT sees each vendor's code + confidence, resolves conflict |
+| All vendors null, name is clear (nail salon) | 561499 (AI told to give up with no evidence) | **name_only**: GPT searches web + told "do NOT return 561499 for clear names" |
+| All vendors null, name is genuinely ambiguous | 561499 ✓ (correct) | **name_only**: GPT searches web; 561499 only if truly nothing found |
+"""))
+
+cells.append(nbf.v4.new_code_cell("""\
+# Combined before/after summary table
+tier_labels = {
+    OUTCOME_USE_PREDICTION: "Tier 1: XGBoost decides (GPT skipped)",
+    OUTCOME_SEND_TO_AI:     "Tier 2: Enriched GPT (vendor conflict)",
+    OUTCOME_NAME_ONLY:      "Tier 3: GPT + web search (all null)",
+}
+
+summary_rows = []
+for outcome_code, label in tier_labels.items():
+    tier_df = outcomes_df[outcomes_df["outcome"] == outcome_code]
+    n = len(tier_df)
+    if n == 0:
+        continue
+    avg_conf   = tier_df["model_confidence"].mean()
+    still_561  = (tier_df["predicted_naics"] == "561499").sum()
+    changed    = n - still_561
+    gpt_fires  = outcome_code != OUTCOME_USE_PREDICTION
+    summary_rows.append({
+        "Tier":           label,
+        "# Businesses":   f"{n:,}  ({100*n/len(outcomes_df):.0f}%)",
+        "Avg Confidence": f"{avg_conf:.2f}",
+        "Real Code Predicted": f"{changed:,}  ({100*changed/max(n,1):.0f}%)",
+        "GPT Fires?":     "❌ No (saved)" if not gpt_fires else "✅ Yes (enriched prompt)",
+    })
+
+# Overall
+n_total_classified = sum(1 for r in outcomes_df.itertuples()
+                          if r.predicted_naics != "561499" and r.predicted_naics != "")
+print("=" * 70)
+print("FULL BEFORE vs AFTER COMPARISON")
+print("=" * 70)
+print(f"Total businesses that currently have 561499:      {n_total:,}")
+print(f"Businesses NEW system classifies with real NAICS: {n_total_classified:,}  "
+      f"({100*n_total_classified/max(n_total,1):.1f}%)")
+print(f"Businesses remaining on 561499 (genuinely hard):  {n_total-n_total_classified:,}  "
+      f"({100*(n_total-n_total_classified)/max(n_total,1):.1f}%)")
+print()
+print(f"GPT calls before: {n_total:,}  (every fallback business, blind prompt)")
+print(f"GPT calls after:  {n_send_ai + n_name:,}  (only uncertain cases, enriched prompt)")
+print(f"GPT calls saved:  {n_use:,}  ({gpt_savings_pct:.1f}% reduction in GPT cost)")
+
+if summary_rows:
+    df_summary = pd.DataFrame(summary_rows)
+    display(HTML("<br>"))
+    display(df_summary.style.set_table_styles([
+        {"selector": "th", "props": [("background-color","#1E3A5F"),("color","#93C5FD"),
+                                      ("font-weight","bold"),("padding","10px")]},
+        {"selector": "td", "props": [("padding","10px"),("background-color","#1E293B"),
+                                      ("color","#CBD5E1")]},
+    ]))
+
+# Final bar chart: before vs after
+fig, ax = plt.subplots(figsize=(12, 5))
+categories = [
+    "Businesses\\ncurrently\\non 561499",
+    "XGBoost\\nclassifies\\n(GPT skipped)",
+    "Enriched GPT\\n(conflict\\nresolution)",
+    "GPT + web\\nsearch\\n(all null)",
+    "Remaining\\non 561499\\n(genuinely hard)",
+]
+values = [
+    n_total,
+    n_use,
+    n_send_ai,
+    n_name,
+    n_total - n_total_classified,
+]
+colours = [RED, GREEN, BLUE, AMBER, "#4B5563"]
+bars = ax.bar(categories, values, color=colours, width=0.6)
+for bar, val in zip(bars, values):
+    ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + n_total*0.005,
+            f"{val:,}\\n({100*val/n_total:.0f}%)",
+            ha="center", color="white", fontsize=9, fontweight="bold")
+ax.set_ylabel("Number of Businesses")
+ax.set_title("Before vs After: What Happens to Every 561499 Business", color="#E2E8F0", fontsize=13)
+plt.tight_layout()
+plt.show()
+"""))
+
+# ── Section 15: AI context quality ────────────────────────────────────────────
+cells.append(nbf.v4.new_markdown_cell("""## Section 15 — Quality of AI Enrichment Context
+
+When GPT does fire (Tier 2 and Tier 3), it now receives a structured context block
+showing the vendor signals and XGBoost analysis. This section shows what that context looks like
+for real businesses, so you can assess the quality of information GPT is now working with.
+"""))
+
+cells.append(nbf.v4.new_code_cell("""\
+# Show the AI enrichment context for one Tier 2 and one Tier 3 example
+examples_for_context = [
+    dict(business_id="demo-1", business_name="DataCore Systems Inc",
+         current_naics_code="561499", current_mcc_code="5614",
+         zi_c_naics6="541511", efx_naics_primary="541512",
+         zi_c_naics_top3="541511|541519|519130",
+         efx_naics_secondary_1="541519",
+         zi_match_confidence=0.65, efx_match_confidence=0.48, oc_match_confidence=0.0,
+         has_website=True),
+    dict(business_id="demo-2", business_name="St. Michael Community Church",
+         current_naics_code="561499", current_mcc_code="5614",
+         zi_c_naics6="", efx_naics_primary="",
+         zi_match_confidence=0.0, efx_match_confidence=0.0, oc_match_confidence=0.0),
+    dict(business_id="demo-3", business_name="Premier Business Solutions Corp",
+         current_naics_code="561499", current_mcc_code="5614",
+         zi_c_naics6="", efx_naics_primary="",
+         zi_match_confidence=0.0, efx_match_confidence=0.0, oc_match_confidence=0.0),
+]
+
+for ex in examples_for_context:
+    r = predictor.predict_single(**ex)
+    print(f"\\n{'='*70}")
+    print(f"Business: {ex['business_name']}")
+    print(f"Outcome:  {r.outcome}  |  XGBoost prediction: {r.predicted_naics_code}  "
+          f"({r.model_confidence:.0%})")
+    print(f"All vendors null: {r.all_vendors_null}  |  Keywords: {r.name_keywords_found}")
+    print(f"{'─'*70}")
+    print("AI ENRICHMENT CONTEXT (injected into GPT system prompt):")
+    print(r.ai_enrichment_context)
+"""))
+
+# ── Section 16: Updated summary ───────────────────────────────────────────────
+cells.append(nbf.v4.new_markdown_cell("""## Section 16 — Full System Summary
+
+### The complete picture
+
+| Component | What it does |
+|---|---|
+| `data_loader.py` | One Redshift CTE query: facts + Pipeline B + entity-match confidences + vendor NAICS from ZI/EFX/OC |
+| `feature_engineering.py` | 63 features: vendor NAICS primary, **ZI top-3**, **EFX secondary 1-4**, SIC cross-agreement, name keywords |
+| `model.py` | `NAICSClassifier` + `MCCClassifier` — XGBoost `multi:softprob` |
+| `predictor.py` | `NAICSPredictor.predict_single()` — three-tier decision, builds vendor signal list, generates AI context |
+| `api.py` | FastAPI `POST /predict` — called by TypeScript before GPT, returns outcome + ai_enrichment_context |
+| `pipeline.py` | Training orchestrator |
+| `aiNaicsEnrichment.ts` | Updated: calls Python API first, applies if confident, enriches GPT prompt otherwise |
+
+### The three tiers in production
+
+**Tier 1 — XGBoost decides (GPT skipped, ~X% of cases):**
+- Vendor signals agree and confidence ≥ 0.55
+- OR name clearly encodes the industry (nail salon, restaurant, church, etc.) even with zero vendor matches
+- Result: real NAICS code applied, zero GPT cost
+
+**Tier 2 — Enriched GPT (vendor conflict, ~Y% of cases):**
+- Some vendor signals exist but they disagree or confidence is low
+- GPT now receives: every vendor's code + confidence + XGBoost top-5 + "resolve the conflict"
+- GPT acts as a referee with full information rather than a blind last resort
+
+**Tier 3 — GPT + open web search (all vendors null, ~Z% of cases):**
+- No vendor has any match for this business
+- GPT enabled to search the web freely (not restricted to known domain)
+- GPT explicitly told: classify from name keywords if clear; only return 561499 if truly unclassifiable
+
+### What 561499 now means
+
+Before: 561499 = "AI ran out of options" (vendor signals were available but not shown to AI)
+After:  561499 = "Genuinely unclassifiable" (AI searched the web, checked name keywords, exhausted all signals)
+
+This makes the 561499 count meaningful as a true data quality metric.
+"""))
+
 nb.cells = cells
 
 # Write notebook — nbf.write() writes valid .ipynb directly (do NOT use json.dump around it)
