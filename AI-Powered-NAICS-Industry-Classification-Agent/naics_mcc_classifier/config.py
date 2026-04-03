@@ -51,7 +51,10 @@ TABLES = dict(
     # matching — it does NOT contain NAICS codes.
     # smb_zi_oc_efx_ver_combined.sql pulls zi_c_naics6 directly from comp_standard_global.
     zi_source       = "zoominfo.comp_standard_global",
-    efx_source      = "warehouse.equifax_us_standardized",
+    # equifax_us_latest has NAICS/SIC columns (efx_primnaicscode, efx_secnaics1-4, efx_primsic).
+    # equifax_us_standardized only has normalized name/address for Levenshtein matching — no NAICS.
+    # The warehouse pipeline (smb_zi_oc_efx_ver_combined.sql line 587) uses equifax_us_latest.
+    efx_source      = "warehouse.equifax_us_latest",
     oc_source       = "datascience.open_corporates_standard_ml_2",
     liberty_1       = "liberty.einmst_20260218",
     liberty_2       = "liberty.einmst_15_5mn",

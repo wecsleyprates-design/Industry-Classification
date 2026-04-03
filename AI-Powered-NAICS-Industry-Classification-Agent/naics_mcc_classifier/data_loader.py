@@ -445,21 +445,29 @@ def load_equifax_signals() -> pl.DataFrame:
       efx_employee_count     — firmographic: employees
       efx_annual_sales       — firmographic: annual revenue
     """
+    # warehouse.equifax_us_latest column names (verified from customer_table.sql and
+    # smb_zi_oc_efx_ver_combined.sql):
+    #   efx_state       — US state (not efx_eng_state)
+    #   efx_corpempcnt  — employee count string (not efx_employees)
+    #   No efx_annual_sales column exists — using 0 as placeholder
     schema, table = TABLES["efx_source"].split(".")
     sql = f"""
     SELECT
-        CAST(efx_id AS VARCHAR)                             AS efx_id,
+        CAST(efx_id AS VARCHAR)                                                   AS efx_id,
         efx_name,
-        COALESCE(UPPER(TRIM(efx_eng_state)), 'MISSING')    AS state,
-        CAST(efx_primnaicscode AS VARCHAR)                  AS efx_naics_primary,
-        CAST(COALESCE(efx_secnaics1, 0) AS VARCHAR)         AS efx_naics_secondary_1,
-        CAST(COALESCE(efx_secnaics2, 0) AS VARCHAR)         AS efx_naics_secondary_2,
-        CAST(COALESCE(efx_secnaics3, 0) AS VARCHAR)         AS efx_naics_secondary_3,
-        CAST(COALESCE(efx_secnaics4, 0) AS VARCHAR)         AS efx_naics_secondary_4,
-        CAST(efx_primsic AS VARCHAR)                        AS efx_sic_primary,
-        efx_primnaicsdesc                                   AS efx_naics_primary_desc,
-        COALESCE(efx_employees, 0)                          AS efx_employee_count,
-        COALESCE(efx_annual_sales, 0)                       AS efx_annual_sales
+        COALESCE(UPPER(TRIM(efx_state)), 'MISSING')                               AS state,
+        CAST(efx_primnaicscode AS VARCHAR)                                         AS efx_naics_primary,
+        CAST(COALESCE(efx_secnaics1, 0) AS VARCHAR)                               AS efx_naics_secondary_1,
+        CAST(COALESCE(efx_secnaics2, 0) AS VARCHAR)                               AS efx_naics_secondary_2,
+        CAST(COALESCE(efx_secnaics3, 0) AS VARCHAR)                               AS efx_naics_secondary_3,
+        CAST(COALESCE(efx_secnaics4, 0) AS VARCHAR)                               AS efx_naics_secondary_4,
+        CAST(efx_primsic AS VARCHAR)                                               AS efx_sic_primary,
+        efx_primnaicsdesc                                                          AS efx_naics_primary_desc,
+        COALESCE(
+            CAST(NULLIF(REGEXP_REPLACE(efx_corpempcnt, '[^0-9]', ''), '') AS INTEGER),
+            0
+        )                                                                          AS efx_employee_count,
+        0                                                                          AS efx_annual_sales
     FROM "{schema}"."{table}"
     WHERE efx_primnaicscode IS NOT NULL
       AND efx_primnaicscode != 0
@@ -833,20 +841,30 @@ def build_training_dataset(
                                            COALESCE(similarity_index,0) DESC) AS rn
         FROM {t_efx_match}
     ),
+    -- Actual column names in warehouse.equifax_us_latest (verified from customer_table.sql):
+    --   efx_primnaicscode  — primary 6-digit NAICS
+    --   efx_secnaics1-4    — secondary NAICS codes
+    --   efx_primsic        — primary 4-digit SIC
+    --   efx_secsic1-4      — secondary SIC codes
+    --   efx_corpempcnt     — employee count (string, needs REGEXP_REPLACE)
+    --   efx_state          — US state code (not efx_eng_state)
     efx_naics_cte AS (
         SELECT
-            LOWER(CAST(b.business_id AS VARCHAR))            AS business_id,
-            CAST(e.efx_primnaicscode AS VARCHAR)             AS efx_naics_primary,
-            CAST(COALESCE(e.efx_secnaics1, 0) AS VARCHAR)   AS efx_naics_secondary_1,
-            CAST(COALESCE(e.efx_secnaics2, 0) AS VARCHAR)   AS efx_naics_secondary_2,
-            CAST(COALESCE(e.efx_secnaics3, 0) AS VARCHAR)   AS efx_naics_secondary_3,
-            CAST(COALESCE(e.efx_secnaics4, 0) AS VARCHAR)   AS efx_naics_secondary_4,
-            CAST(e.efx_primsic AS VARCHAR)                   AS efx_sic_primary,
-            CAST(COALESCE(e.efx_secsic1, 0) AS VARCHAR)     AS efx_sic_secondary_1,
-            CAST(COALESCE(e.efx_secsic2, 0) AS VARCHAR)     AS efx_sic_secondary_2,
-            COALESCE(e.efx_employees, 0)                     AS efx_employee_count,
-            COALESCE(e.efx_annual_sales, 0)                  AS efx_annual_sales,
-            COALESCE(UPPER(TRIM(e.efx_eng_state)), 'MISSING') AS efx_state
+            LOWER(CAST(b.business_id AS VARCHAR))                                    AS business_id,
+            CAST(e.efx_primnaicscode AS VARCHAR)                                     AS efx_naics_primary,
+            CAST(COALESCE(e.efx_secnaics1, 0) AS VARCHAR)                           AS efx_naics_secondary_1,
+            CAST(COALESCE(e.efx_secnaics2, 0) AS VARCHAR)                           AS efx_naics_secondary_2,
+            CAST(COALESCE(e.efx_secnaics3, 0) AS VARCHAR)                           AS efx_naics_secondary_3,
+            CAST(COALESCE(e.efx_secnaics4, 0) AS VARCHAR)                           AS efx_naics_secondary_4,
+            CAST(e.efx_primsic AS VARCHAR)                                           AS efx_sic_primary,
+            CAST(COALESCE(e.efx_secsic1, 0) AS VARCHAR)                             AS efx_sic_secondary_1,
+            CAST(COALESCE(e.efx_secsic2, 0) AS VARCHAR)                             AS efx_sic_secondary_2,
+            COALESCE(
+                CAST(NULLIF(REGEXP_REPLACE(e.efx_corpempcnt, '[^0-9]', ''), '') AS INTEGER),
+                0
+            )                                                                        AS efx_employee_count,
+            0                                                                        AS efx_annual_sales,
+            COALESCE(UPPER(TRIM(e.efx_state)), 'MISSING')                           AS efx_state
         FROM efx_best_cte b
         JOIN {t_efx_src} e ON e.efx_id = b.efx_id
         WHERE b.rn = 1
