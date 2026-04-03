@@ -622,10 +622,9 @@ cells.append(nbf.v4.new_markdown_cell("""## Section 10 — Summary & Recommendat
 
 nb.cells = cells
 
-# Write notebook
+# Write notebook — nbf.write() writes valid .ipynb directly (do NOT use json.dump around it)
 from pathlib import Path as _Path
-import json as _json
 nb_path = _Path(__file__).parent / "NAICS_MCC_Classifier_Comparison.ipynb"
-with open(nb_path, "w") as f:
-    _json.dump(nbf.writes(nb, version=4), f)
+with open(nb_path, "w", encoding="utf-8") as f:
+    nbf.write(nb, f, version=4)
 print(f"Notebook written to: {nb_path}")
