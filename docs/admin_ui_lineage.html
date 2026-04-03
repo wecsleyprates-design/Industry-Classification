@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Deck 6 — Worth AI Admin Portal: Complete Data Lineage</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.5.0/reveal.min.css"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.5.0/theme/black.min.css"/>
+<style>
+:root{--c-purple:#A78BFA;--c-blue:#60A5FA;--c-green:#34D399;--c-amber:#FBBF24;--c-red:#F87171;--c-slate:#94A3B8;--c-teal:#2DD4BF;}
+.reveal{font-size:22px;font-family:'Segoe UI',system-ui,sans-serif!important;}
+.reveal h1,.reveal h2,.reveal h3{font-family:'Segoe UI',system-ui,sans-serif!important;text-transform:none!important;letter-spacing:0!important;}
+.reveal h1{font-size:1.6em!important;color:var(--c-purple)!important;font-weight:900!important;}
+.reveal h2{font-size:1.15em!important;color:var(--c-blue)!important;font-weight:800!important;margin-bottom:0.5em!important;}
+.reveal h3{font-size:0.95em!important;color:var(--c-teal)!important;font-weight:700!important;}
+.reveal p,.reveal li,.reveal td,.reveal th{font-size:0.72em!important;color:#E2E8F0!important;line-height:1.55!important;}
+.reveal strong{color:white!important;}
+.reveal code{background:rgba(255,255,255,.12)!important;padding:1px 6px!important;border-radius:4px!important;font-size:0.88em!important;color:#7DD3FC!important;}
+.reveal pre{background:#0F172A!important;border-radius:8px!important;padding:12px 16px!important;font-size:0.62em!important;border:1px solid rgba(255,255,255,.1)!important;width:100%!important;max-height:320px!important;overflow-y:auto!important;}
+.reveal pre code{background:transparent!important;color:#BAE6FD!important;padding:0!important;}
+.reveal table{border-collapse:collapse!important;width:100%!important;font-size:0.64em!important;}
+.reveal table th{background:#1E3A5F!important;color:#93C5FD!important;font-weight:700!important;padding:7px 10px!important;text-align:left!important;border-bottom:2px solid #3B82F6!important;}
+.reveal table td{padding:6px 10px!important;border-bottom:1px solid rgba(255,255,255,.08)!important;color:#E2E8F0!important;vertical-align:top!important;}
+.reveal table tr:nth-child(even) td{background:rgba(255,255,255,.04)!important;}
+.tag{display:inline-block;background:rgba(99,102,241,.25);border:1px solid rgba(99,102,241,.5);color:#C4B5FD;border-radius:5px;padding:2px 8px;font-size:0.62em;margin:2px;font-weight:600;}
+.tag-green{background:rgba(52,211,153,.15);border-color:rgba(52,211,153,.4);color:#6EE7B7;}
+.tag-red{background:rgba(248,113,113,.15);border-color:rgba(248,113,113,.4);color:#FCA5A5;}
+.tag-amber{background:rgba(251,191,36,.15);border-color:rgba(251,191,36,.4);color:#FDE68A;}
+.tag-blue{background:rgba(96,165,250,.15);border-color:rgba(96,165,250,.4);color:#93C5FD;}
+.callout{background:rgba(59,130,246,.12);border-left:4px solid #3B82F6;border-radius:6px;padding:12px 16px;margin:10px 0;font-size:0.68em;color:#BFDBFE!important;}
+.callout-green{background:rgba(52,211,153,.1);border-color:#34D399;color:#A7F3D0!important;}
+.callout-red{background:rgba(248,113,113,.1);border-color:#F87171;color:#FECACA!important;}
+.callout-amber{background:rgba(251,191,36,.1);border-color:#FBBF24;color:#FDE68A!important;}
+.lineage{background:#0F172A;border-left:3px solid #2DD4BF;border-radius:6px;padding:10px 14px;font-family:'Courier New',monospace;font-size:0.58em;color:#BAE6FD!important;white-space:pre-wrap;line-height:1.6;max-height:280px;overflow-y:auto;}
+.pill{display:inline-block;padding:3px 10px;border-radius:12px;font-size:0.6em;font-weight:700;margin:1px;}
+.pill-green{background:rgba(52,211,153,.2);color:#34D399;border:1px solid #34D399;}
+.pill-red{background:rgba(248,113,113,.2);color:#F87171;border:1px solid #F87171;}
+.pill-amber{background:rgba(251,191,36,.2);color:#FBBF24;border:1px solid #FBBF24;}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;}
+.box{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:12px;}
+.box-title{font-size:0.65em;font-weight:700;color:var(--c-blue);margin-bottom:6px;}
+.box-body{font-size:0.6em;color:#CBD5E1;line-height:1.5;}
+.num{font-size:4em;font-weight:900;color:rgba(255,255,255,.06);position:absolute;top:10px;right:20px;}
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- ─── SLIDE 1: TITLE ─── -->
+<section>
+  <div class="num">6</div>
+  <h1>Worth AI Admin Portal</h1>
+  <h2 style="color:var(--c-teal)!important">Complete Data Lineage Reference</h2>
+  <p style="margin-top:1em;color:#94A3B8!important;">Every field · Every badge · Every score · Every table</p>
+  <div style="margin-top:1.5em;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
+    <span class="tag tag-blue">admin.joinworth.com</span>
+    <span class="tag tag-green">case-service verified</span>
+    <span class="tag tag-green">integration-service verified</span>
+    <span class="tag">manual-score-service verified</span>
+    <span class="tag tag-amber">Apr 2 2026 training confirmed</span>
+  </div>
+  <div class="callout" style="margin-top:1.5em;">
+    <strong>The fundamental question this deck answers:</strong> When an analyst sees "NAICS Code: 812113 — Nail Salons" with a Worth Score of 819/850 and a green "Verified" badge, exactly which table, which model, which API call, and which rule produced each of those values?
+  </div>
+</section>
+
+<!-- ─── SLIDE 2: THREE PORTALS ─── -->
+<section>
+  <h2>The Three Portals — Who Sees What</h2>
+  <table>
+    <tr><th>Portal</th><th>URL</th><th>Who uses it</th><th>Unique capability</th></tr>
+    <tr>
+      <td><strong>Admin Portal</strong></td>
+      <td><code>admin.joinworth.com</code></td>
+      <td>Internal Worth AI staff</td>
+      <td>All 249 customers · Source vendor names · Raw API response via Network tab · Confidence per source</td>
+    </tr>
+    <tr>
+      <td><strong>Customer Portal</strong></td>
+      <td><code>customer.joinworth.com</code></td>
+      <td>Banks / lenders / fintechs</td>
+      <td>Portfolio dashboard · Auto-decisioning pass/fail rules · No vendor names shown (only platform IDs)</td>
+    </tr>
+    <tr>
+      <td><strong>REST API / Postman</strong></td>
+      <td>API endpoints</td>
+      <td>Engineers, analysts</td>
+      <td>Full facts JSON: <code>source.confidence</code>, <code>alternatives[]</code>, <code>override</code> — more data than the UI shows</td>
+    </tr>
+  </table>
+  <div class="callout callout-amber" style="margin-top:0.8em;">
+    <strong>Training (Allison, 00:02:06):</strong> "We don't expose to our customers that this came from Middesk — we might give them the platform ID, but not the vendor name." The admin portal shows source names. The customer portal shows only platform IDs.
+  </div>
+  <div class="callout callout-green" style="margin-top:0.5em;">
+    <strong>Key fact (Mats, 00:26:16):</strong> Admin and customer portals use the same externalized APIs — any data visible in admin is available to customers programmatically.
+  </div>
+</section>
+
+<!-- ─── SLIDE 3: THREE IDs ─── -->
+<section>
+  <h2>The Three Primary Identifiers</h2>
+  <p style="margin-bottom:0.8em">Every record is identified by three UUIDs forming a hierarchy:</p>
+  <div class="lineage">Customer ID  →  Case ID  →  Business ID</div>
+  <div class="grid3" style="margin-top:0.8em;">
+    <div class="box">
+      <div class="box-title" style="color:var(--c-purple);">🏦 Customer ID</div>
+      <div class="box-body">The bank/lender using Worth AI.<br/>Table: <code>data_customers.id</code><br/>URL: <code>/customers/{customer_id}</code><br/>Matches the warehouse ID — use in SQL to build direct links.</div>
+    </div>
+    <div class="box">
+      <div class="box-title" style="color:var(--c-amber);">📋 Case ID</div>
+      <div class="box-body">Point-in-time snapshot.<br/>Table: <code>data_cases.id</code><br/>Primary use: <strong>auditability, traceability, compliance</strong>. Regulators require it.<br/>"I look at case ID 0.1% of the time." (Allison)</div>
+    </div>
+    <div class="box">
+      <div class="box-title" style="color:var(--c-green);">🏢 Business ID</div>
+      <div class="box-body">The merchant being verified.<br/>Table: <code>data_businesses.id</code><br/>URL: <code>admin.joinworth.com/{business_id}</code><br/><strong>Primary ID for 99.9% of analysis.</strong> Stable across all cases.</div>
+    </div>
+  </div>
+  <div class="callout" style="margin-top:0.8em;font-size:0.62em;">
+    <strong>Craig (00:30:20):</strong> "The three IDs that drive the business are those three IDs." &nbsp;|&nbsp; <strong>Raj (00:33:18):</strong> "Case ID is for auditability, traceability. HSBC was asked to shut down for not having proper case management. TD Bank had a similar scenario."
+  </div>
+</section>
+
+<!-- ─── SLIDE 4: SANDBOX vs PRODUCTION ─── -->
+<section>
+  <h2>Sandbox vs. Production — What Is Real Data?</h2>
+  <table>
+    <tr><th>Integration</th><th>Sandbox customer: API</th><th>Redshift affected?</th><th>No sandbox env?</th></tr>
+    <tr><td>Equifax</td><td>Equifax SANDBOX API</td><td>No</td><td>Has sandbox</td></tr>
+    <tr><td>Plaid + Plaid IDV</td><td>Plaid SANDBOX</td><td>No</td><td>Has sandbox</td></tr>
+    <tr><td>GIACT gVerify/gAuthenticate</td><td>GIACT SANDBOX API</td><td>No</td><td>Has sandbox</td></tr>
+    <tr><td>Middesk (KYB)</td><td style="color:#F87171;font-weight:700;">PRODUCTION Middesk</td><td>No</td><td style="color:#F87171;font-weight:700;">NO SANDBOX</td></tr>
+    <tr><td>OpenCorporates</td><td>Redshift query (no API)</td><td style="color:#34D399;font-weight:700;">Yes — same data</td><td>N/A</td></tr>
+    <tr><td>ZoomInfo</td><td>Redshift query (no API)</td><td style="color:#34D399;font-weight:700;">Yes — same data</td><td>N/A</td></tr>
+    <tr><td style="color:#F87171;font-weight:700;">VerData (BYL)</td><td style="color:#F87171;font-weight:700;">PRODUCTION VerData</td><td>No</td><td style="color:#F87171;font-weight:700;">CONFIRMED: No sandbox</td></tr>
+    <tr><td style="color:#F87171;font-weight:700;">SERP (web scraping)</td><td style="color:#F87171;font-weight:700;">PRODUCTION SERP</td><td>No</td><td style="color:#F87171;font-weight:700;">CONFIRMED: No sandbox</td></tr>
+  </table>
+  <div class="callout callout-amber" style="margin-top:0.6em;font-size:0.62em;">
+    <strong>Training (Allison, 00:08:02):</strong> "If it's marked as sandbox, it is hitting sandbox environments — EXCEPT for VerData or SER where they don't have a sandbox." Also: OC and ZoomInfo always hit the same Redshift tables regardless of sandbox/production.
+  </div>
+</section>
+
+<!-- ─── SLIDE 5: WHAT IS A CASE ─── -->
+<section>
+  <h2>What Is a Case? When Is a New One Created?</h2>
+  <div class="callout callout-green" style="margin-bottom:0.8em;">
+    <strong>Definition (Allison, 00:09:00):</strong> "A case is a point in time of onboarding or risk monitoring — just pulling all of the verifications at a given point in time."
+  </div>
+  <div class="grid2">
+    <div>
+      <h3>What creates a new case</h3>
+      <ul>
+        <li><strong>Worth Score manual refresh</strong> — by analyst or business owner</li>
+        <li><strong>Risk monitoring</strong> — flags a score change on existing business</li>
+        <li><strong>New customer invitation</strong> — same business applies to different lender</li>
+      </ul>
+      <div class="callout callout-amber" style="margin-top:0.8em;font-size:0.62em;">
+        <strong>Craig (00:35:48):</strong> Score refresh creates a new case but does NOT necessarily re-run all vendor integrations. Some facts may carry over.
+      </div>
+    </div>
+    <div>
+      <h3>Case types</h3>
+      <table>
+        <tr><th>Type</th><th>ID</th><th>When</th></tr>
+        <tr><td>ONBOARDING</td><td>1</td><td>New business application (most common today)</td></tr>
+        <tr><td>APPLICATION_EDIT</td><td>2</td><td>Business updated their application</td></tr>
+        <tr><td>RISK</td><td>3</td><td>Risk monitoring triggered re-evaluation</td></tr>
+      </table>
+      <br/>
+      <h3>Status flow</h3>
+      <div class="lineage">SUBMITTED → [integrations run] → SCORE_CALCULATED
+  → AUTO_APPROVED (6) if score ≥ threshold
+  → AUTO_REJECTED (13) if score ≤ threshold
+  → UNDER_MANUAL_REVIEW (4) if in middle range
+  → MANUALLY_APPROVED (5) | MANUALLY_REJECTED (8)
+     by analyst</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 6: WORTH SCORE ARCHITECTURE ─── -->
+<section>
+  <h2>Worth Score — How 819/850 Is Computed</h2>
+  <div class="callout callout-red" style="margin-bottom:0.6em;font-size:0.62em;">
+    <strong>Common misconception:</strong> The Worth Score is NOT the XGBoost entity-matching model. The entity-matching model finds the right vendor record. The Worth Score is a separate weighted multi-factor scoring system in <code>manual-score-service</code>.
+  </div>
+  <div class="grid3">
+    <div class="box">
+      <div class="box-title" style="color:var(--c-blue);">🏦 Banking Category</div>
+      <div class="box-body">Source: <strong>Plaid</strong> (platform 1)<br/>Factors: avg daily balance, NSF count, overdraft frequency, deposit volume<br/>Data: <code>plaid_transactions</code></div>
+    </div>
+    <div class="box">
+      <div class="box-title" style="color:var(--c-red);">📋 Public Records</div>
+      <div class="box-body">Source: <strong>Middesk, Trulioo, Adverse Media, NPI</strong><br/>Factors: SOS status, watchlist hits, adverse media, NPI validity, business age<br/>Platforms: 16, 38, 27, 28</div>
+    </div>
+    <div class="box">
+      <div class="box-title" style="color:var(--c-green);">📊 Financial Strength</div>
+      <div class="box-body">Source: <strong>Rutter</strong> (QBO, Xero, etc.) + <strong>Tax Status</strong><br/>Factors: revenue trends, gross profit, AR, tax compliance<br/>Platforms: 5–13, 15</div>
+    </div>
+  </div>
+  <div class="lineage" style="margin-top:0.8em;">Integrations complete → Kafka: GENERATE_AI_SCORE
+→ calculateBankingScore() + calculatePublicRecordsScore() + calculateFinancialScore()
+→ Sum weighted_score_100 → × 8.5 → weighted_score_850 (0–850)
+→ score_decision_matrix lookup: Low / Medium / High Risk + AUTO_APPROVED / REJECTED / MANUAL
+→ UPDATE data_cases.status_id
+→ UI shows "Low Risk ✓  819/850  Generated on 03/27/26 using Model 3.0"</div>
+  <p style="margin-top:0.5em;font-size:0.6em;color:#64748B;">"Model 3.0" = <code>score_config_history</code> version referenced by <code>business_scores.score_weightage_config</code></p>
+</section>
+
+<!-- ─── SLIDE 7: CONFIDENCE PER SOURCE ─── -->
+<section>
+  <h2>Confidence Is Per-Source — Not Per-Address</h2>
+  <div class="callout callout-green" style="margin-bottom:0.6em;">
+    <strong>Confirmed in training (Wecsley + Allison, 00:25:08):</strong> "I think it's per source. You have a confidence per source at the end. You have the winning source." — "We put the winner at the top and then anything in alternatives is what didn't make the cut."
+  </div>
+  <table>
+    <tr><th>Source</th><th>Platform ID</th><th>Confidence method</th><th>Weight</th></tr>
+    <tr><td>OpenCorporates</td><td>23</td><td>XGBoost <code>oc_probability</code> from <code>ml_model_matches</code></td><td>0.9</td></tr>
+    <tr><td>Middesk</td><td>16</td><td>XGBoost <code>confidenceScoreMany()</code> OR task-based (0.15 + 0.20/task)</td><td><strong>2.0 — highest</strong></td></tr>
+    <tr><td>ZoomInfo</td><td>24</td><td>XGBoost <code>zi_probability</code> OR <code>similarity_index/55</code></td><td>0.8</td></tr>
+    <tr><td>Equifax</td><td>17</td><td>XGBoost <code>efx_probability</code> OR <code>similarity_index/55</code></td><td>0.7</td></tr>
+    <tr><td>Trulioo</td><td>38</td><td>Heuristic ONLY: <code>match.index / 55 (MAX_CONFIDENCE_INDEX)</code></td><td>0.8</td></tr>
+    <tr><td>AI (GPT-5-mini)</td><td>31</td><td>Self-reported: HIGH→0.70 / MED→0.50 / LOW→0.30</td><td>0.1 — lowest</td></tr>
+  </table>
+  <div class="callout callout-amber" style="margin-top:0.6em;font-size:0.62em;">
+    <strong>"Fancy rigging" (Allison, 00:25:08):</strong> Middesk is sorted above OC because of its weight (2.0 vs 0.9). This is the <code>SOURCE_WEIGHTS</code> constant in <code>rules.ts</code> — not ad hoc, but calibrated to reflect Middesk's direct SOS filing access vs OC's registry scraping.
+  </div>
+</section>
+
+<!-- ─── SLIDE 8: KYB FIELD LINEAGE ─── -->
+<section>
+  <h2>KYB Background — Field-Level Lineage</h2>
+  <table>
+    <tr><th>UI Field</th><th>Fact name</th><th>Winner priority</th><th>Source table</th></tr>
+    <tr><td>Legal Business Name</td><td><code>legal_business_name</code></td><td>Middesk → OC → ZI</td><td><code>business_entity_verification.name</code></td></tr>
+    <tr><td>Business Address</td><td><code>address_*</code></td><td>Middesk → OC → ZI → EFX</td><td><code>business_entity_address_source</code></td></tr>
+    <tr><td>Business Age</td><td><code>year_of_incorporation</code></td><td>Middesk SOS → OC</td><td><code>business_entity_verification.incorporation_date</code></td></tr>
+    <tr><td>Corporation Type</td><td><code>corporation_type</code></td><td>Middesk → OC</td><td><code>business_entity_verification.entity_type</code></td></tr>
+    <tr><td>Employees</td><td><code>employee_count</code></td><td>ZoomInfo → Equifax</td><td><code>zoominfo_standard_ml_2.zi_c_employee_count</code></td></tr>
+    <tr><td><strong>NAICS Code</strong></td><td><code>naics_code</code></td><td><strong>Middesk &gt; OC &gt; ZI &gt; Trulioo &gt; EFX &gt; AI &gt; 561499</strong></td><td><code>rds_warehouse_public.facts</code></td></tr>
+    <tr><td><strong>MCC Code</strong></td><td><code>mcc_code</code></td><td><strong>Vendor direct → NAICS crosswalk → AI</strong></td><td><code>rds_warehouse_public.facts</code></td></tr>
+    <tr><td>Industry Name</td><td><code>industry</code></td><td>First 2 digits of NAICS → sector lookup</td><td><code>core_business_industries</code></td></tr>
+    <tr><td>MBE / WBE / VBE</td><td><code>minority_owned</code> etc.</td><td>Equifax → ZoomInfo</td><td><code>equifax_us_standardized.efx_minority_business_enterprise</code></td></tr>
+  </table>
+  <div class="callout" style="margin-top:0.5em;font-size:0.6em;">Every field went through: <code>factWithHighestConfidence()</code> → <code>weightedFactSelector()</code> → <code>manualOverride()</code> in <code>integration-service/lib/facts/rules.ts</code></div>
+</section>
+
+<!-- ─── SLIDE 9: ADDRESSES ─── -->
+<section>
+  <h2>KYB Contact Information — Submitted vs. Reported Addresses</h2>
+  <div class="grid2">
+    <div>
+      <h3>Address types</h3>
+      <table>
+        <tr><th>Type</th><th>Meaning</th><th>Source</th></tr>
+        <tr><td><strong>Submitted</strong></td><td>Applicant typed this during onboarding</td><td><code>data_businesses.address_*</code></td></tr>
+        <tr><td><strong>Reported</strong></td><td>Official registry returned this address</td><td><code>business_entity_address_source</code> WHERE <code>submitted=false</code></td></tr>
+      </table>
+      <br/>
+      <h3>Verification badges</h3>
+      <ul>
+        <li><span class="pill pill-green">Verified</span> Trulioo Comprehensive View: all address fields "match" or "missing"</li>
+        <li><span class="pill pill-red">No Match</span> ANY address field returned "nomatch" in Comprehensive View</li>
+        <li><span class="pill pill-green">Deliverable</span> USPS confirms mail deliverable (Middesk <code>deliverable=true</code>)</li>
+        <li><span class="pill pill-blue">Google Profile: Verified</span> SERP (platform 39) found matching Google Maps listing</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Why multiple reported addresses?</h3>
+      <div class="callout" style="font-size:0.62em;">
+        Middesk and Trulioo query official registries that store multiple addresses for the same entity: registered office, trading address, mailing address, historical addresses. ALL are shown in the Contact Information tab — analysts can review any discrepancies.
+      </div>
+      <h3 style="margin-top:0.8em;">Address storage</h3>
+      <div class="lineage">integration_data.business_entity_address_source:
+  address_line_1, city, state, postal_code
+  submitted = true  (applicant entered)
+  submitted = false (registry reported)
+  deliverable = true/false (USPS check)
+
+integration_data.business_entity_review_task:
+  key = "address_verification"
+  status = "success" (Verified) | "failure" (No Match)</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 10: KYC TAB ─── -->
+<section>
+  <h2>KYC Tab — Know Your Customer (Owner Identity)</h2>
+  <div class="callout callout-amber" style="margin-bottom:0.6em;font-size:0.62em;">
+    <strong>Allison (00:19:06):</strong> "We wouldn't get her date of birth and home address and fill it in for her. This is user entered." — Worth AI does NOT auto-populate KYC fields from vendor data. Owners self-enter all PII.
+  </div>
+  <div class="grid2">
+    <div>
+      <h3>KYC verification badge states</h3>
+      <table>
+        <tr><th>Badge</th><th>Condition</th><th>IDV_STATUS</th></tr>
+        <tr><td>✅ Verified</td><td>IDV completed, fields matched</td><td>SUCCESS (1)</td></tr>
+        <tr><td>⏳ Verification Pending</td><td>IDV started, not completed</td><td>PENDING (2)</td></tr>
+        <tr><td>⚠️ Unverified — IDV Disabled</td><td>IDV feature inactive for customer</td><td>n/a</td></tr>
+        <tr><td>❌ Unverified (Expired)</td><td>IDV link expired</td><td>EXPIRED (4)</td></tr>
+        <tr><td>❌ Unverified (Failed)</td><td>IDV failed</td><td>FAILED (99)</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Match / No Match badges</h3>
+      <p>These come from <strong>Trulioo PSC</strong> (UK/Canada) or <strong>Plaid IDV</strong> (US) — NOT the XGBoost entity-matching model.</p>
+      <div class="lineage">Plaid IDV: applicant completes photo ID + selfie
+→ Plaid compares submitted fields vs govt ID
+→ Returns field-level match results
+→ stored in: data_identity_verifications
+
+Trulioo PSC: name + DOB + address vs bureau/registry
+→ DatasourceFields[{FieldName, Status}]
+→ "match" → green Match badge
+→ "nomatch" → red No Match badge
+→ "missing" → no badge (field not in data)</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 11: FRAUD REPORT ─── -->
+<section>
+  <h2>Fraud Report — Plaid IDV Risk Intelligence</h2>
+  <div class="callout" style="margin-bottom:0.6em;font-size:0.62em;">
+    The Fraud Report section appears only when Plaid IDV is enabled for the customer. It comes from Plaid's <code>risk_check</code> which runs automatically during the identity verification flow.
+  </div>
+  <table>
+    <tr><th>UI Field</th><th>Plaid API field</th><th>What it means</th></tr>
+    <tr>
+      <td><strong>Synthetic Identity Risk Score</strong></td>
+      <td><code>risk_check.identity_abuse_signals.synthetic_identity.score</code></td>
+      <td>0–100: likelihood the identity was fabricated (real + fake info combined). Score 3 = very low. <strong>&gt;70 = HIGH risk.</strong></td>
+    </tr>
+    <tr>
+      <td><strong>Stolen Identity Risk Score</strong></td>
+      <td><code>risk_check.identity_abuse_signals.stolen_identity.score</code></td>
+      <td>0–100: likelihood this is a real person's identity being used fraudulently. Score 1 = very low. <strong>&gt;70 = HIGH risk.</strong></td>
+    </tr>
+    <tr>
+      <td>Fraud Ring</td>
+      <td><code>risk_check.fraud_ring_detected</code></td>
+      <td>Signals coordinated fraud ring activity on this device/identity</td>
+    </tr>
+    <tr>
+      <td>Bot Presence</td>
+      <td><code>risk_check.bot_detected</code></td>
+      <td>Automated/bot behavior detected during the IDV session</td>
+    </tr>
+    <tr>
+      <td>User Interactions</td>
+      <td><code>risk_check.user_interactions</code></td>
+      <td>Behavioral signals (unusual copy-paste, atypical mouse movements, etc.)</td>
+    </tr>
+  </table>
+  <div class="callout callout-green" style="margin-top:0.6em;font-size:0.62em;">
+    <strong>Email Report</strong> (same panel): <code>is_deliverable</code>, <code>breach_count</code>, <code>domain_is_disposable</code>, <code>top_level_domain_is_suspicious</code>, <code>ip_spam_list_count</code> — all from Plaid's risk_check on the submitted email address.
+  </div>
+</section>
+
+<!-- ─── SLIDE 12: WATCHLISTS ─── -->
+<section>
+  <h2>Watchlists Tab — Global Screening Results</h2>
+  <div class="grid2">
+    <div>
+      <h3>What is screened</h3>
+      <table>
+        <tr><th>Entity type</th><th>Source</th><th>When</th></tr>
+        <tr><td>Business (KYB)</td><td>Trulioo KYB (platform 38)</td><td>On business submission</td></tr>
+        <tr><td>Owners (PSC)</td><td>Trulioo PSC (platform 42)</td><td>Auto-triggered after KYB for UK/CA; manual for US</td></tr>
+      </table>
+      <br/>
+      <h3>Lists checked (sample)</h3>
+      <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:4px;">
+        <span class="tag tag-red">OFAC SDN</span>
+        <span class="tag tag-red">OFAC SSI</span>
+        <span class="tag tag-red">BIS Entity List</span>
+        <span class="tag tag-red">UN Consolidated</span>
+        <span class="tag tag-red">EU Consolidated</span>
+        <span class="tag tag-amber">PEP Database</span>
+        <span class="tag tag-amber">Adverse Media</span>
+        <span class="tag">UK OFSI Financial Sanctions</span>
+        <span class="tag">UK Register of Insolvencies</span>
+        <span class="tag">UK Disqualified Directors</span>
+      </div>
+    </div>
+    <div>
+      <h3>Storage path</h3>
+      <div class="lineage">Trulioo returns watchlist hits
+→ extractWatchlistResultsFromTruliooResponse()
+  Priority 1: fullServiceDetails.WatchlistHitDetails
+    WL_results → SANCTIONS hits (with score, entity name, URL)
+    AM_results → ADVERSE_MEDIA hits
+    PEP_results → PEP hits
+  Priority 2 (fallback): summary count format
+    → placeholder entries without entity-level detail
+→ storeBusinessWatchlistResults():
+    integration_data.business_entity_review_task
+      key="watchlist", status="success/failure"
+      metadata = WatchlistValueMetadatum[]
+→ Facts: watchlist (consolidated), watchlist_hits (count)</div>
+      <div class="callout callout-red" style="margin-top:0.5em;font-size:0.58em;">
+        <strong>Known gap:</strong> Trulioo returns a match relevancy score (0.0–1.0) per hit. This is captured in raw response but NOT propagated to the API or UI. Score 1.0 looks the same as 0.3 to analysts.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 13: STORAGE ARCHITECTURE ─── -->
+<section>
+  <h2>Complete Storage Architecture</h2>
+  <table>
+    <tr><th>Table</th><th>Schema</th><th>What it stores</th><th>Written by</th></tr>
+    <tr><td><code>facts</code></td><td><code>rds_warehouse_public</code></td><td>217 computed facts as JSONB. One row per (business_id, name).</td><td>warehouse-service FactService</td></tr>
+    <tr><td><code>data_businesses</code></td><td><code>rds_cases_public</code></td><td>Submitted fields: name, address, tin (encrypted), industry FK</td><td>case-service API</td></tr>
+    <tr><td><code>data_cases</code></td><td><code>rds_cases_public</code></td><td>Case records: status_id, case_type_id, score_trigger_id</td><td>case-service API</td></tr>
+    <tr><td><code>business_entity_verification</code></td><td><code>integration_data</code></td><td>KYB results: name, status, officers, incorporation_date</td><td>integration-service (Middesk/Trulioo)</td></tr>
+    <tr><td><code>business_entity_review_task</code></td><td><code>integration_data</code></td><td>Review tasks: watchlist, tin, name, address_verification</td><td>integration-service</td></tr>
+    <tr><td><code>request_response</code></td><td><code>integration_data</code></td><td>Raw API responses + confidence per call from all vendors</td><td>integration-service per API call</td></tr>
+    <tr><td><code>business_scores</code></td><td><code>rds_cases_public</code></td><td>Worth Score: weighted_score_850, risk_level, score_decision</td><td>manual-score-service</td></tr>
+    <tr><td><code>data_current_scores</code></td><td><code>rds_cases_public</code></td><td>Latest score per (business_id, customer_id) — what UI reads</td><td>manual-score-service</td></tr>
+    <tr><td><code>customer_files</code></td><td><code>datascience</code> (Redshift)</td><td>Pipeline B: primary_naics_code, zi/efx_match_confidence (internal only)</td><td>warehouse-service batch job</td></tr>
+  </table>
+</section>
+
+<!-- ─── SLIDE 14: API ENDPOINTS ─── -->
+<section>
+  <h2>API Endpoints — What Each Surfaces</h2>
+  <table>
+    <tr><th>Endpoint</th><th>naics_code?</th><th>Access</th><th>What is returned</th></tr>
+    <tr>
+      <td><code>GET /facts/business/{id}/details</code></td>
+      <td><span class="pill pill-green">Yes — primary</span></td>
+      <td>Admin / Customer / Applicant</td>
+      <td>Full fact: code + confidence + platformId + alternatives[]</td>
+    </tr>
+    <tr>
+      <td><code>GET /facts/business/{id}/kyb</code></td>
+      <td><span class="pill pill-green">Yes</span></td>
+      <td>Admin / Customer / Applicant</td>
+      <td>naics_code + mcc_code + industry in KYB fact set</td>
+    </tr>
+    <tr>
+      <td><code>GET /businesses/customers/{id}</code></td>
+      <td><span class="pill pill-green">Yes — simplified</span></td>
+      <td>Admin / Customer</td>
+      <td>Flat: naics_code + naics_title (no source lineage)</td>
+    </tr>
+    <tr>
+      <td><code>GET /facts/business/{id}/all</code></td>
+      <td><span class="pill pill-amber">Admin ONLY</span></td>
+      <td>Admin ONLY</td>
+      <td>All 217 facts — "intentionally not cached, leaks information"</td>
+    </tr>
+    <tr>
+      <td><code>PATCH /facts/.../override/naics_code</code></td>
+      <td><span class="pill pill-blue">Write</span></td>
+      <td>Admin / Customer</td>
+      <td>Sets analyst override — always wins future Fact Engine runs</td>
+    </tr>
+  </table>
+  <div class="callout callout-red" style="margin-top:0.6em;font-size:0.62em;">
+    <strong>Gap (00:26:16):</strong> Auto-decisioning pass/fail rules are only visible in <code>customer.joinworth.com</code> (customer instance), NOT in <code>admin.joinworth.com</code>. Analysts who need to see which specific rules passed or failed must log in to the customer's own portal.
+  </div>
+</section>
+
+<!-- ─── SLIDE 15: TENANT URL STANDALONE ─── -->
+<section>
+  <h2>Tenants, Standalone Cases & URL Patterns</h2>
+  <div class="grid2">
+    <div>
+      <h3>Tenants</h3>
+      <div class="callout" style="font-size:0.62em;">
+        <strong>Allison (00:13:47):</strong> "This was for when we were doing SSO for Repay — we had to set up Okta for them." For internal users, tenants have NO impact. All 249 customers are always visible in the Customers tab regardless of tenant.
+      </div>
+      <br/>
+      <h3>Standalone Cases (deprecated)</h3>
+      <div class="callout callout-red" style="font-size:0.62em;">
+        <strong>Allison (00:12:03):</strong> "We should just deprecate this tab. When we were initially talking about doing SMBs...We're not doing that anymore." Any data there is QA test data. This tab should be ignored entirely.
+      </div>
+    </div>
+    <div>
+      <h3>URL navigation patterns</h3>
+      <table>
+        <tr><th>Navigation</th><th>URL pattern</th></tr>
+        <tr><td>Customer list</td><td><code>admin.joinworth.com/customers</code></td></tr>
+        <tr><td>Customer detail</td><td><code>.../customers/{customer_id}</code></td></tr>
+        <tr><td>Case detail</td><td><code>.../customers/{customer_id}/cases/{case_id}</code></td></tr>
+        <tr><td><strong>Business (fastest)</strong></td><td><code>admin.joinworth.com/{business_id}</code></td></tr>
+      </table>
+      <div class="callout callout-amber" style="margin-top:0.6em;font-size:0.62em;">
+        <strong>Craig (00:14:57):</strong> "We can use SQL and literally produce a link — all we got to do is insert that ID." The Business ID URL is the fastest way to jump to any business record.
+      </div>
+      <div class="callout callout-red" style="margin-top:0.5em;font-size:0.58em;">
+        <strong>Allison (00:15:47):</strong> "There is no seemingly standard for how we're building out these URL strings — it does change when you go from the business's view to the case view."
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 16: PRIORITIES ─── -->
+<section>
+  <h2>Team Priorities & Worthipedia Roadmap</h2>
+  <p style="margin-bottom:0.6em;font-size:0.65em;color:#94A3B8!important;">From Craig, 00:31:21: "I want us to be more prepared for being able to answer questions."</p>
+  <div class="grid2">
+    <div>
+      <h3>Immediate priorities (documented)</h3>
+      <table>
+        <tr><th>Topic</th><th>Owner</th><th>Status</th></tr>
+        <tr><td>Industry classification (NAICS, MCC, 8 facts)</td><td>Wecsley</td><td><span class="pill pill-green">Done</span></td></tr>
+        <tr><td>KYC / fraud — global launch</td><td>Raj</td><td><span class="pill pill-green">In this deck + UK doc</span></td></tr>
+        <tr><td>Worth Score questions</td><td>Team</td><td><span class="pill pill-green">Section 3 of admin doc</span></td></tr>
+        <tr><td>SoS nuances (NJ/Delaware gaps)</td><td>Team</td><td><span class="pill pill-amber">Partial</span></td></tr>
+        <tr><td>Risk components (BYL, PEP, watchlist)</td><td>Team</td><td><span class="pill pill-green">UK Screening Deck 7</span></td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Still needed</h3>
+      <ul>
+        <li><strong>Auto-decisioning rules</strong> — what rules exist, how configured, where stored. Only visible in customer.joinworth.com.</li>
+        <li><strong>Per-state Middesk coverage</strong> — which states have status gaps, which have formation date gaps</li>
+        <li><strong>Score drop investigation guide</strong> — "why did score drop from 750 to 600?"</li>
+        <li><strong>VerData BYL deep dive</strong> — source, table, API exposure, refresh cadence</li>
+        <li><strong>Watchlist hit score surfacing</strong> — currently a known gap (score not in API)</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 17: SUMMARY ─── -->
+<section>
+  <h1 style="font-size:1.3em!important;">Summary — The Admin Portal in One Page</h1>
+  <div class="grid2" style="margin-top:0.5em;">
+    <div>
+      <h3>What the portal shows you</h3>
+      <ul>
+        <li>All 249 customers, each with its own sandbox or production environment</li>
+        <li>Cases: point-in-time snapshots of onboarding or risk monitoring</li>
+        <li>KYB: vendor-enriched business facts — confidence is per-source, not per-address</li>
+        <li>KYC: owner self-entered data + IDV/PSC verification badges</li>
+        <li>Worth Score: weighted multi-factor model across banking, public records, financial strength</li>
+      </ul>
+    </div>
+    <div>
+      <h3>What it doesn't show</h3>
+      <ul>
+        <li>Vendor names (customers only see platform IDs)</li>
+        <li>Raw confidence scores from Trulioo watchlist hits</li>
+        <li>Auto-decisioning pass/fail rules (customer.joinworth.com only)</li>
+        <li>Pipeline B analytics data (Redshift internal only)</li>
+        <li>UK SIC / NACE codes (captured but not surfaced)</li>
+      </ul>
+    </div>
+  </div>
+  <div class="callout callout-green" style="margin-top:0.8em;">
+    <strong>Fastest navigation tip:</strong> If you have a business ID, go directly to <code>admin.joinworth.com/{business_id}</code>. If you need vendor source names and confidence, use the Network tab or Postman to call <code>GET /facts/business/{id}/details</code> directly.
+  </div>
+</section>
+
+</div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.5.0/reveal.min.js"></script>
+<script>
+Reveal.initialize({
+  hash:true, center:false, transition:'slide', transitionSpeed:'fast',
+  width:1100, height:700, margin:0.04, minScale:0.5, maxScale:1.5,
+  plugins:[]
+});
+</script>
+</body>
+</html>

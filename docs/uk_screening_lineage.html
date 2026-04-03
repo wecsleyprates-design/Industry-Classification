@@ -1,0 +1,710 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Deck 7 — Worth AI UK Screening: Complete End-to-End Lineage</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.5.0/reveal.min.css"/>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.5.0/theme/black.min.css"/>
+<style>
+:root{--c-purple:#A78BFA;--c-blue:#60A5FA;--c-green:#34D399;--c-amber:#FBBF24;--c-red:#F87171;--c-slate:#94A3B8;--c-teal:#2DD4BF;}
+.reveal{font-size:22px;font-family:'Segoe UI',system-ui,sans-serif!important;}
+.reveal h1,.reveal h2,.reveal h3{font-family:'Segoe UI',system-ui,sans-serif!important;text-transform:none!important;letter-spacing:0!important;}
+.reveal h1{font-size:1.6em!important;color:var(--c-purple)!important;font-weight:900!important;}
+.reveal h2{font-size:1.15em!important;color:var(--c-blue)!important;font-weight:800!important;margin-bottom:0.5em!important;}
+.reveal h3{font-size:0.95em!important;color:var(--c-teal)!important;font-weight:700!important;}
+.reveal p,.reveal li,.reveal td,.reveal th{font-size:0.72em!important;color:#E2E8F0!important;line-height:1.55!important;}
+.reveal strong{color:white!important;}
+.reveal code{background:rgba(255,255,255,.12)!important;padding:1px 6px!important;border-radius:4px!important;font-size:0.88em!important;color:#7DD3FC!important;}
+.reveal pre{background:#0F172A!important;border-radius:8px!important;padding:12px 16px!important;font-size:0.60em!important;border:1px solid rgba(255,255,255,.1)!important;width:100%!important;max-height:320px!important;overflow-y:auto!important;}
+.reveal pre code{background:transparent!important;color:#BAE6FD!important;padding:0!important;}
+.reveal table{border-collapse:collapse!important;width:100%!important;font-size:0.64em!important;}
+.reveal table th{background:#1E3A5F!important;color:#93C5FD!important;font-weight:700!important;padding:7px 10px!important;text-align:left!important;border-bottom:2px solid #3B82F6!important;}
+.reveal table td{padding:6px 10px!important;border-bottom:1px solid rgba(255,255,255,.08)!important;color:#E2E8F0!important;vertical-align:top!important;}
+.reveal table tr:nth-child(even) td{background:rgba(255,255,255,.04)!important;}
+.tag{display:inline-block;background:rgba(99,102,241,.25);border:1px solid rgba(99,102,241,.5);color:#C4B5FD;border-radius:5px;padding:2px 8px;font-size:0.62em;margin:2px;font-weight:600;}
+.tag-green{background:rgba(52,211,153,.15);border-color:rgba(52,211,153,.4);color:#6EE7B7;}
+.tag-red{background:rgba(248,113,113,.15);border-color:rgba(248,113,113,.4);color:#FCA5A5;}
+.tag-amber{background:rgba(251,191,36,.15);border-color:rgba(251,191,36,.4);color:#FDE68A;}
+.tag-blue{background:rgba(96,165,250,.15);border-color:rgba(96,165,250,.4);color:#93C5FD;}
+.callout{background:rgba(59,130,246,.12);border-left:4px solid #3B82F6;border-radius:6px;padding:12px 16px;margin:10px 0;font-size:0.68em;color:#BFDBFE!important;}
+.callout-green{background:rgba(52,211,153,.1);border-color:#34D399;color:#A7F3D0!important;}
+.callout-red{background:rgba(248,113,113,.1);border-color:#F87171;color:#FECACA!important;}
+.callout-amber{background:rgba(251,191,36,.1);border-color:#FBBF24;color:#FDE68A!important;}
+.lineage{background:#0F172A;border-left:3px solid #2DD4BF;border-radius:6px;padding:10px 14px;font-family:'Courier New',monospace;font-size:0.58em;color:#BAE6FD!important;white-space:pre-wrap;line-height:1.6;max-height:300px;overflow-y:auto;}
+.pill{display:inline-block;padding:3px 10px;border-radius:12px;font-size:0.6em;font-weight:700;margin:1px;}
+.pill-green{background:rgba(52,211,153,.2);color:#34D399;border:1px solid #34D399;}
+.pill-red{background:rgba(248,113,113,.2);color:#F87171;border:1px solid #F87171;}
+.pill-amber{background:rgba(251,191,36,.2);color:#FBBF24;border:1px solid #FBBF24;}
+.pill-blue{background:rgba(96,165,250,.2);color:#60A5FA;border:1px solid #60A5FA;}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;}
+.box{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:8px;padding:12px;}
+.box-title{font-size:0.65em;font-weight:700;color:var(--c-blue);margin-bottom:6px;}
+.box-body{font-size:0.6em;color:#CBD5E1;line-height:1.5;}
+.num{font-size:4em;font-weight:900;color:rgba(255,255,255,.06);position:absolute;top:10px;right:20px;}
+.flag-uk{display:inline-block;background:rgba(0,82,204,.3);border:1px solid #0052CC;color:#93C5FD;border-radius:4px;padding:2px 8px;font-size:0.58em;font-weight:700;}
+</style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+<!-- ─── SLIDE 1: TITLE ─── -->
+<section>
+  <div class="num">7</div>
+  <h1>Worth AI UK Screening</h1>
+  <h2 style="color:var(--c-teal)!important">Complete End-to-End Lineage</h2>
+  <p style="color:#94A3B8!important;margin-top:0.8em;">Trulioo KYB · Watchlists · Sanctions · PEPs · Adverse Media · PSC/UBO Screening</p>
+  <div style="margin-top:1em;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;">
+    <span class="flag-uk">🇬🇧 UK-specific</span>
+    <span class="tag tag-blue">Trulioo verified</span>
+    <span class="tag tag-green">integration-service source code</span>
+    <span class="tag">lib/facts/kyb/index.ts</span>
+    <span class="tag">handlers/report.ts</span>
+  </div>
+  <div class="callout" style="margin-top:1.2em;">
+    <strong>What this deck answers:</strong> How does a UK business get verified? Where do Companies House data, OFAC watchlist hits, PEP results, adverse media, and UBO/Director screening results flow — from the Trulioo API call all the way to the UI badge and the 360 Report?
+  </div>
+</section>
+
+<!-- ─── SLIDE 2: UK VS US ROUTING ─── -->
+<section>
+  <h2>UK vs. US Routing — When Does Trulioo Run?</h2>
+  <table>
+    <tr><th>Dimension</th><th>US business</th><th>UK business (GB)</th></tr>
+    <tr><td>KYB provider</td><td>Middesk (platform 16)</td><td><strong>Trulioo (platform 38)</strong></td></tr>
+    <tr><td>Registry queried</td><td>Secretary of State (50 states + DC)</td><td>Companies House (UK) via Trulioo</td></tr>
+    <tr><td>Watchlist screening</td><td>Optional (Advanced Watchlists toggle)</td><td><strong>AUTOMATIC</strong> — no toggle needed</td></tr>
+    <tr><td>PSC/UBO screening</td><td>Only if Advanced Watchlists enabled</td><td><strong>AUTOMATIC</strong> — triggered on every KYB approval</td></tr>
+    <tr><td>NAICS code</td><td>From Middesk SOS filing</td><td>Often unavailable — AI fallback (561499)</td></tr>
+    <tr><td>UK SIC code</td><td>N/A</td><td>In OC <code>industry_code_uids</code> (gb_sic-) — not yet surfaced in API</td></tr>
+  </table>
+  <div class="lineage" style="margin-top:0.6em;">// canIRun() logic in truliooBusiness.ts:
+1. data_integration_settings.trulioo.status === "ENABLED"
+2. business country (GB) is in customer's enabled countries list
+   → GET /customers/{id}/onboarding-setups/7/countries
+   → "GB" or "UK" must be is_selected=true
+3. GB/UK normalisation: both treated as same code ("UK" → "GB")
+
+If all true → Trulioo runs, Middesk does NOT</div>
+</section>
+
+<!-- ─── SLIDE 3: TRULIOO CONFIGURATION ─── -->
+<section>
+  <h2>Trulioo Configuration & Authentication</h2>
+  <div class="grid2">
+    <div>
+      <h3>Environment variables</h3>
+      <pre><code>TRULIOO_API_URL=https://api.globaldatacompany.com
+TRULIOO_CLIENT_ID=your_client_id
+TRULIOO_CLIENT_SECRET=your_client_secret
+TRULIOO_KYB_FLOWID=kyb-flow
+TRULIOO_PSC_FLOWID=psc-screening-flow
+TRULIOO_HTTP_TIMEOUT=30000  # 30 seconds</code></pre>
+      <h3 style="margin-top:0.6em;">OAuth 2.0 Client Credentials</h3>
+      <pre><code>POST /oauth2/v1/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials
+&client_id={TRULIOO_CLIENT_ID}
+&client_secret={TRULIOO_CLIENT_SECRET}
+
+Response:
+{ "access_token": "eyJ...", "expires_in": 3600 }</code></pre>
+    </div>
+    <div>
+      <h3>Two-step flow architecture</h3>
+      <div class="lineage">STEP 1: Initialize flow
+POST /flows/{TRULIOO_KYB_FLOWID}/init
+→ Returns field elements with roles:
+  { "id": "elem_001", "role": "company_name" }
+  { "id": "elem_002", "role": "company_regno" }
+  { "id": "elem_003", "role": "company_zip" }
+  "hfSession": "session-uuid-abc123"
+
+STEP 2: Submit business data
+POST /flows/{TRULIOO_KYB_FLOWID}/submit
+→ Worth AI maps business fields to element roles
+→ Trulioo queries Companies House + watchlists
+→ Returns verification result</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 4: UK KYB REQUEST PAYLOAD ─── -->
+<section>
+  <h2>UK KYB Request Payload — The Address Split Strategy</h2>
+  <div class="callout callout-amber" style="margin-bottom:0.6em;font-size:0.62em;">
+    <strong>Critical design decision:</strong> Worth AI sends a street-only address to Trulioo (no suite/apartment) so the Comprehensive View shows green on Address Line 1. Including a suite number causes false "nomatch" because Companies House only stores the street.
+  </div>
+  <div class="grid2">
+    <div>
+      <h3>Internal storage payload</h3>
+      <pre><code>// Full address WITH suite (stored in DB):
+businessPayload = {
+  companyName: "Acme Limited",
+  companyCountryIncorporation: "GB",
+  companyStateAddress: "England",
+  companyCity: "London",
+  companyZip: "W1U 6RG",
+  companyregno: "12345678",        // Companies House no.
+  companyAddressFull: "123 Baker Street, Suite 2"
+}</code></pre>
+    </div>
+    <div>
+      <h3>Sent to Trulioo (street only)</h3>
+      <pre><code>// Street ONLY (no suite) sent to Trulioo:
+truliooPayload = {
+  ...businessPayload,
+  companyAddressFull: "123 Baker Street"
+  // ↑ Suite stripped intentionally
+  // → Trulioo Comprehensive View compares
+  //   "123 Baker Street" vs Companies House
+  //   → Address Line 1: match ✓
+}
+
+// businessPayload.companyAddressFull (full)
+// stored in business_entity_address_source
+// for badge comparison with submitted address</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 5: TRULIOO RESPONSE STRUCTURE ─── -->
+<section>
+  <h2>Trulioo KYB Response — Key Structures</h2>
+  <div class="grid2">
+    <div>
+      <h3>businessData (Companies House data)</h3>
+      <pre><code>{
+  "name": "Acme Limited",
+  "country": "GB",
+  "business_addresses": [{
+    "is_primary": true,
+    "addressLine1": "123 Baker Street",
+    "postalCode": "W1U 6RG"
+  }],
+  "ubos": [{          // PSC from Companies House
+    "fullName": "John Smith",
+    "ownershipPercentage": 75,
+    "title": "Director",
+    "nationality": "British"
+  }],
+  "directors": [{
+    "fullName": "Jane Doe",
+    "title": "Secretary"
+  }]
+}</code></pre>
+    </div>
+    <div>
+      <h3>Comprehensive View — address verification</h3>
+      <pre><code>"DatasourceName": "Comprehensive View",
+"DatasourceFields": [
+  { "FieldName": "BusinessName",       "Status": "match" },
+  { "FieldName": "AddressLine1",       "Status": "match" },
+  { "FieldName": "PostalCode",         "Status": "match" },
+  { "FieldName": "BusinessRegistrationNumber", "Status": "match" },
+  { "FieldName": "DayOfBirth",         "Status": "missing" }
+]
+
+// Status values:
+// "match"   → confirmed by registry ✓
+// "missing" → field not in Trulioo's data (NOT a mismatch)
+// "nomatch" → explicitly contradicts submitted value ✗</code></pre>
+      <div class="callout callout-amber" style="font-size:0.6em;margin-top:0.5em;">
+        Worth AI ignores all datasources EXCEPT Comprehensive View for address verification — individual datasources (Business Insights, Business Essentials) report false "nomatch" for some UK addresses.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 6: UK WATCHLIST SOURCES ─── -->
+<section>
+  <h2>Watchlists & Sanctions — UK-Specific Sources</h2>
+  <div class="grid2">
+    <div>
+      <h3>UK-specific lists (verified from source code)</h3>
+      <table>
+        <tr><th>List</th><th>Agency</th><th>Type</th></tr>
+        <tr><td>Register of Insolvencies</td><td>Accountant in Bankruptcy (Scotland)</td><td><span class="pill pill-red">SANCTIONS</span></td></tr>
+        <tr><td>Employment Tribunal Decisions</td><td>Employment Tribunal</td><td><span class="pill pill-red">SANCTIONS</span></td></tr>
+        <tr><td>UK Financial Sanctions</td><td>OFSI (HM Treasury)</td><td><span class="pill pill-red">SANCTIONS</span></td></tr>
+        <tr><td>Disqualified Directors</td><td>Companies House UK</td><td><span class="pill pill-red">SANCTIONS</span></td></tr>
+        <tr><td>Insolvency Register</td><td>Insolvency Service UK</td><td><span class="pill pill-red">SANCTIONS</span></td></tr>
+        <tr><td>PEP Database</td><td>Various (MPs, Lords, civil servants)</td><td><span class="pill pill-amber">PEP</span></td></tr>
+        <tr><td>Adverse Media</td><td>BBC, FT, Guardian, Reuters...</td><td><span class="pill pill-blue">ADVERSE_MEDIA</span></td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Global lists also applied to UK</h3>
+      <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:0.8em;">
+        <span class="tag tag-red">OFAC SDN</span>
+        <span class="tag tag-red">OFAC SSI</span>
+        <span class="tag tag-red">OFAC Non-SDN CMIC</span>
+        <span class="tag tag-red">OFAC Non-SDN Iran</span>
+        <span class="tag tag-red">BIS Entity List</span>
+        <span class="tag tag-red">BIS Denied Persons</span>
+        <span class="tag tag-red">UN Consolidated</span>
+        <span class="tag tag-red">EU Consolidated</span>
+      </div>
+      <h3>All returned in one datasource</h3>
+      <div class="callout" style="font-size:0.62em;">
+        Trulioo screens against ALL lists simultaneously via the <strong>"Advanced Business Watchlist"</strong> datasource. Results are returned in three buckets inside <code>WatchlistHitDetails</code>:<br/><br/>
+        <code>WL_results</code> → Sanctions hits<br/>
+        <code>AM_results</code> → Adverse Media hits<br/>
+        <code>PEP_results</code> → PEP hits
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 7: WATCHLIST EXTRACTION ─── -->
+<section>
+  <h2>Watchlist Extraction — Priority 1 vs. Priority 2</h2>
+  <div class="grid2">
+    <div>
+      <h3>Priority 1 — Detailed (preferred)</h3>
+      <p style="font-size:0.62em;color:#94A3B8!important;">Real UK example from test fixtures:</p>
+      <pre><code>"WL_results": [
+  {
+    "score": 1,                          // relevancy 0.0–1.0
+    "subjectMatched": "Jacqueline Martin",// entity matched
+    "sourceListType": "Register of Insolvencies",
+    "sourceRegion": "Europe",
+    "sourceAgencyName": "Accountant in Bankruptcy",
+    "URL": "https://example.com/hit1"
+  },
+  {
+    "score": 0.98,                       // close fuzzy match
+    "subjectMatched": "Martin Jacqueline",// name permutation
+    "sourceListType": "Employment Tribunal Decisions",
+    "sourceAgencyName": "Employment Tribunal"
+  }
+]</code></pre>
+    </div>
+    <div>
+      <h3>Priority 2 — Summary (fallback)</h3>
+      <pre><code>// When fullServiceDetails is absent:
+"watchlistResults": {
+  "Advanced Watchlist": {
+    "watchlistStatus": "Potential Hit",
+    "watchlistHitDetails": {
+      "wlHitsNumber": 138,  // ← count only
+      "amHitsNumber": 12,
+      "pepHitsNumber": 3,
+      "confidence": 0.85
+    }
+  }
+}
+// Creates placeholder hits:
+// "Watchlist hit 1 of 138" — no entity name, no URL</code></pre>
+      <div class="callout callout-red" style="margin-top:0.5em;font-size:0.6em;">
+        Priority 2 hits lack entity names, URLs, and sourceAgencyName. The gap is visible to analysts but no remediation data is available without re-querying Trulioo.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 8: SCORE CONFIDENCE ─── -->
+<section>
+  <h2>Score / Confidence / Relevancy — The Two Systems</h2>
+  <div class="callout callout-red" style="margin-bottom:0.6em;font-size:0.62em;">
+    <strong>Critical distinction:</strong> There are TWO different score concepts. They are often confused.
+  </div>
+  <div class="grid2">
+    <div>
+      <h3>1. Watchlist hit relevancy score</h3>
+      <table>
+        <tr><th>Aspect</th><th>Detail</th></tr>
+        <tr><td>What</td><td>Trulioo's match quality: 1.0 = exact, 0.85 = close fuzzy</td></tr>
+        <tr><td>Source</td><td><code>WL_results[].score</code>, <code>AM_results[].score</code></td></tr>
+        <tr><td>Stored</td><td><code>request_response.response</code> JSONB (raw only)</td></tr>
+        <tr><td>In API?</td><td><span class="pill pill-red">NO — Known Gap</span></td></tr>
+        <tr><td>Impact</td><td>Score 1.0 looks same as 0.3 to analysts</td></tr>
+      </table>
+      <div class="callout callout-amber" style="margin-top:0.5em;font-size:0.58em;">
+        The <code>watchlist</code> fact schema has <code>score: z.number().optional()</code> (line 1527 of kyb/index.ts) but it is never populated. <strong>Fix: add to WatchlistValueMetadatum + copy in mapWatchlistHits().</strong>
+      </div>
+    </div>
+    <div>
+      <h3>2. Trulioo source confidence (entity match quality)</h3>
+      <table>
+        <tr><th>Aspect</th><th>Detail</th></tr>
+        <tr><td>What</td><td>How well Worth AI matched submitted business to Trulioo entity</td></tr>
+        <tr><td>Primary</td><td>XGBoost entity-matching model</td></tr>
+        <tr><td>Fallback</td><td>Status-based: completed→0.7, pending→0.4, failed→0.2</td></tr>
+        <tr><td>Stored</td><td><code>request_response.confidence</code> (dedicated column)</td></tr>
+        <tr><td>In API?</td><td><span class="pill pill-green">YES</span> <code>source.confidence</code> in /facts/ response</td></tr>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 9: PEP SCREENING UK ─── -->
+<section>
+  <h2>PEP Screening — UK-Specific</h2>
+  <div class="grid2">
+    <div>
+      <h3>Who is a UK PEP?</h3>
+      <ul>
+        <li>Current/former senior politicians: <strong>MPs, Lords, Devolved Assembly Members</strong></li>
+        <li>Government ministers and senior civil servants</li>
+        <li>Senior judicial officers (High Court judges+)</li>
+        <li>Ambassadors and high commissioners</li>
+        <li>Senior executives of state-owned enterprises</li>
+        <li>Members of international org governing bodies (UN, NATO…)</li>
+        <li><strong>Immediate family and known close associates</strong> of any of the above</li>
+      </ul>
+      <div class="callout" style="margin-top:0.6em;font-size:0.62em;">
+        Basis: UK AML regulations (JMLSG guidance, Money Laundering Regulations 2017)
+      </div>
+    </div>
+    <div>
+      <h3>Where PEP hits appear</h3>
+      <pre><code>// In WatchlistHitDetails:
+"PEP_results": [
+  {
+    "score": 1,
+    "subjectMatched": "Jane Smith",
+    "sourceListType": "PEP Database",
+    "sourceRegion": "Europe"
+  }
+]
+
+// createWatchlistHit() transforms to:
+{
+  listType: "PEP",
+  listName: "PEP Database",
+  confidence: 1.0,
+  matchDetails: "Jane Smith",
+  sourceRegion: "Europe"
+}</code></pre>
+      <div class="callout callout-green" style="margin-top:0.5em;font-size:0.6em;">
+        PEPs are screened for BOTH the business entity (KYB) and each UBO/Director (PSC flow). Both appear as separate entries in the consolidated <code>watchlist</code> fact — business hits with <code>entity_type="business"</code>, person hits with <code>entity_type="person"</code>.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 10: ADVERSE MEDIA ─── -->
+<section>
+  <h2>Adverse Media — UK Flow with OpenAI Scoring</h2>
+  <div class="grid2">
+    <div>
+      <h3>Two sources of adverse media</h3>
+      <table>
+        <tr><th>Source</th><th>Platform</th><th>Trigger</th></tr>
+        <tr><td>Trulioo KYB <code>AM_results</code></td><td>38</td><td>Automatic during KYB</td></tr>
+        <tr><td>SERP adverse media</td><td>22</td><td>If SERP enabled for customer</td></tr>
+      </table>
+      <br/>
+      <h3>Title extraction from URL slug</h3>
+      <pre><code>// When Trulioo returns generic "Adverse Media" as listName,
+// Worth AI extracts real title from URL:
+extractTitleFromUrl(
+  "https://bbc.co.uk/news/acme-ltd-fraud-case"
+)
+→ "Acme ltd fraud case"
+
+// Strips: file extensions, numeric IDs (5+ digits),
+// hyphens → spaces. Returns null if &lt;10 chars.</code></pre>
+    </div>
+    <div>
+      <h3>OpenAI scoring pipeline</h3>
+      <div class="lineage">For each AM_results hit:
+1. Get title (from listName or URL slug)
+2. scoreAdverseMedia(title, entityNames) via OpenAI:
+   → keywordsScore (0–1): fraud/crime keywords
+   → negativeSentimentScore (0–1): sentiment
+   → entityFocusScore (0–1): article about this entity?
+   → finalScore (0–1): weighted combination
+   → riskLevel: "LOW" | "MEDIUM" | "HIGH"
+   → description: human-readable risk explanation
+
+3. Deduplicate by (link, mediaType)
+4. insertAdverseMedia():
+   → adverse_media (business_id, counts)
+   → adverse_media_articles (per article, all scores)
+
+Stored example:
+{
+  title: "Acme Ltd fraud investigation",
+  source: "bbc.co.uk",
+  final_score: 0.91,
+  risk_level: "HIGH"
+}</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 11: PSC AUTOMATIC UK FLOW ─── -->
+<section>
+  <h2>PSC (UBO/Director) Screening — Automatic UK Flow</h2>
+  <div class="callout callout-green" style="margin-bottom:0.6em;">
+    <strong>For UK businesses: PSC screening is AUTOMATIC.</strong> No separate toggle. No manual trigger. It runs immediately after KYB verification completes with status="approved". This follows the Middesk pattern: one API call handles both business and person verification.
+  </div>
+  <div class="grid2">
+    <div>
+      <h3>Decision logic</h3>
+      <div class="lineage">shouldScreenPSCsForBusiness("GB"):
+  isUS = false  // GB is not US
+  internationalKYBEnabled = true  // from data_integration_settings
+  → { shouldScreen: true }  // automatic for non-US
+
+// US businesses need Advanced Watchlists toggle:
+shouldScreenPSCsForBusiness("US"):
+  isUS = true
+  advancedWatchlistsEnabled = false  // if toggle off
+  → { shouldScreen: false }
+  // Only screens US owners if toggle explicitly enabled</div>
+      <br/>
+      <h3>Person sources aggregated</h3>
+      <ul>
+        <li><code>businessData.ubos[]</code> — PSCs from Companies House</li>
+        <li><code>businessData.directors[]</code> — Directors from filing</li>
+        <li><code>data_owners</code> (case-service) — applicant-submitted owners</li>
+        <li>Deduplication: by fullName (case-insensitive)</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Atomic lock — prevents duplicate screening</h3>
+      <pre><code>// Only ONE process triggers PSC per person:
+INSERT INTO integration_data.business_entity_people
+  (business_entity_verification_id, name, ...)
+ON CONFLICT (business_entity_verification_id, name)
+DO IGNORE  ← atomic lock
+
+// If INSERT succeeds → screen this person
+// If conflict → already being screened → skip</code></pre>
+      <h3 style="margin-top:0.6em;">PSC result storage</h3>
+      <pre><code>// Person hits stored with entity_type="person":
+WatchlistValueMetadatum {
+  type: "pep",
+  entity_type: "person",    // ← distinguishes from KYB
+  metadata: {
+    entity_name: "John Smith",
+    title: "PEP Database"
+  }
+}
+// vs business hits: entity_type = "business"</code></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 12: SERP UK ─── -->
+<section>
+  <h2>SERP — UK Behavior</h2>
+  <div class="callout" style="margin-bottom:0.6em;font-size:0.62em;">
+    SERP runs for UK businesses when enabled for the customer. It is NOT country-specific — it runs based on customer integration settings. UK companies may have Google Business profiles (but coverage is lower than US).
+  </div>
+  <div class="grid2">
+    <div>
+      <table>
+        <tr><th>Feature</th><th>Runs for UK?</th><th>Notes</th></tr>
+        <tr><td>Google SERP scraping</td><td><span class="pill pill-green">Yes (if enabled)</span></td><td>Finds contact info, website, description for UK businesses</td></tr>
+        <tr><td>Google Business Profile (platform 39)</td><td><span class="pill pill-green">Yes</span></td><td>Fetches Google Maps listing for UK company</td></tr>
+        <tr><td>Worth Website Scanning (platform 30)</td><td><span class="pill pill-green">Yes</span></td><td>Domain age, SSL, malware — works for .co.uk domains</td></tr>
+        <tr><td>SERP Adverse Media</td><td><span class="pill pill-green">Yes (if enabled)</span></td><td>Google Search "[UK company] fraud/scam/lawsuit"</td></tr>
+      </table>
+    </div>
+    <div>
+      <h3>Google Profile Verified/Unverified for UK addresses</h3>
+      <div class="lineage">caseTabValuesManager.ts:
+
+// SERP_GOOGLE_PROFILE (platform 39) fetches Google Maps address
+const googleAddr = google_profile?.address
+
+// Compare submitted UK address to Google Maps address:
+if (googleAddr matches submitted) →
+  googleProfileStatus = "passed" → "Verified" (blue badge)
+  "Business address (Google) verified."
+
+if (address present but not confirmed) →
+  googleProfileStatus = "missing" → "Unverified" (yellow badge)
+  "Address present but not verified."
+
+if (no Google listing found) →
+  googleProfileStatus = "failed" → no badge
+
+// Common for UK: postcode format differences
+// "W1U 6RG" vs "W1U6RG" may cause "missing" status</div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 13: DATA STORAGE ─── -->
+<section>
+  <h2>All Storage Tables for UK Screening</h2>
+  <table>
+    <tr><th>Table</th><th>Schema</th><th>What is stored</th><th>Written by</th></tr>
+    <tr><td><code>request_response</code></td><td><code>integration_data</code></td><td>FULL raw Trulioo response + confidence score</td><td>truliooBusinessResultsStorage.saveRequestResponse()</td></tr>
+    <tr><td><code>business_entity_verification</code></td><td><code>integration_data</code></td><td>KYB result: name, status, incorporation_date, entity_type</td><td>storeInitialVerificationRecord()</td></tr>
+    <tr><td><code>business_entity_address_source</code></td><td><code>integration_data</code></td><td>Submitted + reported addresses, deliverable flag</td><td>storeAddressData()</td></tr>
+    <tr><td><code>business_entity_names</code></td><td><code>integration_data</code></td><td>Submitted and reported business names</td><td>upsertBusinessEntityNames()</td></tr>
+    <tr><td><code>business_entity_review_task</code></td><td><code>integration_data</code></td><td>watchlist, tin, name, address_verification review tasks</td><td>storeBusinessWatchlistResults()</td></tr>
+    <tr><td><code>business_entity_people</code></td><td><code>integration_data</code></td><td>UBOs/Directors from PSC + screening results JSONB</td><td>truliooPersonDataStorage</td></tr>
+    <tr><td><code>adverse_media_articles</code></td><td><code>rds_cases_public</code></td><td>OpenAI-scored articles: scores, risk_level, source URL</td><td>adverseMedia.insertAdverseMedia()</td></tr>
+    <tr><td><code>facts</code></td><td><code>rds_warehouse_public</code></td><td>watchlist, adverse_media_hits, address_verification facts</td><td>warehouse-service FactService</td></tr>
+  </table>
+</section>
+
+<!-- ─── SLIDE 14: FACT ENGINE + API ─── -->
+<section>
+  <h2>Fact Engine & API Surfacing</h2>
+  <div class="grid2">
+    <div>
+      <h3>watchlist (consolidated) fact</h3>
+      <pre><code>{
+  "metadata": [
+    {
+      "id": "&lt;uuid&gt;",
+      "type": "sanctions",
+      "entity_type": "business",
+      "metadata": {
+        "title": "Register of Insolvencies",
+        "agency": "Accountant in Bankruptcy",
+        "entity_name": "Acme Limited"
+      },
+      "url": "https://www.aib.gov.uk/...",
+      "score": null  // ← NOT populated (known gap)
+    },
+    {
+      "type": "pep",
+      "entity_type": "person",    // PSC hit
+      "metadata": { "entity_name": "John Smith" }
+    }
+  ],
+  "message": "Found 2 watchlist hit(s)"
+}</code></pre>
+    </div>
+    <div>
+      <h3>Where data is surfaced</h3>
+      <table>
+        <tr><th>Endpoint</th><th>Returns</th></tr>
+        <tr><td><code>/facts/business/{id}/details</code></td><td>watchlist fact, watchlist_hits count, adverse_media_hits, source.confidence</td></tr>
+        <tr><td>360 Report</td><td>watchlist_hits, people_watchlist (per person), watchlist_entries (grouped)</td></tr>
+        <tr><td>Admin UI Watchlists tab</td><td>Grouped by entity_type: "Hits for Acme Ltd" (business) + "Hits for John Smith" (PSC person)</td></tr>
+      </table>
+      <br/>
+      <h3>Consistency guarantees</h3>
+      <ul>
+        <li>All endpoints read the same <code>watchlist</code> computed fact</li>
+        <li><code>createWatchlistDedupKey()</code> prevents double-counting</li>
+        <li>Atomic lock in <code>business_entity_people</code> prevents duplicate PSC</li>
+        <li>Comprehensive View is the single arbiter for address match</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ─── SLIDE 15: KNOWN GAPS ─── -->
+<section>
+  <h2>Known Gaps & What to Fix</h2>
+  <div class="grid3">
+    <div class="box">
+      <div class="box-title" style="color:var(--c-red);">🔴 Gap 1: Watchlist score not surfaced</div>
+      <div class="box-body">
+        Trulioo returns <code>score</code> (0–1) per hit. This is captured in raw response but NOT propagated to <code>WatchlistValueMetadatum</code> or the API.<br/><br/>
+        <strong>Fix:</strong> Add <code>score?: number</code> to <code>WatchlistValueMetadatum</code>. Copy in <code>mapWatchlistHits()</code>. Include in consolidated watchlist fact.
+      </div>
+    </div>
+    <div class="box">
+      <div class="box-title" style="color:var(--c-red);">🔴 Gap 2: UK SIC codes not surfaced</div>
+      <div class="box-body">
+        OC's <code>industry_code_uids</code> contains <code>gb_sic-56101</code> for UK companies. Captured in <code>classification_codes</code> fact but no downstream consumer reads it.<br/><br/>
+        <strong>Fix:</strong> Add Kafka handler for <code>UPDATE_CLASSIFICATION_CODES</code> + new API endpoint.
+      </div>
+    </div>
+    <div class="box">
+      <div class="box-title" style="color:var(--c-amber);">⚠️ Gap 3: Adverse media count inconsistency</div>
+      <div class="box-body">
+        Trulioo AM_results count ≠ OpenAI-scored count. Scoring rejects low-quality articles.<br/><br/>
+        "12 hits" in watchlist tab. "9 articles" in adverse media tab. Confusing for analysts.
+      </div>
+    </div>
+  </div>
+  <div class="callout callout-green" style="margin-top:0.8em;">
+    <strong>Working correctly:</strong> PSC deduplication (atomic lock) ✓ · Comprehensive View as single arbiter ✓ · Upsert pattern on facts table ✓ · Business vs person entity_type distinction ✓
+  </div>
+</section>
+
+<!-- ─── SLIDE 16: FULL TIMELINE ─── -->
+<section>
+  <h2>Full End-to-End Timeline — UK Business Submission</h2>
+  <div class="lineage">T+0:00  UK business submits (country=GB)
+  canIRun(): GB enabled + Trulioo enabled → true
+T+0:02  OAuth token acquired from Trulioo
+T+0:03  KYB Flow init → hfSession received
+T+0:04  KYB payload sent (street-only address):
+  companyName="Acme Limited", companyZip="W1U 6RG",
+  companyregno="12345678", companyAddressFull="123 Baker Street"
+T+0:15  Trulioo response received:
+  status="completed"
+  Comprehensive View: BusinessName=match, AddressLine1=match ✓
+  Advanced Business Watchlist WatchlistHitDetails:
+    WL_results: [{ score:1.0, "Register of Insolvencies", "Accountant in Bankruptcy" }]
+    AM_results: [{ score:0.95, URL:"https://bbc.co.uk/..." }]
+T+0:16  storeBusinessVerificationResults():
+  → request_response: FULL raw Trulioo response
+  → business_entity_verification: name, status
+  → business_entity_address_source: submitted + reported
+  → business_entity_review_task key="address_verification": "success"
+  → business_entity_review_task key="watchlist": metadata=[sanctions hit]
+  → processAndPersistTruliooAdverseMedia(): OpenAI scores → adverse_media_articles
+T+0:17  PSC Screening (AUTOMATIC for GB):
+  shouldScreenPSCsForBusiness("GB") → true
+  Persons: John Smith (75%, Director) + Jane Doe (Secretary) from businessData
+  Atomic lock → screenPersonWithPSCFlow() for each
+  PSC results: no PEP hits for John Smith or Jane Doe
+T+0:25  Kafka: facts.v1 CALCULATE_BUSINESS_FACTS
+  watchlist fact: 1 SANCTIONS hit (Register of Insolvencies)
+  adverse_media_hits: 1 (OpenAI-scored)
+  address_verification_boolean: true
+T+0:30  Customer API ready:
+  GET /facts/business/{id}/details → watchlist.metadata, source.confidence=0.85
+  NOTE: watchlist hit score (1.0) NOT in response (Gap 1)
+T+varies  360 Report: watchlist_entries=[{entity:"Acme Ltd", hits:[sanctions hit]}]</div>
+</section>
+
+<!-- ─── SLIDE 17: SUMMARY ─── -->
+<section>
+  <h1 style="font-size:1.3em!important;">Summary — UK Screening in One Slide</h1>
+  <div class="grid2" style="margin-top:0.6em;">
+    <div>
+      <h3>What Trulioo does for UK businesses</h3>
+      <ul>
+        <li>Queries Companies House for registration, directors, UBOs, addresses</li>
+        <li>Verifies submitted address via Comprehensive View (match/nomatch per field)</li>
+        <li>Screens against 20+ global watchlists simultaneously: OFAC, BIS, UN, EU, UK OFSI, UK Insolvency registers, UK Disqualified Directors, PEP databases, Adverse Media</li>
+        <li>Returns relevancy score per hit (1.0 = exact)</li>
+        <li>Automatically triggers PSC screening for all UBOs/Directors (no toggle needed)</li>
+      </ul>
+    </div>
+    <div>
+      <h3>What Worth AI does with that data</h3>
+      <ul>
+        <li>Stores raw response in <code>request_response</code> (audit trail)</li>
+        <li>Extracts watchlist hits with Priority 1/2 logic</li>
+        <li>Scores adverse media articles with OpenAI (keywords, sentiment, entity focus)</li>
+        <li>Consolidates business + PSC hits into <code>watchlist</code> computed fact</li>
+        <li>Surfaces <code>source.confidence</code> in API (entity match quality)</li>
+        <li><strong>Does NOT surface</strong> watchlist hit relevancy score (0.0–1.0) — known gap</li>
+        <li>Builds 360 Report watchlist section from <code>watchlist</code> + <code>screened_people</code> facts</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+</div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/reveal.js/4.5.0/reveal.min.js"></script>
+<script>
+Reveal.initialize({
+  hash:true, center:false, transition:'slide', transitionSpeed:'fast',
+  width:1100, height:700, margin:0.04, minScale:0.5, maxScale:1.5,
+  plugins:[]
+});
+</script>
+</body>
+</html>

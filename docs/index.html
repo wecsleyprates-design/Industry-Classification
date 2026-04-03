@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>Industry Classification — Full Engineering Reference</title>
+<title>Worth AI — Full Engineering Reference</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;}
 body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;min-height:100vh;}
@@ -58,6 +58,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
 .deck-1{background:linear-gradient(135deg,#0D47A1,#1565C0);}
 .deck-2{background:linear-gradient(135deg,#1B5E20,#2E7D32);}
 .deck-3{background:linear-gradient(135deg,#212121,#37474F);}
+.deck-6{background:linear-gradient(135deg,#7B1FA2,#4A148C);}
+.deck-7{background:linear-gradient(135deg,#00695C,#00796B);}
 
 /* ── Flow diagram ── */
 .flow-section{padding:0 40px 40px;max-width:1200px;margin:0 auto;}
@@ -79,9 +81,9 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
 
 <!-- ── HEADER ── -->
 <div class="header">
-  <h1>Industry Classification — Full Engineering Reference</h1>
-  <p>The complete picture: data sources, phases, models, gaps, and the Consensus Engine</p>
-  <div class="badge">Worth AI · March 2026</div>
+  <h1>Worth AI — Full Engineering Reference</h1>
+  <p>Industry Classification · Admin Portal Lineage · UK Screening · Pipeline Architecture · XGBoost Models</p>
+  <div class="badge">Worth AI · April 2026</div>
 </div>
 
 <!-- ── KEY INSIGHT ── -->
@@ -105,8 +107,8 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
 
 <!-- ── READING ORDER ── -->
 <div class="reading-order">
-  <h2>Read in This Order — Start with 1, End with 5</h2>
-  <p>Each deck builds on the previous one. The full picture emerges across all five.</p>
+  <h2>Seven Decks — Start with 1 for Industry Classification, or Jump to 6 &amp; 7 for Operational Lineage</h2>
+  <p>Decks 1–5 cover the classification engine architecture. Decks 6–7 are operational reference documents for analysts and engineers.</p>
 </div>
 
 <!-- ── DECK GRID ── -->
@@ -271,11 +273,81 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
     </div>
   </a>
 
+  <!-- DECK 6 — Admin Portal Lineage -->
+  <a href="admin_ui_lineage.html" class="deck deck-6" style="text-decoration:none">
+    <div class="deck-num">6</div>
+    <div class="deck-header">
+      <div class="deck-icon">🖥️</div>
+      <div class="deck-step">Operational Reference — Admin Portal</div>
+      <div class="deck-title">Worth AI Admin Portal — Complete Data Lineage</div>
+      <div class="deck-subtitle">17 slides · Every field, badge, score &amp; status explained</div>
+    </div>
+    <div class="deck-body">
+      <div class="deck-why">
+        <div class="deck-why-label">Why read this</div>
+        <div class="deck-why-text">When an analyst sees "NAICS Code: 812113 — Nail Salons", a Worth Score of 819/850, or a green "Verified" badge in admin.joinworth.com, where did each value come from? This deck answers that question for every visible element in the admin portal — confirmed against April 2, 2026 team training session and verified against case-service, integration-service, and manual-score-service source code.</div>
+      </div>
+      <div class="deck-covers">
+        <div class="deck-tag">3 portals: admin vs customer vs API</div>
+        <div class="deck-tag">Sandbox vs Production — what is real data</div>
+        <div class="deck-tag">VerData/SERP: no sandbox env (confirmed)</div>
+        <div class="deck-tag">Worth Score: 3 categories, 13 tables</div>
+        <div class="deck-tag">Confidence per-source (not per-address)</div>
+        <div class="deck-tag">KYB field-level lineage (9 fields)</div>
+        <div class="deck-tag">KYC: Match/No Match badge mechanics</div>
+        <div class="deck-tag">Fraud Report: Plaid IDV risk scores</div>
+        <div class="deck-tag">Submitted vs Reported addresses</div>
+        <div class="deck-tag">All 20 case statuses + who sets each</div>
+        <div class="deck-tag">Case ID vs Business ID utility</div>
+        <div class="deck-tag">URL navigation patterns</div>
+      </div>
+    </div>
+    <div class="deck-links">
+      <a href="admin_ui_lineage.html" onclick="event.stopPropagation()" class="btn-slides">View Slides →</a>
+      <a href="admin_ui_lineage.md" onclick="event.stopPropagation()" class="btn-doc">Read Document</a>
+    </div>
+  </a>
+
+  <!-- DECK 7 — UK Screening Lineage -->
+  <a href="uk_screening_lineage.html" class="deck deck-7" style="text-decoration:none">
+    <div class="deck-num">7</div>
+    <div class="deck-header">
+      <div class="deck-icon">🇬🇧</div>
+      <div class="deck-step">Operational Reference — UK Screening</div>
+      <div class="deck-title">UK Screening — Complete End-to-End Lineage</div>
+      <div class="deck-subtitle">17 slides · Trulioo · Watchlists · PEPs · Adverse Media · PSC</div>
+    </div>
+    <div class="deck-body">
+      <div class="deck-why">
+        <div class="deck-why-label">Why read this</div>
+        <div class="deck-why-text">How does a UK business get verified? This deck traces the complete journey from the Trulioo KYB API call — through Companies House lookup, OFAC/BIS/OFSI/PEP watchlist screening, adverse media scoring, and automatic UBO/Director PSC screening — all the way to the "Verified" badge and 360 Report watchlist section. Includes real UK example payloads, the address split strategy, and three confirmed gaps.</div>
+      </div>
+      <div class="deck-covers">
+        <div class="deck-tag">UK vs US routing: canIRun() logic</div>
+        <div class="deck-tag">Trulioo OAuth + flow architecture</div>
+        <div class="deck-tag">Address split strategy (street only)</div>
+        <div class="deck-tag">Comprehensive View — UK address match</div>
+        <div class="deck-tag">UK-specific watchlists (Register of Insolvencies...)</div>
+        <div class="deck-tag">WL_results / AM_results / PEP_results</div>
+        <div class="deck-tag">Priority 1 vs 2 extraction (real UK examples)</div>
+        <div class="deck-tag">Score/confidence/relevancy: 2 systems</div>
+        <div class="deck-tag">Watchlist score NOT in API (confirmed gap)</div>
+        <div class="deck-tag">UK PEP definition + PSC flow</div>
+        <div class="deck-tag">Adverse media OpenAI scoring pipeline</div>
+        <div class="deck-tag">Full T+0 → T+30s → 360 Report timeline</div>
+      </div>
+    </div>
+    <div class="deck-links">
+      <a href="uk_screening_lineage.html" onclick="event.stopPropagation()" class="btn-slides">View Slides →</a>
+      <a href="uk_screening_lineage.md" onclick="event.stopPropagation()" class="btn-doc">Read Document</a>
+    </div>
+  </a>
+
 </div>
 
 <!-- ── FLOW DIAGRAM ── -->
 <div class="flow-section">
-  <h2>The Complete Story — How All 4 Decks Connect</h2>
+  <h2>The Complete Story — How All 7 Decks Connect</h2>
   <div class="flow-row">
     <div class="flow-box">
       <strong>Deck 1</strong>
@@ -300,6 +372,22 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
     <div class="flow-box" style="background:rgba(43,76,126,.4);border-color:#4299E1;">
       <strong>Deck 5</strong>
       <span style="color:#90CDF4">8 Facts Blueprint<br/>Where facts come from</span>
+    </div>
+  </div>
+  <div class="flow-row" style="margin-top:12px;">
+    <div class="flow-box" style="background:rgba(74,20,140,.3);border-color:#9C27B0;">
+      <strong>Deck 6</strong>
+      <span style="color:#CE93D8">Admin Portal Lineage<br/>Every field explained</span>
+    </div>
+    <div class="flow-arrow">+</div>
+    <div class="flow-box" style="background:rgba(0,105,92,.3);border-color:#00897B;">
+      <strong>Deck 7</strong>
+      <span style="color:#80CBC4">UK Screening<br/>Trulioo end-to-end</span>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-box flow-new">
+      <strong>Worthipedia</strong>
+      <span>Operational knowledge<br/>for analysts &amp; engineers</span>
     </div>
   </div>
 
@@ -333,7 +421,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0D1B2A;color:white;
 </div>
 
 <div class="footer">
-  Worth AI Engineering · March 2026 ·
+  Worth AI Engineering · April 2026 ·
   <a href="https://github.com/wecsleyprates-design/Industry-Classification">GitHub Repository</a>
 </div>
 
