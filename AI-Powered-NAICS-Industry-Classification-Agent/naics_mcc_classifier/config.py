@@ -46,8 +46,11 @@ CASESERVICE_PG = dict(
 
 # ── Redshift table names ──────────────────────────────────────────────────────
 TABLES = dict(
-    # Vendor standardised source tables (pre-loaded bulk)
-    zi_source       = "datascience.zoominfo_standard_ml_2",
+    # ZoomInfo NAICS source: comp_standard_global is the raw ZI table with zi_c_naics6.
+    # zoominfo_standard_ml_2 only has normalized name/address columns for Levenshtein
+    # matching — it does NOT contain NAICS codes.
+    # smb_zi_oc_efx_ver_combined.sql pulls zi_c_naics6 directly from comp_standard_global.
+    zi_source       = "zoominfo.comp_standard_global",
     efx_source      = "warehouse.equifax_us_standardized",
     oc_source       = "datascience.open_corporates_standard_ml_2",
     liberty_1       = "liberty.einmst_20260218",

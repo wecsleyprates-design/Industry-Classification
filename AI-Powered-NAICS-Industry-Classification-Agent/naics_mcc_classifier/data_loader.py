@@ -389,38 +389,47 @@ def load_customer_files_naics() -> pl.DataFrame:
 
 def load_zoominfo_signals() -> pl.DataFrame:
     """
-    ZoomInfo NAICS, SIC, and internal confidence scores.
-    Source: datascience.zoominfo_standard_ml_2
+    ZoomInfo NAICS, SIC, and confidence scores.
+    Source: zoominfo.comp_standard_global  (the raw ZI table with all NAICS fields)
 
-    Key columns returned:
-      zi_c_naics6                — 6-digit NAICS primary code
-      zi_c_naics4, zi_c_naics2  — sub-sector codes
-      zi_c_naics_confidence_score — ZI's own confidence (0-1, often null)
-      zi_c_sic4                 — 4-digit SIC code
-      zi_c_total_employee_count — firmographic: employees
-      zi_c_annual_revenue       — firmographic: revenue
+    Note on table choice:
+      - datascience.zoominfo_standard_ml_2 has ONLY normalized name/address columns
+        for Levenshtein similarity scoring — it does NOT contain NAICS codes.
+      - zoominfo.comp_standard_global is the source table that contains zi_c_naics6,
+        confidence scores, firmographics, etc.
+      - smb_zi_oc_efx_ver_combined.sql pulls NAICS directly from comp_standard_global.
+      - The enriched table zoominfo.enriched_match_reasons_conf_tier_udb also has
+        all these columns and can be used as an alternative.
+
+    Key columns returned (all verified from smb_zi_oc_efx_ver_combined.sql line 1237+):
+      zi_c_naics6              — 6-digit NAICS primary code
+      zi_c_naics4, zi_c_naics2 — sub-sector codes
+      zi_c_naics_confidence_score — ZI's own NAICS confidence (0-1)
+      zi_c_sic4                — 4-digit SIC primary code
+      zi_c_employees           — firmographic: employee count
+      zi_c_revenue             — firmographic: annual revenue
     """
     schema, table = TABLES["zi_source"].split(".")
     sql = f"""
     SELECT
-        CAST(zi_c_company_id AS VARCHAR) || '|' ||
-        CAST(zi_c_location_id AS VARCHAR)       AS zi_key,
-        CAST(zi_c_naics6 AS VARCHAR)            AS zi_c_naics6,
-        CAST(zi_c_naics4 AS VARCHAR)            AS zi_c_naics4,
-        CAST(zi_c_naics2 AS VARCHAR)            AS zi_c_naics2,
+        CAST(zi_c_company_id  AS VARCHAR) || '|' ||
+        CAST(zi_c_location_id AS VARCHAR)        AS zi_key,
+        CAST(zi_c_naics6 AS VARCHAR)             AS zi_c_naics6,
+        CAST(zi_c_naics4 AS VARCHAR)             AS zi_c_naics4,
+        CAST(zi_c_naics2 AS VARCHAR)             AS zi_c_naics2,
         zi_c_naics_confidence_score,
-        CAST(zi_c_sic4 AS VARCHAR)              AS zi_c_sic4,
-        zi_c_total_employee_count,
-        zi_c_annual_revenue,
+        CAST(zi_c_sic4 AS VARCHAR)               AS zi_c_sic4,
+        zi_c_employees                           AS zi_c_total_employee_count,
+        zi_c_revenue                             AS zi_c_annual_revenue,
         zi_c_name,
-        COALESCE(zi_eng_state, 'MISSING')       AS state,
-        country_code
+        COALESCE(zi_c_state,   'MISSING')        AS state,
+        zi_c_country                             AS country_code
     FROM "{schema}"."{table}"
     WHERE zi_c_naics6 IS NOT NULL
-      AND CAST(zi_c_naics6 AS VARCHAR) != ''
+      AND zi_c_country = 'United States'
     """
     df = redshift_query(sql)
-    logger.info("Loaded %d ZoomInfo records with NAICS", len(df))
+    logger.info("Loaded %d ZoomInfo records with NAICS from %s.%s", len(df), schema, table)
     return df
 
 
@@ -740,14 +749,14 @@ def build_training_dataset(
 
     schema_zi, table_zi = TABLES["zi_matches"].split(".")
     # Best ZI match per business: row with highest zi_probability, else highest similarity_index
+    # zi_key format must match load_zoominfo_signals(): zi_c_company_id|zi_c_location_id
     sql_zi_ids = f"""
     SELECT
         LOWER(CAST(business_id AS VARCHAR))       AS business_id,
-        CAST(zi_c_company_id AS VARCHAR) || '|' ||
+        CAST(zi_c_company_id  AS VARCHAR) || '|' ||
         CAST(zi_c_location_id AS VARCHAR)         AS zi_key
     FROM (
         SELECT business_id, zi_c_company_id, zi_c_location_id,
-               COALESCE(zi_probability, 0) + COALESCE(similarity_index / 55.0, 0) AS score,
                ROW_NUMBER() OVER (
                    PARTITION BY business_id
                    ORDER BY COALESCE(zi_probability, 0) DESC,
