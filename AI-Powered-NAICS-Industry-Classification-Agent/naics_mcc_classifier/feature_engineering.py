@@ -138,15 +138,46 @@ def build_feature_matrix(
         df.get("efx_sic_primary", pd.Series("", index=df.index))
         .fillna("").apply(lambda x: int(x[:4]) if str(x).strip()[:4].isdigit() else 0)
     )
+    # Equifax secondary NAICS (up to 4)
     feats["efx_naics_secondary_1"] = df.get("efx_naics_secondary_1", pd.Series("", index=df.index)).fillna("").apply(_enc)
     feats["efx_naics_secondary_2"] = df.get("efx_naics_secondary_2", pd.Series("", index=df.index)).fillna("").apply(_enc)
+    feats["efx_naics_secondary_3"] = df.get("efx_naics_secondary_3", pd.Series("", index=df.index)).fillna("").apply(_enc)
+    feats["efx_naics_secondary_4"] = df.get("efx_naics_secondary_4", pd.Series("", index=df.index)).fillna("").apply(_enc)
+    # Equifax secondary SIC
+    feats["efx_sic_secondary_1"] = (
+        df.get("efx_sic_secondary_1", pd.Series("", index=df.index))
+        .fillna("").apply(lambda x: int(x[:4]) if str(x).strip()[:4].isdigit() else 0)
+    )
+    feats["efx_sic_secondary_2"] = (
+        df.get("efx_sic_secondary_2", pd.Series("", index=df.index))
+        .fillna("").apply(lambda x: int(x[:4]) if str(x).strip()[:4].isdigit() else 0)
+    )
 
     feats["oc_naics_primary"] = df["oc_naics_primary"].fillna("").apply(_enc)
     feats["oc_naics_sector"]  = df.get("oc_naics_sector", pd.Series("", index=df.index)).fillna("").apply(
         lambda x: int(x) if str(x).isdigit() else 0
     )
 
-    # ── B. Source agreement ───────────────────────────────────────────────────
+    # ── ZoomInfo top-3 NAICS candidates (NEW) ─────────────────────────────────
+    # zi_c_naics_top3 = "722511|722513|722515" — ZI's top-3 candidate codes
+    for i, col in enumerate(["zi_c_naics_top3_1","zi_c_naics_top3_2","zi_c_naics_top3_3"], 1):
+        feats[f"zi_naics_top3_{i}"] = df.get(col, pd.Series("", index=df.index)).fillna("").apply(_enc)
+    for i, col in enumerate(["zi_c_sic_top3_1","zi_c_sic_top3_2"], 1):
+        feats[f"zi_sic_top3_{i}"] = (
+            df.get(col, pd.Series("", index=df.index))
+            .fillna("").apply(lambda x: int(x[:4]) if str(x).strip()[:4].isdigit() else 0)
+        )
+    # How many distinct 2-digit sectors appear in ZI's top-3? (1=certain, 3=uncertain)
+    def _top3_spread(row):
+        sectors = set()
+        for c in ["zi_c_naics_top3_1","zi_c_naics_top3_2","zi_c_naics_top3_3"]:
+            v = str(row.get(c,"")).strip()
+            if v and len(v) >= 2 and v[:2].isdigit():
+                sectors.add(v[:2])
+        return len(sectors) if sectors else 1
+    feats["zi_top3_sector_spread"] = df.apply(_top3_spread, axis=1)
+
+    # ── B. Source agreement (primary codes) ───────────────────────────────────
     def _sector2(code_col: str) -> pd.Series:
         return df[code_col].fillna("").str[:2]
 
@@ -170,6 +201,33 @@ def build_feature_matrix(
     feats["zi_efx_naics_match"] = (zi_sec == efx_sec).astype(int)
     feats["zi_oc_naics_match"]  = (zi_sec == oc_sec).astype(int)
     feats["efx_oc_naics_match"] = (efx_sec == oc_sec).astype(int)
+
+    # ── Cross-source agreement using top-3 / secondary codes (NEW) ────────────
+    # Does EFX primary sector appear ANYWHERE in ZI's top-3?
+    def _efx_in_zi_top3(row):
+        efx_s = str(row.get("efx_naics_primary",""))[:2]
+        if not efx_s.isdigit(): return 0
+        for c in ["zi_c_naics_top3_1","zi_c_naics_top3_2","zi_c_naics_top3_3"]:
+            if str(row.get(c,""))[:2] == efx_s: return 1
+        return 0
+    feats["efx_matches_zi_top3"] = df.apply(_efx_in_zi_top3, axis=1)
+
+    # Does ZI primary sector appear in EFX secondary codes?
+    def _zi_in_efx_secondary(row):
+        zi_s = str(row.get("zi_c_naics6",""))[:2]
+        if not zi_s.isdigit(): return 0
+        for c in ["efx_naics_secondary_1","efx_naics_secondary_2",
+                  "efx_naics_secondary_3","efx_naics_secondary_4"]:
+            if str(row.get(c,""))[:2] == zi_s: return 1
+        return 0
+    feats["zi_matches_efx_secondary"] = df.apply(_zi_in_efx_secondary, axis=1)
+
+    # SIC cross-source agreement
+    zi_sic4  = df.get("zi_c_sic4",     pd.Series("", index=df.index)).fillna("").astype(str).str[:4]
+    efx_sic4 = df.get("efx_sic_primary",pd.Series("", index=df.index)).fillna("").astype(str).str[:4]
+    feats["sic_cross_source_agree"]  = (zi_sic4 == efx_sic4).astype(int)
+    feats["zi_efx_sic_match"]        = (zi_sic4 == efx_sic4).astype(int)
+    feats["zi_efx_sic_sector_match"] = (zi_sic4.str[:2] == efx_sic4.str[:2]).astype(int)
 
     # ── C. Entity-match confidence ────────────────────────────────────────────
     feats["zi_match_confidence"]  = pd.to_numeric(df.get("zi_match_confidence",  0), errors="coerce").fillna(0.0)

@@ -713,119 +713,253 @@ def build_training_dataset(
         )
         return _generate_synthetic_dataset(n=limit or 10_000)
 
-    # ── Step 1-3: Load from Redshift — convert to pandas immediately ─────────
-    # All joins are done in pandas to avoid Polars outer-join key collisions.
-    logger.info("Loading production facts (current NAICS/MCC from Pipeline A)...")
-    prod_pl = load_production_naics()
-    prod = prod_pl.to_pandas()
+    # ── ONE SINGLE REDSHIFT QUERY — all joins done server-side ───────────────
+    # Previously we loaded full vendor tables into Python and joined there.
+    # zoominfo.comp_standard_global has millions of rows globally — loading it
+    # entirely caused the 16+ minute hang.
+    #
+    # Fix: push ALL joins into one CTE query on Redshift (same pattern as
+    # smb_zi_oc_efx_ver_combined.sql). Redshift only returns one row per
+    # business_id with the best matched vendor signals. ~1-3 minutes total.
+    #
+    # New features added vs previous version:
+    #   zi_c_naics_top3  — ZoomInfo's top-3 NAICS candidates (pipe-delimited)
+    #   zi_c_sic_top3    — ZoomInfo's top-3 SIC candidates
+    #   efx_secnaics1-4  — Equifax 4 secondary NAICS codes
+    #   efx_secsic1-4    — Equifax 4 secondary SIC codes
+    #   oc_industry_code_uids — all OC taxonomy codes (parsed for NAICS + SIC)
 
-    logger.info("Loading entity-match confidences (XGBoost Level 1 outputs)...")
-    conf = load_entity_match_confidences()      # already returns pandas
+    t_facts    = "rds_warehouse_public.facts"
+    t_zi_match = TABLES["zi_matches"]
+    t_efx_match= TABLES["efx_matches"]
+    t_oc_match = TABLES["oc_matches"]
+    t_zi_src   = TABLES["zi_source"]       # zoominfo.comp_standard_global
+    t_efx_src  = TABLES["efx_source"]      # warehouse.equifax_us_standardized
+    t_oc_src   = TABLES["oc_source"]       # datascience.open_corporates_standard_ml_2
+    t_cust     = TABLES["customer_files"]
 
-    logger.info("Loading Pipeline B NAICS winner (ZI vs EFX rule)...")
-    pipeB = load_customer_files_naics().to_pandas()
+    logger.info("Executing single Redshift query — all vendor signals joined server-side...")
+    limit_clause = f"LIMIT {limit}" if limit else ""
 
-    # ── Step 4: Merge all three on business_id (pandas left-merge) ────────────
-    pdf = (
-        prod
-        .merge(conf,  on="business_id", how="left")
-        .merge(pipeB, on="business_id", how="left")
+    sql_master = f"""
+    WITH
+    -- ── facts: current Pipeline A NAICS/MCC ─────────────────────────────────
+    facts_cte AS (
+        SELECT
+            LOWER(CAST(f_naics.business_id AS VARCHAR))              AS business_id,
+            JSON_EXTRACT_PATH_TEXT(f_naics.value, 'value')           AS current_naics_code,
+            JSON_EXTRACT_PATH_TEXT(f_naics.value, 'source.confidence') AS naics_confidence,
+            JSON_EXTRACT_PATH_TEXT(f_naics.value, 'source.platformId')  AS naics_platform_id,
+            JSON_EXTRACT_PATH_TEXT(f_naics.value, 'override')        AS naics_override_raw,
+            JSON_EXTRACT_PATH_TEXT(f_mcc.value,   'value')           AS current_mcc_code,
+            JSON_EXTRACT_PATH_TEXT(f_ai.value,    'confidence')      AS ai_enrichment_confidence
+        FROM {t_facts} f_naics
+        LEFT JOIN {t_facts} f_mcc
+               ON f_mcc.business_id = f_naics.business_id AND f_mcc.name = 'mcc_code'
+        LEFT JOIN {t_facts} f_ai
+               ON f_ai.business_id  = f_naics.business_id AND f_ai.name  = 'ai_naics_enrichment_metadata'
+        WHERE f_naics.name = 'naics_code'
+    ),
+
+    -- ── Pipeline B winner (ZI vs EFX rule) ──────────────────────────────────
+    pipeb_cte AS (
+        SELECT
+            LOWER(CAST(business_id AS VARCHAR))      AS business_id,
+            CAST(primary_naics_code AS VARCHAR)      AS pipeline_b_naics,
+            COALESCE(CAST(mcc_code AS VARCHAR), '')  AS pipeline_b_mcc,
+            COALESCE(match_confidence, 0.0)          AS match_confidence
+        FROM {t_cust}
+        WHERE primary_naics_code IS NOT NULL AND primary_naics_code != 0
+    ),
+
+    -- ── Entity-match confidence: best match per business ─────────────────────
+    zi_conf_cte AS (
+        SELECT business_id,
+               MAX(CASE WHEN zi_probability IS NOT NULL  THEN zi_probability
+                        WHEN similarity_index/55.0>=0.8  THEN similarity_index/55.0
+                        ELSE 0 END) AS zi_match_confidence
+        FROM {t_zi_match} GROUP BY business_id
+    ),
+    efx_conf_cte AS (
+        SELECT business_id,
+               MAX(CASE WHEN efx_probability IS NOT NULL THEN efx_probability
+                        WHEN similarity_index/55.0>=0.8  THEN similarity_index/55.0
+                        ELSE 0 END) AS efx_match_confidence
+        FROM {t_efx_match} GROUP BY business_id
+    ),
+    oc_conf_cte AS (
+        SELECT business_id,
+               MAX(CASE WHEN oc_probability IS NOT NULL  THEN oc_probability
+                        WHEN similarity_index/55.0>=0.8  THEN similarity_index/55.0
+                        ELSE 0 END) AS oc_match_confidence
+        FROM {t_oc_match} GROUP BY business_id
+    ),
+
+    -- ── Best ZI match per business → join comp_standard_global ───────────────
+    -- Only fetch ZI records for matched businesses (avoids full table scan)
+    zi_best_cte AS (
+        SELECT business_id, zi_c_company_id, zi_c_location_id,
+               ROW_NUMBER() OVER (PARTITION BY business_id
+                                  ORDER BY COALESCE(zi_probability,0) DESC,
+                                           COALESCE(similarity_index,0) DESC) AS rn
+        FROM {t_zi_match}
+    ),
+    zi_naics_cte AS (
+        SELECT
+            LOWER(CAST(b.business_id AS VARCHAR))     AS business_id,
+            CAST(z.zi_c_naics6 AS VARCHAR)            AS zi_c_naics6,
+            CAST(z.zi_c_naics4 AS VARCHAR)            AS zi_c_naics4,
+            CAST(z.zi_c_naics2 AS VARCHAR)            AS zi_c_naics2,
+            CAST(z.zi_c_naics_top3 AS VARCHAR)        AS zi_c_naics_top3,
+            CAST(z.zi_c_sic4 AS VARCHAR)              AS zi_c_sic4,
+            CAST(z.zi_c_sic_top3 AS VARCHAR)          AS zi_c_sic_top3,
+            z.zi_c_naics_confidence_score,
+            z.zi_c_employees                          AS zi_c_total_employee_count,
+            z.zi_c_revenue                            AS zi_c_annual_revenue,
+            COALESCE(z.zi_c_state, 'MISSING')         AS zi_state
+        FROM zi_best_cte b
+        JOIN {t_zi_src} z
+          ON z.zi_c_company_id  = b.zi_c_company_id
+         AND z.zi_c_location_id = b.zi_c_location_id
+         AND z.zi_c_country = 'United States'
+        WHERE b.rn = 1
+    ),
+
+    -- ── Best EFX match per business → join equifax_us_standardized ───────────
+    efx_best_cte AS (
+        SELECT business_id, efx_id,
+               ROW_NUMBER() OVER (PARTITION BY business_id
+                                  ORDER BY COALESCE(efx_probability,0) DESC,
+                                           COALESCE(similarity_index,0) DESC) AS rn
+        FROM {t_efx_match}
+    ),
+    efx_naics_cte AS (
+        SELECT
+            LOWER(CAST(b.business_id AS VARCHAR))            AS business_id,
+            CAST(e.efx_primnaicscode AS VARCHAR)             AS efx_naics_primary,
+            CAST(COALESCE(e.efx_secnaics1, 0) AS VARCHAR)   AS efx_naics_secondary_1,
+            CAST(COALESCE(e.efx_secnaics2, 0) AS VARCHAR)   AS efx_naics_secondary_2,
+            CAST(COALESCE(e.efx_secnaics3, 0) AS VARCHAR)   AS efx_naics_secondary_3,
+            CAST(COALESCE(e.efx_secnaics4, 0) AS VARCHAR)   AS efx_naics_secondary_4,
+            CAST(e.efx_primsic AS VARCHAR)                   AS efx_sic_primary,
+            CAST(COALESCE(e.efx_secsic1, 0) AS VARCHAR)     AS efx_sic_secondary_1,
+            CAST(COALESCE(e.efx_secsic2, 0) AS VARCHAR)     AS efx_sic_secondary_2,
+            COALESCE(e.efx_employees, 0)                     AS efx_employee_count,
+            COALESCE(e.efx_annual_sales, 0)                  AS efx_annual_sales,
+            COALESCE(UPPER(TRIM(e.efx_eng_state)), 'MISSING') AS efx_state
+        FROM efx_best_cte b
+        JOIN {t_efx_src} e ON e.efx_id = b.efx_id
+        WHERE b.rn = 1
+    ),
+
+    -- ── Best OC match per business → keep industry_code_uids ─────────────────
+    oc_best_cte AS (
+        SELECT business_id, company_number, jurisdiction_code,
+               ROW_NUMBER() OVER (PARTITION BY business_id
+                                  ORDER BY COALESCE(oc_probability,0) DESC,
+                                           COALESCE(similarity_index,0) DESC) AS rn
+        FROM {t_oc_match}
+    ),
+    oc_naics_cte AS (
+        SELECT
+            LOWER(CAST(b.business_id AS VARCHAR))  AS business_id,
+            o.industry_code_uids                   AS oc_industry_code_uids,
+            o.jurisdiction_code                    AS oc_jurisdiction_code
+        FROM oc_best_cte b
+        JOIN {t_oc_src} o
+          ON o.company_number    = b.company_number
+         AND o.jurisdiction_code = b.jurisdiction_code
+        WHERE b.rn = 1
+          AND o.industry_code_uids IS NOT NULL
     )
 
-    # ── Step 5: Pull vendor NAICS signals and attach via match table IDs ──────
-    # Each match table has one row per (business_id, vendor_record) candidate.
-    # We take the best candidate per business (highest confidence) in Redshift,
-    # then join the vendor source table for NAICS details.
-    #
-    # Actual match-table columns (from warehouse-service stored procedures):
-    #   zoominfo_matches_custom_inc_ml: business_id, zi_c_company_id, zi_c_location_id,
-    #                                   zi_es_location_id, zi_probability, similarity_index
-    #   efx_matches_custom_inc_ml:      business_id, efx_id, efx_probability, similarity_index
-    #   oc_matches_custom_inc_ml:       business_id, company_number, jurisdiction_code,
-    #                                   oc_probability, similarity_index
-
-    logger.info("Loading ZoomInfo NAICS signals...")
-    zi_pd = load_zoominfo_signals().to_pandas()
-
-    schema_zi, table_zi = TABLES["zi_matches"].split(".")
-    # Best ZI match per business: row with highest zi_probability, else highest similarity_index
-    # zi_key format must match load_zoominfo_signals(): zi_c_company_id|zi_c_location_id
-    sql_zi_ids = f"""
+    -- ── Final join ────────────────────────────────────────────────────────────
     SELECT
-        LOWER(CAST(business_id AS VARCHAR))       AS business_id,
-        CAST(zi_c_company_id  AS VARCHAR) || '|' ||
-        CAST(zi_c_location_id AS VARCHAR)         AS zi_key
-    FROM (
-        SELECT business_id, zi_c_company_id, zi_c_location_id,
-               ROW_NUMBER() OVER (
-                   PARTITION BY business_id
-                   ORDER BY COALESCE(zi_probability, 0) DESC,
-                            COALESCE(similarity_index, 0) DESC
-               ) AS rn
-        FROM "{schema_zi}"."{table_zi}"
-    ) t WHERE rn = 1
+        f.business_id,
+        f.current_naics_code,
+        f.naics_confidence,
+        f.naics_platform_id,
+        f.naics_override_raw,
+        f.current_mcc_code,
+        f.ai_enrichment_confidence,
+        -- Pipeline B
+        p.pipeline_b_naics,
+        p.pipeline_b_mcc,
+        p.match_confidence,
+        -- Match confidences
+        COALESCE(zc.zi_match_confidence,  0.0) AS zi_match_confidence,
+        COALESCE(ec.efx_match_confidence, 0.0) AS efx_match_confidence,
+        COALESCE(oc.oc_match_confidence,  0.0) AS oc_match_confidence,
+        -- ZoomInfo NAICS signals (primary + top3 + SIC top3)
+        zi.zi_c_naics6,
+        zi.zi_c_naics4,
+        zi.zi_c_naics2,
+        zi.zi_c_naics_top3,
+        zi.zi_c_sic4,
+        zi.zi_c_sic_top3,
+        zi.zi_c_naics_confidence_score,
+        zi.zi_c_total_employee_count,
+        zi.zi_c_annual_revenue,
+        zi.zi_state             AS zi_state,
+        -- Equifax NAICS signals (primary + 4 secondary + SIC secondary)
+        efx.efx_naics_primary,
+        efx.efx_naics_secondary_1,
+        efx.efx_naics_secondary_2,
+        efx.efx_naics_secondary_3,
+        efx.efx_naics_secondary_4,
+        efx.efx_sic_primary,
+        efx.efx_sic_secondary_1,
+        efx.efx_sic_secondary_2,
+        efx.efx_employee_count,
+        efx.efx_annual_sales,
+        efx.efx_state,
+        -- OC industry codes (full pipe-delimited string — parsed in Python)
+        oc2.oc_industry_code_uids,
+        oc2.oc_jurisdiction_code
+    FROM facts_cte f
+    LEFT JOIN pipeb_cte     p   ON p.business_id  = f.business_id
+    LEFT JOIN zi_conf_cte   zc  ON zc.business_id = f.business_id
+    LEFT JOIN efx_conf_cte  ec  ON ec.business_id = f.business_id
+    LEFT JOIN oc_conf_cte   oc  ON oc.business_id = f.business_id
+    LEFT JOIN zi_naics_cte  zi  ON zi.business_id = f.business_id
+    LEFT JOIN efx_naics_cte efx ON efx.business_id= f.business_id
+    LEFT JOIN oc_naics_cte  oc2 ON oc2.business_id= f.business_id
+    {limit_clause}
     """
-    zi_ids = redshift_query(sql_zi_ids).to_pandas()
-    zi_cols = ["zi_key","zi_c_naics6","zi_c_naics4","zi_c_naics2",
-               "zi_c_naics_confidence_score","zi_c_sic4",
-               "zi_c_total_employee_count","zi_c_annual_revenue"]
-    zi_with_naics = zi_ids.merge(zi_pd[[c for c in zi_cols if c in zi_pd.columns]],
-                                  on="zi_key", how="left")
-    pdf = pdf.merge(zi_with_naics.drop(columns=["zi_key"], errors="ignore"),
-                    on="business_id", how="left")
 
-    logger.info("Loading Equifax NAICS signals...")
-    efx_pd = load_equifax_signals().to_pandas()
+    logger.info("Running master Redshift query (all joins server-side)...")
+    pdf = redshift_query(sql_master).to_pandas()
+    logger.info("Master query returned %d rows", len(pdf))
 
-    schema_efx, table_efx = TABLES["efx_matches"].split(".")
-    sql_efx_ids = f"""
-    SELECT
-        LOWER(CAST(business_id AS VARCHAR)) AS business_id,
-        CAST(efx_id AS VARCHAR)             AS efx_id
-    FROM (
-        SELECT business_id, efx_id,
-               ROW_NUMBER() OVER (
-                   PARTITION BY business_id
-                   ORDER BY COALESCE(efx_probability, 0) DESC,
-                            COALESCE(similarity_index, 0) DESC
-               ) AS rn
-        FROM "{schema_efx}"."{table_efx}"
-    ) t WHERE rn = 1
-    """
-    efx_ids = redshift_query(sql_efx_ids).to_pandas()
-    efx_cols = ["efx_id","efx_naics_primary","efx_naics_sector",
-                "efx_naics_secondary_1","efx_naics_secondary_2",
-                "efx_sic_primary","efx_employee_count","efx_annual_sales"]
-    efx_with_naics = efx_ids.merge(efx_pd[[c for c in efx_cols if c in efx_pd.columns]],
-                                    on="efx_id", how="left")
-    pdf = pdf.merge(efx_with_naics.drop(columns=["efx_id"], errors="ignore"),
-                    on="business_id", how="left")
+    # ── Parse OC industry_code_uids in Python ─────────────────────────────────
+    # Full pipe-delimited string: "us_naics-541110|gb_sic-62012|nace-J6201"
+    def _parse_oc_naics(s):
+        if not s: return ""
+        m = _US_NAICS_RE.search(str(s))
+        return m.group(1) if m else ""
 
-    logger.info("Loading OpenCorporates NAICS signals...")
-    oc_pd = load_oc_signals().to_pandas()
+    def _parse_oc_gb_sic(s):
+        if not s: return ""
+        m = _GB_SIC_RE.search(str(s))
+        return m.group(1) if m else ""
 
-    schema_oc, table_oc = TABLES["oc_matches"].split(".")
-    sql_oc_ids = f"""
-    SELECT
-        LOWER(CAST(business_id AS VARCHAR))         AS business_id,
-        CAST(company_number AS VARCHAR) || '|' ||
-        CAST(jurisdiction_code AS VARCHAR)           AS oc_key
-    FROM (
-        SELECT business_id, company_number, jurisdiction_code,
-               ROW_NUMBER() OVER (
-                   PARTITION BY business_id
-                   ORDER BY COALESCE(oc_probability, 0) DESC,
-                            COALESCE(similarity_index, 0) DESC
-               ) AS rn
-        FROM "{schema_oc}"."{table_oc}"
-    ) t WHERE rn = 1
-    """
-    oc_ids = redshift_query(sql_oc_ids).to_pandas()
-    oc_cols = ["oc_key","oc_naics_primary","oc_naics_sector","oc_gb_sic"]
-    oc_with_naics = oc_ids.merge(oc_pd[[c for c in oc_cols if c in oc_pd.columns]],
-                                  on="oc_key", how="left")
-    pdf = pdf.merge(oc_with_naics.drop(columns=["oc_key"], errors="ignore"),
-                    on="business_id", how="left")
+    pdf["oc_naics_primary"] = pdf["oc_industry_code_uids"].apply(_parse_oc_naics)
+    pdf["oc_gb_sic"]        = pdf["oc_industry_code_uids"].apply(_parse_oc_gb_sic)
+    pdf["oc_naics_sector"]  = pdf["oc_naics_primary"].str[:2]
+
+    # ── Parse ZI top-3 NAICS and SIC (pipe-delimited: "722511|722513|722515") ─
+    def _split_top3(s, idx):
+        """Return the idx-th code from a pipe-delimited top-3 string."""
+        if not s or str(s).strip() == "": return ""
+        parts = str(s).split("|")
+        return parts[idx].strip() if idx < len(parts) else ""
+
+    pdf["zi_c_naics_top3_1"] = pdf["zi_c_naics_top3"].apply(lambda x: _split_top3(x, 0))
+    pdf["zi_c_naics_top3_2"] = pdf["zi_c_naics_top3"].apply(lambda x: _split_top3(x, 1))
+    pdf["zi_c_naics_top3_3"] = pdf["zi_c_naics_top3"].apply(lambda x: _split_top3(x, 2))
+    pdf["zi_c_sic_top3_1"]   = pdf["zi_c_sic_top3"].apply(lambda x: _split_top3(x, 0))
+    pdf["zi_c_sic_top3_2"]   = pdf["zi_c_sic_top3"].apply(lambda x: _split_top3(x, 1))
+    pdf["zi_c_naics_sector"]  = pdf["zi_c_naics6"].fillna("").str[:2]
 
     # ── Step 6: Assign labels ─────────────────────────────────────────────────
 

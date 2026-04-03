@@ -139,71 +139,108 @@ MCC_XGB_PARAMS = dict(
 # ── Feature groups ────────────────────────────────────────────────────────────
 # Exact column names produced by feature_engineering.py
 FEATURE_NAMES = [
-    # ── Vendor NAICS signals ──────────────────────────────────────────────
-    "zi_naics6",            # ZoomInfo 6-digit NAICS (label-encoded)
-    "zi_naics4",            # ZoomInfo 4-digit NAICS sector
-    "zi_naics2",            # ZoomInfo 2-digit sector
-    "zi_naics_confidence",  # ZoomInfo internal NAICS confidence (0-1 or NaN)
-    "zi_sic4",              # ZoomInfo 4-digit SIC
-    "efx_naics_primary",    # Equifax primary NAICS (6-digit, encoded)
-    "efx_naics_sector",     # Equifax 2-digit sector
-    "efx_sic_primary",      # Equifax primary SIC (4-digit)
-    "efx_naics_secondary_1",# Equifax secondary NAICS 1
-    "efx_naics_secondary_2",# Equifax secondary NAICS 2
-    "oc_naics_primary",     # OC parsed primary US NAICS from industry_code_uids
-    "oc_naics_sector",      # OC 2-digit sector
+    # ── ZoomInfo primary NAICS ────────────────────────────────────────────
+    "zi_naics6",              # ZI primary 6-digit NAICS (label-encoded)
+    "zi_naics4",              # ZI 4-digit NAICS group
+    "zi_naics2",              # ZI 2-digit sector
+    "zi_naics_confidence",    # ZI internal NAICS confidence score (0-1)
+    "zi_sic4",                # ZI primary 4-digit SIC
 
-    # ── Source agreement ──────────────────────────────────────────────────
-    "naics2_agreement",     # Count of sources agreeing on 2-digit sector (0-4)
-    "naics4_agreement",     # Count of sources agreeing on 4-digit group
-    "naics6_agreement",     # Count of sources agreeing on 6-digit code
-    "zi_efx_naics_match",   # 1 if ZI and EFX primary NAICS sectors match
-    "zi_oc_naics_match",    # 1 if ZI and OC primary NAICS sectors match
-    "efx_oc_naics_match",   # 1 if EFX and OC primary NAICS sectors match
+    # ── ZoomInfo top-3 NAICS candidates (NEW) ────────────────────────────
+    # ZI returns its top-3 most likely NAICS codes (pipe-delimited).
+    # These capture ZI's internal uncertainty about the classification.
+    # If all 3 agree on the same 2-digit sector → high sector confidence.
+    # If they span different sectors → ZI itself is uncertain.
+    "zi_naics_top3_1",        # ZI top-3 candidate #1 (label-encoded, same as zi_naics6)
+    "zi_naics_top3_2",        # ZI top-3 candidate #2
+    "zi_naics_top3_3",        # ZI top-3 candidate #3
+    "zi_top3_sector_spread",  # Count of distinct 2-digit sectors in top-3 (1=certain, 3=uncertain)
+    "zi_sic_top3_1",          # ZI top-3 SIC candidate #1
+    "zi_sic_top3_2",          # ZI top-3 SIC candidate #2
 
-    # ── Entity-matching confidence scores (XGBoost outputs) ──────────────
-    "zi_match_confidence",  # Entity matching confidence for ZI record
-    "efx_match_confidence", # Entity matching confidence for EFX record
-    "oc_match_confidence",  # Entity matching confidence for OC record
+    # ── Equifax primary NAICS + SIC ───────────────────────────────────────
+    "efx_naics_primary",      # EFX primary NAICS (6-digit, encoded)
+    "efx_naics_sector",       # EFX 2-digit sector
+    "efx_sic_primary",        # EFX primary SIC (4-digit)
 
-    # ── Business name tokens (hashed) ─────────────────────────────────────
-    "name_token_hash_1",    # MurmurHash of cleaned name token 1
-    "name_token_hash_2",    # MurmurHash of cleaned name token 2
-    "name_token_hash_3",    # MurmurHash of cleaned name token 3
-    "name_len_words",       # Word count in business name
-    "name_has_llc",         # Binary: name contains LLC/INC/CORP etc.
-    "name_has_restaurant",  # Binary: name contains food/restaurant keywords
-    "name_has_salon",       # Binary: name contains salon/spa/beauty
-    "name_has_construction",# Binary: name contains construction/contractor
-    "name_has_tech",        # Binary: name contains tech/software/systems
-    "name_has_medical",     # Binary: name contains medical/health/dental
+    # ── Equifax secondary NAICS codes (NEW) ──────────────────────────────
+    # EFX stores up to 4 secondary NAICS codes in addition to primary.
+    # These are EFX's alternative classifications — analogous to ZI's top-3.
+    # Checking if EFX's secondary codes match ZI's primary recovers agreement
+    # that the current model misses entirely.
+    "efx_naics_secondary_1",  # EFX secondary NAICS #1 (encoded)
+    "efx_naics_secondary_2",  # EFX secondary NAICS #2
+    "efx_naics_secondary_3",  # EFX secondary NAICS #3
+    "efx_naics_secondary_4",  # EFX secondary NAICS #4
+    "efx_sic_secondary_1",    # EFX secondary SIC #1
+    "efx_sic_secondary_2",    # EFX secondary SIC #2
 
-    # ── Jurisdiction / geography ──────────────────────────────────────────
-    "state_encoded",        # US state (label-encoded)
-    "country_encoded",      # Country code (label-encoded)
-    "is_us_business",       # Binary
+    # ── OpenCorporates NAICS ──────────────────────────────────────────────
+    "oc_naics_primary",       # OC parsed primary US NAICS from industry_code_uids
+    "oc_naics_sector",        # OC 2-digit sector
+
+    # ── Cross-source agreement (primary codes) ───────────────────────────
+    "naics2_agreement",       # Count of sources agreeing on 2-digit sector (0-4)
+    "naics4_agreement",       # Count of sources agreeing on 4-digit group
+    "naics6_agreement",       # Count of sources agreeing on exact 6-digit code
+    "zi_efx_naics_match",     # 1 if ZI and EFX primary sectors match
+    "zi_oc_naics_match",      # 1 if ZI and OC primary sectors match
+    "efx_oc_naics_match",     # 1 if EFX and OC primary sectors match
+
+    # ── Cross-source agreement using top-3/secondary (NEW) ───────────────
+    # Recovers agreement that primary-only comparison misses:
+    # e.g. EFX primary differs from ZI primary but matches ZI top-3 candidate #2
+    "efx_matches_zi_top3",    # 1 if EFX primary NAICS sector appears in ZI's top-3
+    "zi_matches_efx_secondary",# 1 if ZI primary NAICS sector appears in EFX secondary codes
+    "sic_cross_source_agree", # 1 if ZI sic4 sector == EFX primsic sector
+
+    # ── SIC-based sector agreement (NEW) ─────────────────────────────────
+    # SIC codes are a bridge: ZI and EFX may have different NAICS but same SIC.
+    # If SIC agrees on sector → implied NAICS sector agreement.
+    "zi_efx_sic_match",       # 1 if ZI sic4 matches EFX primsic (same 4-digit)
+    "zi_efx_sic_sector_match",# 1 if ZI sic2 matches EFX sic2 (same sector)
+
+    # ── Entity-matching confidence (XGBoost Level 1 outputs) ─────────────
+    "zi_match_confidence",
+    "efx_match_confidence",
+    "oc_match_confidence",
+
+    # ── Business name tokens ──────────────────────────────────────────────
+    "name_token_hash_1",
+    "name_token_hash_2",
+    "name_token_hash_3",
+    "name_len_words",
+    "name_has_llc",
+    "name_has_restaurant",
+    "name_has_salon",
+    "name_has_construction",
+    "name_has_tech",
+    "name_has_medical",
+
+    # ── Jurisdiction ──────────────────────────────────────────────────────
+    "state_encoded",
+    "country_encoded",
+    "is_us_business",
 
     # ── AI enrichment metadata ────────────────────────────────────────────
-    "ai_confidence_high",   # 1 if AI returned confidence=HIGH
-    "ai_confidence_med",    # 1 if AI returned confidence=MED
-    "ai_confidence_low",    # 1 if AI returned confidence=LOW or missing
-    "ai_naics_is_fallback", # 1 if current naics_code == 561499
-    "ai_mcc_is_fallback",   # 1 if current mcc_code == 5614
-    "ai_has_website",       # 1 if website was available for AI enrichment
-    "ai_naics_sector",      # AI-suggested NAICS 2-digit sector (0 if fallback)
+    "ai_confidence_high",
+    "ai_confidence_med",
+    "ai_confidence_low",
+    "ai_naics_is_fallback",
+    "ai_mcc_is_fallback",
+    "ai_has_website",
+    "ai_naics_sector",
 
     # ── Source availability ───────────────────────────────────────────────
-    "has_zi_match",         # 1 if ZI entity match found
-    "has_efx_match",        # 1 if EFX entity match found
-    "has_oc_match",         # 1 if OC entity match found
+    "has_zi_match",
+    "has_efx_match",
+    "has_oc_match",
 
-    # ── EFX firmographic signals ──────────────────────────────────────────
-    "efx_employee_count_log",  # log(employee_count + 1)
-    "efx_annual_sales_log",    # log(annual_sales + 1)
-
-    # ── ZI firmographic ───────────────────────────────────────────────────
-    "zi_employee_count_log",   # log(zi_c_total_employee_count + 1)
-    "zi_revenue_log",          # log(zi_c_annual_revenue + 1)
+    # ── Firmographic (log-scaled) ─────────────────────────────────────────
+    "efx_employee_count_log",
+    "efx_annual_sales_log",
+    "zi_employee_count_log",
+    "zi_revenue_log",
 ]
 
 # Columns used to build the NAICS label
