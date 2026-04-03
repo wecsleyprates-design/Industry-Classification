@@ -115,6 +115,8 @@ class NAICSClassifier:
         self.label_encoder: Optional[LabelEncoder] = None
         self.feature_names = FEATURE_NAMES
         self.metrics: dict = {}
+        self._remap: dict = {}           # contiguous_index → original_le_index
+        self._remap_inv: dict = {}       # original_le_index → contiguous_index
 
     # ── Training ──────────────────────────────────────────────────────────────
 
@@ -132,12 +134,11 @@ class NAICSClassifier:
             X_train, X_val  — feature matrices (from feature_engineering.build_feature_matrix)
             y_train, y_val  — label_naics6 series (will be label-encoded internally)
         """
-        # Fit label encoder on TRAINING labels only.
-        # Fitting on train+val caused class index mismatches: some NAICS codes appear
-        # only in the val split (not in train), so XGBoost sees different unique label
-        # sets in train vs val and raises "Invalid classes inferred from unique values of y".
-        # By fitting only on train, val examples with unseen codes get -1 from
-        # encode_labels() and are filtered out via mask_val — clean and consistent.
+        # Strategy: fit encoder on the NAICS codes that actually appear in y_train
+        # (non-fallback only), then remap both train and val labels to a contiguous
+        # 0..K-1 integer range.  Any val example whose NAICS code was not seen in
+        # y_train gets remapped to -1 and filtered out via mask_val.
+        # This guarantees XGBoost always sees labels exactly 0..K-1 — no gaps.
         self.label_encoder = make_label_encoder(y_train)
         n_classes = len(self.label_encoder.classes_)
         logger.info("NAICS label encoder: %d unique classes", n_classes)
@@ -149,6 +150,22 @@ class NAICSClassifier:
         y_tr = y_train_enc[mask_train].values
         X_vl = X_val[mask_val].values
         y_vl = y_val_enc[mask_val].values
+
+        # Remap train labels to contiguous 0..K-1 so XGBoost num_class is consistent.
+        # Even after mask_train some original label indices may be absent from the
+        # train subset (rare codes that landed only in val/test). Without remapping
+        # XGBoost infers fewer unique classes than num_class and raises ValueError.
+        unique_tr = np.unique(y_tr)
+        remap     = {int(old): int(new) for new, old in enumerate(unique_tr)}
+        remap_inv = {int(new): int(old) for new, old in enumerate(unique_tr)}
+        self._remap     = remap
+        self._remap_inv = remap_inv
+        y_tr  = np.array([remap[int(v)] for v in y_tr])
+        # Remap val labels the same way; drop val rows whose label is unseen in train
+        val_keep = np.array([int(v) in remap for v in y_vl])
+        y_vl  = np.array([remap[int(v)] for v in y_vl[val_keep]])
+        X_vl  = X_vl[val_keep]
+        n_classes = len(unique_tr)          # actual contiguous class count
 
         logger.info(
             "NAICS training: %d rows, validation: %d rows, classes: %d",
@@ -175,8 +192,8 @@ class NAICSClassifier:
             for i in range(len(y_vl))
         ]))
         # Sector-level accuracy (2-digit)
-        codes_pred = self.label_encoder.inverse_transform(preds_val)
-        codes_true = self.label_encoder.inverse_transform(y_vl)
+        codes_pred = self._decode(preds_val)
+        codes_true = self._decode(y_vl)
         sector_acc = float((
             pd.Series(codes_pred).str[:2] == pd.Series(codes_true).str[:2]
         ).mean())
@@ -194,6 +211,15 @@ class NAICSClassifier:
             top1_acc, top3_acc, sector_acc,
         )
         return self
+
+    def _decode(self, contiguous_indices):
+        """Convert contiguous model indices back to NAICS codes via label encoder.
+        Handles the remap from 0..K-1 → original LE indices → NAICS code strings."""
+        if self._remap_inv:
+            orig = np.array([self._remap_inv.get(int(i), int(i)) for i in contiguous_indices])
+        else:
+            orig = np.asarray(contiguous_indices)
+        return self.label_encoder.inverse_transform(orig)
 
     # ── Inference ─────────────────────────────────────────────────────────────
 
@@ -218,7 +244,10 @@ class NAICSClassifier:
             top_idx = np.argsort(row_proba)[::-1][:k]
             results.append([
                 {
-                    "naics_code":   self.label_encoder.inverse_transform([idx])[0],
+                    # idx is a contiguous model index; unmap to original LE index first
+                    "naics_code":   self.label_encoder.inverse_transform(
+                                        [self._remap_inv.get(int(idx), int(idx))]
+                                    )[0],
                     "probability":  float(row_proba[idx]),
                 }
                 for idx in top_idx
@@ -245,7 +274,7 @@ class NAICSClassifier:
         proba      = self.model.predict_proba(X.values)
         top1_idx   = np.argmax(proba, axis=1)
         top1_proba = proba[np.arange(len(proba)), top1_idx]
-        top1_codes = self.label_encoder.inverse_transform(top1_idx)
+        top1_codes = self._decode(top1_idx)
 
         rows = []
         for i, (idx, code, prob, cur_naics, cur_mcc) in enumerate(zip(
@@ -263,7 +292,7 @@ class NAICSClassifier:
 
             # Top-K for transparency
             top_k_idx   = np.argsort(proba[i])[::-1][:5]
-            top_k_codes = self.label_encoder.inverse_transform(top_k_idx)
+            top_k_codes = self._decode(top_k_idx)
             top_k_info  = [
                 {"naics_code": c, "probability": float(proba[i][top_k_idx[j]])}
                 for j, c in enumerate(top_k_codes)
@@ -325,6 +354,16 @@ class MCCClassifier:
         self.model: Optional[xgb.XGBClassifier] = None
         self.label_encoder: Optional[LabelEncoder] = None
         self.metrics: dict = {}
+        self._remap: dict = {}
+        self._remap_inv: dict = {}
+
+    def _decode(self, contiguous_indices):
+        """Convert contiguous model indices back to MCC codes via label encoder."""
+        if self._remap_inv:
+            orig = np.array([self._remap_inv.get(int(i), int(i)) for i in contiguous_indices])
+        else:
+            orig = np.asarray(contiguous_indices)
+        return self.label_encoder.inverse_transform(orig)
 
     def fit(
         self,
@@ -333,7 +372,8 @@ class MCCClassifier:
         X_val: pd.DataFrame,
         y_val: pd.Series,
     ) -> "MCCClassifier":
-        # Fit on training labels only (not train+val) — same reason as NAICSClassifier
+        # Fit on training labels only, then remap to contiguous 0..K-1
+        # (same pattern as NAICSClassifier — see detailed comment there)
         self.label_encoder = make_label_encoder(y_train)
         n_classes = len(self.label_encoder.classes_)
         logger.info("MCC label encoder: %d unique classes", n_classes)
@@ -345,6 +385,18 @@ class MCCClassifier:
         y_tr = y_train_enc[mask_train].values
         X_vl = X_val[mask_val].values
         y_vl = y_val_enc[mask_val].values
+
+        # Remap train labels to contiguous 0..K-1
+        unique_tr = np.unique(y_tr)
+        remap     = {int(old): int(new) for new, old in enumerate(unique_tr)}
+        remap_inv = {int(new): int(old) for new, old in enumerate(unique_tr)}
+        self._remap     = remap
+        self._remap_inv = remap_inv
+        y_tr  = np.array([remap[int(v)] for v in y_tr])
+        val_keep = np.array([int(v) in remap for v in y_vl])
+        y_vl  = np.array([remap[int(v)] for v in y_vl[val_keep]])
+        X_vl  = X_vl[val_keep]
+        n_classes = len(unique_tr)
 
         params = {**MCC_XGB_PARAMS, "num_class": n_classes}
         early  = params.pop("early_stopping_rounds")
@@ -368,7 +420,7 @@ class MCCClassifier:
         for row_proba in proba:
             top_idx = np.argsort(row_proba)[::-1][:k]
             results.append([
-                {"mcc_code": self.label_encoder.inverse_transform([i])[0],
+                {"mcc_code": self._decode([i])[0],
                  "probability": float(row_proba[i])}
                 for i in top_idx
             ])
@@ -515,13 +567,13 @@ def evaluate_on_test(
     # NAICS predictions
     proba_naics  = naics_clf.model.predict_proba(X_test.values)
     top1_idx     = np.argmax(proba_naics, axis=1)
-    top1_codes   = naics_clf.label_encoder.inverse_transform(top1_idx)
+    top1_codes   = naics_clf._decode(top1_idx)
     top1_proba   = proba_naics[np.arange(len(proba_naics)), top1_idx]
 
     true_enc, mask = encode_labels(y_naics_test, naics_clf.label_encoder, NAICS_FALLBACK)
     true_enc_np    = true_enc[mask].values
     pred_enc_np    = top1_idx[mask]
-    true_codes     = naics_clf.label_encoder.inverse_transform(true_enc_np)
+    true_codes     = naics_clf._decode(true_enc_np)
     pred_codes_filt= top1_codes[mask]
 
     naics_top1_acc     = float((pred_enc_np == true_enc_np).mean())
@@ -537,7 +589,7 @@ def evaluate_on_test(
     # MCC predictions
     proba_mcc   = mcc_clf.model.predict_proba(X_test.values)
     top1_mcc_idx= np.argmax(proba_mcc, axis=1)
-    top1_mcc    = mcc_clf.label_encoder.inverse_transform(top1_mcc_idx)
+    top1_mcc    = mcc_clf._decode(top1_mcc_idx)
 
     true_mcc_enc, mask_mcc = encode_labels(y_mcc_test, mcc_clf.label_encoder, MCC_FALLBACK)
     mcc_top1_acc = float(
