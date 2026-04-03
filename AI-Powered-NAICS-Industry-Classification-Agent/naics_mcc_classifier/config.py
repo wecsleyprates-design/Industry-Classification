@@ -55,7 +55,10 @@ TABLES = dict(
     # equifax_us_standardized only has normalized name/address for Levenshtein matching — no NAICS.
     # The warehouse pipeline (smb_zi_oc_efx_ver_combined.sql line 587) uses equifax_us_latest.
     efx_source      = "warehouse.equifax_us_latest",
-    oc_source       = "datascience.open_corporates_standard_ml_2",
+    # oc_companies_latest has industry_code_uids column.
+    # open_corporates_standard_ml_2 does NOT — it only has name/address for matching.
+    # smb_zi_oc_efx_ver_combined.sql line 1990: LEFT JOIN warehouse.oc_companies_latest ocs
+    oc_source       = "warehouse.oc_companies_latest",
     liberty_1       = "liberty.einmst_20260218",
     liberty_2       = "liberty.einmst_15_5mn",
     liberty_3       = "liberty.einmst_5_3m_remaining",

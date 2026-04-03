@@ -489,11 +489,17 @@ def load_equifax_signals() -> pl.DataFrame:
 def load_oc_signals() -> pl.DataFrame:
     """
     OpenCorporates industry_code_uids — parses NAICS and UK SIC.
-    Source: datascience.open_corporates_standard_ml_2
+    Source: warehouse.oc_companies_latest  (has industry_code_uids)
+    Note:  datascience.open_corporates_standard_ml_2 does NOT have industry_code_uids.
+           The pipeline uses warehouse.oc_companies_latest for industry codes.
+           Verified from smb_zi_oc_efx_ver_combined.sql line 1990 + 1407.
 
-    industry_code_uids is a pipe-delimited multi-taxonomy string:
-      "us_naics-541110|gb_sic-62012|nace-J6201|ca_naics-541110"
+    oc_companies_latest column names (differ from open_corporates_standard_ml_2):
+      name                       — company name (not company_name)
+      "registered_address.region" — state/region (not region)
+      industry_code_uids         — pipe-delimited multi-taxonomy codes
 
+    industry_code_uids format: "us_naics-541110|gb_sic-62012|nace-J6201|ca_naics-541110"
     We extract:
       oc_naics_primary  — first us_naics- entry
       oc_gb_sic         — first gb_sic- entry (UK businesses)
@@ -501,11 +507,11 @@ def load_oc_signals() -> pl.DataFrame:
     schema, table = TABLES["oc_source"].split(".")
     sql = f"""
     SELECT
-        company_number || '|' || jurisdiction_code  AS oc_key,
-        company_name,
+        company_number || '|' || jurisdiction_code      AS oc_key,
+        name                                            AS company_name,
         industry_code_uids,
         jurisdiction_code,
-        UPPER(TRIM(region))                         AS state
+        COALESCE(UPPER(TRIM("registered_address.region")), 'MISSING') AS state
     FROM "{schema}"."{table}"
     WHERE industry_code_uids IS NOT NULL
       AND industry_code_uids != ''
@@ -743,7 +749,7 @@ def build_training_dataset(
     t_oc_match = TABLES["oc_matches"]
     t_zi_src   = TABLES["zi_source"]       # zoominfo.comp_standard_global
     t_efx_src  = TABLES["efx_source"]      # warehouse.equifax_us_standardized
-    t_oc_src   = TABLES["oc_source"]       # datascience.open_corporates_standard_ml_2
+    t_oc_src   = TABLES["oc_source"]       # warehouse.oc_companies_latest (has industry_code_uids)
     t_cust     = TABLES["customer_files"]
 
     logger.info("Executing single Redshift query — all vendor signals joined server-side...")
