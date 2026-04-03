@@ -169,6 +169,28 @@ def load_production_naics() -> pl.DataFrame:
     """
     df = redshift_query(sql)
 
+    # Diagnostic: if JSON_EXTRACT_PATH_TEXT returned all NULLs, the value column
+    # may store the JSON differently. Sample and log to help diagnose.
+    null_count = df["current_naics_code"].is_null().sum()
+    if null_count == len(df) and len(df) > 0:
+        logger.warning(
+            "ALL %d rows have NULL current_naics_code — "
+            "JSON_EXTRACT_PATH_TEXT(value,'code') returned nothing. "
+            "Sampling raw value to diagnose the column format...",
+            len(df)
+        )
+        try:
+            sample = redshift_query(
+                "SELECT value FROM rds_warehouse_public.facts "
+                "WHERE name = 'naics_code' LIMIT 3"
+            )
+            for row in sample.to_pandas()["value"].tolist():
+                logger.warning("  Raw value sample: %s", str(row)[:300])
+        except Exception as diag_e:
+            logger.warning("  Could not fetch sample: %s", diag_e)
+    elif null_count > 0:
+        logger.warning("%d / %d rows have NULL current_naics_code.", null_count, len(df))
+
     # Normalise business_id to lowercase for consistent merging across tables
     df = df.with_columns([
         pl.col("business_id").cast(pl.Utf8).str.to_lowercase().str.strip_chars().alias("business_id"),
@@ -203,32 +225,62 @@ def load_entity_match_confidences() -> pl.DataFrame:
     """
     Loads entity-matching confidence scores from the XGBoost Level 1 model outputs.
 
-    Sources:
-      datascience.zoominfo_matches_custom_inc_ml  → zi_match_confidence
-      datascience.efx_matches_custom_inc_ml       → efx_match_confidence
-      datascience.oc_matches_custom_inc_ml        → oc_match_confidence
+    Actual columns in each match table (verified from warehouse-service SQL):
+      zoominfo_matches_custom_inc_ml: business_id, zi_c_company_id, zi_c_location_id,
+                                       zi_es_location_id, zi_probability, similarity_index
+      efx_matches_custom_inc_ml:      business_id, efx_id, efx_probability, similarity_index
+      oc_matches_custom_inc_ml:       business_id, company_number, jurisdiction_code,
+                                       oc_probability, similarity_index
 
-    These are the SAME scores used by:
-      - Pipeline B winner rule: WHEN zi_match_confidence > efx_match_confidence ...
-      - Pipeline A Fact Engine: source.confidence in the facts JSONB
+    zi/efx/oc_match_confidence are NOT stored columns — they are computed in
+    smb_zi_oc_efx_ver_combined.sql using the same CASE expression reproduced here:
+      WHEN {source}_probability IS NOT NULL        THEN {source}_probability
+      WHEN similarity_index / 55.0 >= 0.8          THEN similarity_index / 55.0
+      ELSE 0
 
-    Returns one row per business_id with all three confidence scores.
+    This exactly mirrors the warehouse-service computation.
     """
-    def _load(table_key: str, conf_col: str, extra_cols: str = "") -> pl.DataFrame:
-        schema, table = TABLES[table_key].split(".")
-        sql = f"""
-        SELECT
-            LOWER(CAST(business_id AS VARCHAR)) AS business_id,
-            COALESCE({conf_col}, 0.0)           AS {conf_col}
-            {', ' + extra_cols if extra_cols else ''}
-        FROM "{schema}"."{table}"
-        WHERE {conf_col} IS NOT NULL
-        """
-        return redshift_query(sql)
+    # ZoomInfo: zi_probability is the XGBoost score; similarity_index is the heuristic fallback
+    schema_zi, table_zi = TABLES["zi_matches"].split(".")
+    sql_zi = f"""
+    SELECT
+        LOWER(CAST(business_id AS VARCHAR)) AS business_id,
+        CASE
+            WHEN zi_probability IS NOT NULL          THEN zi_probability
+            WHEN similarity_index / 55.0 >= 0.8     THEN similarity_index / 55.0
+            ELSE 0
+        END AS zi_match_confidence
+    FROM "{schema_zi}"."{table_zi}"
+    """
+    df_zi = redshift_query(sql_zi)
 
-    df_zi  = _load("zi_matches",  "zi_match_confidence")
-    df_efx = _load("efx_matches", "efx_match_confidence")
-    df_oc  = _load("oc_matches",  "oc_match_confidence")
+    # Equifax: efx_probability is the XGBoost score
+    schema_efx, table_efx = TABLES["efx_matches"].split(".")
+    sql_efx = f"""
+    SELECT
+        LOWER(CAST(business_id AS VARCHAR)) AS business_id,
+        CASE
+            WHEN efx_probability IS NOT NULL         THEN efx_probability
+            WHEN similarity_index / 55.0 >= 0.8     THEN similarity_index / 55.0
+            ELSE 0
+        END AS efx_match_confidence
+    FROM "{schema_efx}"."{table_efx}"
+    """
+    df_efx = redshift_query(sql_efx)
+
+    # OpenCorporates: oc_probability is the XGBoost score
+    schema_oc, table_oc = TABLES["oc_matches"].split(".")
+    sql_oc = f"""
+    SELECT
+        LOWER(CAST(business_id AS VARCHAR)) AS business_id,
+        CASE
+            WHEN oc_probability IS NOT NULL          THEN oc_probability
+            WHEN similarity_index / 55.0 >= 0.8     THEN similarity_index / 55.0
+            ELSE 0
+        END AS oc_match_confidence
+    FROM "{schema_oc}"."{table_oc}"
+    """
+    df_oc = redshift_query(sql_oc)
 
     # Outer-join all three on business_id
     df = (
@@ -635,7 +687,16 @@ def build_training_dataset(
     logger.info("Loading OpenCorporates NAICS signals...")
     oc = load_oc_signals()
 
-    # Join match tables to get vendor company IDs, then join vendor signals
+    # Join match tables to get vendor company IDs, then join vendor NAICS signals.
+    # Actual columns in match tables (verified from warehouse-service stored procedures):
+    #   zoominfo_matches_custom_inc_ml: business_id, zi_c_company_id, zi_c_location_id,
+    #                                   zi_es_location_id, zi_probability, similarity_index
+    #   efx_matches_custom_inc_ml:      business_id, efx_id, efx_probability, similarity_index
+    #   oc_matches_custom_inc_ml:       business_id, company_number, jurisdiction_code,
+    #                                   oc_probability, similarity_index
+    # The *_match_confidence columns do NOT exist in these tables; they are computed in
+    # smb_zi_oc_efx_ver_combined.sql (and already loaded via load_entity_match_confidences).
+
     schema_zi, table_zi = TABLES["zi_matches"].split(".")
     sql_zi_ids = f"""
     SELECT
@@ -643,7 +704,7 @@ def build_training_dataset(
         CAST(zi_c_company_id AS VARCHAR) || '|' ||
         CAST(zi_c_location_id AS VARCHAR)   AS zi_key
     FROM "{schema_zi}"."{table_zi}"
-    WHERE zi_match_confidence IS NOT NULL
+    WHERE zi_probability IS NOT NULL OR similarity_index IS NOT NULL
     """
     zi_ids = redshift_query(sql_zi_ids)
     zi_with_naics = zi_ids.join(zi.select(["zi_key","zi_c_naics6","zi_c_naics4",
@@ -658,7 +719,7 @@ def build_training_dataset(
         LOWER(CAST(business_id AS VARCHAR)) AS business_id,
         CAST(efx_id AS VARCHAR)             AS efx_id
     FROM "{schema_efx}"."{table_efx}"
-    WHERE efx_match_confidence IS NOT NULL
+    WHERE efx_probability IS NOT NULL OR similarity_index IS NOT NULL
     """
     efx_ids = redshift_query(sql_efx_ids)
     efx_with_naics = efx_ids.join(efx.select(["efx_id","efx_naics_primary","efx_naics_sector",
@@ -673,15 +734,15 @@ def build_training_dataset(
         .join(efx_with_naics.drop("efx_id"), on="business_id", how="left")
     )
 
-    # OC: join via match table's oc_company_number + oc_jurisdiction_code
+    # OC: actual columns are company_number and jurisdiction_code (not oc_company_number)
     schema_oc, table_oc = TABLES["oc_matches"].split(".")
     sql_oc_ids = f"""
     SELECT
-        LOWER(CAST(business_id AS VARCHAR))         AS business_id,
-        oc_company_number || '|' ||
-        oc_jurisdiction_code                        AS oc_key
+        LOWER(CAST(business_id AS VARCHAR))             AS business_id,
+        CAST(company_number AS VARCHAR) || '|' ||
+        CAST(jurisdiction_code AS VARCHAR)              AS oc_key
     FROM "{schema_oc}"."{table_oc}"
-    WHERE oc_match_confidence IS NOT NULL
+    WHERE oc_probability IS NOT NULL OR similarity_index IS NOT NULL
     """
     oc_ids = redshift_query(sql_oc_ids)
     oc_with_naics = oc_ids.join(oc.select(["oc_key","oc_naics_primary","oc_naics_sector",
