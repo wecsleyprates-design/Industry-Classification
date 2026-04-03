@@ -360,16 +360,18 @@ def load_customer_files_naics() -> pl.DataFrame:
     #   business_id, match_confidence, primary_naics_code, mcc_code, mcc_desc, ...
     # NOTE: zi_match_confidence and efx_match_confidence are NOT stored in customer_files.
     #       Only the winning match_confidence (= MAX(zi, efx)) is stored.
+    # primary_naics_code and mcc_code are INTEGER columns in customer_files.
+    # COALESCE(integer_col, '') fails — must CAST to VARCHAR first.
     schema, table = TABLES["customer_files"].split(".")
     sql = f"""
     SELECT
-        LOWER(CAST(business_id AS VARCHAR))     AS business_id,
-        CAST(primary_naics_code AS VARCHAR)     AS pipeline_b_naics,
-        COALESCE(mcc_code, '')                  AS pipeline_b_mcc,
-        COALESCE(match_confidence, 0.0)         AS match_confidence
+        LOWER(CAST(business_id AS VARCHAR))          AS business_id,
+        CAST(primary_naics_code AS VARCHAR)          AS pipeline_b_naics,
+        COALESCE(CAST(mcc_code AS VARCHAR), '')      AS pipeline_b_mcc,
+        COALESCE(match_confidence, 0.0)              AS match_confidence
     FROM "{schema}"."{table}"
     WHERE primary_naics_code IS NOT NULL
-      AND CAST(primary_naics_code AS VARCHAR) NOT IN ('0', '')
+      AND primary_naics_code != 0
     """
     df = redshift_query(sql)
     df = df.with_columns([
