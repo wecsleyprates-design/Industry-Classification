@@ -136,7 +136,7 @@ if result["connected"]:
 
     sql_fallback = (
         "SELECT COUNT(*) AS n_fallback "
-        "FROM rds_warehouse_public.facts "
+        "FROM rds_warehouse_public.facts "   # trailing space is required
         "WHERE name = 'naics_code' "
         "  AND JSON_EXTRACT_PATH_TEXT(value, 'code') = '561499'"
     )
