@@ -89,6 +89,33 @@ print(f"   Fallback NAICS: {NAICS_FALLBACK}  |  Fallback MCC: {MCC_FALLBACK}")
 print(f"   Override threshold: {NAICS_OVERRIDE_CONFIDENCE_THRESHOLD}")
 """))
 
+# ── Cell 1b: Redshift connection test ─────────────────────────────────────────
+cells.append(nbf.v4.new_markdown_cell("### Redshift Connection Test\nRun this cell first. It verifies credentials and Redshift SQL compatibility before loading any data."))
+cells.append(nbf.v4.new_code_cell("""\
+from naics_mcc_classifier.data_loader import test_redshift_connection
+
+result = test_redshift_connection()
+if result["connected"]:
+    print("✅ Redshift: CONNECTED")
+    print(f"   JSON_EXTRACT_PATH_TEXT works: {result['json_extract_works']}")
+    print()
+    print("Ready to load real data. Set USE_SYNTHETIC = False in the next cell.")
+else:
+    print("❌ Redshift: NOT REACHABLE")
+    print(f"   Error: {result['error']}")
+    print()
+    print("Options:")
+    print("  1. Check your .env file has REDSHIFT_HOST, REDSHIFT_USER, REDSHIFT_PASSWORD")
+    print("  2. Or set USE_SYNTHETIC = True in the next cell to run with synthetic data")
+    print()
+    print("  Required .env keys:")
+    print("    REDSHIFT_HOST=<your-redshift-endpoint>")
+    print("    REDSHIFT_PORT=5439")
+    print("    REDSHIFT_DB=dev")
+    print("    REDSHIFT_USER=readonly_all_access")
+    print("    REDSHIFT_PASSWORD=<your-password>")
+"""))
+
 # ── Cell 2: Current State (What the problem looks like) ───────────────────────
 cells.append(nbf.v4.new_markdown_cell("""## Section 1 — Current State: The Fallback Problem
 

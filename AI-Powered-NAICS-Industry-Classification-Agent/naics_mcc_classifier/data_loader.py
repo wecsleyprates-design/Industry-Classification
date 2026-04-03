@@ -71,15 +71,60 @@ def _connect_pg():
 
 
 def _query_redshift(sql: str, params=None) -> pd.DataFrame:
-    """Execute SQL against Redshift and return a DataFrame."""
-    with _connect_redshift() as conn:
-        return pd.read_sql(sql, conn, params=params)
+    """
+    Execute SQL against Redshift and return a DataFrame.
+
+    Uses cursor.execute() directly to avoid the pandas SQLiteDatabase routing
+    bug that occurs with older pandas (< 2.0) + psycopg2 on Python 3.9.
+
+    Important: All SQL must use Redshift-compatible syntax:
+      ✅ JSON_EXTRACT_PATH_TEXT(col, 'key')      ← Redshift
+      ❌ col::json->>'key'                        ← PostgreSQL only
+      ✅ CAST(x AS VARCHAR)                      ← Redshift
+      ✅ LOWER(), COALESCE(), GREATEST()         ← Both
+    """
+    conn = _connect_redshift()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            cols = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+        return pd.DataFrame(rows, columns=cols)
+    finally:
+        conn.close()
+
+
+def test_redshift_connection() -> dict:
+    """
+    Quick connectivity and syntax test for Redshift.
+    Returns a dict with connection status and a sample JSON_EXTRACT_PATH_TEXT result.
+    Useful to call before running the full pipeline to catch config issues early.
+    """
+    try:
+        result = _query_redshift("SELECT 1 AS ping")
+        json_test = _query_redshift(
+            "SELECT JSON_EXTRACT_PATH_TEXT('{\"code\":\"722511\"}', 'code') AS test_code"
+        )
+        return {
+            "connected": True,
+            "ping": "ok",
+            "json_extract_works": json_test["test_code"].iloc[0] == "722511",
+        }
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
 
 
 def _query_pg(sql: str) -> pd.DataFrame:
     """Execute SQL against case-service PostgreSQL and return a DataFrame."""
-    with _connect_pg() as conn:
-        return pd.read_sql(sql, conn)
+    conn = _connect_pg()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            cols = [desc[0] for desc in cur.description]
+            rows = cur.fetchall()
+        return pd.DataFrame(rows, columns=cols)
+    finally:
+        conn.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -151,33 +196,41 @@ def load_production_naics() -> pd.DataFrame:
 
     Key column: ai_naics_is_fallback = 1 when the current code is 561499
     """
+    # Redshift uses JSON_EXTRACT_PATH_TEXT() — not PostgreSQL's ::json->> operator.
+    # Nested keys require chained calls:
+    #   PG:      col::json->'source'->>'confidence'
+    #   Redshift: JSON_EXTRACT_PATH_TEXT(JSON_EXTRACT_PATH_TEXT(col,'source'),'confidence')
     sql = f"""
     SELECT
         f_naics.business_id,
-        f_naics.value::json->>'code'                  AS current_naics_code,
-        f_naics.value::json->'source'->>'confidence'  AS naics_confidence,
-        f_naics.value::json->'source'->>'platformId'  AS naics_platform_id,
-        f_naics.value::json->>'override'              AS naics_override_raw,
-        f_naics.received_at                           AS naics_updated_at,
-        f_mcc.value::json->>'code'                    AS current_mcc_code,
-        f_mcc.value::json->'source'->>'confidence'    AS mcc_confidence,
-        f_ai.value::json->>'confidence'               AS ai_enrichment_confidence,
-        f_ai.value::json->>'reasoning'                AS ai_reasoning,
-        f_ai.value::json->>'website_summary'          AS ai_website_summary
+        JSON_EXTRACT_PATH_TEXT(f_naics.value, 'code')                                              AS current_naics_code,
+        JSON_EXTRACT_PATH_TEXT(JSON_EXTRACT_PATH_TEXT(f_naics.value,'source'),'confidence')        AS naics_confidence,
+        JSON_EXTRACT_PATH_TEXT(JSON_EXTRACT_PATH_TEXT(f_naics.value,'source'),'platformId')        AS naics_platform_id,
+        JSON_EXTRACT_PATH_TEXT(f_naics.value, 'override')                                          AS naics_override_raw,
+        f_naics.received_at                                                                         AS naics_updated_at,
+        JSON_EXTRACT_PATH_TEXT(f_mcc.value, 'code')                                                AS current_mcc_code,
+        JSON_EXTRACT_PATH_TEXT(JSON_EXTRACT_PATH_TEXT(f_mcc.value,'source'),'confidence')          AS mcc_confidence,
+        JSON_EXTRACT_PATH_TEXT(f_ai.value, 'confidence')                                            AS ai_enrichment_confidence,
+        JSON_EXTRACT_PATH_TEXT(f_ai.value, 'reasoning')                                            AS ai_reasoning,
+        JSON_EXTRACT_PATH_TEXT(f_ai.value, 'website_summary')                                      AS ai_website_summary
     FROM {TABLES['facts']} f_naics
     LEFT JOIN {TABLES['facts']} f_mcc
         ON  f_mcc.business_id = f_naics.business_id
         AND f_mcc.name        = 'mcc_code'
     LEFT JOIN {TABLES['facts']} f_ai
-        ON  f_ai.business_id = f_naics.business_id
-        AND f_ai.name        = 'ai_naics_enrichment_metadata'
+        ON  f_ai.business_id  = f_naics.business_id
+        AND f_ai.name         = 'ai_naics_enrichment_metadata'
     WHERE f_naics.name = 'naics_code'
     """
     df = _query_redshift(sql)
+    df["business_id"] = df["business_id"].astype(str).str.lower().str.strip()
     df["ai_naics_is_fallback"] = (df["current_naics_code"] == NAICS_FALLBACK).astype(int)
     df["ai_mcc_is_fallback"]   = (df["current_mcc_code"]   == MCC_FALLBACK).astype(int)
     df["has_analyst_override"] = (
-        df["naics_override_raw"].notna() & (df["naics_override_raw"] != "null")
+        df["naics_override_raw"].notna()
+        & (df["naics_override_raw"].astype(str) != "null")
+        & (df["naics_override_raw"].astype(str) != "")
+        & (df["naics_override_raw"].astype(str) != "None")
     ).astype(int)
     df["naics_confidence"] = pd.to_numeric(df["naics_confidence"], errors="coerce")
     logger.info(
@@ -329,7 +382,7 @@ def load_entity_match_confidences() -> pd.DataFrame:
     """
     sql_zi = f"""
     SELECT
-        business_id,
+        LOWER(CAST(business_id AS VARCHAR)) AS business_id,
         zi_match_confidence,
         zi_c_company_id,
         zi_c_location_id
@@ -338,7 +391,7 @@ def load_entity_match_confidences() -> pd.DataFrame:
     """
     sql_efx = f"""
     SELECT
-        business_id,
+        LOWER(CAST(business_id AS VARCHAR)) AS business_id,
         efx_match_confidence,
         efx_id
     FROM {TABLES['efx_matches']}
@@ -346,7 +399,7 @@ def load_entity_match_confidences() -> pd.DataFrame:
     """
     sql_oc = f"""
     SELECT
-        business_id,
+        LOWER(CAST(business_id AS VARCHAR)) AS business_id,
         oc_match_confidence,
         oc_company_number,
         oc_jurisdiction_code
@@ -384,14 +437,17 @@ def load_customer_files_naics() -> pd.DataFrame:
     """
     sql = f"""
     SELECT
-        business_id,
-        primary_naics_code      AS pipeline_b_naics,
+        LOWER(CAST(business_id AS VARCHAR)) AS business_id,
+        CAST(primary_naics_code AS VARCHAR) AS pipeline_b_naics,
         zi_match_confidence,
         efx_match_confidence,
-        GREATEST(zi_match_confidence, efx_match_confidence) AS match_confidence
+        GREATEST(
+            COALESCE(zi_match_confidence, 0),
+            COALESCE(efx_match_confidence, 0)
+        ) AS match_confidence
     FROM {TABLES['customer_files']}
     WHERE primary_naics_code IS NOT NULL
-      AND primary_naics_code != 0
+      AND CAST(primary_naics_code AS VARCHAR) != '0'
     """
     df = _query_redshift(sql)
     df["pipeline_b_naics"] = df["pipeline_b_naics"].astype(str).str.strip().str.zfill(6)
@@ -438,6 +494,11 @@ def build_training_dataset(
 
     logger.info("Loading Pipeline B winner codes...")
     pipeB = load_customer_files_naics()
+
+    # Normalise business_id to lowercase string for consistent merging
+    # (Redshift may return UUIDs in different casing across tables)
+    for _df in [prod, conf, pipeB]:
+        _df["business_id"] = _df["business_id"].astype(str).str.lower().str.strip()
 
     # Merge on business_id
     df = (
