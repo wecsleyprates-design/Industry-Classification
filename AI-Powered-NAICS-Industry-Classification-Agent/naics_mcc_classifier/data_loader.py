@@ -137,27 +137,25 @@ def load_production_naics() -> pl.DataFrame:
       current_mcc_code       — 4-digit MCC string (may be '5614' = fallback)
       ai_enrichment_confidence — 'HIGH'/'MED'/'LOW' from AI enrichment response
     """
-    # Redshift JSON access: JSON_EXTRACT_PATH_TEXT(column, 'key')
-    # Nested:              JSON_EXTRACT_PATH_TEXT(JSON_EXTRACT_PATH_TEXT(col,'a'),'b')
+    # The facts table value column stores JSON with key "value" for the code:
+    # {"name":"naics_code","value":"561499","source.confidence":0.1,
+    #  "source.platformId":31,"source.name":"AINaicsEnrichment","alternatives":[]}
+    #
+    # Note: nested keys like "source.confidence" are stored as FLAT dot-notation
+    # strings — NOT as nested JSON objects. JSON_EXTRACT_PATH_TEXT(col,'source.confidence')
+    # reads the literal key "source.confidence" from the top-level JSON.
     schema, table = "rds_warehouse_public", "facts"
     sql = f"""
     SELECT
         f_naics.business_id,
-        JSON_EXTRACT_PATH_TEXT(f_naics.value, 'code')
-                                                                AS current_naics_code,
-        JSON_EXTRACT_PATH_TEXT(
-            JSON_EXTRACT_PATH_TEXT(f_naics.value, 'source'), 'confidence')
-                                                                AS naics_confidence,
-        JSON_EXTRACT_PATH_TEXT(
-            JSON_EXTRACT_PATH_TEXT(f_naics.value, 'source'), 'platformId')
-                                                                AS naics_platform_id,
-        JSON_EXTRACT_PATH_TEXT(f_naics.value, 'override')      AS naics_override_raw,
-        f_naics.received_at                                     AS naics_updated_at,
-        JSON_EXTRACT_PATH_TEXT(f_mcc.value, 'code')            AS current_mcc_code,
-        JSON_EXTRACT_PATH_TEXT(
-            JSON_EXTRACT_PATH_TEXT(f_mcc.value, 'source'), 'confidence')
-                                                                AS mcc_confidence,
-        JSON_EXTRACT_PATH_TEXT(f_ai.value, 'confidence')       AS ai_enrichment_confidence
+        JSON_EXTRACT_PATH_TEXT(f_naics.value, 'value')               AS current_naics_code,
+        JSON_EXTRACT_PATH_TEXT(f_naics.value, 'source.confidence')   AS naics_confidence,
+        JSON_EXTRACT_PATH_TEXT(f_naics.value, 'source.platformId')   AS naics_platform_id,
+        JSON_EXTRACT_PATH_TEXT(f_naics.value, 'override')            AS naics_override_raw,
+        f_naics.received_at                                           AS naics_updated_at,
+        JSON_EXTRACT_PATH_TEXT(f_mcc.value,   'value')               AS current_mcc_code,
+        JSON_EXTRACT_PATH_TEXT(f_mcc.value,   'source.confidence')   AS mcc_confidence,
+        JSON_EXTRACT_PATH_TEXT(f_ai.value,    'confidence')          AS ai_enrichment_confidence
     FROM "{schema}"."{table}" f_naics
     LEFT JOIN "{schema}"."{table}" f_mcc
            ON f_mcc.business_id = f_naics.business_id
@@ -169,25 +167,43 @@ def load_production_naics() -> pl.DataFrame:
     """
     df = redshift_query(sql)
 
-    # Diagnostic: if JSON_EXTRACT_PATH_TEXT returned all NULLs, the value column
-    # may store the JSON differently. Sample and log to help diagnose.
+    # The facts table stores values as:
+    #   {"name":"naics_code","value":"561499","source.confidence":0.1,...}
+    # Key is "value" (not "code") — confirmed from raw value diagnostic log.
+    # If JSON_EXTRACT_PATH_TEXT returns all NULLs, try the "value" key instead.
     null_count = df["current_naics_code"].is_null().sum()
     if null_count == len(df) and len(df) > 0:
         logger.warning(
-            "ALL %d rows have NULL current_naics_code — "
-            "JSON_EXTRACT_PATH_TEXT(value,'code') returned nothing. "
-            "Sampling raw value to diagnose the column format...",
+            "ALL %d rows have NULL current_naics_code from key 'code'. "
+            "Facts table uses key 'value' — requerying with correct key...",
             len(df)
         )
-        try:
-            sample = redshift_query(
-                "SELECT value FROM rds_warehouse_public.facts "
-                "WHERE name = 'naics_code' LIMIT 3"
-            )
-            for row in sample.to_pandas()["value"].tolist():
-                logger.warning("  Raw value sample: %s", str(row)[:300])
-        except Exception as diag_e:
-            logger.warning("  Could not fetch sample: %s", diag_e)
+        # The value column JSON uses "value" as the NAICS code key, not "code"
+        # Full confirmed format from diagnostic sample:
+        # {"name":"naics_code","value":"561499","source.name":"AINaicsEnrichment",
+        #  "source.confidence":0.1,"source.platformId":31,"alternatives":[]}
+        schema2, table2 = "rds_warehouse_public", "facts"
+        sql2 = f"""
+        SELECT
+            f_naics.business_id,
+            JSON_EXTRACT_PATH_TEXT(f_naics.value, 'value')                          AS current_naics_code,
+            JSON_EXTRACT_PATH_TEXT(f_naics.value, 'source.confidence')              AS naics_confidence,
+            JSON_EXTRACT_PATH_TEXT(f_naics.value, 'source.platformId')              AS naics_platform_id,
+            JSON_EXTRACT_PATH_TEXT(f_naics.value, 'override')                       AS naics_override_raw,
+            f_naics.received_at                                                      AS naics_updated_at,
+            JSON_EXTRACT_PATH_TEXT(f_mcc.value, 'value')                            AS current_mcc_code,
+            JSON_EXTRACT_PATH_TEXT(f_mcc.value, 'source.confidence')                AS mcc_confidence,
+            JSON_EXTRACT_PATH_TEXT(f_ai.value, 'confidence')                        AS ai_enrichment_confidence
+        FROM "{schema2}"."{table2}" f_naics
+        LEFT JOIN "{schema2}"."{table2}" f_mcc
+               ON f_mcc.business_id = f_naics.business_id
+              AND f_mcc.name        = 'mcc_code'
+        LEFT JOIN "{schema2}"."{table2}" f_ai
+               ON f_ai.business_id  = f_naics.business_id
+              AND f_ai.name         = 'ai_naics_enrichment_metadata'
+        WHERE f_naics.name = 'naics_code'
+        """
+        df = redshift_query(sql2)
     elif null_count > 0:
         logger.warning("%d / %d rows have NULL current_naics_code.", null_count, len(df))
 
@@ -198,10 +214,23 @@ def load_production_naics() -> pl.DataFrame:
         pl.col("current_mcc_code").cast(pl.Utf8).fill_null("").alias("current_mcc_code"),
     ])
 
-    # Flag fallback rows
+    # Flag fallback rows:
+    # A business is "fallback" when:
+    #   - current_naics_code == '561499'  (explicit AI last-resort code), OR
+    #   - current_naics_code is null/empty (facts table has no NAICS for this business)
+    # Both cases mean "the current system doesn't know the NAICS" — our model
+    # should try to fill these in using vendor signals.
     df = df.with_columns([
-        (pl.col("current_naics_code") == NAICS_FALLBACK).cast(pl.Int8).alias("ai_naics_is_fallback"),
-        (pl.col("current_mcc_code")   == MCC_FALLBACK).cast(pl.Int8).alias("ai_mcc_is_fallback"),
+        (
+            pl.col("current_naics_code").is_null()
+            | (pl.col("current_naics_code") == "")
+            | (pl.col("current_naics_code") == NAICS_FALLBACK)
+        ).cast(pl.Int8).alias("ai_naics_is_fallback"),
+        (
+            pl.col("current_mcc_code").is_null()
+            | (pl.col("current_mcc_code") == "")
+            | (pl.col("current_mcc_code") == MCC_FALLBACK)
+        ).cast(pl.Int8).alias("ai_mcc_is_fallback"),
         (
             pl.col("naics_override_raw").is_not_null()
             & (pl.col("naics_override_raw") != "null")
@@ -327,17 +356,17 @@ def load_customer_files_naics() -> pl.DataFrame:
     Note: Pipeline B uses ZI + EFX ONLY — OC, Middesk, Trulioo are excluded.
     We use this as a high-quality training label when match_confidence >= 0.80.
     """
+    # customer_files actual columns (verified from customer_table.sql):
+    #   business_id, match_confidence, primary_naics_code, mcc_code, mcc_desc, ...
+    # NOTE: zi_match_confidence and efx_match_confidence are NOT stored in customer_files.
+    #       Only the winning match_confidence (= MAX(zi, efx)) is stored.
     schema, table = TABLES["customer_files"].split(".")
     sql = f"""
     SELECT
         LOWER(CAST(business_id AS VARCHAR))     AS business_id,
         CAST(primary_naics_code AS VARCHAR)     AS pipeline_b_naics,
-        COALESCE(zi_match_confidence,  0.0)     AS zi_match_confidence,
-        COALESCE(efx_match_confidence, 0.0)     AS efx_match_confidence,
-        GREATEST(
-            COALESCE(zi_match_confidence,  0.0),
-            COALESCE(efx_match_confidence, 0.0)
-        )                                       AS match_confidence
+        COALESCE(mcc_code, '')                  AS pipeline_b_mcc,
+        COALESCE(match_confidence, 0.0)         AS match_confidence
     FROM "{schema}"."{table}"
     WHERE primary_naics_code IS NOT NULL
       AND CAST(primary_naics_code AS VARCHAR) NOT IN ('0', '')
@@ -346,6 +375,7 @@ def load_customer_files_naics() -> pl.DataFrame:
     df = df.with_columns([
         pl.col("pipeline_b_naics").str.zfill(6).alias("pipeline_b_naics"),
         pl.col("pipeline_b_naics").str.zfill(6).str.slice(0, 2).alias("pipeline_b_sector"),
+        pl.col("pipeline_b_mcc").fill_null("").alias("pipeline_b_mcc"),
     ])
     logger.info("Loaded %d Pipeline B NAICS records", len(df))
     return df
@@ -788,26 +818,54 @@ def build_training_dataset(
 
     # ── Step 6: Assign labels ─────────────────────────────────────────────────
 
-    # Start with current Pipeline A NAICS as candidate label
-    pdf["label_naics6"] = pdf["current_naics_code"].fillna(NAICS_FALLBACK)
+    # ── Label assignment ──────────────────────────────────────────────────────
+    # Start with current Pipeline A NAICS as candidate label.
+    # Null/empty means the system has no code at all — treat same as 561499.
+    pdf["label_naics6"] = (
+        pdf["current_naics_code"]
+        .fillna(NAICS_FALLBACK)
+        .replace("", NAICS_FALLBACK)
+    )
 
-    # Upgrade label to Pipeline B when confidence is high and code is not fallback
+    # Upgrade label to Pipeline B when confidence is high and code is real
+    # Pipeline B winner uses match_confidence (not zi/efx separately)
+    match_conf = pd.to_numeric(pdf.get("match_confidence", 0), errors="coerce").fillna(0)
     mask_pipeB = (
         pdf["pipeline_b_naics"].notna()
         & (pdf["pipeline_b_naics"] != NAICS_FALLBACK)
-        & (pd.to_numeric(pdf.get("match_confidence", 0), errors="coerce").fillna(0) >= 0.80)
+        & (pdf["pipeline_b_naics"] != "")
+        & (match_conf >= 0.80)
     )
     pdf.loc[mask_pipeB, "label_naics6"] = pdf.loc[mask_pipeB, "pipeline_b_naics"]
 
-    # Mark rows where label is the fallback code
-    pdf["is_fallback"] = (pdf["label_naics6"] == NAICS_FALLBACK).astype(int)
+    # Mark rows where the label is still the fallback code (our target set)
+    # These are the businesses the model aims to reclassify.
+    pdf["is_fallback"] = (
+        pdf["label_naics6"].isna()
+        | (pdf["label_naics6"] == "")
+        | (pdf["label_naics6"] == NAICS_FALLBACK)
+    ).astype(int)
 
     # ── MCC label: use crosswalk to derive from NAICS ─────────────────────────
     crosswalk = load_naics_mcc_crosswalk()
     naics_to_mcc = crosswalk.set_index("naics_code")["mcc_code"].to_dict() if len(crosswalk) else {}
     pdf["label_mcc"] = (
         pdf["current_mcc_code"]
-        .where(pdf["current_mcc_code"] != MCC_FALLBACK)
+        .where(
+            pdf["current_mcc_code"].notna()
+            & (pdf["current_mcc_code"] != "")
+            & (pdf["current_mcc_code"] != MCC_FALLBACK)
+        )
+        # Also use Pipeline B mcc_code when available and non-fallback
+        .fillna(
+            pdf.get("pipeline_b_mcc", pd.Series(dtype=str))
+            .where(
+                pdf.get("pipeline_b_mcc", pd.Series(dtype=str)).notna()
+                & (pdf.get("pipeline_b_mcc", pd.Series(dtype=str)) != "")
+                & (pdf.get("pipeline_b_mcc", pd.Series(dtype=str)) != MCC_FALLBACK)
+            )
+        )
+        # Derive from NAICS crosswalk as next best
         .fillna(pdf["label_naics6"].map(naics_to_mcc))
         .fillna(MCC_FALLBACK)
     )
