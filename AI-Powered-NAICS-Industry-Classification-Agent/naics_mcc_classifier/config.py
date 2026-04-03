@@ -7,9 +7,12 @@ fallback codes, and model thresholds.
 from __future__ import annotations
 import os
 from pathlib import Path
-from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent / ".env")
+except ImportError:
+    pass  # dotenv optional; fall back to environment variables
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 ROOT_DIR      = Path(__file__).parent.parent
@@ -18,12 +21,16 @@ ARTIFACTS_DIR = MODULE_DIR / "artifacts"
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── Redshift connection ───────────────────────────────────────────────────────
+# Credentials match the pattern from your working redshift_query() helper.
+# Set env vars to override; hardcoded defaults are the known read-only endpoint.
 REDSHIFT = dict(
-    host     = os.getenv("REDSHIFT_HOST", ""),
+    host     = os.getenv("REDSHIFT_HOST",
+                         "worthai-services-redshift-endpoint-k9sdhv2ja6lgojidri87"
+                         ".808338307022.us-east-1.redshift-serverless.amazonaws.com"),
     port     = int(os.getenv("REDSHIFT_PORT", "5439")),
-    dbname   = os.getenv("REDSHIFT_DB", "dev"),
-    user     = os.getenv("REDSHIFT_USER", "readonly_all_access"),
-    password = os.getenv("REDSHIFT_PASSWORD", ""),
+    dbname   = os.getenv("REDSHIFT_DB",       "dev"),
+    user     = os.getenv("REDSHIFT_USER",     "readonly_all_access"),
+    password = os.getenv("REDSHIFT_PASSWORD", "Y7&.D3!09WvT4/nSqXS2>qbO"),
     connect_timeout = 10,
 )
 

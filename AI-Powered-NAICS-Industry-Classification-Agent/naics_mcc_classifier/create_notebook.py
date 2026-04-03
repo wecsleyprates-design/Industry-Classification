@@ -92,28 +92,52 @@ print(f"   Override threshold: {NAICS_OVERRIDE_CONFIDENCE_THRESHOLD}")
 # ── Cell 1b: Redshift connection test ─────────────────────────────────────────
 cells.append(nbf.v4.new_markdown_cell("### Redshift Connection Test\nRun this cell first. It verifies credentials and Redshift SQL compatibility before loading any data."))
 cells.append(nbf.v4.new_code_cell("""\
-from naics_mcc_classifier.data_loader import test_redshift_connection
+from naics_mcc_classifier.data_loader import (
+    test_redshift_connection, establish_redshift_connection, redshift_query
+)
+from naics_mcc_classifier.config import REDSHIFT
 
+# Show which credentials are being used
+print("Redshift endpoint:", REDSHIFT["host"][:60] + "...")
+print("User:", REDSHIFT["user"])
+print()
+
+# Test connection and Redshift JSON syntax compatibility
 result = test_redshift_connection()
+
 if result["connected"]:
     print("✅ Redshift: CONNECTED")
-    print(f"   JSON_EXTRACT_PATH_TEXT works: {result['json_extract_works']}")
+    print(f"   JSON_EXTRACT_PATH_TEXT: {'✅ works' if result['json_extract_works'] else '❌ failed'}")
     print()
-    print("Ready to load real data. Set USE_SYNTHETIC = False in the next cell.")
+    print("→ Set USE_SYNTHETIC = False in Section 2 to load real data.")
 else:
     print("❌ Redshift: NOT REACHABLE")
     print(f"   Error: {result['error']}")
     print()
-    print("Options:")
-    print("  1. Check your .env file has REDSHIFT_HOST, REDSHIFT_USER, REDSHIFT_PASSWORD")
-    print("  2. Or set USE_SYNTHETIC = True in the next cell to run with synthetic data")
+    print("Fix options:")
+    print("  1. Check VPN / AWS network access to the Redshift endpoint")
+    print("  2. Override credentials via environment variables:")
+    print("       export REDSHIFT_HOST=<endpoint>")
+    print("       export REDSHIFT_PASSWORD=<password>")
+    print("  3. Or set USE_SYNTHETIC = True in Section 2 to use synthetic data")
+
+# Quick table sanity check (only if connected)
+if result["connected"]:
     print()
-    print("  Required .env keys:")
-    print("    REDSHIFT_HOST=<your-redshift-endpoint>")
-    print("    REDSHIFT_PORT=5439")
-    print("    REDSHIFT_DB=dev")
-    print("    REDSHIFT_USER=readonly_all_access")
-    print("    REDSHIFT_PASSWORD=<your-password>")
+    print("Quick table check — counting facts rows...")
+    df_check = redshift_query(
+        'SELECT COUNT(*) AS n_rows FROM "rds_warehouse_public"."facts" '
+        "WHERE name = 'naics_code'"
+    )
+    print(f"  rds_warehouse_public.facts (naics_code rows): {df_check['n_rows'][0]:,}")
+    
+    df_fallback_check = redshift_query(
+        "SELECT COUNT(*) AS n_fallback "
+        "FROM \"rds_warehouse_public\".\"facts\" "
+        "WHERE name = 'naics_code' "
+        "  AND JSON_EXTRACT_PATH_TEXT(value, 'code') = '561499'"
+    )
+    print(f"  of which are fallback 561499: {df_fallback_check['n_fallback'][0]:,}")
 """))
 
 # ── Cell 2: Current State (What the problem looks like) ───────────────────────
@@ -197,18 +221,36 @@ Loading training data from:
 cells.append(nbf.v4.new_code_cell("""\
 # Set use_synthetic=True for development (no Redshift needed)
 # Set use_synthetic=False + configure .env with Redshift credentials for real data
-USE_SYNTHETIC = True   # ← change to False when Redshift is accessible
+# ─────────────────────────────────────────────────────────────────────────────
+# SET THIS TO False WHEN REDSHIFT IS ACCESSIBLE
+# The connection test in the previous cell tells you which to use.
+# ─────────────────────────────────────────────────────────────────────────────
+USE_SYNTHETIC = True   # ← False = real Redshift data, True = synthetic (no Redshift needed)
 
 train_df, fallback_df = build_training_dataset(
-    limit=20_000 if USE_SYNTHETIC else None,
+    limit=None,            # None = load all data; set e.g. 50_000 for a quick test run
     use_synthetic=USE_SYNTHETIC,
 )
 
+total = len(train_df) + len(fallback_df)
+print(f"Total businesses loaded:               {total:,}")
 print(f"Training rows (labeled, non-fallback): {len(train_df):,}")
-print(f"Fallback rows (current NAICS = 561499): {len(fallback_df):,}")
-print(f"Fallback rate: {100 * len(fallback_df) / (len(train_df) + len(fallback_df)):.1f}%")
+print(f"Fallback rows (current NAICS = 561499):{len(fallback_df):,}")
+print(f"Fallback rate:                         {100 * len(fallback_df) / max(total, 1):.1f}%")
 print()
-print("Training data columns:", list(train_df.columns[:10]), "...")
+print("Key training columns:")
+key_cols = ["business_id","current_naics_code","current_mcc_code","label_naics6","label_mcc",
+            "zi_match_confidence","efx_match_confidence","oc_match_confidence",
+            "zi_c_naics6","efx_naics_primary","oc_naics_primary"]
+for col in key_cols:
+    if col in train_df.columns:
+        sample_vals = train_df[col].dropna().head(2).tolist()
+        print(f"  {col:<35} sample: {sample_vals}")
+print()
+if not USE_SYNTHETIC:
+    print("✅ Real Redshift data loaded — fallback count above is the production baseline.")
+else:
+    print("⚠️  Synthetic data — switch USE_SYNTHETIC=False for real production results.")
 """))
 
 # ── Cell 4: EDA - Fallback Distribution ───────────────────────────────────────
