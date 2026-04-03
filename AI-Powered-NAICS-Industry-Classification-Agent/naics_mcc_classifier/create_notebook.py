@@ -284,17 +284,42 @@ ax.set_xlabel("Count"); ax.set_title("Top 10 NAICS Sectors (Training)", color="#
 ax.invert_yaxis()
 
 # 3. Entity-match confidence distribution
+# IMPORTANT: filter to confidence > 0 before plotting.
+# ~42,000 businesses have confidence = 0 (no vendor match — they got their NAICS
+# from Middesk, Trulioo, or AI, not from ZI/EFX/OC entity matching).
+# Including zeros with density=True creates a massive spike at x=0 that
+# visually swamps the non-zero distributions — making it look like only one
+# source has data, when all three are actually present.
 ax = axes[2]
+match_counts = {}
 for col, colour, label in [
-    ("zi_match_confidence", BLUE, "ZoomInfo"),
+    ("zi_match_confidence",  BLUE,  "ZoomInfo"),
     ("efx_match_confidence", GREEN, "Equifax"),
-    ("oc_match_confidence", AMBER, "OpenCorporates"),
+    ("oc_match_confidence",  AMBER, "OpenCorporates"),
 ]:
     if col in train_df.columns:
         vals = train_df[col].dropna()
-        ax.hist(vals, bins=30, alpha=0.6, color=colour, label=label, density=True)
-ax.set_xlabel("Match Confidence"); ax.set_title("Entity-Match Confidence (Training)", color="#E2E8F0")
-ax.legend(facecolor="#1E293B", labelcolor="white")
+        vals_nonzero = vals[vals > 0.0]   # only businesses that have a match
+        match_counts[label] = len(vals_nonzero)
+        if len(vals_nonzero) > 0:
+            ax.hist(vals_nonzero, bins=25, alpha=0.65, color=colour,
+                    label=f"{label} (n={len(vals_nonzero):,})", density=False)
+ax.set_xlabel("Match Confidence (matched businesses only)")
+ax.set_ylabel("Business Count")
+ax.set_title("Entity-Match Confidence\\n(businesses with a vendor match > 0)", color="#E2E8F0")
+ax.legend(facecolor="#1E293B", labelcolor="white", fontsize=8)
+
+# Also print the coverage stats so the numbers are clear
+print("Entity-match coverage in training data:")
+n_train = len(train_df)
+for col, label in [("zi_match_confidence","ZoomInfo"),
+                   ("efx_match_confidence","Equifax"),
+                   ("oc_match_confidence","OpenCorporates")]:
+    if col in train_df.columns:
+        n_matched = (train_df[col].fillna(0) > 0).sum()
+        avg_conf  = train_df.loc[train_df[col].fillna(0) > 0, col].mean()
+        print(f"  {label:<18} matched: {n_matched:>6,} ({100*n_matched/n_train:.1f}%)  "
+              f"avg confidence: {avg_conf:.3f}")
 
 plt.tight_layout()
 plt.show()
