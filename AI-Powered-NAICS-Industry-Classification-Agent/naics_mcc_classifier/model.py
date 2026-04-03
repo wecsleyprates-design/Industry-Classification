@@ -412,22 +412,64 @@ def train_and_evaluate(
     y_naics = train_df[NAICS_LABEL_COL].astype(str)
     y_mcc   = train_df[MCC_LABEL_COL].astype(str)
 
-    # Stratified split on NAICS 2-digit sector
+    # ── Stratified split on NAICS 2-digit sector ──────────────────────────────
+    # Stratification fails when any sector has fewer than 2 members
+    # (sklearn requires at least 2 members per class for StratifiedShuffleSplit).
+    # Real production data has rare NAICS sectors with only 1 business.
+    # Fix: use stratify only for sectors that have ≥ 2 members; fall back to
+    # un-stratified split if too many rare sectors exist.
     strat = y_naics.str[:2]
-    X_tr, X_te, yn_tr, yn_te, ym_tr, ym_te = train_test_split(
-        feature_matrix, y_naics, y_mcc,
-        test_size=test_size,
-        stratify=strat,
-        random_state=random_state,
-    )
+    sector_counts = strat.value_counts()
+    rare_sectors  = sector_counts[sector_counts < 2].index
+    if len(rare_sectors) > 0:
+        logger.warning(
+            "%d NAICS sector(s) have only 1 member — removing from training to allow "
+            "stratified split: %s",
+            len(rare_sectors), list(rare_sectors)
+        )
+        keep_mask = ~strat.isin(rare_sectors)
+        feature_matrix = feature_matrix[keep_mask]
+        y_naics = y_naics[keep_mask]
+        y_mcc   = y_mcc[keep_mask]
+        strat   = strat[keep_mask]
+        logger.info("Kept %d rows after removing rare-sector businesses", keep_mask.sum())
+
+    try:
+        X_tr, X_te, yn_tr, yn_te, ym_tr, ym_te = train_test_split(
+            feature_matrix, y_naics, y_mcc,
+            test_size=test_size,
+            stratify=strat,
+            random_state=random_state,
+        )
+    except ValueError as e:
+        logger.warning(
+            "Stratified split failed (%s) — falling back to random split.", e
+        )
+        X_tr, X_te, yn_tr, yn_te, ym_tr, ym_te = train_test_split(
+            feature_matrix, y_naics, y_mcc,
+            test_size=test_size,
+            stratify=None,
+            random_state=random_state,
+        )
+
     # Further split train into train/val
     strat_tr = yn_tr.str[:2]
-    X_tr2, X_vl, yn_tr2, yn_vl, ym_tr2, ym_vl = train_test_split(
-        X_tr, yn_tr, ym_tr,
-        test_size=0.15,
-        stratify=strat_tr,
-        random_state=random_state,
-    )
+    strat_tr_counts = strat_tr.value_counts()
+    use_stratify_val = (strat_tr_counts >= 2).all()
+    try:
+        X_tr2, X_vl, yn_tr2, yn_vl, ym_tr2, ym_vl = train_test_split(
+            X_tr, yn_tr, ym_tr,
+            test_size=0.15,
+            stratify=strat_tr if use_stratify_val else None,
+            random_state=random_state,
+        )
+    except ValueError:
+        X_tr2, X_vl, yn_tr2, yn_vl, ym_tr2, ym_vl = train_test_split(
+            X_tr, yn_tr, ym_tr,
+            test_size=0.15,
+            stratify=None,
+            random_state=random_state,
+        )
 
     logger.info("Split sizes: train=%d, val=%d, test=%d", len(X_tr2), len(X_vl), len(X_te))
 
