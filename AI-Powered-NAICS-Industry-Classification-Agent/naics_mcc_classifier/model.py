@@ -132,8 +132,13 @@ class NAICSClassifier:
             X_train, X_val  — feature matrices (from feature_engineering.build_feature_matrix)
             y_train, y_val  — label_naics6 series (will be label-encoded internally)
         """
-        # Fit label encoder
-        self.label_encoder = make_label_encoder(pd.concat([y_train, y_val]))
+        # Fit label encoder on TRAINING labels only.
+        # Fitting on train+val caused class index mismatches: some NAICS codes appear
+        # only in the val split (not in train), so XGBoost sees different unique label
+        # sets in train vs val and raises "Invalid classes inferred from unique values of y".
+        # By fitting only on train, val examples with unseen codes get -1 from
+        # encode_labels() and are filtered out via mask_val — clean and consistent.
+        self.label_encoder = make_label_encoder(y_train)
         n_classes = len(self.label_encoder.classes_)
         logger.info("NAICS label encoder: %d unique classes", n_classes)
 
@@ -328,7 +333,8 @@ class MCCClassifier:
         X_val: pd.DataFrame,
         y_val: pd.Series,
     ) -> "MCCClassifier":
-        self.label_encoder = make_label_encoder(pd.concat([y_train, y_val]))
+        # Fit on training labels only (not train+val) — same reason as NAICSClassifier
+        self.label_encoder = make_label_encoder(y_train)
         n_classes = len(self.label_encoder.classes_)
         logger.info("MCC label encoder: %d unique classes", n_classes)
 
