@@ -4,15 +4,15 @@
     "naics_test_top3_accuracy": 1.0,
     "naics_test_sector_accuracy": 1.0,
     "mcc_test_top1_accuracy": 1.0,
-    "n_test_naics": 1600,
-    "n_test_mcc": 1600,
+    "n_test_naics": 1000,
+    "n_test_mcc": 1000,
     "naics_val_metrics": {
       "val_top1_accuracy": 1.0,
       "val_top3_accuracy": 1.0,
       "val_sector_accuracy": 1.0,
       "n_classes": 15,
-      "n_train": 5440,
-      "n_val": 960
+      "n_train": 3400,
+      "n_val": 600
     },
     "mcc_val_metrics": {
       "val_top1_accuracy": 1.0,
@@ -20,8 +20,8 @@
     }
   },
   "fallback_analysis": {
-    "n_total_fallback_businesses": 1600,
-    "n_can_override": 1600,
+    "n_total_fallback_businesses": 1000,
+    "n_can_override": 1000,
     "n_cannot_override": 0,
     "override_rate_pct": 100.0,
     "confidence_distribution": {
@@ -29,18 +29,18 @@
       "0.40-0.55": 0,
       "0.55-0.70": 0,
       "0.70-0.85": 0,
-      "\u22650.85": 1600
+      "\u22650.85": 1000
     },
     "top_predicted_naics_codes": {
-      "238210": 1600
+      "238210": 1000
     },
-    "avg_model_confidence_all": 0.9900916218757629,
-    "avg_model_confidence_override": 0.9900916218757629,
+    "avg_model_confidence_all": 0.9845879077911377,
+    "avg_model_confidence_override": 0.9845879077911377,
     "threshold_used": 0.55
   },
   "dataset_sizes": {
-    "n_train_rows": 8000,
-    "n_fallback_rows": 1600,
+    "n_train_rows": 5000,
+    "n_fallback_rows": 1000,
     "n_naics_classes": 15,
     "n_mcc_classes": 14
   },
