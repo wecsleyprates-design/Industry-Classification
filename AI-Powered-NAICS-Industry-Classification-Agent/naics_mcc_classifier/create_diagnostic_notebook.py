@@ -381,12 +381,16 @@ for scenario_code in [
     ]))
 """))
 
-# ── Fix roadmap ────────────────────────────────────────────────────────────────
-cells.append(nbf.v4.new_markdown_cell("### Step 7: Fix Roadmap — Prioritised by Impact"))
-cells.append(nbf.v4.new_code_cell("""\
-# ── Full fix roadmap based on scenario analysis ──────────────────────────────
+# ── Gap summary ────────────────────────────────────────────────────────────────
+cells.append(nbf.v4.new_markdown_cell("""### Step 7: Current System Gaps — What Is Missing and Why
 
-# Compute scenario-based fix estimates
+This step documents the confirmed gaps in the **current Worth AI pipeline** that cause
+businesses to receive NAICS 561499. No proposed solutions are included here —
+this is a pure diagnosis of the existing system.
+"""))
+cells.append(nbf.v4.new_code_cell("""\
+# ── Confirmed gaps in the current Worth AI pipeline ──────────────────────────
+
 n_B = scen_counts.get(SCENARIO_SOME_VENDORS_HAVE_NAICS, 0)
 n_A = scen_counts.get(SCENARIO_ALL_VENDORS_HAVE_NAICS, 0)
 n_D = scen_counts.get(SCENARIO_AI_HALLUCINATED, 0)
@@ -395,128 +399,181 @@ n_E = scen_counts.get(SCENARIO_AI_NOT_TRIGGERED, 0)
 n_F = scen_counts.get(SCENARIO_WINNER_HAS_NAICS_NOT_STORED, 0)
 n_pb= summary["pipeline_b_analysis"]["pipeline_b_has_real_naics"]
 
-# Name keyword deducible (estimated ~30% of scenario C based on keyword density)
-n_C_keywords = int(n_C * 0.30)
-n_C_web      = int(n_C * 0.20)
-n_C_hard     = n_C - n_C_keywords - n_C_web
+# Estimated sub-categories within Scenario C
+n_C_name_deducible = int(n_C * 0.30)  # name clearly implies industry
+n_C_web_findable   = int(n_C * 0.20)  # web search would find it
+n_C_genuine_hard   = n_C - n_C_name_deducible - n_C_web_findable  # truly unknown
 
-fixes = [
+gaps = [
     {
-        "P": 1, "Businesses": n_B, "Pct": f"{100*n_B//max(n_total,1)}%",
-        "Fix": "Deploy consensus.py Tier 1 (already built)",
-        "How": "apply_consensus() applies vendor NAICS directly (OC=0.9>ZI=0.8>EFX=0.7). "
-               "No AI needed for these cases.",
-        "Files": "consensus.py (already done), aiNaicsEnrichment.ts (BEFORE AI fires)",
-        "Effort": "Low — consensus.py exists, just needs TypeScript integration",
+        "Gap ID": "G1",
+        "Description": "Entity matching fails to find ZI/EFX/OC records",
+        "Businesses affected": f"{n_C:,} (Scenario C)",
+        "Root cause": (
+            "The heuristic similarity scoring (Levenshtein) and XGBoost entity-matching model "
+            "(entity_matching_20250127 v1) found no vendor record above the minimum threshold "
+            "(similarity_index >= 45, XGBoost probability >= 0.80) for these businesses. "
+            "Likely causes: new registrations not yet in bulk data, micro-businesses not in "
+            "commercial databases, generic/ambiguous names, address normalisation failures."
+        ),
+        "Tables with missing data": "zoominfo_matches, efx_matches, oc_matches: NO ROW | customer_files: primary_naics_code=NULL",
+        "Pipeline": "Both A and B",
     },
     {
-        "P": 2, "Businesses": n_A, "Pct": f"{100*n_A//max(n_total,1)}%",
-        "Fix": "Prevent AI from overriding 3-vendor consensus with 561499",
-        "How": "In aiNaicsEnrichment.ts: if consensus returns non-fallback code, "
-               "skip AI entirely (the whole point of the 3-tier architecture).",
-        "Files": "aiNaicsEnrichment.ts executeDeferrableTask() — call consensus first",
-        "Effort": "Low — TypeScript change to existing class",
+        "Gap ID": "G2",
+        "Description": "AI enrichment does not use web search for zero-vendor businesses",
+        "Businesses affected": f"~{n_C_web_findable:,} est. (20% of Scenario C)",
+        "Root cause": (
+            "In aiNaicsEnrichment.ts getPrompt(), the web_search tool is only enabled "
+            "when a website URL is already known (params.website is set). "
+            "For businesses with no vendor match and no website URL, "
+            "the AI receives only business_name + address and cannot search the web. "
+            "GPT-5-mini has web_search capability but it is blocked by the current code."
+        ),
+        "Tables with missing data": "request_response: AI stored (web_search not used) | facts: naics_code=561499",
+        "Pipeline": "Pipeline A only (AI enrichment step)",
     },
     {
-        "P": 3, "Businesses": n_pb, "Pct": f"{100*n_pb//max(n_total,1)}%",
-        "Fix": "Use Pipeline B NAICS (customer_files) as additional vendor signal",
-        "How": "customer_files.primary_naics_code is the ZI vs EFX winner. "
-               "When Pipeline A has 561499 but Pipeline B has a real code, use it.",
-        "Files": "consensus.py — add pipeline_b_naics as Tier 1b source",
-        "Effort": "Low — query customer_files and feed to consensus layer",
+        "Gap ID": "G3",
+        "Description": "AI prompt does not classify from name keywords before returning 561499",
+        "Businesses affected": f"~{n_C_name_deducible:,} est. (30% of Scenario C)",
+        "Root cause": (
+            "The AI system prompt in aiNaicsEnrichment.ts (line 104-115) instructs: "
+            "'If there is no evidence at all, return naics_code 561499 as a last resort.' "
+            "It does NOT instruct the AI to check business name keywords (salon, restaurant, "
+            "church, dental, etc.) before giving up. A business named 'Lisa's Nail Salon' "
+            "will receive 561499 if no vendor match exists and no website is provided, "
+            "even though the name unambiguously indicates NAICS 812113 (Nail Salons)."
+        ),
+        "Tables with missing data": "facts: naics_code=561499 despite name indicating real sector",
+        "Pipeline": "Pipeline A only (AI enrichment prompt)",
     },
     {
-        "P": 4, "Businesses": n_D, "Pct": f"{100*n_D//max(n_total,1)}%",
-        "Fix": "Improve AI hallucination handling",
-        "How": "When removeNaicsCode() strips a code, try the sector-level parent "
-               "(e.g. invalid 999999 → try 999XXX → fall back to 561499). "
-               "Also: validate against core_naics_code BEFORE using.",
-        "Files": "aiNaicsEnrichment.ts executePostProcessing()",
-        "Effort": "Medium — requires lookup table join",
+        "Gap ID": "G4",
+        "Description": "AI enrichment confidence metadata not stored for fallback cases",
+        "Businesses affected": f"{n_total:,} (all 561499 businesses)",
+        "Root cause": (
+            "The 'ai_naics_enrichment_metadata' fact is not written when AI returns 561499. "
+            "For all 5,349 businesses, ai_confidence, ai_reasoning, and ai_website_summary "
+            "are empty — the diagnostic shows ai_confidence_level = '' for 100% of cases. "
+            "The raw response IS stored in integration_data.request_response (platform_id=31) "
+            "but the structured metadata fact is never written. "
+            "This prevents quality monitoring and makes it impossible to track AI improvement."
+        ),
+        "Tables with missing data": "facts ai_naics_enrichment_metadata: NOT WRITTEN | request_response: raw stored",
+        "Pipeline": "Pipeline A (post-processing step)",
     },
     {
-        "P": 5, "Businesses": n_C_keywords, "Pct": f"{100*n_C_keywords//max(n_total,1)}% est.",
-        "Fix": "Name keyword → NAICS for zero-vendor name-deducible businesses",
-        "How": "consensus.py detect_name_keywords() maps 80+ keywords to NAICS sectors. "
-               "Church → 813110, Salon → 812113, Restaurant → 722511, etc.",
-        "Files": "consensus.py (already built), predictor.py name_only tier",
-        "Effort": "Low — keyword maps already in consensus.py",
+        "Gap ID": "G5",
+        "Description": "MCC fallback description is misleading and customer-facing",
+        "Businesses affected": f"{n_total:,} (all 561499 businesses)",
+        "Root cause": (
+            "The AI system prompt produces mcc_description = 'Fallback MCC per instructions "
+            "(no industry evidence to determine canonical MCC description)'. "
+            "This internal system note is displayed directly to customers in the admin portal. "
+            "It reveals internal implementation details and provides no useful information "
+            "about what the business actually does or why classification failed."
+        ),
+        "Tables with missing data": "facts mcc_description: stores internal debug text visible to customers",
+        "Pipeline": "Pipeline A (AI enrichment prompt output)",
     },
     {
-        "P": 6, "Businesses": n_C_web, "Pct": f"{100*n_C_web//max(n_total,1)}% est.",
-        "Fix": "Enable open web search for ALL zero-vendor businesses",
-        "How": "aiNaicsEnrichment.ts currently only uses web_search when website URL is known. "
-               "For name_only businesses, enable unrestricted web_search: "
-               "search '[business name] [city] [state]' to find Google Maps/LinkedIn/SOS records.",
-        "Files": "aiNaicsEnrichment.ts getPrompt() — add unrestricted web_search tool",
-        "Effort": "Medium — already partially implemented for name_only_inference outcome",
-    },
-    {
-        "P": 7, "Businesses": n_C_hard, "Pct": f"{100*n_C_hard//max(n_total,1)}% est.",
-        "Fix": "Accept genuine 561499 (holding companies, shell entities, new registrations)",
-        "How": "These businesses truly have no public information. 561499 is correct. "
-               "Improve MCC description: instead of 'Fallback MCC per instructions', "
-               "show 'Classification pending — insufficient data available'.",
-        "Files": "aiNaicsEnrichment.ts system prompt — change fallback MCC description",
-        "Effort": "Very Low — string change in prompt",
+        "Gap ID": "G6",
+        "Description": "Pipeline B also has no NAICS for these businesses",
+        "Businesses affected": f"{n_total:,} — Pipeline B also null",
+        "Root cause": (
+            "Pipeline B (customer_table.sql) applies the ZI vs EFX winner rule: "
+            "WHEN zi_match_confidence > efx_match_confidence THEN ZI NAICS ELSE EFX NAICS. "
+            "For these 5,349 businesses, BOTH zi_match_confidence = 0 AND efx_match_confidence = 0 "
+            "because neither ZI nor EFX entity matching found a record. "
+            "Pipeline B's customer_files.primary_naics_code = NULL for all 5,349. "
+            "This confirms the entity-matching failure is complete across both pipelines."
+        ),
+        "Tables with missing data": "customer_files: primary_naics_code=NULL for all 5349 businesses",
+        "Pipeline": "Pipeline B (batch Redshift)",
     },
 ]
 
-df_fixes = pd.DataFrame(fixes)
-print("=" * 70)
-print("PRIORITISED FIX ROADMAP")
-print("=" * 70)
-display(df_fixes.style.set_table_styles([
-    {"selector": "th", "props": [("background-color","#1E3A5F"),("color","#93C5FD"),
-                                  ("font-weight","bold"),("padding","8px")]},
-    {"selector": "td", "props": [("padding","8px"),("background-color","#1E293B"),
-                                  ("color","#CBD5E1"),("font-size","0.85em"),
-                                  ("vertical-align","top")]},
-]))
+df_gaps = pd.DataFrame(gaps)
 
-# ── Impact chart ───────────────────────────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(14, 5))
-px = [f["P"] for f in fixes]
-py = [f["Businesses"] for f in fixes]
-plabels = [f"P{f['P']}\\n{f['Fix'][:35]}..." for f in fixes]
-pcolours= [GREEN, GREEN, BLUE, AMBER, TEAL, TEAL, GREY]
-bars = ax.bar(range(len(py)), py, color=pcolours, width=0.7)
-for bar, val, pct in zip(bars, py, [f["Pct"] for f in fixes]):
-    ax.text(bar.get_x()+bar.get_width()/2, bar.get_height()+max(py)*0.01,
-            f"{val:,}\\n({pct})", ha="center", color="white", fontsize=8, fontweight="bold")
-ax.set_xticks(range(len(plabels)))
-ax.set_xticklabels(plabels, fontsize=7, rotation=0)
-ax.set_ylabel("Businesses Recovered")
-ax.set_title("Fix Impact: Businesses Recovered from 561499 per Fix",
-             color="#E2E8F0", fontsize=13)
+print("=" * 70)
+print(f"CONFIRMED GAPS IN CURRENT WORTH AI PIPELINE ({n_total:,} affected businesses)")
+print("=" * 70)
+print()
+
+for g in gaps:
+    print(f"GAP {g['Gap ID']}: {g['Description']}")
+    print(f"  Businesses:  {g['Businesses affected']}")
+    print(f"  Root cause:  {g['Root cause'][:120]}...")
+    print(f"  Pipeline:    {g['Pipeline']}")
+    print(f"  Missing in:  {g['Tables with missing data'].split(chr(10))[0]}")
+    print()
+
+# ── Recovery potential ─────────────────────────────────────────────────────────
+print("=" * 70)
+print("RECOVERY POTENTIAL ESTIMATE")
+print("=" * 70)
+print(f"Total businesses with 561499:            {n_total:,}  (100%)")
+print()
+print(f"Scenario A (vendors have NAICS, AI overrode): {n_A:,} ({100*n_A//max(n_total,1)}%)")
+print(f"Scenario B (1-2 vendors have NAICS):          {n_B:,} ({100*n_B//max(n_total,1)}%)")
+print(f"Scenario C — name-deducible (est. 30%):       {n_C_name_deducible:,} ({100*n_C_name_deducible//max(n_total,1)}%)")
+print(f"Scenario C — web-findable (est. 20%):          {n_C_web_findable:,} ({100*n_C_web_findable//max(n_total,1)}%)")
+print(f"Scenario C — genuinely unclassifiable:         {n_C_genuine_hard:,} ({100*n_C_genuine_hard//max(n_total,1)}%)")
+print()
+total_potentially_recoverable = n_A + n_B + n_C_name_deducible + n_C_web_findable + n_D + n_pb
+print(f"POTENTIALLY RECOVERABLE (all categories):    {total_potentially_recoverable:,}  ({100*total_potentially_recoverable//max(n_total,1)}%)")
+print(f"GENUINELY UNCLASSIFIABLE (561499 correct):   {n_C_genuine_hard + n_E + n_F:,}  ({100*(n_C_genuine_hard+n_E+n_F)//max(n_total,1)}%)")
+print()
+print("Note: 'Genuinely unclassifiable' includes holding companies, shell entities,")
+print("  brand-new registrations, and businesses with no public footprint.")
+print("  For these businesses, 561499 is the CORRECT classification.")
+print("  The gap is not in the NAICS code but in the MCC description (Gap G5).")
+
+# ── Bar chart: categories ──────────────────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(12, 5))
+categories = [
+    f"Scenario A\\n(vendors have\\nNAICS, AI\\noverrode)",
+    f"Scenario B\\n(1-2 vendors\\nhave NAICS)",
+    f"Scenario C\\nname-deducible\\n(est. 30%)",
+    f"Scenario C\\nweb-findable\\n(est. 20%)",
+    f"Scenario C\\ngenuinely hard\\n(est. 50%)",
+    f"Scenarios D/E/F\\n(other causes)",
+]
+values_cat = [n_A, n_B, n_C_name_deducible, n_C_web_findable, n_C_genuine_hard, n_D+n_E+n_F]
+colours_cat= [AMBER, BLUE, TEAL, TEAL, RED, GREY]
+bars = ax.bar(range(len(categories)), values_cat, color=colours_cat, width=0.65)
+for bar, val in zip(bars, values_cat):
+    pct = 100*val//max(n_total,1)
+    if val > 0:
+        ax.text(bar.get_x()+bar.get_width()/2,
+                bar.get_height() + n_total*0.01,
+                f"{val:,}\\n({pct}%)",
+                ha="center", color="white", fontsize=9, fontweight="bold")
+ax.set_xticks(range(len(categories)))
+ax.set_xticklabels(categories, fontsize=8)
+ax.set_ylabel("Business Count")
+ax.set_title("Classification of 561499 Businesses by Recovery Category",
+             color="#E2E8F0", fontsize=12)
+
+legend_patches = [
+    mpatches.Patch(color=AMBER, label="Recoverable: fix AI override logic"),
+    mpatches.Patch(color=BLUE,  label="Recoverable: apply vendor code directly"),
+    mpatches.Patch(color=TEAL,  label="Recoverable: name keywords + web search"),
+    mpatches.Patch(color=RED,   label="Accept 561499 (correct — fix description only)"),
+    mpatches.Patch(color=GREY,  label="Other / edge cases"),
+]
+ax.legend(handles=legend_patches, facecolor="#1E293B", labelcolor="white",
+          fontsize=8, loc="upper right")
 plt.tight_layout()
 plt.show()
-
-# ── Summary numbers ────────────────────────────────────────────────────────────
-total_recoverable = n_B + n_A + n_D + n_C_keywords + n_C_web + n_pb
-total_hard        = n_C_hard + n_E + n_F
-
-print(f"\\n{'='*60}")
-print(f"OVERALL RECOVERY POTENTIAL")
-print(f"{'='*60}")
-print(f"Total businesses with 561499:                {n_total:,}  (100%)")
-print(f"Recoverable with existing fixes (P1-P5):     {total_recoverable:,}  ({100*total_recoverable//max(n_total,1)}%)")
-print(f"Recoverable with AI web search (P6):         {n_C_web:,}  ({100*n_C_web//max(n_total,1)}%)")
-print(f"Genuinely unclassifiable (561499 is correct):{total_hard:,}  ({100*total_hard//max(n_total,1)}%)")
-print()
-print("Fixes already built:")
-print("  ✅ consensus.py — Tier 1 deterministic vendor consensus (P1, P3, P5)")
-print("  ✅ predictor.py — Three-tier architecture (Tier 2 conflict, Tier 3 name/AI)")
-print("  ✅ aiNaicsEnrichment.ts — XGBoost-first call, enriched GPT prompt (P2, P4, P6)")
-print()
-print("Still needed in production:")
-print("  ⚙️  TypeScript integration: call consensus.py API BEFORE AI fires")
-print("  ⚙️  AI prompt: enable unrestricted web_search for zero-vendor businesses")
-print("  ⚙️  Prompt fix: replace 'Fallback MCC per instructions' with meaningful message")
 """))
 
 # ── Workflow diagram ───────────────────────────────────────────────────────────
-cells.append(nbf.v4.new_markdown_cell("""### Step 8: Complete Workflow Diagram
+cells.append(nbf.v4.new_markdown_cell("""### Step 8: Current Worth AI Pipeline — How 561499 Is Produced
+
+This diagram shows the **current system as it operates today**, annotated with
+where each confirmed gap (G1-G6) occurs in the pipeline.
 
 ```
 BUSINESS SUBMITTED
@@ -526,54 +583,91 @@ BUSINESS SUBMITTED
 │ PIPELINE A — Integration Service (real-time, per business)          │
 │                                                                     │
 │  Vendors called in parallel:                                        │
-│    • Middesk (SOS registry)          platform_id=16                │
-│    • OpenCorporates (global registry) platform_id=23               │
-│    • ZoomInfo (Redshift pre-loaded)   platform_id=24               │
-│    • Equifax (Redshift pre-loaded)    platform_id=17               │
-│    • Trulioo (KYB/KYC)               platform_id=38               │
-│    • SERP / AI enrichment            platform_id=22,31             │
+│    • Middesk (SOS registry)          platform_id=16  weight=2.0    │
+│    • OpenCorporates (OC registry)    platform_id=23  weight=0.9    │
+│    • ZoomInfo (Redshift pre-loaded)  platform_id=24  weight=0.8    │
+│    • Equifax (Redshift pre-loaded)   platform_id=17  weight=0.7    │
+│    • Trulioo (KYB live API)          platform_id=38  weight=0.8    │
+│    • SERP scraping                   platform_id=22               │
+│                                                                     │
+│  ⚠️ GAP G1: For 5,348/5,349 businesses, ZI/EFX/OC entity          │
+│     matching finds NO record above threshold. Vendor NAICS = null. │
 └──────────────────────────────────────────────────────────────────┬──┘
                                                                    │
        ▼                                                           │
 ┌─────────────────────────────────────────────────────────────────▼──┐
 │ FACT ENGINE — factWithHighestConfidence() + weightedFactSelector()  │
+│   (integration-service/lib/facts/rules.ts)                          │
 │                                                                     │
-│  Weights: Middesk(2.0) > OC(0.9) > ZI(0.8) = Trulioo(0.8) >     │
+│  Weights: Middesk(2.0) > OC(0.9) > ZI(0.8)=Trulioo(0.8) >       │
 │           Equifax(0.7) > AI(0.1)                                   │
 │                                                                     │
-│  IF ≥3 sources have NAICS → winner selected → DONE                │
-│  IF <3 sources have NAICS → AI enrichment triggered               │
+│  Trigger condition for AI enrichment:                               │
+│    naics_code fact has fewer than minimumSources=1 non-AI sources  │
+│    AND fewer than maximumSources=3 total sources                   │
+│  → For our 5,349 businesses: 0 sources have NAICS → AI triggered  │
 └──────────────────────────────────────────────────────────────────┬──┘
                                                                    │
-       ▼ (AI triggered)                                            │
+       ▼ (AI enrichment triggered)                                  │
 ┌─────────────────────────────────────────────────────────────────▼──┐
 │ AI ENRICHMENT — AINaicsEnrichment.ts (GPT-5-mini)                  │
 │                                                                     │
-│  CURRENT behaviour:                                                 │
-│    Receives: business_name, address, existing naics_code            │
-│    Does NOT receive: raw ZI/EFX/OC NAICS codes from Redshift       │
-│    If no evidence → returns 561499 + MCC 5614                     │
+│  What AI receives TODAY:                                            │
+│    ✅ business_name   (from applicant onboarding form)              │
+│    ✅ primary_address (from applicant onboarding form)              │
+│    ❌ naics_code: null (no vendor produced one)                    │
+│    ❌ website: null for most (not provided; SERP may not have run) │
+│    ❌ ZI/EFX/OC NAICS codes NOT included in prompt               │
 │                                                                     │
-│  NEW behaviour (after fix):                                         │
-│    Step 1: consensus.py checks vendor NAICS → if clear → DONE     │
-│    Step 2: If conflict → XGBoost arbitrates                        │
-│    Step 3: If all null → AI fires with web_search + name keywords  │
+│  System prompt instruction (line 114):                              │
+│    "If no evidence → return naics_code 561499 and mcc_code 5614"  │
+│                                                                     │
+│  ⚠️ GAP G2: web_search only enabled when website URL is known.    │
+│     For zero-vendor businesses without website: AI cannot search.  │
+│                                                                     │
+│  ⚠️ GAP G3: No name keyword logic. "Lisa's Nail Salon" → 561499  │
+│     even though name clearly indicates NAICS 812113.               │
+│                                                                     │
+│  ⚠️ GAP G4: Confidence/reasoning metadata NOT stored in facts.    │
+│     ai_naics_enrichment_metadata fact is never written for these.  │
+│                                                                     │
+│  AI result: naics_code="561499", mcc_code="5614",                 │
+│             mcc_description="Fallback MCC per instructions..."    │
+│             (⚠️ GAP G5: this internal text shown to customers)    │
 └──────────────────────────────────────────────────────────────────┬──┘
                                                                    │
        ▼                                                           │
 ┌─────────────────────────────────────────────────────────────────▼──┐
-│ RESULT STORED IN rds_warehouse_public.facts                         │
-│   naics_code.value = "561499" ← what customer sees                 │
-│   mcc_code.value   = "5614"   ← "Fallback MCC per instructions"   │
+│ KAFKA: facts.v1 → warehouse-service → rds_warehouse_public.facts   │
+│                                                                     │
+│   name="naics_code"  value={"value":"561499","source":{"platformId":31}}│
+│   name="mcc_code"    value={"value":"5614","source":{"platformId":31}}  │
+│                                                                     │
+│  ← What the customer sees in admin.joinworth.com KYB tab          │
 └─────────────────────────────────────────────────────────────────────┘
 
-WHY 561499 HAPPENS (6 root causes):
-  A (5-10%):  All vendors have NAICS but AI overrode them → fix: block AI when vendors agree
-  B (20-30%): 1-2 vendors have NAICS, AI fired and gave up → fix: use vendor code directly
-  C (50-60%): Zero vendor signals, AI had no evidence → fix: name keywords + web search
-  D (3-5%):   AI hallucinated invalid code → replaced with 561499 → fix: sector fallback
-  E (2-5%):   AI not triggered, winning source had no NAICS → fix: trace winning source
-  F (<2%):    Winning source had NAICS but not stored → fix: check Kafka/DB write path
+═══════════════════════════════════════════════════════════
+PIPELINE B — Batch Redshift (runs separately)
+═══════════════════════════════════════════════════════════
+datascience.customer_files:
+  primary_naics_code = NULL  ← ⚠️ GAP G6: Pipeline B also has no NAICS
+  (zi_match_confidence = 0 AND efx_match_confidence = 0 for all 5,349)
+
+═══════════════════════════════════════════════════════════
+CONFIRMED GAPS IN CURRENT SYSTEM (from this analysis):
+═══════════════════════════════════════════════════════════
+  G1 (5,348 businesses): Entity matching finds no vendor record
+     → ZI, EFX, OC match tables: NO ROWS for these businesses
+  G2 (~1,069 est.):  AI web_search not used when no website provided
+     → aiNaicsEnrichment.ts getPrompt(): web_search blocked when website=null
+  G3 (~1,604 est.):  AI prompt has no name keyword classification logic
+     → System prompt only says "return 561499 if no evidence"
+  G4 (5,349):  AI confidence/reasoning metadata not stored in facts
+     → ai_naics_enrichment_metadata fact never written for fallback cases
+  G5 (5,349):  "Fallback MCC per instructions" shown to customers
+     → Internal debug text exposed in mcc_description fact
+  G6 (5,349):  Pipeline B also null — confirms complete entity-match failure
+     → datascience.customer_files primary_naics_code = NULL
 ```
 """))
 
