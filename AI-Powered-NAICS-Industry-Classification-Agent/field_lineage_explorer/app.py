@@ -23,108 +23,142 @@ st.set_page_config(
 )
 
 # ── CSS ────────────────────────────────────────────────────────────────────────
+# All cards use DARK backgrounds so text is always visible in Streamlit dark mode.
 st.markdown("""
 <style>
 /* Global font */
 html, body, [class*="css"] { font-family: 'Inter', 'Segoe UI', sans-serif; }
 
 /* Sidebar */
-section[data-testid="stSidebar"] { background: #0F172A; }
+section[data-testid="stSidebar"] { background: #0B1120 !important; }
 section[data-testid="stSidebar"] * { color: #E2E8F0 !important; }
-section[data-testid="stSidebar"] .stSelectbox label,
-section[data-testid="stSidebar"] .stMultiSelect label,
-section[data-testid="stSidebar"] .stRadio label { color: #94A3B8 !important; font-size: 0.8rem; }
 
-/* Field card */
+/* ── Cards (dark backgrounds — readable in both light and dark Streamlit theme) ── */
 .field-card {
-    background: #F8FAFF;
-    border: 1px solid #DBEAFE;
-    border-left: 4px solid #1D4ED8;
-    border-radius: 8px;
-    padding: 12px 16px;
-    margin-bottom: 10px;
-}
-.field-card-red {
-    background: #FEF2F2;
-    border-left: 4px solid #DC2626;
-}
-.field-card-green {
-    background: #F0FDF4;
-    border-left: 4px solid #059669;
-}
-.field-card-amber {
-    background: #FFFBEB;
-    border-left: 4px solid #D97706;
-}
-.field-card-purple {
-    background: #EDE9FE;
-    border-left: 4px solid #7C3AED;
-}
-
-/* Source badge */
-.badge {
-    display: inline-block;
-    padding: 2px 10px;
-    border-radius: 12px;
-    font-size: 0.72rem;
-    font-weight: 600;
-    margin: 2px;
-}
-.badge-blue   { background: #DBEAFE; color: #1E40AF; }
-.badge-green  { background: #D1FAE5; color: #065F46; }
-.badge-amber  { background: #FEF3C7; color: #78350F; }
-.badge-red    { background: #FEE2E2; color: #7F1D1D; }
-.badge-purple { background: #EDE9FE; color: #5B21B6; }
-.badge-grey   { background: #F1F5F9; color: #334155; }
-
-/* Metric block */
-.metric-block {
-    background: white;
-    border: 1px solid #E2E8F0;
+    background: #1A2744;
+    border: 1px solid #2D4070;
+    border-left: 5px solid #3B82F6;
     border-radius: 8px;
     padding: 14px 18px;
+    margin-bottom: 10px;
+    color: #CBD5E1 !important;
+    line-height: 1.65;
+}
+.field-card * { color: #CBD5E1 !important; }
+.field-card b, .field-card strong { color: #E2E8F0 !important; }
+
+.field-card-red {
+    background: #2A1010;
+    border-left: 5px solid #EF4444;
+    color: #FCA5A5 !important;
+}
+.field-card-red * { color: #FCA5A5 !important; }
+.field-card-red b, .field-card-red strong { color: #FEE2E2 !important; }
+
+.field-card-green {
+    background: #0C2218;
+    border-left: 5px solid #10B981;
+    color: #6EE7B7 !important;
+}
+.field-card-green * { color: #6EE7B7 !important; }
+.field-card-green b, .field-card-green strong { color: #A7F3D0 !important; }
+
+.field-card-amber {
+    background: #221A06;
+    border-left: 5px solid #F59E0B;
+    color: #FCD34D !important;
+}
+.field-card-amber * { color: #FCD34D !important; }
+.field-card-amber b, .field-card-amber strong { color: #FDE68A !important; }
+
+.field-card-purple {
+    background: #180D30;
+    border-left: 5px solid #8B5CF6;
+    color: #C4B5FD !important;
+}
+.field-card-purple * { color: #C4B5FD !important; }
+.field-card-purple b, .field-card-purple strong { color: #DDD6FE !important; }
+
+/* ── Source badges ── */
+.badge {
+    display: inline-block;
+    padding: 3px 11px;
+    border-radius: 12px;
+    font-size: 0.73rem;
+    font-weight: 700;
+    margin: 2px;
+    letter-spacing: 0.01em;
+}
+.badge-blue   { background: #1E3A6E; color: #93C5FD; border: 1px solid #2563EB; }
+.badge-green  { background: #064E3B; color: #6EE7B7; border: 1px solid #059669; }
+.badge-amber  { background: #451A03; color: #FCD34D; border: 1px solid #D97706; }
+.badge-red    { background: #450A0A; color: #FCA5A5; border: 1px solid #DC2626; }
+.badge-purple { background: #2E1065; color: #C4B5FD; border: 1px solid #7C3AED; }
+.badge-grey   { background: #1E293B; color: #94A3B8; border: 1px solid #475569; }
+
+/* ── Metric blocks ── */
+.metric-block {
+    background: #1A2744;
+    border: 1px solid #2D4070;
+    border-radius: 10px;
+    padding: 16px 18px;
     text-align: center;
 }
-.metric-num { font-size: 2rem; font-weight: 700; color: #1E40AF; }
-.metric-label { font-size: 0.78rem; color: #64748B; margin-top: 2px; }
+.metric-num   { font-size: 2rem; font-weight: 700; color: #60A5FA; }
+.metric-label { font-size: 0.78rem; color: #94A3B8; margin-top: 4px; }
 
-/* Table */
-.lineage-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+/* ── Data table ── */
+.lineage-table { width: 100%; border-collapse: collapse; font-size: 0.87rem; }
 .lineage-table th {
-    background: #1E3A5F;
+    background: #0F2040;
     color: #93C5FD;
-    font-weight: 600;
-    padding: 8px 12px;
+    font-weight: 700;
+    padding: 9px 13px;
     text-align: left;
+    border-bottom: 2px solid #2563EB;
 }
 .lineage-table td {
-    padding: 7px 12px;
-    border-bottom: 1px solid #E2E8F0;
+    padding: 8px 13px;
+    border-bottom: 1px solid #1E293B;
     vertical-align: top;
+    color: #CBD5E1;
+    background: #0F172A;
 }
-.lineage-table tr:nth-child(even) td { background: #F8FAFF; }
-
-/* Section header */
-.section-header {
-    background: linear-gradient(135deg, #1E3A5F 0%, #1D4ED8 100%);
-    color: white;
-    padding: 10px 18px;
-    border-radius: 8px;
-    font-weight: 600;
-    font-size: 1.05rem;
-    margin-bottom: 10px;
-}
-
-/* Code block */
-.code-box {
-    background: #1E293B;
+.lineage-table tr:nth-child(even) td { background: #141F35; }
+.lineage-table tr:hover td { background: #1A2A45; }
+.lineage-table code {
+    background: #1E3A5F;
     color: #93C5FD;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.82em;
+}
+
+/* ── Section header ── */
+.section-header {
+    background: linear-gradient(135deg, #0F2040 0%, #1D4ED8 100%);
+    color: #E2E8F0;
+    padding: 11px 20px;
+    border-radius: 8px;
+    font-weight: 700;
+    font-size: 1.08rem;
+    margin-bottom: 12px;
+    border: 1px solid #2563EB;
+    letter-spacing: 0.01em;
+}
+
+/* ── Code / flow box ── */
+.code-box {
+    background: #0A1628;
+    color: #93C5FD;
+    border: 1px solid #1E3A5F;
     border-radius: 6px;
-    padding: 10px 14px;
+    padding: 12px 16px;
     font-family: 'Courier New', monospace;
     font-size: 0.82rem;
     white-space: pre-wrap;
     word-break: break-all;
+    line-height: 1.55;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -159,8 +193,24 @@ def null_badge(is_error: bool) -> str:
 # SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.image("https://via.placeholder.com/200x40/0F172A/60A5FA?text=Worth+AI", width=200)
-    st.markdown("## 🔍 Field Lineage Explorer")
+    st.markdown("""
+    <div style="
+        background: linear-gradient(135deg, #0B0F2A 0%, #1a1150 100%);
+        border-radius: 10px;
+        padding: 14px 18px;
+        margin-bottom: 4px;
+        border: 1px solid #2D2080;
+        text-align: center;
+    ">
+        <div style="font-size:1.5rem; font-weight:900; letter-spacing:0.06em; color:#E2E8F0;">
+            <span style="color:#B57BFF;">W</span>ORTH
+        </div>
+        <div style="font-size:0.65rem; color:#8B8FBF; letter-spacing:0.18em; margin-top:2px;">
+            FIELD LINEAGE EXPLORER
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.markdown("")
     st.markdown("---")
 
     page = st.radio(
@@ -254,30 +304,50 @@ if page == "🏠 Overview":
 
     # Field summary table
     st.markdown("### 📋 All Fields at a Glance")
-    rows = []
-    for key, fld in FIELD_LINEAGE.items():
-        src_html = " ".join(source_badge(s) for s in fld["sources"][:3])
-        rows.append({
-            "API Field": f"<code>{fld['api_field_path']}</code>",
-            "Display Name": fld["display_name"],
-            "Section": fld["section"],
-            "Type": fld["data_type"],
-            "Primary Sources": src_html,
-            "Null = Error?": "⚠️ Yes" if fld["null_is_error"] else "✅ No",
-            "W360": "✅" if fld.get("w360") else "—",
-        })
+
+    def null_cell(is_error: bool) -> str:
+        if is_error:
+            return '<span style="color:#FCA5A5;font-weight:700;">⚠️ Yes</span>'
+        return '<span style="color:#6EE7B7;font-weight:700;">✅ No</span>'
+
+    def w360_cell(has: bool) -> str:
+        if has:
+            return '<span style="color:#6EE7B7;font-weight:700;">✅</span>'
+        return '<span style="color:#64748B;">—</span>'
+
+    def display_name_cell(name: str) -> str:
+        return f'<span style="color:#E2E8F0;">{name}</span>'
+
+    def section_cell(s: str) -> str:
+        colours = {"KYB": "#60A5FA", "KYC": "#A78BFA", "Banking": "#34D399"}
+        c = colours.get(s, "#94A3B8")
+        return f'<span style="color:{c};font-weight:600;">{s}</span>'
+
+    def type_cell(t: str) -> str:
+        colours = {"Verification": "#93C5FD", "Prefill": "#86EFAC", "Risk": "#FCA5A5", "Industry": "#FCD34D"}
+        c = colours.get(t, "#CBD5E1")
+        return f'<span style="color:{c};">{t}</span>'
 
     table_html = """<table class="lineage-table">
-    <tr><th>API Field</th><th>Display Name</th><th>Section</th><th>Type</th><th>Primary Sources</th><th>Null=Error?</th><th>W360</th></tr>"""
-    for r in rows:
+    <tr>
+      <th>API Field Path</th>
+      <th>Display Name</th>
+      <th>Section</th>
+      <th>Type</th>
+      <th>Primary Sources</th>
+      <th>Null = Error?</th>
+      <th>W360</th>
+    </tr>"""
+    for key, fld in FIELD_LINEAGE.items():
+        src_html = " ".join(source_badge(s) for s in fld["sources"][:3])
         table_html += f"""<tr>
-        <td>{r['API Field']}</td>
-        <td>{r['Display Name']}</td>
-        <td>{r['Section']}</td>
-        <td>{r['Type']}</td>
-        <td>{r['Primary Sources']}</td>
-        <td>{r['Null = Error?']}</td>
-        <td>{r['W360']}</td>
+        <td><code>{fld['api_field_path']}</code></td>
+        <td>{display_name_cell(fld['display_name'])}</td>
+        <td>{section_cell(fld['section'])}</td>
+        <td>{type_cell(fld['data_type'])}</td>
+        <td>{src_html}</td>
+        <td>{null_cell(fld['null_is_error'])}</td>
+        <td>{w360_cell(fld.get('w360', False))}</td>
         </tr>"""
     table_html += "</table>"
     st.markdown(table_html, unsafe_allow_html=True)
@@ -487,11 +557,13 @@ LIMIT 1;
         )
         for src_key, src in sorted_sources:
             cls, label = SOURCE_BADGE.get(src_key, ("badge-grey", src_key))
+            w = src.get("weight", 0)
+            w_colour = "#FCD34D" if w >= 2.0 else ("#6EE7B7" if w >= 0.8 else "#94A3B8")
             priority_table += f"""<tr>
             <td><span class="badge {cls}">{label}</span></td>
             <td><code>{src.get('platform_id', '?')}</code></td>
-            <td><b>{src.get('weight', '?')}</b></td>
-            <td style="font-size:0.82rem;">{src.get('confidence_model', '?')}</td>
+            <td><b style="color:{w_colour};font-size:1rem;">{src.get('weight', '?')}</b></td>
+            <td style="font-size:0.82rem;color:#94A3B8;">{src.get('confidence_model', '?')}</td>
             </tr>"""
         priority_table += "</table>"
         st.markdown(priority_table, unsafe_allow_html=True)
