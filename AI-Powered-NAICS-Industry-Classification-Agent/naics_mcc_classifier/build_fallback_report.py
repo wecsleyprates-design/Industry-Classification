@@ -207,90 +207,109 @@ def chart_vendor_signal():
 
 
 def chart_ai_enrichment():
-    """3-panel: AI confidence / AI winner / hallucination donut."""
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5.5), facecolor=BG)
+    """
+    Redesigned: two side-by-side panels that make the 'AI ran but metadata missing'
+    distinction visually obvious.
+
+    LEFT:  Stacked bar showing the 5,349 businesses split by what we KNOW happened
+           (AI was Fact Engine winner vs other source won) — both confirmed by the
+           facts table winning source field.
+    RIGHT: What the METADATA FACT recorded — nothing for any of the 5,349 businesses,
+           because ai_naics_enrichment_metadata was never written for fallback cases.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6.5), facecolor=BG)
     fig.suptitle(
-        "AI Enrichment (GPT-5-mini) Behaviour for 561499 Businesses",
-        color=TEXT_COL, fontsize=13, fontweight="bold", y=1.01
+        "AI Enrichment — Two Different Questions, Two Different Answers",
+        color=TEXT_COL, fontsize=13, fontweight="bold", y=1.02
     )
 
-    # Panel 1: AI confidence
+    # ── LEFT panel: Did AI run? (confirmed by winning source field) ──────────
     ax = axes[0]
     ax.set_facecolor(BG)
-    conf_labels = ["HIGH", "MED", "LOW", "Not Run\n(metadata\nnot stored)"]
-    conf_vals   = [0, 0, 0, 5349]
-    conf_cols   = [GREEN_C, AMBER_C, RED_C, GREY_C]
-    bars = ax.bar(range(4), conf_vals, color=conf_cols, width=0.55, edgecolor=BG)
-    for bar, val in zip(bars, conf_vals):
-        pct = 100 * val // N_TOTAL
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + N_TOTAL * 0.005,
-            f"{val:,}\n({pct}%)",
-            ha="center", va="bottom", color=TEXT_COL, fontsize=9, fontweight="bold"
-        )
-    ax.set_xticks(range(4))
-    ax.set_xticklabels(conf_labels, color=SUBTEXT, fontsize=8.5)
-    ax.set_ylabel("Business Count", color=SUBTEXT, fontsize=9)
-    ax.set_title("AI Confidence Level\n(ai_naics_enrichment_metadata fact)", color=TEXT_COL, fontsize=10)
+
+    # Stacked bar: AI winner (amber) + other source winner (blue)
+    ai_winner   = 2381
+    other_winner = 2968
+    x = [0]
+    bar_ai    = ax.bar(x, [ai_winner],    color=AMBER_C, width=0.5, edgecolor=BG,
+                       label=f"AI was Fact Engine winner (platform_id=31)\n= 2,381 (44%)")
+    bar_other = ax.bar(x, [other_winner], color=BLUE_C,  width=0.5, edgecolor=BG,
+                       bottom=[ai_winner],
+                       label=f"Other source won (Middesk/Trulioo/SERP)\n= 2,968 (56%)")
+
+    # Annotations on the stacked bar
+    ax.text(0, ai_winner / 2,
+            f"AI won\n2,381\n(44%)",
+            ha="center", va="center", color="#0F172A", fontsize=11, fontweight="bold")
+    ax.text(0, ai_winner + other_winner / 2,
+            f"Other source\n2,968\n(56%)",
+            ha="center", va="center", color="#0F172A", fontsize=11, fontweight="bold")
+
+    ax.set_xticks([0])
+    ax.set_xticklabels(["5,349 businesses\nwith NAICS 561499"], color=SUBTEXT, fontsize=10)
+    ax.set_ylabel("Business Count", color=SUBTEXT, fontsize=10)
+    ax.set_title(
+        "QUESTION 1: Did the AI enrichment run?\n"
+        "(Source: winning platformId in facts table)",
+        color=TEXT_COL, fontsize=10.5, pad=14
+    )
+    ax.set_ylim(0, N_TOTAL * 1.22)
     ax.tick_params(colors=SUBTEXT)
     for spine in ax.spines.values(): spine.set_edgecolor(GRID_COL)
     ax.yaxis.grid(True, color=GRID_COL, linewidth=0.6, linestyle="--")
     ax.set_axisbelow(True)
-    ax.set_ylim(0, N_TOTAL * 1.15)
+    ax.legend(facecolor=GRID_COL, labelcolor=TEXT_COL, fontsize=9,
+              loc="upper right", edgecolor="none")
 
-    # Panel 2: AI winner vs other
+    # Bold "YES" annotation
+    ax.text(0.5, 0.97,
+            "YES — AI ran for at least 2,381 businesses",
+            transform=ax.transAxes, ha="center", va="top",
+            color=GREEN_C, fontsize=10, fontweight="bold")
+
+    # ── RIGHT panel: Was the metadata fact saved? ────────────────────────────
     ax2 = axes[1]
     ax2.set_facecolor(BG)
-    ai_win  = 2381
-    ai_lose = N_TOTAL - ai_win
-    win_labels = ["AI was winner\n(platform_id=31)", "Other source\nwas winner"]
-    win_vals   = [ai_win, ai_lose]
-    win_cols   = [AMBER_C, BLUE_C]
-    bars2 = ax2.bar(range(2), win_vals, color=win_cols, width=0.5, edgecolor=BG)
-    for bar, val in zip(bars2, win_vals):
-        pct = 100 * val // N_TOTAL
-        ax2.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + N_TOTAL * 0.005,
-            f"{val:,}\n({pct}%)",
-            ha="center", va="bottom", color=TEXT_COL, fontsize=11, fontweight="bold"
-        )
-    ax2.set_xticks(range(2))
-    ax2.set_xticklabels(win_labels, color=SUBTEXT, fontsize=9)
-    ax2.set_title("Which Source Won\nthe Fact Engine?", color=TEXT_COL, fontsize=10)
-    ax2.set_ylabel("Business Count", color=SUBTEXT, fontsize=9)
+
+    # Single bar: metadata NOT written for any of the 5,349
+    bar_missing = ax2.bar([0], [N_TOTAL], color=RED_C, width=0.5, edgecolor=BG,
+                          label=f"Metadata fact NOT written = 5,349 (100%)")
+    ax2.text(0, N_TOTAL / 2,
+             f"Metadata\nNOT saved\n5,349\n(100%)",
+             ha="center", va="center", color="#0F172A", fontsize=13, fontweight="bold")
+
+    # Zero-height bars for the fields that would have been stored
+    meta_fields = ["HIGH conf\nstored", "MED conf\nstored", "LOW conf\nstored"]
+    for i, label in enumerate([1, 2, 3], start=1):
+        ax2.bar([i], [0], color=GREEN_C, width=0.5, edgecolor=BG)
+        ax2.text(i, N_TOTAL * 0.02, "0\n(0%)",
+                 ha="center", va="bottom", color=GREY_C, fontsize=9)
+    ax2.set_xticks([0, 1, 2, 3])
+    ax2.set_xticklabels(
+        ["ai_naics_enrichment\n_metadata fact", "HIGH\nconfidence\nstored",
+         "MED\nconfidence\nstored", "LOW\nconfidence\nstored"],
+        color=SUBTEXT, fontsize=8.5
+    )
+    ax2.set_ylabel("Business Count", color=SUBTEXT, fontsize=10)
+    ax2.set_title(
+        "QUESTION 2: Was the AI confidence/reasoning saved?\n"
+        "(Source: ai_naics_enrichment_metadata fact in facts table)",
+        color=TEXT_COL, fontsize=10.5, pad=14
+    )
+    ax2.set_ylim(0, N_TOTAL * 1.22)
     ax2.tick_params(colors=SUBTEXT)
     for spine in ax2.spines.values(): spine.set_edgecolor(GRID_COL)
     ax2.yaxis.grid(True, color=GRID_COL, linewidth=0.6, linestyle="--")
     ax2.set_axisbelow(True)
-    ax2.set_ylim(0, N_TOTAL * 1.15)
 
-    # Panel 3: Hallucination donut
-    ax3 = axes[2]
-    ax3.set_facecolor(BG)
-    hall_vals  = [0, 5349]
-    hall_cols  = [PURPLE_C, GRID_COL]
-    hall_labels = [f"Hallucinated (0)", f"Valid or no code (5,349)"]
-    wedges, _, autotexts = ax3.pie(
-        [0.001, 5349],  # tiny non-zero value to render both slices
-        colors=hall_cols,
-        autopct="%1.1f%%",
-        startangle=90,
-        textprops={"color": TEXT_COL, "fontsize": 10},
-        wedgeprops={"width": 0.55, "edgecolor": BG, "linewidth": 1.5}
-    )
-    for at in autotexts:
-        at.set_fontweight("bold")
-    ax3.set_title("AI Hallucination Rate\n(0 codes stripped — AI returned valid 561499)",
-                  color=TEXT_COL, fontsize=9.5)
-    ax3.legend(
-        hall_labels, facecolor=GRID_COL, labelcolor=TEXT_COL, fontsize=8.5,
-        loc="lower center", bbox_to_anchor=(0.5, -0.18), edgecolor="none"
-    )
+    # Bold "NO" annotation
+    ax2.text(0.5, 0.97,
+             "NO — metadata fact was NEVER written (Gap G4)",
+             transform=ax2.transAxes, ha="center", va="top",
+             color=RED_C, fontsize=10, fontweight="bold")
 
     plt.tight_layout()
-    return _fig_to_docx_img(fig)
+    return _fig_to_docx_img(fig, width_inches=9.2)
 
 
 def chart_recovery_potential():
@@ -1034,59 +1053,110 @@ doc.add_page_break()
 
 H1('Section 6 — Step 5: AI Enrichment (GPT-5-mini) Behaviour')
 
+# ── Upfront explanation of the apparent contradiction ──────────────────────
+callout(
+    'WHY TWO DIFFERENT NUMBERS APPEAR FOR "AI":\n\n'
+    'The diagnostic produces two different AI-related numbers that look contradictory:\n'
+    '  - "AI was winning source = 2,381 (44%)"   <- AI ran and won\n'
+    '  - "AI metadata fact not written = 5,349 (100%)"   <- no metadata saved\n\n'
+    'These measure completely different things:\n\n'
+    '  QUESTION 1 — Did the AI enrichment (GPT-5-mini) actually run?\n'
+    '  SOURCE: The "source.platformId" field inside the naics_code fact in rds_warehouse_public.facts\n'
+    '  ANSWER: YES — for 2,381 businesses, AI ran AND was the source the Fact Engine trusted most.\n'
+    '          For the other 2,968, a different source (Middesk/Trulioo/SERP) was trusted more,\n'
+    '          but that source also had no NAICS. The AI still ran as part of the enrichment process.\n\n'
+    '  QUESTION 2 — Was the AI confidence/reasoning saved as a structured fact?\n'
+    '  SOURCE: A separate fact named "ai_naics_enrichment_metadata" in rds_warehouse_public.facts\n'
+    '  ANSWER: NO — this fact was NEVER written for any of the 5,349 businesses.\n'
+    '          When AI returns 561499, the code path that saves confidence, reasoning,\n'
+    '          and tools_used as a structured fact is not triggered. This is Gap G4.\n\n'
+    'In short: The AI ran, produced a result, but its metadata was silently discarded.',
+    bg='FFF7ED', border='EA580C', tc=RGBColor(0x7C, 0x2D, 0x12)
+)
+spacer(4)
+
 body(
-    'Two charts show how the AI enrichment behaved across all 5,349 businesses: '
-    'the confidence level distribution and the breakdown of which source won the Fact Engine.'
+    'The chart below makes this distinction visual: the LEFT panel shows what we know about '
+    'whether AI ran (from the Fact Engine winner field), and the RIGHT panel shows '
+    'what was actually saved as a structured metadata fact (nothing, for all 5,349).'
 )
 spacer(4)
 add_chart(img_ai, w_ai,
-          caption="Figure 3 — AI Enrichment Behaviour. LEFT: AI confidence is empty (Not Run) "
-                  "for 100% of businesses — the ai_naics_enrichment_metadata fact was never written. "
-                  "MIDDLE: 2,381 (44%) had AI as the winning source; 2,968 (55%) had another source "
-                  "win but also with no NAICS. RIGHT: AI hallucination rate = 0.0% — "
-                  "the AI correctly returned valid code 561499, not a hallucinated code.")
+          caption="Figure 3 — Two Questions About AI Enrichment. "
+                  "LEFT: Did AI run? YES — confirmed by the Fact Engine winner field: "
+                  "AI (platform_id=31) was the winning source for 2,381 (44%) businesses; "
+                  "another source won for 2,968 (56%) but also had no NAICS. "
+                  "RIGHT: Was AI confidence/reasoning saved as a structured fact? "
+                  "NO — the ai_naics_enrichment_metadata fact was never written for any of the 5,349 "
+                  "businesses (Gap G4). This is NOT the same as 'AI never ran.'")
 
-spacer(6)
-add_chart(img_winner, w_winner,
-          caption="Figure 4 — AI Winner vs Other Source breakdown. "
-                  "For 2,381 businesses, the Fact Engine selected AI (platform_id=31) as the NAICS winner. "
-                  "For 2,968 businesses, Middesk/Trulioo/SERP won — but also had no NAICS.")
+H2('What actually happened — the full sequence')
 
-H2('Panel-by-Panel Interpretation')
+lineage([
+    'FOR THE 2,381 businesses where AI was the Fact Engine winner:',
+    '  1. All vendor lookups returned no NAICS (ZI, EFX, OC, Middesk, Trulioo all empty)',
+    '  2. Fact Engine triggered AI enrichment (AINaicsEnrichment.ts)',
+    '  3. GPT-5-mini received: business_name + address (no website, no vendor NAICS)',
+    '  4. GPT-5-mini ran and produced a response:',
+    '       naics_code = "561499"',
+    '       mcc_code   = "5614"',
+    '       confidence = "LOW"     <-- THIS WAS PRODUCED but never saved to facts',
+    '       reasoning  = "No industry evidence available..." <-- PRODUCED but not saved',
+    '  5. Fact Engine selected AI as winner (it was the only source with any NAICS response)',
+    '  6. facts table written:',
+    '       name="naics_code" value={"value":"561499","source":{"platformId":31}}',
+    '       !! ai_naics_enrichment_metadata fact was NOT written (Gap G4)',
+    '  7. integration_data.request_response: full raw GPT response WAS saved here',
+    '     (confidence and reasoning are recoverable from this table via JSON parsing)',
+    '',
+    'FOR THE 2,968 businesses where another source was the Fact Engine winner:',
+    '  1. Same as above — all vendors returned no NAICS',
+    '  2. Fact Engine triggered AI enrichment',
+    '  3. GPT-5-mini ran and returned 561499',
+    '  4. BUT: Middesk (weight=2.0) or Trulioo (weight=0.8) also responded',
+    '     with some non-NAICS data (address confirmation, entity type, SOS filing)',
+    '  5. Fact Engine: Middesk/Trulioo weight > AI weight (0.1) -> other source wins',
+    '  6. facts table: naics_code winner = other source (not AI)',
+    '     Even though AI ran and returned 561499, the winning platformId is NOT 31',
+    '     These 2,968 businesses show "other source winner" in the diagnostic',
+])
 
-H3('Panel 1 (Left): AI Confidence Level')
-warn(
-    'IMPORTANT DISTINCTION: "Not Run = 5,349 (100%)" does NOT mean the AI never ran.\n\n'
-    'This panel reads the ai_naics_enrichment_metadata FACT from rds_warehouse_public.facts. '
-    'This fact was NOT written for any of the 5,349 businesses — this is Gap G4. '
-    'The ai_was_winner field (which reads the winning platform_id) confirms that AI DID run '
-    'for 2,381 businesses. The metadata (confidence, reasoning, tools_used) was produced '
-    'by GPT-5-mini but was never saved as a structured fact. '
-    'The raw response IS in integration_data.request_response but requires JSON parsing to access.'
-)
-
-H3('Panel 2 (Middle): Which Source Won the Fact Engine?')
-body(
-    'For 2,381 businesses (44.5%), the AI enrichment (platform_id=31) was selected '
-    'by the Fact Engine as the winner for the naics_code fact — '
-    'meaning all non-AI sources had lower confidence or no NAICS. '
-    'For 2,968 businesses (55.5%), a different source (Middesk SOS, Trulioo KYB, or SERP) '
-    'won the Fact Engine comparison with a higher weight or confidence score. '
-    'However, that winning source also had no valid NAICS — it may have returned '
-    'address or entity-type data without an industry code. '
-    'The AI then produced 561499, but since the AI weight (0.1) is lower than '
-    'Middesk (2.0) and Trulioo (0.8), those sources\' NAICS-less responses outweighed the AI '
-    'in the Fact Engine, resulting in no NAICS code being stored at all — or 561499 from the winner.'
-)
-
-H3('Panel 3 (Right): AI Hallucination Rate')
+H2('Hallucination Rate')
 ok(
-    'POSITIVE FINDING: Zero hallucination.\n\n'
-    '561499 is a valid, real NAICS code in core_naics_code. '
-    'The post-processing validateNaicsCode() stripped 0 codes (0.0%). '
-    'The AI correctly returned a real code as instructed by its system prompt. '
-    'The problem is not hallucination — it is the absence of better instructions '
-    'and data inputs that prevent the AI from finding a more specific code.'
+    'POSITIVE FINDING: Zero AI hallucination.\n\n'
+    'The post-processing step validateNaicsCode() checks every AI-returned NAICS code '
+    'against the core_naics_code table. It stripped 0 codes (0.0%). '
+    '561499 is a real, valid NAICS code ("All Other Business Support Services"). '
+    'The AI returned a valid code as instructed by its system prompt. '
+    'The problem is not hallucination — it is that the prompt instructs 561499 as the fallback '
+    'without first checking name keywords or attempting web search.'
+)
+
+H2('Why 55.5% of businesses show a non-AI winning source')
+body(
+    'A business can show "other source was winner" AND still have NAICS 561499. Here is why:'
+)
+tbl(
+    ['Source', 'Weight', 'What it returned', 'Why it could win despite no NAICS'],
+    [
+        ['Middesk (SOS registry)', '2.0 (highest)',
+         'Entity confirmation: legal name, state, entity type\nBut NAICS field: empty or null',
+         'Weight 2.0 is much higher than AI weight 0.1. Even with no NAICS, '
+         'Middesk wins the overall fact comparison if it responded with any data.'],
+        ['Trulioo (live KYB)', '0.8',
+         'KYB verification: address, directors, status\nNAICS field: empty or 4-digit (Polluted)',
+         'Weight 0.8 vs AI 0.1. Trulioo wins if it responded, even without a valid NAICS.'],
+        ['SERP scraping', 'N/A',
+         'Web scraping: business description or website URL\nNAICS field: not structured',
+         'SERP data can win the "naics_code" fact if it was the only source '
+         'that produced any content for that fact slot.'],
+        ['AI enrichment (GPT-5-mini)', '0.1 (lowest)',
+         'naics_code = "561499"\nmcc_code = "5614"',
+         'Wins ONLY when all other sources also have no NAICS. '
+         'If ANY higher-weight source responds with data, AI is outweighed.'],
+    ],
+    col_widths=[2.2, 0.9, 3.0, 3.4],
+    fs=8.5,
 )
 
 doc.add_page_break()
