@@ -164,46 +164,9 @@ section[data-testid="stSidebar"] * { color: #E2E8F0 !important; }
     line-height: 1.55;
 }
 
-/* ── Tooltip ── */
-.tooltip-wrap {
-    position: relative;
-    display: inline-block;
-    cursor: help;
-}
-.tooltip-wrap .tooltip-box {
-    visibility: hidden;
-    opacity: 0;
-    transition: opacity 0.18s ease;
-    background: #0F2040;
-    color: #E2E8F0;
-    border: 1px solid #2563EB;
-    border-radius: 8px;
-    padding: 12px 15px;
-    font-size: 0.80rem;
-    line-height: 1.6;
-    width: 360px;
-    position: absolute;
-    z-index: 9999;
-    bottom: 130%;
-    left: 50%;
-    transform: translateX(-50%);
-    box-shadow: 0 8px 24px rgba(0,0,0,0.55);
-    pointer-events: none;
-    white-space: normal;
-}
-.tooltip-wrap .tooltip-box::after {
-    content: "";
-    position: absolute;
-    top: 100%;
-    left: 50%;
-    transform: translateX(-50%);
-    border: 6px solid transparent;
-    border-top-color: #2563EB;
-}
-.tooltip-wrap:hover .tooltip-box {
-    visibility: visible;
-    opacity: 1;
-}
+/* ── Native-title tooltip trigger (Streamlit clips position:absolute,
+   so we rely on the browser's built-in title= tooltip instead) ── */
+[data-null-tip] { cursor: help; }
 
 /* ── Null cause pill ── */
 .null-cause-pill {
@@ -246,28 +209,43 @@ def null_badge(is_error: bool) -> str:
     return '<span class="badge badge-green">✅ Expected Behaviour</span>'
 
 def null_cell_tooltip(is_error: bool, field_key: str) -> str:
-    """Return a table cell with hover tooltip explaining the null status."""
+    """
+    Return a table cell using the native HTML title= attribute for hover tooltip.
+    Streamlit clips position:absolute inside its overflow:hidden containers so
+    CSS-only tooltips don't work. The browser's built-in title tooltip always does.
+    """
     causes = FIELD_NULL_CAUSES.get(field_key, [])
-    cause_lines = ""
-    for cause_type, detail in causes[:4]:   # show top 4 causes in tooltip
+
+    # Build plain-text tooltip for the native title= attribute
+    if is_error:
+        tip_lines = ["⚠️  NULL here IS an error — this field should always be populated.",
+                     "Reason: required value was not submitted by the applicant."]
+    else:
+        tip_lines = ["✅  NULL here is NOT an error — it is expected behaviour.",
+                     "Worth does NOT suppress values based on confidence.",
+                     "Null means no vendor returned a value for this business.",
+                     ""]
+
+    for cause_type, detail in causes[:5]:
         ct = NULL_CAUSE_TYPES.get(cause_type, {})
-        icon = ct.get("icon", "•")
-        cause_lines += f'<div style="margin-top:6px;"><b style="color:{ct.get("colour","#E2E8F0")};">{icon} {ct.get("label","")}</b><br><span style="color:#CBD5E1;font-size:0.78rem;">{detail}</span></div>'
+        tip_lines.append(f"{ct.get('icon','•')} {ct.get('label','')}: {detail}")
+
+    tip_text = "\n".join(tip_lines)
 
     if is_error:
-        badge = '<span style="color:#FCA5A5;font-weight:700;font-size:0.85rem;">⚠️ Yes</span>'
-        header = '<b style="color:#FCA5A5;">Why this is an error:</b><br><span style="color:#FCA5A5;font-size:0.8rem;">This field should always have a value after submission. A null here indicates missing required input or a pipeline failure.</span>'
+        badge_html = (
+            f'<span data-null-tip="1" title="{tip_text}" '
+            f'style="color:#FCA5A5;font-weight:700;font-size:0.9rem;'
+            f'border-bottom:2px dotted #FCA5A5;cursor:help;">⚠️ Yes</span>'
+        )
     else:
-        badge = '<span style="color:#6EE7B7;font-weight:700;font-size:0.85rem;">✅ No</span>'
-        header = '<b style="color:#6EE7B7;">Why null is expected (not an error):</b><br><span style="color:#6EE7B7;font-size:0.8rem;">Worth never suppresses this field due to low confidence. Null means no vendor returned a value — not a Worth decision.</span>'
+        badge_html = (
+            f'<span data-null-tip="1" title="{tip_text}" '
+            f'style="color:#6EE7B7;font-weight:700;font-size:0.9rem;'
+            f'border-bottom:2px dotted #6EE7B7;cursor:help;">✅ No</span>'
+        )
 
-    tooltip_content = f'{header}{cause_lines}<div style="margin-top:8px;border-top:1px solid #1E3A5F;padding-top:6px;color:#64748B;font-size:0.72rem;">Hover over the field row below for full details →</div>'
-
-    return (
-        f'<div class="tooltip-wrap">{badge}'
-        f'<div class="tooltip-box">{tooltip_content}</div>'
-        f'</div>'
-    )
+    return badge_html
 
 def null_causes_panel(field_key: str) -> str:
     """Return HTML for the null causes breakdown panel shown below a field row."""
@@ -430,6 +408,17 @@ if page == "🏠 Overview":
         c = colours.get(t, "#CBD5E1")
         return f'<span style="color:{c};">{t}</span>'
 
+    # Tip above table
+    st.markdown(
+        '<div style="background:#0F2040;border:1px solid #2563EB;border-radius:6px;'
+        'padding:8px 14px;font-size:0.82rem;color:#93C5FD;margin-bottom:10px;">'
+        '💡 <b>Null = Error? column:</b> hover over the <u style="cursor:help;">underlined ✅ No / ⚠️ Yes</u> '
+        'values to see a browser tooltip with the reason. '
+        'Click any field in the expanders below for the full causes breakdown.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
     # Build the main table with tooltip on Null=Error? column
     table_html = """<table class="lineage-table">
     <tr>
@@ -438,7 +427,7 @@ if page == "🏠 Overview":
       <th>Section</th>
       <th>Type</th>
       <th>Primary Sources</th>
-      <th title="Hover each cell for explanation">Null = Error? ℹ️</th>
+      <th>Null = Error? (hover ↑)</th>
       <th>W360</th>
     </tr>"""
     for key, fld in FIELD_LINEAGE.items():
