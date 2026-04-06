@@ -12,6 +12,9 @@ from lineage_data import (
     ALL_DATA_TYPES,
     ALL_FIELD_KEYS,
     PIPELINE_OVERVIEW,
+    NULL_CAUSE_TYPES,
+    FIELD_NULL_CAUSES,
+    CONFIDENCE_SUPPRESSION_FACT,
 )
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -160,6 +163,60 @@ section[data-testid="stSidebar"] * { color: #E2E8F0 !important; }
     word-break: break-all;
     line-height: 1.55;
 }
+
+/* ── Tooltip ── */
+.tooltip-wrap {
+    position: relative;
+    display: inline-block;
+    cursor: help;
+}
+.tooltip-wrap .tooltip-box {
+    visibility: hidden;
+    opacity: 0;
+    transition: opacity 0.18s ease;
+    background: #0F2040;
+    color: #E2E8F0;
+    border: 1px solid #2563EB;
+    border-radius: 8px;
+    padding: 12px 15px;
+    font-size: 0.80rem;
+    line-height: 1.6;
+    width: 360px;
+    position: absolute;
+    z-index: 9999;
+    bottom: 130%;
+    left: 50%;
+    transform: translateX(-50%);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.55);
+    pointer-events: none;
+    white-space: normal;
+}
+.tooltip-wrap .tooltip-box::after {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: #2563EB;
+}
+.tooltip-wrap:hover .tooltip-box {
+    visibility: visible;
+    opacity: 1;
+}
+
+/* ── Null cause pill ── */
+.null-cause-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 10px;
+    border-radius: 14px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    margin: 2px 3px 2px 0;
+    border: 1px solid rgba(255,255,255,0.10);
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -187,6 +244,51 @@ def null_badge(is_error: bool) -> str:
     if is_error:
         return '<span class="badge badge-red">⚠️ Potential Error</span>'
     return '<span class="badge badge-green">✅ Expected Behaviour</span>'
+
+def null_cell_tooltip(is_error: bool, field_key: str) -> str:
+    """Return a table cell with hover tooltip explaining the null status."""
+    causes = FIELD_NULL_CAUSES.get(field_key, [])
+    cause_lines = ""
+    for cause_type, detail in causes[:4]:   # show top 4 causes in tooltip
+        ct = NULL_CAUSE_TYPES.get(cause_type, {})
+        icon = ct.get("icon", "•")
+        cause_lines += f'<div style="margin-top:6px;"><b style="color:{ct.get("colour","#E2E8F0")};">{icon} {ct.get("label","")}</b><br><span style="color:#CBD5E1;font-size:0.78rem;">{detail}</span></div>'
+
+    if is_error:
+        badge = '<span style="color:#FCA5A5;font-weight:700;font-size:0.85rem;">⚠️ Yes</span>'
+        header = '<b style="color:#FCA5A5;">Why this is an error:</b><br><span style="color:#FCA5A5;font-size:0.8rem;">This field should always have a value after submission. A null here indicates missing required input or a pipeline failure.</span>'
+    else:
+        badge = '<span style="color:#6EE7B7;font-weight:700;font-size:0.85rem;">✅ No</span>'
+        header = '<b style="color:#6EE7B7;">Why null is expected (not an error):</b><br><span style="color:#6EE7B7;font-size:0.8rem;">Worth never suppresses this field due to low confidence. Null means no vendor returned a value — not a Worth decision.</span>'
+
+    tooltip_content = f'{header}{cause_lines}<div style="margin-top:8px;border-top:1px solid #1E3A5F;padding-top:6px;color:#64748B;font-size:0.72rem;">Hover over the field row below for full details →</div>'
+
+    return (
+        f'<div class="tooltip-wrap">{badge}'
+        f'<div class="tooltip-box">{tooltip_content}</div>'
+        f'</div>'
+    )
+
+def null_causes_panel(field_key: str) -> str:
+    """Return HTML for the null causes breakdown panel shown below a field row."""
+    causes = FIELD_NULL_CAUSES.get(field_key, [])
+    if not causes:
+        return ""
+    html = '<div style="padding:10px 14px 4px 14px;background:#0A1220;border-radius:6px;margin-top:4px;">'
+    html += '<div style="font-size:0.76rem;color:#64748B;font-weight:600;margin-bottom:6px;letter-spacing:0.05em;">POSSIBLE NULL / BLANK CAUSES</div>'
+    for cause_type, detail in causes:
+        ct = NULL_CAUSE_TYPES.get(cause_type, {})
+        colour = ct.get("colour", "#94A3B8")
+        icon   = ct.get("icon", "•")
+        label  = ct.get("label", cause_type)
+        html += (
+            f'<div style="margin-bottom:6px;display:flex;gap:8px;align-items:flex-start;">'
+            f'<span class="null-cause-pill" style="background:{colour}20;color:{colour};border-color:{colour}40;white-space:nowrap;">{icon} {label}</span>'
+            f'<span style="color:#94A3B8;font-size:0.78rem;line-height:1.5;">{detail}</span>'
+            f'</div>'
+        )
+    html += '</div>'
+    return html
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -328,6 +430,7 @@ if page == "🏠 Overview":
         c = colours.get(t, "#CBD5E1")
         return f'<span style="color:{c};">{t}</span>'
 
+    # Build the main table with tooltip on Null=Error? column
     table_html = """<table class="lineage-table">
     <tr>
       <th>API Field Path</th>
@@ -335,7 +438,7 @@ if page == "🏠 Overview":
       <th>Section</th>
       <th>Type</th>
       <th>Primary Sources</th>
-      <th>Null = Error?</th>
+      <th title="Hover each cell for explanation">Null = Error? ℹ️</th>
       <th>W360</th>
     </tr>"""
     for key, fld in FIELD_LINEAGE.items():
@@ -346,11 +449,33 @@ if page == "🏠 Overview":
         <td>{section_cell(fld['section'])}</td>
         <td>{type_cell(fld['data_type'])}</td>
         <td>{src_html}</td>
-        <td>{null_cell(fld['null_is_error'])}</td>
-        <td>{w360_cell(fld.get('w360', False))}</td>
+        <td style="text-align:center;">{null_cell_tooltip(fld['null_is_error'], key)}</td>
+        <td style="text-align:center;">{w360_cell(fld.get('w360', False))}</td>
         </tr>"""
     table_html += "</table>"
     st.markdown(table_html, unsafe_allow_html=True)
+
+    st.markdown("")
+    st.markdown("**Click any field below to see its detailed null/blank cause breakdown:**")
+
+    # Per-field expandable null causes
+    for key, fld in FIELD_LINEAGE.items():
+        causes = FIELD_NULL_CAUSES.get(key, [])
+        if not causes:
+            continue
+        label = f"{'⚠️' if fld['null_is_error'] else '✅'}  **{fld['display_name']}**  ·  `{fld['api_field_path']}`"
+        with st.expander(label, expanded=False):
+            st.markdown(f"**{fld['display_name']}** — *{fld['data_type']} / {fld['section']}*")
+            causes_html = null_causes_panel(key)
+            if causes_html:
+                st.markdown(causes_html, unsafe_allow_html=True)
+            if not fld["null_is_error"]:
+                st.markdown(
+                    f'<div class="field-card field-card-green" style="margin-top:8px;font-size:0.85rem;">'
+                    f'✅ <b>Worth does NOT suppress this field based on confidence.</b> '
+                    f'Null = vendor returned nothing, not a Worth decision to hide the value.</div>',
+                    unsafe_allow_html=True,
+                )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -516,22 +641,53 @@ LIMIT 1;
 
     with tab4:
         st.markdown("### When Is This Field Blank or NULL?")
+
         null_cls = "field-card-red" if fld["null_is_error"] else "field-card-green"
         null_icon = "⚠️" if fld["null_is_error"] else "✅"
-        st.markdown(f'<div class="field-card {null_cls}">{null_icon} <b>NULL / Blank is: {"a potential error" if fld["null_is_error"] else "expected behaviour"}</b><br><br>{fld["null_reason"]}</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="field-card {null_cls}">{null_icon} <b>NULL / Blank is: '
+            f'{"a potential error" if fld["null_is_error"] else "expected behaviour — not an error"}</b>'
+            f'<br><br>{fld["null_reason"]}</div>',
+            unsafe_allow_html=True,
+        )
 
-        st.markdown("### Detailed Null Scenarios")
+        # Structured causes breakdown
+        causes = FIELD_NULL_CAUSES.get(selected_key, [])
+        if causes:
+            st.markdown("### Possible Causes — Ranked by Likelihood")
+            for cause_type, detail in causes:
+                ct = NULL_CAUSE_TYPES.get(cause_type, {})
+                colour  = ct.get("colour", "#94A3B8")
+                icon    = ct.get("icon", "•")
+                label   = ct.get("label", cause_type)
+                explain = ct.get("explanation", "")
+                st.markdown(
+                    f'<div class="field-card" style="border-left-color:{colour};background:#0E1E38;margin-bottom:8px;">'
+                    f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">'
+                    f'<span class="null-cause-pill" style="background:{colour}22;color:{colour};border-color:{colour}55;">'
+                    f'{icon} {label}</span></div>'
+                    f'<div style="color:#E2E8F0;font-size:0.9rem;font-weight:600;margin-bottom:3px;">{detail}</div>'
+                    f'<div style="color:#94A3B8;font-size:0.82rem;line-height:1.55;">{explain}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+        st.markdown("### Detailed Null Scenarios (Full Description)")
         st.markdown(fld["null_blank_scenario"])
 
-        st.markdown("### Is This a Worth Internal Rule?")
-        if fld["null_is_error"]:
-            st.error("This field should not be null in normal operation. If null, it may indicate a data pipeline issue.")
-        else:
-            st.success(
-                "Worth does NOT suppress this field based on confidence thresholds. "
-                "If the value is blank, it means no vendor returned data for this field for this business. "
-                "Worth shows whatever the vendors provide — if they find nothing, the field is blank."
-            )
+        # Confidence suppression panel
+        st.markdown("### Does Worth Suppress This Field Based on Confidence?")
+        csf = CONFIDENCE_SUPPRESSION_FACT
+        st.markdown(
+            f'<div class="field-card field-card-green">'
+            f'<b>Answer: {csf["answer"]}</b><br><br>'
+            f'<pre style="white-space:pre-wrap;font-size:0.78rem;color:#A7F3D0;background:transparent;border:none;padding:0;margin:0;">'
+            f'{csf["detail"].strip()}</pre>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        with st.expander("Source code reference"):
+            st.code(csf["source_code_reference"], language=None)
 
     with tab5:
         st.markdown("### Fact Engine Rule Applied")
@@ -674,6 +830,36 @@ elif page == "📋 Pipeline Diagram":
     ```
     """)
 
+    st.markdown("---")
+    st.markdown("### Does Worth Hide Values Because Confidence Is Too Low?")
+    csf = CONFIDENCE_SUPPRESSION_FACT
+    st.markdown(
+        f'<div class="field-card field-card-green">'
+        f'<b style="font-size:1rem;">Q: {csf["question"]}</b><br><br>'
+        f'<b style="font-size:1.05rem;color:#A7F3D0;">Answer: {csf["answer"]}</b><br><br>'
+        f'<pre style="white-space:pre-wrap;font-size:0.80rem;color:#A7F3D0;background:transparent;border:none;padding:0;margin:0;">'
+        f'{csf["detail"].strip()}</pre>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Source code: {csf['source_code_reference']}")
+
+    st.markdown("---")
+    st.markdown("### Null / Blank Cause Types — Reference")
+    for ct_key, ct in NULL_CAUSE_TYPES.items():
+        if ct_key == "NO_SUPPRESSION_BY_WORTH":
+            continue
+        colour = ct["colour"]
+        st.markdown(
+            f'<div class="field-card" style="border-left-color:{colour};background:#0E1E38;margin-bottom:6px;">'
+            f'<b style="color:{colour};">{ct["icon"]} {ct["label"]}</b><br>'
+            f'<span style="color:#94A3B8;font-size:0.85rem;">{ct["explanation"]}</span>'
+            f'{"<ul style=color:#6EE7B7;font-size:0.8rem;margin-top:6px;>" + "".join(f"<li>{e}</li>" for e in ct["examples"]) + "</ul>" if ct["examples"] else ""}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown("---")
     st.markdown("### Fact Engine Rule Execution Order")
     st.markdown("""
     ```

@@ -1202,6 +1202,323 @@ FIELD_LINEAGE = {
     },
 }
 
+# ── Null / Blank cause taxonomy ───────────────────────────────────────────────
+# Every possible reason a field can be null/blank, grouped by root cause type.
+# Used to populate the tooltip and null causes panel in the UI.
+
+NULL_CAUSE_TYPES = {
+    "VENDOR_NO_RECORD": {
+        "label": "Vendor Found No Record",
+        "colour": "#FCA5A5",   # red
+        "icon": "🔍",
+        "explanation": (
+            "The vendor searched its database using the submitted business name and/or TIN "
+            "and returned no matching entity. This is NOT a Worth decision — Worth passes the "
+            "search request to the vendor and displays whatever the vendor returns. "
+            "If the vendor finds nothing, the field is blank."
+        ),
+        "examples": [
+            "Middesk searched all 50 US SoS databases and found no SoS filing for this EIN+name",
+            "OpenCorporates has no record for this jurisdiction",
+            "ZoomInfo has no firmographic profile for this business",
+        ],
+    },
+    "VENDOR_FIELD_ABSENT": {
+        "label": "Vendor Returned Data But Field Was Empty",
+        "colour": "#FCD34D",   # amber
+        "icon": "📭",
+        "explanation": (
+            "The vendor returned a response for this business, but the specific field "
+            "was not present or was null in the vendor's response. "
+            "For example, Middesk may find a SoS filing but the filing may not include "
+            "officer names if the state does not require them."
+        ),
+        "examples": [
+            "Middesk found SoS filing but officers field is empty (state does not mandate officer disclosure)",
+            "ZoomInfo has a profile but no NAICS code for this business",
+            "Equifax record exists but annual revenue field is not populated",
+        ],
+    },
+    "BELOW_CONFIDENCE_THRESHOLD": {
+        "label": "Confidence Below Worth Threshold",
+        "colour": "#FCD34D",   # amber
+        "icon": "📉",
+        "explanation": (
+            "The Fact Engine evaluated vendor candidates for this field but the highest-confidence "
+            "match did not exceed Worth's minimum confidence threshold. "
+            "Worth applies a minimum threshold (typically 0.45–0.50 on the 0–1 scale, "
+            "equivalent to match.index ≥ 25/55) before accepting a vendor match. "
+            "Candidates below this threshold are discarded and the field is left blank "
+            "rather than showing a potentially wrong value.\n\n"
+            "IMPORTANT: This threshold applies to ENTITY MATCHING (finding the right company "
+            "in the vendor database) — NOT to the field value itself. "
+            "If the entity-matching score is too low, Worth will not use ANY data from that vendor "
+            "for that business, including this field."
+        ),
+        "examples": [
+            "ZoomInfo found a company with similar name but match.index=20/55 (confidence=0.36) — below threshold → no ZI data used",
+            "Equifax entity-match XGBoost score=0.42 — below 0.45 threshold → no EFX data used",
+            "OpenCorporates matched a company but similarity_index=18 — rejected",
+        ],
+    },
+    "INTEGRATIONS_PROCESSING": {
+        "label": "Integrations Still Processing",
+        "colour": "#93C5FD",   # blue
+        "icon": "⏳",
+        "explanation": (
+            "The vendor API call has been initiated but has not yet returned a response. "
+            "Worth fires all vendor lookups in parallel after submission. "
+            "Some vendors (especially Middesk live API calls) can take 15–60 seconds. "
+            "The admin UI shows 'Integrations are currently processing' while this is happening. "
+            "Once complete, the field will be populated automatically."
+        ),
+        "examples": [
+            "Middesk live SoS API still running — SoS fields all blank",
+            "Plaid IDV link sent to owner but owner has not yet completed the flow",
+            "Trulioo KYB verification in progress",
+        ],
+    },
+    "NOT_SUBMITTED": {
+        "label": "Applicant Did Not Submit This Value",
+        "colour": "#A78BFA",   # purple
+        "icon": "📋",
+        "explanation": (
+            "This field is populated from the applicant's onboarding form submission. "
+            "If the applicant did not provide this value, the field will be blank. "
+            "Worth does not discover or infer applicant-submitted fields from external sources — "
+            "it uses exactly what was submitted."
+        ),
+        "examples": [
+            "Owner email not provided during onboarding",
+            "Owner mobile number not provided",
+            "DBA name not submitted (business operates only under legal name)",
+        ],
+    },
+    "FIELD_NOT_APPLICABLE": {
+        "label": "Field Not Applicable for This Business",
+        "colour": "#6EE7B7",   # green
+        "icon": "✓",
+        "explanation": (
+            "This field is genuinely not applicable for this business type or jurisdiction. "
+            "For example: a sole proprietor in most US states does not need to file with the SoS, "
+            "so SoS fields will be blank and this is the CORRECT result. "
+            "Similarly, UK SIC codes only apply to GB-jurisdiction businesses."
+        ),
+        "examples": [
+            "Sole proprietor — SoS filing not required in most states",
+            "UK SIC code — only applicable when business country = GB",
+            "W360 report — only shown when business has completed full KYB",
+        ],
+    },
+    "NO_SUPPRESSION_BY_WORTH": {
+        "label": "Worth Does NOT Suppress This Field",
+        "colour": "#6EE7B7",   # green
+        "icon": "✅",
+        "explanation": (
+            "Worth does NOT apply a post-match confidence threshold to hide or suppress "
+            "field values that a vendor has returned. Once a vendor match passes the "
+            "entity-matching confidence threshold, ALL fields from that vendor are used. "
+            "Worth does not say 'I have a value but I'm not confident enough to show it.' "
+            "If a value is blank, it is because no vendor returned it — not because Worth decided to hide it."
+        ),
+        "examples": [],
+    },
+}
+
+# ── Per-field null causes structured breakdown ─────────────────────────────────
+# For each API field: a list of (cause_type, specific_detail) tuples
+# describing every scenario that can produce a blank/null value.
+FIELD_NULL_CAUSES = {
+    "tin.value": [
+        ("INTEGRATIONS_PROCESSING", "Middesk live API not yet completed — TIN task pending"),
+        ("VENDOR_NO_RECORD", "Middesk searched SoS by TIN+name and found no entity — EIN may be incorrect or not yet in IRS records"),
+        ("VENDOR_FIELD_ABSENT", "Middesk found entity but TIN task was not evaluated (e.g. TIN not submitted by applicant)"),
+        ("NOT_SUBMITTED", "Applicant did not provide a TIN/EIN during onboarding"),
+        ("NO_SUPPRESSION_BY_WORTH", "Worth never hides TIN match result based on confidence — if Middesk returns it, it is shown"),
+    ],
+    "watchlist.hits.value": [
+        ("INTEGRATIONS_PROCESSING", "Middesk or Trulioo watchlist scan not yet completed"),
+        ("FIELD_NOT_APPLICABLE", "No hits found = empty array [] — this is the NORMAL expected result for most businesses"),
+        ("NO_SUPPRESSION_BY_WORTH", "Worth never suppresses watchlist hits — all hits from all sources are combined and shown"),
+    ],
+    "watchlist.value.metadata": [
+        ("INTEGRATIONS_PROCESSING", "Watchlist scan not yet completed"),
+        ("FIELD_NOT_APPLICABLE", "Empty array [] = no watchlist hits found — correct and expected for clean businesses"),
+        ("NO_SUPPRESSION_BY_WORTH", "Worth shows all hits regardless of severity — no confidence-based suppression"),
+    ],
+    "legal_name.value": [
+        ("INTEGRATIONS_PROCESSING", "Middesk not yet returned — legal name from Middesk SoS pending"),
+        ("NOT_SUBMITTED", "Applicant did not submit a business name (rare — required field)"),
+        ("VENDOR_NO_RECORD", "Middesk found no SoS entity for this EIN — no verified legal name available from registry"),
+        ("NO_SUPPRESSION_BY_WORTH", "Submitted name is always shown; verified name from Middesk shown when found"),
+    ],
+    "dba_found.value[n]": [
+        ("FIELD_NOT_APPLICABLE", "Business operates only under its legal name — no DBA registered or found (very common, not an error)"),
+        ("VENDOR_NO_RECORD", "No vendor (Middesk, ZoomInfo, OC) found any alternate/trade name for this entity"),
+        ("INTEGRATIONS_PROCESSING", "Vendor scans not yet completed"),
+        ("NO_SUPPRESSION_BY_WORTH", "All DBA names from all sources are combined via combineFacts rule — none are hidden"),
+    ],
+    "google_profile.address": [
+        ("VENDOR_NO_RECORD", "Business has no Google Business Profile — not listed on Google Maps/Places"),
+        ("VENDOR_FIELD_ABSENT", "Google Places found a listing but address field was not populated"),
+        ("INTEGRATIONS_PROCESSING", "SERP scraping not yet completed — no Google Place ID retrieved yet"),
+        ("FIELD_NOT_APPLICABLE", "Many legitimate small businesses have no public Google listing"),
+        ("NO_SUPPRESSION_BY_WORTH", "Worth shows Google address if found — no confidence threshold hides it"),
+    ],
+    "google_profile.business_name": [
+        ("VENDOR_NO_RECORD", "No Google Business Profile found"),
+        ("INTEGRATIONS_PROCESSING", "SERP scraping still running"),
+        ("NO_SUPPRESSION_BY_WORTH", "Shown directly from Google Places API when available"),
+    ],
+    "sos_active.value": [
+        ("VENDOR_NO_RECORD", "Middesk searched all US SoS databases and found NO filing for this TIN+name — the single most common reason for 'No Registry Data to Display'"),
+        ("INTEGRATIONS_PROCESSING", "Middesk live API still running — SoS data pending"),
+        ("FIELD_NOT_APPLICABLE", "Sole proprietor — SoS filing not required in most states; blank is CORRECT"),
+        ("BELOW_CONFIDENCE_THRESHOLD", "OpenCorporates entity-match score below threshold — OC record discarded; Middesk also found nothing → both sources empty"),
+        ("NO_SUPPRESSION_BY_WORTH", "Worth never hides sos_active based on a confidence rule — if Middesk returns active/inactive, Worth shows it"),
+    ],
+    "sos_filings.value[n].entity_type": [
+        ("VENDOR_NO_RECORD", "No SoS filing found by Middesk or OpenCorporates"),
+        ("VENDOR_FIELD_ABSENT", "SoS filing found but state registry does not publish entity type (uncommon)"),
+        ("NO_SUPPRESSION_BY_WORTH", "Shown directly from Middesk registration.entity_type — not filtered"),
+    ],
+    "sos_filings.value[n].filing_date": [
+        ("VENDOR_NO_RECORD", "No SoS filing found"),
+        ("VENDOR_FIELD_ABSENT", "Filing found but registration date absent in state registry record"),
+        ("NO_SUPPRESSION_BY_WORTH", "Shown directly from Middesk or OC — not filtered by Worth"),
+    ],
+    "sos_filings.value[n].state": [
+        ("VENDOR_NO_RECORD", "No SoS filing found — most common for 'No Registry Data' screen"),
+        ("NO_SUPPRESSION_BY_WORTH", "State shown from Middesk registration.registration_state — not filtered"),
+    ],
+    "mcc_code": [
+        ("VENDOR_NO_RECORD", "All three entity-matching vendors (ZI, EFX, OC) found no record — AI enrichment returned fallback MCC 5614"),
+        ("BELOW_CONFIDENCE_THRESHOLD", "Vendor found a candidate but entity-match score below threshold → vendor data rejected → AI enrichment fires as fallback → returns 5614"),
+        ("INTEGRATIONS_PROCESSING", "AI enrichment deferred task not yet completed"),
+        ("NO_SUPPRESSION_BY_WORTH", "Worth always stores a MCC — either from vendor, calculated from NAICS, or AI fallback 5614. Never blank unless AI task pending."),
+    ],
+    "people.value[n].name, people.value[n].titles[n]": [
+        ("VENDOR_NO_RECORD", "No SoS filing found by Middesk — no officers available from SoS"),
+        ("VENDOR_FIELD_ABSENT", "SoS filing found but state does not require officer disclosure (e.g. some states only require registered agent)"),
+        ("INTEGRATIONS_PROCESSING", "Middesk still processing"),
+        ("NO_SUPPRESSION_BY_WORTH", "All people from all sources are combined — none hidden by Worth"),
+    ],
+    "owners[n].first_name": [
+        ("NOT_SUBMITTED", "Applicant did not provide owner first name — required field, absence is an error"),
+    ],
+    "owners[n].last_name": [
+        ("NOT_SUBMITTED", "Applicant did not provide owner last name — required field, absence is an error"),
+    ],
+    "owners[n].date_of_birth": [
+        ("NOT_SUBMITTED", "Applicant did not provide owner date of birth — Plaid IDV cannot complete without DOB"),
+    ],
+    "owners[n].ssn": [
+        ("NOT_SUBMITTED", "SSN not provided by applicant or not required for this flow"),
+        ("FIELD_NOT_APPLICABLE", "Non-US owners may not have SSN — different ID type used"),
+    ],
+    "owners[n].email": [
+        ("NOT_SUBMITTED", "Owner email not provided — Plaid IDV link cannot be sent"),
+    ],
+    "owners[n].mobile": [
+        ("NOT_SUBMITTED", "Owner mobile not provided — Plaid will use email for IDV link delivery"),
+        ("FIELD_NOT_APPLICABLE", "Mobile optional when email is provided"),
+    ],
+    "owners[n].address_line_1, owners[n].address_line_2, owners[n].address_city, owners[n].address_state, owners[n].address_country, owners[n].address_postal_code, owners[n].address_apartment": [
+        ("NOT_SUBMITTED", "Owner address not provided by applicant"),
+        ("FIELD_NOT_APPLICABLE", "Some address sub-fields optional (line_2, apartment)"),
+    ],
+    "verification_result.account_authentication_response.verification_response": [
+        ("INTEGRATIONS_PROCESSING", "Owner has not yet clicked the Plaid IDV link — flow is PENDING"),
+        ("INTEGRATIONS_PROCESSING", "Plaid IDV link expired — owner did not complete in time window"),
+        ("VENDOR_NO_RECORD", "Plaid could not match owner's SSN/DOB/name against credit header or government records"),
+        ("NO_SUPPRESSION_BY_WORTH", "Worth shows IDV result as returned by Plaid — no suppression based on score"),
+    ],
+    "verification_result.account_verification_response.code": [
+        ("INTEGRATIONS_PROCESSING", "Banking verification not yet initiated or Plaid Auth still processing"),
+        ("NOT_SUBMITTED", "Banking section not submitted by applicant"),
+        ("NO_SUPPRESSION_BY_WORTH", "Verification code shown directly from Plaid response"),
+    ],
+    "status": [
+        ("INTEGRATIONS_PROCESSING", "Case is in 'Pending' state — all vendor integrations still running. Worth Score not yet calculated."),
+        ("NO_SUPPRESSION_BY_WORTH", "Status transitions automatically as integrations complete — Worth does not hide status"),
+    ],
+    "data.applicant.status": [
+        ("INTEGRATIONS_PROCESSING", "Middesk live verification not yet returned — 'Verified' badge pending"),
+        ("VENDOR_NO_RECORD", "Middesk returned 'in_review' — SoS search still in progress at Middesk side"),
+        ("NO_SUPPRESSION_BY_WORTH", "Verification status shown directly from Middesk/Trulioo response"),
+    ],
+    "domain.creation_date": [
+        ("VENDOR_NO_RECORD", "No website found for this business — no domain to look up"),
+        ("VENDOR_FIELD_ABSENT", "Website found but WHOIS data unavailable (domain privacy protection enabled)"),
+        ("INTEGRATIONS_PROCESSING", "SERP scraping not yet completed"),
+        ("FIELD_NOT_APPLICABLE", "Many businesses (especially brick-and-mortar) have no website"),
+        ("NO_SUPPRESSION_BY_WORTH", "Domain date shown when found — never hidden by Worth"),
+    ],
+    "stolen_identity_risk_score": [
+        ("INTEGRATIONS_PROCESSING", "Owner has not yet completed Plaid IDV — score not yet generated"),
+        ("VENDOR_FIELD_ABSENT", "Plaid IDV completed but did not return a stolen identity risk score for this owner"),
+        ("FIELD_NOT_APPLICABLE", "IDV not available in this jurisdiction or for this flow type"),
+        ("NO_SUPPRESSION_BY_WORTH", "Risk score shown as returned by Plaid — no Worth confidence filter applied"),
+    ],
+    "synthetic_identity_risk_score": [
+        ("INTEGRATIONS_PROCESSING", "Plaid IDV not yet complete"),
+        ("VENDOR_FIELD_ABSENT", "Plaid completed IDV but synthetic score not returned"),
+        ("FIELD_NOT_APPLICABLE", "IDV not available for this jurisdiction"),
+        ("NO_SUPPRESSION_BY_WORTH", "Risk score shown as returned by Plaid — no Worth confidence filter applied"),
+    ],
+}
+
+# ── The confidence suppression question — definitive answer ───────────────────
+CONFIDENCE_SUPPRESSION_FACT = {
+    "question": (
+        "Does Worth suppress or hide field values when confidence is too low, "
+        "even if the vendor HAS returned a value?"
+    ),
+    "answer": "NO — with one important nuance.",
+    "detail": """
+Worth applies a confidence threshold at the ENTITY MATCHING stage, not at the field display stage.
+
+Here is what actually happens:
+
+STAGE 1 — Entity Matching (where the threshold applies):
+  Each vendor runs an XGBoost entity-matching model to find the right company
+  in their database. The model outputs match.index (0–55) or a probability (0–1).
+  Worth's minimum threshold: match.index ≥ ~25/55 (confidence ≈ 0.45).
+
+  ✅ Score ≥ threshold → vendor match ACCEPTED → ALL fields from this vendor are used
+  ❌ Score < threshold → vendor match REJECTED → ALL fields from this vendor are DISCARDED
+     (including fields that would have had a valid value)
+
+STAGE 2 — Fact Engine / Field Display (NO threshold):
+  Once a vendor match passes Stage 1, Worth does NOT apply any further
+  confidence check to individual fields. If the vendor returned a value
+  for a field, Worth shows it. If the vendor returned null/empty for a field,
+  Worth shows null/empty.
+
+  Worth does NOT say: "I have a field value but I'm not confident enough → hide it."
+
+CONCLUSION:
+  A blank field means either:
+  (a) The vendor found no matching entity (Stage 1 rejected all candidates), OR
+  (b) The vendor returned null/empty for that field in their response, OR
+  (c) Integrations are still processing, OR
+  (d) The applicant did not submit this value
+
+  It does NOT mean Worth is hiding a known value due to low confidence.
+  The confidence threshold only gates whether to use a vendor's data AT ALL —
+  it does not selectively hide individual fields from an accepted match.
+""",
+    "source_code_reference": (
+        "integration-service/lib/facts/sources.ts: getFromRequestResponse() "
+        "uses match.index / MAX_CONFIDENCE_INDEX (55) to compute confidence. "
+        "integration-service/lib/facts/factEngine.ts: isValidFactValue() checks if "
+        "a value is non-null/non-empty AFTER the vendor match was accepted — "
+        "there is no confidence check inside isValidFactValue(). "
+        "The threshold is applied in source.getter() which discards the entire "
+        "vendor response if confidence < minimum."
+    ),
+}
+
 # ── Metadata for the app ───────────────────────────────────────────────────────
 ALL_SECTIONS = sorted(set(v["section"] for v in FIELD_LINEAGE.values()))
 ALL_DATA_TYPES = sorted(set(v["data_type"] for v in FIELD_LINEAGE.values()))
