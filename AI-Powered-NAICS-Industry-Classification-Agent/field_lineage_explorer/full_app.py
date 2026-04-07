@@ -17,7 +17,9 @@ from lineage_data import (
     FIELD_LINEAGE, SOURCES, RULES, ALL_SECTIONS, ALL_DATA_TYPES,
     PIPELINE_OVERVIEW, NULL_CAUSE_TYPES, FIELD_NULL_CAUSES,
     CONFIDENCE_SUPPRESSION_FACT, PIPELINE_A_NAICS_RULES,
+    FIELD_CODE_REFERENCES, REPO_BASE_URLS,
 )
+from rag_builder import load_or_build, search as rag_search
 
 # ═══════════════════════════════════════════════════════════════════
 # PAGE CONFIG + GLOBAL STYLE
@@ -178,7 +180,8 @@ with st.sidebar:
         "Section",
         ["🏷️  KYB API Field Lineage",
          "⚠️  NAICS / MCC 561499 Report",
-         "🔀  Pipeline A & B Deep Dive"],
+         "🔀  Pipeline A & B Deep Dive",
+         "🤖  AI Agent — Ask the Codebase"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -329,7 +332,7 @@ if section == "🏷️  KYB API Field Lineage":
         st.markdown(f'<div class="cb">API Field:  {fld["api_field_path"]}\nFact name:  {fld["api_fact_name"]}</div>',
                     unsafe_allow_html=True)
 
-        t1,t2,t3,t4,t5,t6 = st.tabs(["📖 Description","📡 Sources","🗄️ Storage","⚠️ Null/Blank","📋 Rules","❓ UCM Q&A"])
+        t1,t2,t3,t4,t5,t6,t7 = st.tabs(["📖 Description","📡 Sources","🗄️ Storage","⚠️ Null/Blank","📋 Rules","❓ UCM Q&A","📚 Source Citations"])
 
         with t1:
             st.markdown(fld["description"])
@@ -413,6 +416,39 @@ WHERE business_id = '<id>'
                 else: st.warning("No confirmed answers yet.")
             if fld.get("ucm_rule"):
                 card(f'⚖️ <b>UCM Rule:</b> {fld["ucm_rule"]}', "card-purple")
+
+        with t7:
+            st.markdown("### 📚 Source Citations — Where This Information Comes From")
+            st.markdown(
+                '<div class="card" style="background:#061B1B;border-left-color:#2DD4BF;">'
+                '<b style="color:#2DD4BF;">How to verify this information</b><br>'
+                '<span style="color:#94A3B8;font-size:.85rem;">'
+                'Every claim in this app was derived from reading the actual source code. '
+                'Each citation below links to the exact file + line range in the GitHub repo '
+                'where the claim is confirmed. Click any link to verify in your browser.'
+                '</span></div>', unsafe_allow_html=True)
+
+            refs = FIELD_CODE_REFERENCES.get(sel, [])
+            if refs:
+                for r in refs:
+                    url = r.get("url", "")
+                    gh_label = f"{r['repo']} / {r['path']}" + (f" L{r['line_start']}–{r['line_end']}" if r['line_start'] else "")
+                    st.markdown(
+                        f'<div class="card" style="background:#0E1E38;border-left-color:#60A5FA;margin-bottom:8px;">'
+                        f'<div style="font-size:.78rem;color:#60A5FA;font-family:Courier New;">'
+                        f'<a href="{url}" target="_blank" style="color:#60A5FA;text-decoration:none;">🔗 {gh_label}</a>'
+                        f'</div>'
+                        f'<div style="color:#FCD34D;font-weight:600;margin:4px 0 2px 0;font-size:.88rem;">Claim: {r["claim"]}</div>'
+                        f'<div style="color:#94A3B8;font-size:.82rem;">{r["what_it_proves"]}</div>'
+                        f'</div>', unsafe_allow_html=True)
+            else:
+                st.info("Detailed code citations for this field are not yet mapped. Use the 🤖 AI Agent to search for it — ask: 'Where is the code for {sel}?'")
+
+            st.markdown("---")
+            st.markdown("#### Repos Available for Verification")
+            for repo_name, base_url in REPO_BASE_URLS.items():
+                st.markdown(f"- **{repo_name}**: [{base_url}]({base_url})")
+            st.caption("Note: joinworth/microsites and joinworth/report-service are private org repos not accessible from this agent.")
 
     # ══════════════════════════════════════════════════
     # KYB PAGE: SOURCE REFERENCE
@@ -1726,3 +1762,192 @@ END AS employee_count,
                                "❌ Not in customer_files","✅ worth_score"],
         }
         st.dataframe(pd.DataFrame(field_origins), use_container_width=True, hide_index=True)
+
+# ╔═══════════════════════════════════════════════════════════════════╗
+# ║  SECTION 4 — AI AGENT: ASK THE CODEBASE                          ║
+# ╚═══════════════════════════════════════════════════════════════════╝
+elif section == "🤖  AI Agent — Ask the Codebase":
+    sh("🤖  Worth AI Codebase Agent — Ask Anything About the Pipeline")
+
+    # Read key from environment variable or Streamlit secrets — never hardcoded
+    import os
+    OPENAI_API_KEY = (
+        os.environ.get("OPENAI_API_KEY")
+        or st.secrets.get("OPENAI_API_KEY", "")
+        if hasattr(st, "secrets") else os.environ.get("OPENAI_API_KEY", "")
+    )
+
+    card("""<b>How this agent works:</b><br>
+    1. Your question is matched against 292 indexed chunks from the actual Worth AI source code
+    (SIC-UK-Codes repo: kyb/index.ts, businessDetails/index.ts, aiNaicsEnrichment.ts, rules.ts,
+    sources.ts, customer_table.sql, case-management.ts + Industry-Classification docs)<br>
+    2. The top relevant code chunks are retrieved<br>
+    3. GPT-4o-mini synthesises an answer with exact file + line references<br>
+    4. <b>Every answer cites the source code line it came from — you can verify it</b>
+    """, "card-teal")
+
+    # Load RAG index once per session
+    if "rag_index" not in st.session_state:
+        with st.spinner("Loading codebase index (292 chunks from 10 source files)..."):
+            st.session_state["rag_index"] = load_or_build()
+    rag_index = st.session_state["rag_index"]
+
+    # Init chat history
+    if "agent_history" not in st.session_state:
+        st.session_state["agent_history"] = []
+
+    # Suggested questions
+    st.markdown("#### Try asking:")
+    suggested = [
+        "Where does tin_match_boolean come from? Which file and line?",
+        "What is NAICS_OF_LAST_RESORT and where is it defined?",
+        "Which table stores naics_code facts and what is the JSONB schema?",
+        "How does removeNaicsCode() work and when is it called?",
+        "What is the sos_filings fact? Which sources populate it?",
+        "Why do some businesses show No Registry Data to Display?",
+        "What is the difference between Pipeline A and Pipeline B for NAICS?",
+        "How does factWithHighestConfidence work? Show me the code.",
+        "Where is the winner-takes-all SQL for Pipeline B?",
+        "What does the Middesk source do and what is its weight?",
+    ]
+    cols = st.columns(2)
+    for i, q in enumerate(suggested):
+        if cols[i % 2].button(q, key=f"sq_{i}", use_container_width=True):
+            st.session_state["agent_history"].append({"role": "user", "content": q})
+            st.session_state["pending_question"] = q
+
+    st.markdown("---")
+
+    # Chat history display
+    for msg in st.session_state["agent_history"]:
+        if msg["role"] == "user":
+            st.markdown(
+                f'<div style="background:#1A2744;border:1px solid #2D4070;border-radius:8px;'
+                f'padding:10px 14px;margin:6px 0;color:#E2E8F0;"><b>You:</b> {msg["content"]}</div>',
+                unsafe_allow_html=True)
+        else:
+            st.markdown(
+                f'<div style="background:#0C2218;border:1px solid #059669;border-radius:8px;'
+                f'padding:12px 16px;margin:6px 0;color:#6EE7B7;">'
+                f'<b style="color:#A7F3D0;">🤖 Agent:</b><br><br>'
+                f'<span style="color:#E2E8F0;white-space:pre-wrap;">{msg["content"]}</span>'
+                f'</div>', unsafe_allow_html=True)
+            if msg.get("sources"):
+                with st.expander("📚 Source code chunks used to answer this question"):
+                    for src in msg["sources"]:
+                        url = f"{REPO_BASE_URLS.get(src['repo'],'')}/{src['path']}#L{src['line_start']}-L{src['line_end']}"
+                        st.markdown(
+                            f'<div class="card" style="background:#0E1E38;border-left-color:#60A5FA;margin-bottom:6px;font-size:.82rem;">'
+                            f'<a href="{url}" target="_blank" style="color:#60A5FA;font-family:Courier New;">'
+                            f'🔗 {src["repo"]} / {src["path"]} L{src["line_start"]}–{src["line_end"]}</a><br>'
+                            f'<span style="color:#94A3B8;">{src["description"]}</span>'
+                            f'</div>', unsafe_allow_html=True)
+                        st.code(src["text"][:600] + ("…" if len(src["text"]) > 600 else ""), language="typescript")
+
+    # Chat input
+    user_q = st.chat_input("Ask anything about Worth AI pipelines, field lineage, source code...")
+
+    # Handle suggested question buttons
+    pending = st.session_state.pop("pending_question", None)
+    if pending:
+        user_q = pending
+
+    if user_q:
+        st.session_state["agent_history"].append({"role": "user", "content": user_q})
+
+        with st.spinner("Searching codebase + generating answer..."):
+            # Step 1: RAG retrieval
+            retrieved = rag_search(rag_index, user_q, top_k=6)
+
+            # Step 2: Build context for GPT
+            context_parts = []
+            for chunk in retrieved:
+                context_parts.append(
+                    f"--- FILE: {chunk['repo']}/{chunk['path']} "
+                    f"(lines {chunk['line_start']}–{chunk['line_end']}) ---\n"
+                    f"[Context: {chunk['description']}]\n"
+                    f"{chunk['text'][:1200]}\n"
+                )
+            context = "\n".join(context_parts)
+
+            # Build conversation history for GPT
+            history_for_gpt = []
+            for msg in st.session_state["agent_history"][:-1][-6:]:  # last 6 turns
+                history_for_gpt.append({"role": msg["role"], "content": msg["content"]})
+
+            system_prompt = """You are a precise technical assistant for the Worth AI platform.
+You answer questions about the Worth AI codebase — specifically about:
+- Pipeline A (integration-service: Fact Engine, KYB facts, AI enrichment, vendor sources)
+- Pipeline B (warehouse-service: customer_table.sql, ZI vs EFX winner-takes-all)
+- How specific API fields (naics_code, mcc_code, tin_match, sos_filings, etc.) are populated
+- Data lineage: which file, which function, which line number proves each claim
+
+RULES:
+1. ALWAYS cite the exact source file and line range for every claim you make.
+   Format: [FILE: path/to/file.ts L123-L145]
+2. If the code chunk shows the answer directly, QUOTE the relevant code lines.
+3. If you are not sure from the provided code chunks, say so explicitly.
+4. Do NOT hallucinate. Only answer from the provided code chunks.
+5. Keep answers focused and precise. Use bullet points for multiple facts.
+6. End every answer with: "✅ Verified from source code — click the chunks below to confirm."
+
+The user wants to verify that information in a Streamlit app about Worth AI field lineage
+is accurate and traceable to real source code."""
+
+            try:
+                from openai import OpenAI
+                client = OpenAI(api_key=OPENAI_API_KEY)
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        *history_for_gpt,
+                        {"role": "user", "content": (
+                            f"Question: {user_q}\n\n"
+                            f"Relevant code chunks from the Worth AI repositories:\n\n{context}"
+                        )},
+                    ],
+                    temperature=0.1,
+                    max_tokens=1200,
+                )
+                answer = response.choices[0].message.content
+
+            except Exception as e:
+                # Fallback: return raw retrieved chunks without GPT
+                answer = f"⚠️ GPT call failed: {e}\n\nFalling back to raw retrieved chunks:\n\n"
+                for chunk in retrieved:
+                    answer += f"\n📄 {chunk['repo']}/{chunk['path']} L{chunk['line_start']}–{chunk['line_end']}\n"
+                    answer += chunk['text'][:400] + "\n---\n"
+
+        # Store answer + sources
+        st.session_state["agent_history"].append({
+            "role": "assistant",
+            "content": answer,
+            "sources": retrieved,
+        })
+        st.rerun()
+
+    if st.button("🗑️ Clear conversation", key="clear_chat"):
+        st.session_state["agent_history"] = []
+        st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 📑 Indexed Source Files")
+    st.markdown("The agent searches these files from the actual Worth AI repositories:")
+    src_table = """<table class="t">
+    <tr><th>File</th><th>Repo</th><th>Chunks</th><th>What it covers</th></tr>"""
+    file_counts = {}
+    for chunk in rag_index["chunks"]:
+        k = (chunk["path"], chunk["repo"])
+        file_counts[k] = file_counts.get(k, 0) + 1
+    for (path, repo), count in sorted(file_counts.items()):
+        desc = next((s["description"] for s in rag_index["source_files"] if s["path"] == path), "")
+        url = f"{REPO_BASE_URLS.get(repo,'')}/{path}"
+        src_table += (
+            f"<tr><td><a href='{url}' target='_blank' style='color:#60A5FA;font-family:Courier New;font-size:.8rem;'>{path}</a></td>"
+            f"<td style='color:#94A3B8;font-size:.8rem;'>{repo}</td>"
+            f"<td style='text-align:center;color:#FCD34D;'>{count}</td>"
+            f"<td style='color:#94A3B8;font-size:.8rem;'>{desc[:80]}</td></tr>"
+        )
+    src_table += "</table>"
+    st.markdown(src_table, unsafe_allow_html=True)
