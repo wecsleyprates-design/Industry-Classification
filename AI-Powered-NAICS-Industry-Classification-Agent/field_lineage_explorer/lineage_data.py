@@ -1893,28 +1893,66 @@ FIELD_PROVENANCE = {
     "admin_ui": [
         prov(
             "Admin UI location: KYB → Background → Business Registration card: Tax ID Number (EIN)",
-            "admin_ui_observation",
-            how_to_verify="Observed by reading the admin.joinworth.com portal UI and the case-service API that builds the KYB response. Also in the UCM Working Session spreadsheet [WS] UCM Q/A tab row for tin.value.",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="case-service/src/api/v1/modules/case-management/case-management.ts",
+            line_start=1555, line_end=1574,
+            how_to_verify=(
+                "Open case-management.ts line 1555: getCaseByIDQuery selects data_businesses "
+                "including naics_code, mcc_code, tin. The KYB API response maps these fields "
+                "to the admin UI. The Tax ID Number (EIN) field in Business Registration reads "
+                "from tin_submitted (masked) and tin_match_boolean (verified status)."
+            ),
             is_hardcoded=True,
-            spreadsheet_ref="[WS] UCM Q/A tab, row 2 — API Field Name: tin.value, W360: Yes",
         ),
     ],
     "transformation": [
         prov(
-            "Requires transformation: tin.value (integer EIN) → tin_match_boolean.value (boolean)",
-            "spreadsheet",
-            how_to_verify="Confirmed in [WS] UCM Q/A spreadsheet column F 'Requires Transformation?' and column H 'Decisions/To-Dos': 'UCM should use the tin_match_boolean.value which includes true or false'.",
+            "tin.value is the raw integer EIN; the VERIFICATION field is tin_match_boolean.value (boolean)",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/kyb/index.ts",
+            line_start=482, line_end=491,
+            how_to_verify=(
+                "Open kyb/index.ts line 482: tin_match_boolean fact definition. "
+                "It has dependencies: ['tin_match'] and its fn returns: "
+                "engine.getResolvedFact('tin_match')?.value?.status === 'success'. "
+                "This is a boolean (true/false) derived from the Middesk TIN task result — "
+                "NOT the raw EIN integer. The transformation is confirmed by the fact "
+                "that tin_match_boolean is a computed fact, not the raw tin.value."
+            ),
             is_hardcoded=True,
-            spreadsheet_ref="[WS] UCM Q/A tab row 2, columns E-H",
+        ),
+        prov(
+            "Worth 360 Report uses tin_match_boolean.value (boolean), not tin.value (raw EIN)",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/src/messaging/kafka/consumers/handlers/report.ts",
+            line_start=768, line_end=790,
+            how_to_verify=(
+                "Open report.ts lines 768-790. The Worth 360 Report handler explicitly fetches "
+                "the fact 'tin_match_boolean' (line 769) and returns it as: "
+                "tin_match_boolean: tin_match_boolean?.value ?? false (line 788). "
+                "The raw tin.value is also returned (line 787) as a separate field. "
+                "This confirms the transformation: tin.value = EIN, tin_match_boolean.value = verification result."
+            ),
+            is_hardcoded=True,
         ),
     ],
     "w360": [
         prov(
-            "Worth 360 Report: Yes",
-            "spreadsheet",
-            how_to_verify="Column I 'W360' in [WS] UCM Q/A spreadsheet row 2 = 'Yes'. Also confirmed in column H decision: 'Need to display on Worth 360 Report'.",
+            "Worth 360 Report includes tin_match_boolean — confirmed in the report.ts handler",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/src/messaging/kafka/consumers/handlers/report.ts",
+            line_start=763, line_end=793,
+            how_to_verify=(
+                "Open report.ts lines 763-793. The Worth 360 report generation function "
+                "explicitly includes 'tin_match_boolean' in the factsToFetch array (line 769) "
+                "and maps it to the report output (line 788). "
+                "This is the definitive proof that this field appears in the Worth 360 Report."
+            ),
             is_hardcoded=True,
-            spreadsheet_ref="[WS] UCM Q/A tab row 2, column I = 'Yes'",
         ),
     ],
     "source_middesk": [
@@ -2076,8 +2114,7 @@ FIELD_PROVENANCE = {
 }
 
 PROVENANCE_ORIGIN_LABELS = {
-    "source_code":             ("🔗 Source Code", "#60A5FA"),
-    "hardcoded_from_reading":  ("📝 Hardcoded (derived from reading source code)", "#FCD34D"),
-    "spreadsheet":             ("📊 Spreadsheet", "#34D399"),
-    "admin_ui_observation":    ("🖥️ Admin UI observation", "#A78BFA"),
+    "source_code":             ("🔗 Source Code — verified from repo", "#60A5FA"),
+    "hardcoded_from_reading":  ("📝 Derived from reading source code", "#FCD34D"),
+    "admin_ui_observation":    ("🖥️ Observed in admin UI + confirmed by API code", "#A78BFA"),
 }

@@ -1815,14 +1815,9 @@ END AS employee_count,
 elif section == "🤖  AI Agent — Ask the Codebase":
     sh("🤖  Worth AI Codebase Agent — Ask Anything About the Pipeline")
 
-    # Read key from environment variable or Streamlit secrets — never hardcoded
+    # Read key from environment variable only — avoids st.secrets FileNotFoundError warning
     import os
     OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-    if not OPENAI_API_KEY:
-        try:
-            OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
-        except Exception:
-            OPENAI_API_KEY = ""
 
     card("""<b>How this agent works:</b><br>
     1. Your question is matched against 292 indexed chunks from the actual Worth AI source code
@@ -1943,12 +1938,11 @@ is accurate and traceable to real source code."""
 
             if not OPENAI_API_KEY:
                 answer = (
-                    "⚠️ No OPENAI_API_KEY found.\n\n"
-                    "To enable the AI agent, run the app with:\n"
+                    "⚠️ No OPENAI_API_KEY environment variable found.\n\n"
+                    "Run the app like this to enable GPT answers:\n"
                     "  OPENAI_API_KEY='sk-...' python3 -m streamlit run full_app.py\n\n"
-                    "Or create ~/.streamlit/secrets.toml with:\n"
-                    "  OPENAI_API_KEY = 'sk-...'\n\n"
-                    "--- Retrieved code chunks (no GPT) ---\n"
+                    "Without the key the agent still shows the retrieved code chunks below.\n\n"
+                    "--- Retrieved code chunks (no GPT synthesis) ---\n"
                 )
                 for chunk in retrieved:
                     answer += f"\n📄 {chunk['repo']}/{chunk['path']} L{chunk['line_start']}–{chunk['line_end']}\n"
