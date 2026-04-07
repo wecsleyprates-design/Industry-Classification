@@ -1815,9 +1815,27 @@ END AS employee_count,
 elif section == "🤖  AI Agent — Ask the Codebase":
     sh("🤖  Worth AI Codebase Agent — Ask Anything About the Pipeline")
 
-    # Read key from environment variable only — avoids st.secrets FileNotFoundError warning
+    # Read key from environment variable or ~/.streamlit/secrets.toml
+    # Never hardcoded — GitHub secret scanning blocks pushes with embedded keys
     import os
     OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+    if not OPENAI_API_KEY:
+        try:
+            # Only access st.secrets if the file actually exists to avoid the warning
+            import tomllib, pathlib
+            secrets_paths = [
+                pathlib.Path.home() / ".streamlit" / "secrets.toml",
+                pathlib.Path(__file__).parent / ".streamlit" / "secrets.toml",
+            ]
+            for sp in secrets_paths:
+                if sp.exists():
+                    with open(sp, "rb") as f:
+                        secrets = tomllib.load(f)
+                    OPENAI_API_KEY = secrets.get("OPENAI_API_KEY", "")
+                    if OPENAI_API_KEY:
+                        break
+        except Exception:
+            pass
 
     card("""<b>How this agent works:</b><br>
     1. Your question is matched against 292 indexed chunks from the actual Worth AI source code
