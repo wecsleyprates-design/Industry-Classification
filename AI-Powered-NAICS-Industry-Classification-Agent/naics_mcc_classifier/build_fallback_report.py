@@ -716,25 +716,27 @@ tbl(
         ['1', 'Executive Summary', '5,349 businesses (7.7%) — 1 root cause dominates at 99.98%'],
         ['2', 'The Problem: What the Customer Sees',
          'Internal fallback text exposed verbatim to customers; data lineage explained'],
-        ['3', 'Step 2 — Fallback Diagnosis Summary',
+        ['3', 'HOW THE FACT ENGINE WORKS — Critical Background',
+         'Facts resolved per-field NOT per-vendor. OC winning does not block ZI/EFX NAICS.'],
+        ['4', 'Step 2 — Fallback Diagnosis Summary',
          'Full data pull: vendor availability, AI stats, Pipeline B cross-check'],
-        ['4', 'Step 3 — Root-Cause Scenario Distribution [CHART]',
+        ['5', 'Step 3 — Root-Cause Scenario Distribution [CHART]',
          'Scenario C = 5,348 (99.98%); Scenario E = 1 (0.02%)'],
-        ['5', 'Step 4 — Vendor Signal Availability [CHART]',
+        ['6', 'Step 4 — Vendor Signal Availability [CHART]',
          '100% of businesses have 0 vendor NAICS; Pipeline B also null for all'],
-        ['6', 'Step 5 — AI Enrichment Behaviour [CHART]',
+        ['7', 'Step 5 — AI Enrichment Behaviour [CHART]',
          'AI confidence empty 100%; 44.5% AI winner; 0% hallucination'],
-        ['7', 'Step 6 — Example Businesses per Scenario',
+        ['8', 'Step 6 — Example Businesses per Scenario',
          'Real row-level data: all have zi/efx/oc NAICS = null, pipeline_b = null'],
-        ['8', 'Step 7 — Confirmed System Gaps (G1-G6) [CHART]',
+        ['9', 'Step 7 — Confirmed System Gaps (G1-G6) [CHART]',
          'Six confirmed gaps; recovery: 30% name, 20% web, 50% correct 561499'],
-        ['9', 'Step 7 — Recovery Potential [CHART]',
+        ['10', 'Step 7 — Recovery Potential [CHART]',
          'Bar chart by recovery category'],
-        ['10', 'Step 8 — Pipeline Workflow Diagram',
+        ['11', 'Step 8 — Pipeline Workflow Diagram',
          'Full annotated pipeline showing WHERE each gap occurs'],
-        ['11', 'Prioritised Fix Roadmap', 'P1-P6 ranked by impact and effort'],
-        ['12', 'Implementation Plan', 'Exact TypeScript + Python changes per fix'],
-        ['13', 'Conclusions', 'Four key conclusions from the real data analysis'],
+        ['12', 'Prioritised Fix Roadmap', 'P1-P6 ranked by impact and effort'],
+        ['13', 'Implementation Plan', 'Exact TypeScript + Python changes per fix'],
+        ['14', 'Conclusions', 'Four key conclusions from the real data analysis'],
     ],
     col_widths=[0.5, 2.5, 6.5],
 )
@@ -864,10 +866,207 @@ lineage([
 doc.add_page_break()
 
 # ════════════════════════════════════════════════════════════════════════════
-# SECTION 3 — STEP 2: FALLBACK DIAGNOSIS SUMMARY
+# SECTION 3 — HOW THE FACT ENGINE WORKS (CRITICAL BACKGROUND)
 # ════════════════════════════════════════════════════════════════════════════
 
-H1('Section 3 — Step 2: Fallback Diagnosis Summary (Real Data)')
+H1('Section 3 — How the Fact Engine Works: Critical Background')
+
+callout(
+    'READ THIS FIRST — This section answers a common and important question:\n\n'
+    '"If OpenCorporates has the highest confidence but no NAICS code,\n'
+    ' does the user see all OC data but with a null NAICS?"\n\n'
+    'Answer: NO. The user sees all OC data AND the NAICS from ZoomInfo or Equifax.\n'
+    'This section explains why — and why the 561499 problem is specifically caused\n'
+    'by ALL vendors failing to match, not by any single vendor missing a field.',
+    bg='EDE9FE', border='5B21B6', tc=RGBColor(0x2E, 0x10, 0x65)
+)
+
+H2('The Fact Engine Resolves Every Field Independently')
+
+body(
+    'The Worth AI pipeline uses a Fact Engine (integration-service/lib/facts/factEngine.ts) '
+    'that evaluates each field (fact) completely independently of every other field. '
+    'There is no concept of a "winning vendor" whose data is used for everything. '
+    'Instead, for every single fact — legal_name, addresses, sos_filings, naics_code, '
+    'mcc_code, and 200+ others — the Fact Engine independently asks:'
+)
+lineage([
+    '"Which vendor has the best VALID value for THIS specific field?"',
+    '',
+    'valid = non-null, non-empty string, non-empty array, non-empty object',
+    '      (per factEngine.ts isValidFactValue() function)',
+])
+
+body(
+    'This means a vendor can win the competition for some fields and lose it for others '
+    'within the same business evaluation. OC might provide the winning legal_name AND '
+    'the winning sos_filings, while ZoomInfo provides the winning naics_code — '
+    'all for the same business, in the same API response.'
+)
+spacer(4)
+
+H2('Worked Example: OC Has Highest Confidence but No NAICS')
+
+body(
+    'Imagine a business where OpenCorporates has the highest entity-match confidence (0.92), '
+    'ZoomInfo has a lower confidence (0.61), and Equifax has the lowest (0.48). '
+    'OC found the company in its global registry but does not have a NAICS code for it '
+    '(common for UK companies, holding companies, or companies OC indexes without SIC/NAICS). '
+    'Here is exactly what happens:'
+)
+spacer(4)
+
+lineage([
+    'STEP 1: All vendors run entity matching and return their data:',
+    '',
+    '  OpenCorporates  (conf=0.92, weight=0.9)  legal_name="ABC Ltd"   sos_filings=[...]  naics_code=NULL',
+    '  ZoomInfo        (conf=0.61, weight=0.8)  legal_name="ABC Ltd"   sos_filings=[...]  naics_code="722511"',
+    '  Equifax         (conf=0.48, weight=0.7)  legal_name="ABC Ltd"                      naics_code="722511"',
+    '',
+    'STEP 2: Fact Engine resolves each field independently using factWithHighestConfidence rule:',
+    '',
+    '  legal_name  → candidates: OC(0.92), ZI(0.61), EFX(0.48) — all valid',
+    '               → OC WINS (highest confidence 0.92)',
+    '               → stored: "ABC Ltd" from OC',
+    '',
+    '  sos_filings → candidates: OC(0.92), ZI(0.61), EFX(0.48) — all valid',
+    '               → OC WINS (highest confidence 0.92)',
+    '               → stored: SoS filing array from OC',
+    '',
+    '  naics_code  → candidates evaluated: OC has NULL → isValidFactValue(NULL) = FALSE → EXCLUDED',
+    '               → remaining candidates: ZI(0.61)="722511", EFX(0.48)="722511"',
+    '               → ZI WINS (highest confidence among valid candidates)',
+    '               → stored: "722511" from ZoomInfo',
+    '',
+    '  mcc_code    → derived from naics_code "722511" via rel_naics_mcc lookup',
+    '               → stored: correct MCC for full-service restaurants',
+    '',
+    'RESULT: Customer sees OC legal name + OC SoS data + ZI NAICS/MCC',
+    '        NOT a mix where NAICS is null just because OC won other fields.',
+])
+
+H2('The Key Code: isValidFactValue() Excludes Null Candidates')
+
+body(
+    'The Fact Engine\'s isValidFactValue() function is the gate that makes this work. '
+    'Before applying any selection rule, the engine filters the candidate list to only '
+    'include vendors that returned a non-empty value for that specific field:'
+)
+lineage([
+    '// From factEngine.ts — applyRulesToFact():',
+    '',
+    'const validOptions = allCandidatesWithSameName.filter(',
+    '    fact => fact.resolved !== undefined && this.isValidFactValue(fact.value)',
+    ');',
+    '',
+    '// isValidFactValue() returns FALSE for:',
+    '//   undefined, null, "", [], {}',
+    '//   (an empty/missing vendor field)',
+    '',
+    '// isValidFactValue() returns TRUE for:',
+    '//   any non-empty string, number, array with items, object with keys',
+    '//   including false and 0 (those are valid values)',
+    '',
+    '// After filtering:',
+    '// If validOptions.length === 0 → no valid candidates → fact = NULL → AI enrichment fires',
+    '// If validOptions.length >= 1 → best valid candidate wins per rule',
+])
+
+ok(
+    'CONCLUSION: OC having the highest confidence does NOT mean OC\'s null NAICS\n'
+    'blocks ZoomInfo or Equifax from providing NAICS for that field.\n\n'
+    'OC\'s null is automatically filtered out of the NAICS candidate list.\n'
+    'ZoomInfo or Equifax then compete on their own confidence scores for that field only.\n\n'
+    'The user sees OC data for all fields where OC has a valid value,\n'
+    'AND sees ZI/EFX NAICS/MCC where OC has no value — in the same API response.'
+)
+
+H2('Why Then Do 5,349 Businesses Still Get 561499?')
+
+body(
+    'The scenario above (OC high confidence, no NAICS, ZI/EFX provide NAICS) '
+    'produces a CORRECT result. The 561499 problem is a completely different situation: '
+    'it is NOT caused by any single vendor missing a NAICS field. '
+    'It is caused by ALL vendors failing the entity-match step entirely:'
+)
+spacer(4)
+
+tbl(
+    ['Scenario', 'What happens to NAICS', 'What customer sees'],
+    [
+        ['OC wins entity match (conf=0.92) but OC has no NAICS field\n'
+         'ZI has lower conf (0.61) and has NAICS="722511"',
+         'OC excluded from NAICS candidates (null filtered out)\n'
+         'ZI wins NAICS competition independently\n'
+         'NAICS="722511" stored from ZI',
+         'OC legal name, OC SoS data\n+\nZI NAICS/MCC (correct result)\nNO 561499'],
+        ['OC entity-match score < threshold (e.g. 0.30)\n'
+         'ZI entity-match score < threshold (e.g. 0.28)\n'
+         'EFX entity-match score < threshold (e.g. 0.22)',
+         'ALL vendors rejected at entity-matching stage\n'
+         'No vendor data used for ANY field\n'
+         'NAICS validOptions = []\n'
+         'AI enrichment fires with only name+address\n'
+         'AI returns 561499 as last resort',
+         'No vendor data shown\n'
+         'NAICS=561499, MCC=5614\n'
+         '"No Registry Data to Display"\n'
+         'THIS IS THE 5,349 BUSINESSES CASE'],
+        ['OC entity-match passes (conf=0.70)\n'
+         'ZI entity-match passes (conf=0.65)\n'
+         'Both OC and ZI have no NAICS in their records\n'
+         'EFX also has no NAICS',
+         'All vendors pass entity-matching\n'
+         'But all have NULL naics_code in their response\n'
+         'NAICS validOptions = []\n'
+         'AI enrichment fires\n'
+         'AI returns 561499',
+         'OC + ZI + EFX data shown for other fields\n'
+         'But NAICS=561499, MCC=5614\n'
+         'This is rare — vendors usually have NAICS\n'
+         'when they have a strong entity match'],
+    ],
+    col_widths=[3.5, 3.0, 3.0],
+    fs=8.5,
+)
+
+gap(
+    'FOR THE 5,349 BUSINESSES IN THIS REPORT:\n'
+    'The root cause is the SECOND row of the table above — entity matching failure.\n'
+    'ALL vendors (ZI, EFX, OC) scored BELOW the minimum confidence threshold\n'
+    '(match.index < ~25/55, or XGBoost probability < 0.45).\n\n'
+    'This means the Fact Engine received ZERO vendor data for ANY field for these businesses.\n'
+    'Not just NAICS — all fields. The entity matching step rejected every vendor candidate.\n'
+    'The 5,349 businesses had no vendor data to use for NAICS OR for any other field.\n'
+    'AI enrichment fired as the only remaining option and returned 561499.'
+)
+
+H2('Fact Engine Rule Priority (applies to every field including NAICS)')
+lineage([
+    'For EVERY field, the Fact Engine applies rules in this order:',
+    '',
+    '1. manualOverride          ALWAYS FIRST — analyst manual value wins everything',
+    '2. factWithHighestConfidence — pick vendor with highest confidence among VALID candidates',
+    '   └─ If confidence difference < 0.05 → use factWithHighestWeight as tiebreaker',
+    '3. factWithHighestWeight   — pick vendor with highest weight among VALID candidates',
+    '   Middesk(2.0) > OC(0.9) > ZI(0.8) = Trulioo(0.8) > EFX(0.7) > AI(0.1)',
+    '',
+    'KEY: Steps 2 and 3 only operate on VALID candidates.',
+    'A vendor with null/empty value for a field is excluded BEFORE any rule runs.',
+    'A vendor\'s confidence and weight only matter if it actually has a value to contribute.',
+    '',
+    'For combineFacts fields (names, addresses, people, watchlists):',
+    '   ALL valid values from ALL vendors are merged into a single array.',
+    '   No competition — every valid value is included.',
+])
+
+doc.add_page_break()
+
+# ════════════════════════════════════════════════════════════════════════════
+# SECTION 4 — STEP 2: FALLBACK DIAGNOSIS SUMMARY
+# ════════════════════════════════════════════════════════════════════════════
+
+H1('Section 4 — Step 2: Fallback Diagnosis Summary (Real Data)')
 
 body(
     'The diagnostic module (naics_mcc_classifier/diagnostic.py) pulled all 5,349 businesses '
@@ -944,7 +1143,7 @@ doc.add_page_break()
 # SECTION 4 — STEP 3: ROOT-CAUSE SCENARIO DISTRIBUTION (WITH CHART)
 # ════════════════════════════════════════════════════════════════════════════
 
-H1('Section 4 — Step 3: Root-Cause Scenario Distribution')
+H1('Section 5 — Step 3: Root-Cause Scenario Distribution')
 
 body(
     'The diagnostic classified all 5,349 businesses into one of 6 root-cause scenarios. '
@@ -997,7 +1196,7 @@ doc.add_page_break()
 # SECTION 5 — STEP 4: VENDOR SIGNAL AVAILABILITY (WITH CHART)
 # ════════════════════════════════════════════════════════════════════════════
 
-H1('Section 5 — Step 4: Vendor Signal Availability Analysis')
+H1('Section 6 — Step 4: Vendor Signal Availability Analysis')
 
 body(
     'Three panels were generated to show vendor NAICS signal coverage, '
@@ -1051,7 +1250,7 @@ doc.add_page_break()
 # SECTION 6 — STEP 5: AI ENRICHMENT BEHAVIOUR (WITH CHARTS)
 # ════════════════════════════════════════════════════════════════════════════
 
-H1('Section 6 — Step 5: AI Enrichment (GPT-5-mini) Behaviour')
+H1('Section 7 — Step 5: AI Enrichment (GPT-5-mini) Behaviour')
 
 # ── Upfront explanation of the apparent contradiction ──────────────────────
 callout(
@@ -1165,7 +1364,7 @@ doc.add_page_break()
 # SECTION 7 — STEP 6: EXAMPLE BUSINESSES PER SCENARIO
 # ════════════════════════════════════════════════════════════════════════════
 
-H1('Section 7 — Step 6: Example Businesses per Scenario (Real Row-Level Data)')
+H1('Section 8 — Step 6: Example Businesses per Scenario (Real Row-Level Data)')
 
 body(
     'The diagnostic extracted the first 5 businesses for each scenario from real production data. '
@@ -1226,7 +1425,7 @@ doc.add_page_break()
 # SECTION 8 — STEP 7: CONFIRMED SYSTEM GAPS (WITH CHART)
 # ════════════════════════════════════════════════════════════════════════════
 
-H1('Section 8 — Step 7: Confirmed System Gaps (G1-G6)')
+H1('Section 9 — Step 7: Confirmed System Gaps (G1-G6)')
 
 body(
     'Based on the real data analysis, six confirmed gaps in the current Worth AI pipeline '
@@ -1352,7 +1551,7 @@ doc.add_page_break()
 # SECTION 9 — RECOVERY POTENTIAL (WITH CHART)
 # ════════════════════════════════════════════════════════════════════════════
 
-H1('Section 9 — Step 7: Recovery Potential by Category')
+H1('Section 10 — Step 7: Recovery Potential by Category')
 
 body(
     'The diagnostic estimated recovery potential by sub-categorising Scenario C '
@@ -1406,7 +1605,7 @@ doc.add_page_break()
 # SECTION 10 — STEP 8: PIPELINE WORKFLOW DIAGRAM
 # ════════════════════════════════════════════════════════════════════════════
 
-H1('Section 10 — Step 8: Current Pipeline — How 561499 Is Produced')
+H1('Section 11 — Step 8: Current Pipeline — How 561499 Is Produced')
 
 body(
     'The following annotated workflow shows the exact sequence of steps in the current '
@@ -1510,7 +1709,7 @@ doc.add_page_break()
 # SECTION 11 — PRIORITISED FIX ROADMAP
 # ════════════════════════════════════════════════════════════════════════════
 
-H1('Section 11 — Prioritised Fix Roadmap')
+H1('Section 12 — Prioritised Fix Roadmap')
 
 tbl(
     ['Priority', 'Fix', 'Gaps', 'Est. recovered', 'Effort', 'File'],
@@ -1558,7 +1757,7 @@ doc.add_page_break()
 # SECTION 12 — IMPLEMENTATION PLAN
 # ════════════════════════════════════════════════════════════════════════════
 
-H1('Section 12 — Implementation Plan')
+H1('Section 13 — Implementation Plan')
 
 H2('Fix P1 + P3: AI System Prompt Changes (Highest ROI, Lowest Effort)')
 lineage([
@@ -1632,7 +1831,7 @@ doc.add_page_break()
 # SECTION 13 — CONCLUSIONS
 # ════════════════════════════════════════════════════════════════════════════
 
-H1('Section 13 — Conclusions')
+H1('Section 14 — Conclusions')
 
 ok(
     'CONCLUSION 1: The 561499 problem is fully understood and confirmed by production data.\n\n'
