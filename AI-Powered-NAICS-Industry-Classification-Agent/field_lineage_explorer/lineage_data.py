@@ -1474,50 +1474,123 @@ CONFIDENCE_SUPPRESSION_FACT = {
         "Does Worth suppress or hide field values when confidence is too low, "
         "even if the vendor HAS returned a value?"
     ),
-    "answer": "NO — with one important nuance.",
+    "answer": "NO. Rule 4 of the 6 Pipeline A rules explicitly confirms there is NO minimum confidence cutoff.",
     "detail": """
-Worth applies a confidence threshold at the ENTITY MATCHING stage, not at the field display stage.
+THE 6 PIPELINE A WINNER-SELECTION RULES (confirmed from integration-service source code):
 
-Here is what actually happens:
+RULE 1 — factWithHighestConfidence()
+  Sort all VALID sources by confidence. Highest wins outright if gap > 5%.
+  |conf_A - conf_B| > 0.05 → higher wins
 
-STAGE 1 — Entity Matching (where the threshold applies):
-  Each vendor runs an XGBoost entity-matching model to find the right company
-  in their database. The model outputs match.index (0–55) or a probability (0–1).
-  Worth's minimum threshold: match.index ≥ ~25/55 (confidence ≈ 0.45).
+RULE 2 — weightedFactSelector() [Tie-break]
+  If top two within WEIGHT_THRESHOLD = 0.05, use source weight:
+  Middesk(2.0) > OC(0.9) > ZI(0.8) = Trulioo(0.8) > EFX(0.7) > SERP(0.3) > AI(0.1)
 
-  ✅ Score ≥ threshold → vendor match ACCEPTED → ALL fields from this vendor are used
-  ❌ Score < threshold → vendor match REJECTED → ALL fields from this vendor are DISCARDED
-     (including fields that would have had a valid value)
+RULE 3 — manualOverride() [ALWAYS WINS]
+  Analyst sets via PATCH /facts/.../override/{factName}.
+  override:{...} field. Beats any model/AI result.
 
-STAGE 2 — Fact Engine / Field Display (NO threshold):
-  Once a vendor match passes Stage 1, Worth does NOT apply any further
-  confidence check to individual fields. If the vendor returned a value
-  for a field, Worth shows it. If the vendor returned null/empty for a field,
-  Worth shows null/empty.
+RULE 4 — NO minimum confidence cutoff  ← CRITICAL
+  There is NO "confidence must be >= X" rule.
+  If only one source returned a code at confidence 0.05 — it wins.
+  Low confidence IS visible in API (source.confidence) but does NOT block display.
 
-  Worth does NOT say: "I have a field value but I'm not confident enough → hide it."
+RULE 5 — AI safety net
+  AI triggers when n_non_AI_sources < minimumSources=1 AND total < maximumSources=3.
+  Weight=0.1 so AI rarely wins unless vendors found nothing.
 
-CONCLUSION:
-  A blank field means either:
-  (a) The vendor found no matching entity (Stage 1 rejected all candidates), OR
-  (b) The vendor returned null/empty for that field in their response, OR
-  (c) Integrations are still processing, OR
-  (d) The applicant did not submit this value
+RULE 6 — Last resort: "561499"
+  If winning NAICS not in core_naics_code → removeNaicsCode() → replaces with "561499".
+  AI prompt also explicitly uses NAICS_OF_LAST_RESORT="561499" when no evidence.
 
-  It does NOT mean Worth is hiding a known value due to low confidence.
-  The confidence threshold only gates whether to use a vendor's data AT ALL —
-  it does not selectively hide individual fields from an accepted match.
+PIPELINE B — Winner-Takes-All (customer_table.sql):
+  WHEN COALESCE(zi_match_confidence,0) > COALESCE(efx_match_confidence,0)
+    THEN zi_c_naics6   (ZoomInfo NAICS — ALL ZI firmographic data wins)
+  ELSE efx_primnaicscode  (Equifax NAICS — ALL EFX firmographic data wins)
+  OC / Liberty / Middesk / Trulioo IGNORED entirely in Pipeline B.
+
+CONCLUSION — a blank or 561499 NAICS means:
+  (a) No vendor returned a record for this business (no match in their database)
+  (b) All vendors returned null naics_code in their firmographic response
+  (c) AI fired and returned 561499 (no evidence + NAICS_OF_LAST_RESORT)
+  (d) AI returned an invalid code → removeNaicsCode() → replaced with 561499
+  NOT: Worth dropped a low-confidence value (Rule 4 prohibits this)
 """,
     "source_code_reference": (
-        "integration-service/lib/facts/sources.ts: getFromRequestResponse() "
-        "uses match.index / MAX_CONFIDENCE_INDEX (55) to compute confidence. "
-        "integration-service/lib/facts/factEngine.ts: isValidFactValue() checks if "
-        "a value is non-null/non-empty AFTER the vendor match was accepted — "
-        "there is no confidence check inside isValidFactValue(). "
-        "The threshold is applied in source.getter() which discards the entire "
-        "vendor response if confidence < minimum."
+        "integration-service/lib/aiEnrichment/aiNaicsEnrichment.ts: "
+        "NAICS_OF_LAST_RESORT='561499', removeNaicsCode(), minimumSources=1, maximumSources=3. "
+        "integration-service/lib/facts/rules.ts: factWithHighestConfidence(), "
+        "weightedFactSelector(), manualOverride() — no minimum cutoff anywhere. "
+        "integration-service/lib/facts/businessDetails/index.ts: naics_code source list. "
+        "warehouse-service/.../customer_table.sql: Pipeline B winner-takes-all SQL."
     ),
 }
+
+# ── The 6 Pipeline A rules (for display in the Streamlit app) ─────────────────
+PIPELINE_A_NAICS_RULES = [
+    {
+        "number": 1,
+        "name": "factWithHighestConfidence()",
+        "colour": "#60A5FA",
+        "description": (
+            "Sort all VALID sources by confidence. Highest wins if gap > 5% (WEIGHT_THRESHOLD=0.05). "
+            "Confidence = XGBoost entity-match score (match.index/55) for ZI/EFX/OC."
+        ),
+        "formula": "|conf_A - conf_B| > 0.05 → higher wins",
+    },
+    {
+        "number": 2,
+        "name": "weightedFactSelector() [Tie-break]",
+        "colour": "#34D399",
+        "description": (
+            "If top two sources within 5% confidence, break tie using source weight: "
+            "Middesk(2.0) > OC(0.9) > ZI(0.8) = Trulioo(0.8) > EFX(0.7) > SERP(0.3) > AI(0.1)"
+        ),
+        "formula": "Middesk(2.0) > OC(0.9) > ZI(0.8)=TRU(0.8) > EFX(0.7) > AI(0.1)",
+    },
+    {
+        "number": 3,
+        "name": "manualOverride() [ALWAYS WINS]",
+        "colour": "#FCD34D",
+        "description": (
+            "Analyst sets via PATCH /facts/.../override/{factName}. "
+            "Stored in override:{...} field. Evaluated FIRST before any other rule."
+        ),
+        "formula": "override present → wins unconditionally",
+    },
+    {
+        "number": 4,
+        "name": "NO minimum confidence cutoff",
+        "colour": "#F87171",
+        "description": (
+            "CRITICAL: NO 'confidence >= X' rule exists. "
+            "If one source returned a code at confidence 0.05 — it wins. "
+            "Low confidence IS visible in API (source.confidence) but does NOT block the code."
+        ),
+        "formula": "any valid value from any source → eligible to win",
+    },
+    {
+        "number": 5,
+        "name": "AI safety net",
+        "colour": "#A78BFA",
+        "description": (
+            "AI (GPT-5-mini, weight=0.1) triggers when n_non_AI_sources < minimumSources=1 "
+            "AND total_sources < maximumSources=3. Weight=0.1 so AI rarely wins."
+        ),
+        "formula": "n_non_AI_sources < 1 AND total_sources < 3 → AI fires",
+    },
+    {
+        "number": 6,
+        "name": 'Last resort: "561499"',
+        "colour": "#F87171",
+        "description": (
+            "After AI runs: if winning NAICS NOT in core_naics_code (invalid code), "
+            "removeNaicsCode() replaces with '561499'. "
+            "AI prompt also returns NAICS_OF_LAST_RESORT='561499' when it has no evidence."
+        ),
+        "formula": "code NOT IN core_naics_code → removeNaicsCode() → '561499'",
+    },
+]
 
 # ── Metadata for the app ───────────────────────────────────────────────────────
 ALL_SECTIONS = sorted(set(v["section"] for v in FIELD_LINEAGE.values()))

@@ -960,8 +960,7 @@ lineage([
     ');',
     '',
     '// isValidFactValue() returns FALSE for:',
-    '//   undefined, null, "", [], {}',
-    '//   (an empty/missing vendor field)',
+    '//   undefined, null, "", [], {}  (an empty/missing vendor field)',
     '',
     '// isValidFactValue() returns TRUE for:',
     '//   any non-empty string, number, array with items, object with keys',
@@ -970,6 +969,105 @@ lineage([
     '// After filtering:',
     '// If validOptions.length === 0 → no valid candidates → fact = NULL → AI enrichment fires',
     '// If validOptions.length >= 1 → best valid candidate wins per rule',
+])
+
+H2('IMPORTANT: The 6 Winner Selection Rules for naics_code (Pipeline A)')
+
+body(
+    'The following six rules govern exactly how the winning NAICS code is selected '
+    'in Pipeline A. These are confirmed from the integration-service source code '
+    '(factEngine.ts, rules.ts, aiNaicsEnrichment.ts, businessDetails/index.ts).'
+)
+spacer(4)
+
+tbl(
+    ['Rule', 'Name', 'Description', 'Source file'],
+    [
+        ['1',
+         'factWithHighestConfidence()',
+         'Sort all valid sources by confidence score. Highest wins outright '
+         'if the gap between the top two is > 5% (WEIGHT_THRESHOLD = 0.05). '
+         'Confidence = XGBoost entity-match score (match.index / 55) for ZI/EFX/OC. '
+         'Middesk: task-based score. AI: self-reported HIGH/MED/LOW.',
+         'rules.ts: factWithHighestConfidence'],
+        ['2',
+         'weightedFactSelector() [tie-break]',
+         'If top two sources have confidence within 5% of each other, '
+         'break the tie using source weight: '
+         'Middesk(2.0) > OC(0.9) > ZI(0.8) = Trulioo(0.8) > EFX(0.7) > SERP(0.3) > AI(0.1).',
+         'rules.ts: weightedFactSelector'],
+        ['3',
+         'manualOverride() [ALWAYS WINS]',
+         'If a Worth analyst has manually set a NAICS code via PATCH /facts/.../override/{factName}, '
+         'it is prepended as the FIRST rule before any other evaluation. '
+         'Manual values stored in override field of the fact. Beat any model or AI result.',
+         'rules.ts: manualOverride'],
+        ['4',
+         'NO minimum confidence cutoff',
+         'CRITICAL: There is NO "confidence must be >= X" rule for displaying NAICS. '
+         'If only one source returned a code at confidence 0.05 — it wins. '
+         'Low confidence IS visible in the API response (source.confidence field). '
+         'Worth never drops a NAICS code for being "too uncertain."',
+         'Confirmed by absence of cutoff in factEngine.ts and rules.ts'],
+        ['5',
+         'AI safety net',
+         'AI enrichment (GPT-5-mini, platform_id=31, weight=0.1) triggers '
+         'when fewer than minimumSources=1 non-AI sources returned a naics_code '
+         'AND total sources < maximumSources=3. '
+         'Weight=0.1 so AI rarely wins unless vendors found nothing.',
+         'aiNaicsEnrichment.ts: DEPENDENT_FACTS config'],
+        ['6',
+         'Last resort: "561499"',
+         'After AI runs: if the winning NAICS code does NOT exist in the '
+         'core_naics_code lookup table (invalid/hallucinated code), '
+         'removeNaicsCode() replaces it with 561499 ("All Other Business Support Services"). '
+         'This is the ONLY way 561499 enters via a code-validity check. '
+         'The AI also explicitly uses NAICS_OF_LAST_RESORT = "561499" in its prompt '
+         'as a fallback when it has no evidence.',
+         'aiNaicsEnrichment.ts: removeNaicsCode() + executePostProcessing()'],
+    ],
+    col_widths=[0.4, 2.3, 5.0, 1.8],
+    fs=8.5,
+)
+
+warn(
+    'CORRECTION FROM PREVIOUS VERSIONS OF THIS REPORT:\n\n'
+    'Earlier versions stated that entities with entity-match confidence below a threshold '
+    '(e.g. match.index < 25/55 = 0.45) would have their data rejected. '
+    'THIS IS INCORRECT for the NAICS field display.\n\n'
+    'Rule 4 above confirms: there is no minimum confidence cutoff for NAICS display. '
+    'The Fact Engine uses the highest valid value from whatever sources returned data, '
+    'regardless of how low that confidence is. Low confidence is surfaced in the API '
+    'response (source.confidence field) but does NOT block the code from being shown.\n\n'
+    'The entity-match confidence (XGBoost score) does affect which vendor\'s data is '
+    'pulled from Redshift — if a vendor\'s XGBoost match score is very low, it returns '
+    'fewer or no candidate records. But once a record is returned with any valid NAICS, '
+    'it is a valid candidate regardless of its confidence score.'
+)
+
+H2('How naics_code Gets Its Sources (businessDetails/index.ts)')
+body('The naics_code fact is wired to the following sources in priority order:')
+lineage([
+    '// From businessDetails/index.ts (Pipeline A source wiring):',
+    '',
+    'naics_code: [',
+    '    { source: sources.equifax,         path: "primnaicscode" },',
+    '    { source: sources.zoominfo,         path: "firmographic.zi_c_naics6" },',
+    '    {',
+    '        source: sources.opencorporates,',
+    '        fn: parse industry_code_uids for "us_naics-XXXXXX" entries',
+    '        // OC only has NAICS for US companies (as us_naics codes in industry_code_uids)',
+    '        // UK, EU, CA companies get blank naics_code from OC',
+    '    },',
+    '    { source: sources.serp,             path: "businessLegitimacyClassification.naics_code",  weight: 0.3 },',
+    '    { source: sources.business,         fn: extract from Trulioo standardizedIndustries,       weight: 0.7 },',
+    '    { source: sources.businessDetails,  path: "naics_code",  schema: /^\\d{6}$/,               weight: 0.2 },',
+    '    { source: sources.AINaicsEnrichment, path: "response.naics_code",                         weight: 0.1 },',
+    ']',
+    '',
+    'mcc_code_found:    [{ source: AINaicsEnrichment, path: "response.mcc_code" }]',
+    'mcc_code_from_naics: calculated from winning naics_code via rel_naics_mcc lookup table',
+    'mcc_code:          foundMcc?.value ?? inferredMcc?.value  (AI-provided preferred over derived)',
 ])
 
 ok(
@@ -1000,31 +1098,35 @@ tbl(
          'ZI wins NAICS competition independently\n'
          'NAICS="722511" stored from ZI',
          'OC legal name, OC SoS data\n+\nZI NAICS/MCC (correct result)\nNO 561499'],
-        ['OC entity-match score < threshold (e.g. 0.30)\n'
-         'ZI entity-match score < threshold (e.g. 0.28)\n'
-         'EFX entity-match score < threshold (e.g. 0.22)',
-         'ALL vendors rejected at entity-matching stage\n'
-         'No vendor data used for ANY field\n'
-         'NAICS validOptions = []\n'
-         'AI enrichment fires with only name+address\n'
-         'AI returns 561499 as last resort',
+        ['ALL vendors returned NO matching record\n'
+         '(no candidate found in their database\n'
+         'for this business name + address)\n'
+         'OC: no entry in oc_matches table\n'
+         'ZI:  no entry in zoominfo_matches table\n'
+         'EFX: no entry in efx_matches table',
+         'NAICS validOptions = [] (no source has any value)\n'
+         'AI enrichment fires: minimumSources=1 not met\n'
+         'AI receives only name + address\n'
+         'AI returns 561499 as NAICS_OF_LAST_RESORT\n'
+         'removeNaicsCode() validates: 561499 IS in\n'
+         'core_naics_code → stored as-is',
          'No vendor data shown\n'
          'NAICS=561499, MCC=5614\n'
          '"No Registry Data to Display"\n'
          'THIS IS THE 5,349 BUSINESSES CASE'],
-        ['OC entity-match passes (conf=0.70)\n'
-         'ZI entity-match passes (conf=0.65)\n'
-         'Both OC and ZI have no NAICS in their records\n'
-         'EFX also has no NAICS',
-         'All vendors pass entity-matching\n'
-         'But all have NULL naics_code in their response\n'
+        ['All vendors found a record\n'
+         '(entries exist in match tables)\n'
+         'But all have naics_code = NULL\n'
+         'in their firmographic records',
+         'All vendors pass — but naics_code is NULL\n'
+         'isValidFactValue(null) = FALSE for all\n'
          'NAICS validOptions = []\n'
          'AI enrichment fires\n'
          'AI returns 561499',
          'OC + ZI + EFX data shown for other fields\n'
          'But NAICS=561499, MCC=5614\n'
          'This is rare — vendors usually have NAICS\n'
-         'when they have a strong entity match'],
+         'when they have a matching firmographic record'],
     ],
     col_widths=[3.5, 3.0, 3.0],
     fs=8.5,
@@ -1032,13 +1134,16 @@ tbl(
 
 gap(
     'FOR THE 5,349 BUSINESSES IN THIS REPORT:\n'
-    'The root cause is the SECOND row of the table above — entity matching failure.\n'
-    'ALL vendors (ZI, EFX, OC) scored BELOW the minimum confidence threshold\n'
-    '(match.index < ~25/55, or XGBoost probability < 0.45).\n\n'
-    'This means the Fact Engine received ZERO vendor data for ANY field for these businesses.\n'
-    'Not just NAICS — all fields. The entity matching step rejected every vendor candidate.\n'
-    'The 5,349 businesses had no vendor data to use for NAICS OR for any other field.\n'
-    'AI enrichment fired as the only remaining option and returned 561499.'
+    'The root cause is the SECOND row of the table above — NO vendor match record found.\n'
+    'ALL vendors (ZI, EFX, OC) returned no matching entry in their match tables\n'
+    'for these businesses (no record in zoominfo_matches, efx_matches, or oc_matches).\n\n'
+    'This means the Fact Engine received ZERO valid naics_code values from any vendor.\n'
+    'AI enrichment fired (minimumSources=1 not met) with only business name + address.\n'
+    'AI returned NAICS_OF_LAST_RESORT = "561499" per its system prompt instructions.\n'
+    '561499 is valid in core_naics_code so removeNaicsCode() accepted it.\n\n'
+    'NOTE: This is NOT caused by a confidence threshold cutoff.\n'
+    'Rule 4 confirms: Worth has NO minimum confidence cutoff for NAICS display.\n'
+    'The problem is the vendors simply never found a matching record at all.'
 )
 
 H2('Fact Engine Rule Priority (applies to every field including NAICS)')
@@ -1666,20 +1771,41 @@ lineage([
     'T+0:20  Customer sees: NAICS 561499 / MCC 5614 in admin.joinworth.com KYB tab',
 ])
 
-H2('Pipeline B — Batch Redshift (Runs Separately)')
+H2('Pipeline B — Batch Redshift Winner-Takes-All (customer_table.sql)')
+body(
+    'Pipeline B uses a completely different selection mechanism — a single SQL CASE statement '
+    'that controls EVERY firmographic field (NAICS, employee count, revenue, company name, '
+    'address, city, ZIP, country, website, and more). This is the WINNER-TAKES-ALL rule:'
+)
 lineage([
-    '[!! GAP G6] Pipeline B also shows no NAICS:',
+    '-- From customer_table.sql (sp_recreate_customer_files procedure):',
+    '-- This one comparison controls ALL firmographic output fields:',
     '',
-    '  SQL (customer_table.sql):',
+    'COALESCE(',
     '    CASE',
-    '      WHEN zi.zi_match_confidence > efx.efx_match_confidence THEN zi.naics_code',
-    '      ELSE efx.naics_code',
-    '    END AS primary_naics_code',
+    '        WHEN COALESCE(zi_match_confidence, 0) > COALESCE(efx_match_confidence, 0)',
+    '            THEN CAST(NULLIF(REGEXP_REPLACE(zi_c_naics6, \'[^0-9]\', \'\'), \'\') AS INTEGER)',
+    '        ELSE CAST(NULLIF(REGEXP_REPLACE(efx_primnaicscode, \'[^0-9]\', \'\'), \'\') AS INTEGER)',
+    '    END,',
+    '    naics_code  -- fallback to existing naics_code or NULL',
+    ') AS primary_naics_code',
     '',
-    '  For all 5,349 businesses:',
-    '    zi_match_confidence  = NULL or 0  (no ZI match row)',
-    '    efx_match_confidence = NULL or 0  (no EFX match row)',
-    '    -> primary_naics_code = NULL (Pipeline B has no AI fallback -> stores NULL not 561499)',
+    '-- This same WHEN COALESCE(zi_match_confidence,0) > COALESCE(efx_match_confidence,0)',
+    '-- pattern also controls: employee count, revenue, company name, address, and more.',
+    '',
+    '-- OC is COMPLETELY IGNORED in Pipeline B for NAICS.',
+    '-- Even if OC had a better match (higher oc_match_confidence),',
+    '-- customer_table.sql never reads oc_match_confidence for the NAICS winner decision.',
+    '-- Liberty, Middesk, Trulioo also IGNORED (batch pipeline only uses ZI and EFX).',
+    '',
+    '-- For all 5,349 businesses in this report:',
+    '    zi_match_confidence  = 0 or NULL  (no ZI match record)',
+    '    efx_match_confidence = 0 or NULL  (no EFX match record)',
+    '    -> COALESCE(0,0) > COALESCE(0,0) = FALSE -> EFX branch runs',
+    '    -> efx_primnaicscode = NULL (no EFX record)',
+    '    -> COALESCE(NULL, existing_naics_code_or_NULL) = NULL',
+    '    -> primary_naics_code = NULL  (Pipeline B stores NULL, not 561499)',
+    '    (Pipeline B has no AI fallback -- NULL stays NULL)',
 ])
 
 H2('Gap Summary at Each Pipeline Step')
