@@ -257,19 +257,21 @@ if section == "🏷️  KYB API Field Lineage":
         """, "card-amber")
 
     def null_tip(is_error, key):
+        # NOTE: Streamlit sanitises HTML before rendering — title= attributes are
+        # unreliable and content bleeds into the cell. Use a plain styled badge only;
+        # the full cause breakdown lives in the expanders below the table.
         causes = FIELD_NULL_CAUSES.get(key, [])
-        lines = ["NULL IS AN ERROR — required field missing" if is_error
-                 else "NULL IS EXPECTED — Worth never suppresses based on confidence (Rule 4)", ""]
-        for ct, detail in causes[:5]:
-            info = NULL_CAUSE_TYPES.get(ct, {})
-            safe_detail = detail.replace('"', "'").replace('<', '').replace('>', '')
-            lines.append(f"{info.get('icon','•')} {info.get('label', ct)}: {safe_detail}")
-        tip = "\n".join(lines).replace("'", "`")
+        n_causes = len(causes)
         if is_error:
-            return (f"<span title='{tip}' style=\"color:#FCA5A5;font-weight:700;"
-                    f"border-bottom:2px dotted #FCA5A5;cursor:help;\">⚠️ Yes</span>")
-        return (f"<span title='{tip}' style=\"color:#6EE7B7;font-weight:700;"
-                f"border-bottom:2px dotted #6EE7B7;cursor:help;\">✅ No</span>")
+            return (
+                f'<span style="color:#FCA5A5;font-weight:700;font-size:.9rem;">'
+                f'⚠️ Error</span>'
+            )
+        return (
+            f'<span style="color:#6EE7B7;font-weight:700;font-size:.9rem;">'
+            f'✅ Expected</span>'
+            f'<br><span style="color:#475569;font-size:.72rem;">({n_causes} cause{"s" if n_causes!=1 else ""} below)</span>'
+        )
 
     # ── overview table (only on Overview page) ──
     if kyb_page == "🏠 Overview":
@@ -277,8 +279,10 @@ if section == "🏷️  KYB API Field Lineage":
         st.markdown(
             '<div style="background:#0F2040;border:1px solid #2563EB;border-radius:6px;'
             'padding:8px 14px;font-size:.82rem;color:#93C5FD;margin-bottom:10px;">'
-            '💡 Hover the <u>underlined</u> ✅ No / ⚠️ Yes cells for a tooltip with cause details. '
-            'Expand any row below for the full breakdown.</div>',
+            '💡 <b>Null = Expected</b> means Worth never suppresses this field based on confidence — '
+            'null means no vendor returned a value, not a Worth decision. '
+            '<b>Null = Error</b> means this required field should always be populated. '
+            'Expand any row below to see all possible null causes.</div>',
             unsafe_allow_html=True)
         thtml = """<table class="t"><tr>
           <th>API Field Path</th><th>Display Name</th><th>Section</th>
@@ -1771,11 +1775,12 @@ elif section == "🤖  AI Agent — Ask the Codebase":
 
     # Read key from environment variable or Streamlit secrets — never hardcoded
     import os
-    OPENAI_API_KEY = (
-        os.environ.get("OPENAI_API_KEY")
-        or st.secrets.get("OPENAI_API_KEY", "")
-        if hasattr(st, "secrets") else os.environ.get("OPENAI_API_KEY", "")
-    )
+    OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+    if not OPENAI_API_KEY:
+        try:
+            OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
+        except Exception:
+            OPENAI_API_KEY = ""
 
     card("""<b>How this agent works:</b><br>
     1. Your question is matched against 292 indexed chunks from the actual Worth AI source code
@@ -1894,30 +1899,42 @@ RULES:
 The user wants to verify that information in a Streamlit app about Worth AI field lineage
 is accurate and traceable to real source code."""
 
-            try:
-                from openai import OpenAI
-                client = OpenAI(api_key=OPENAI_API_KEY)
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        *history_for_gpt,
-                        {"role": "user", "content": (
-                            f"Question: {user_q}\n\n"
-                            f"Relevant code chunks from the Worth AI repositories:\n\n{context}"
-                        )},
-                    ],
-                    temperature=0.1,
-                    max_tokens=1200,
+            if not OPENAI_API_KEY:
+                answer = (
+                    "⚠️ No OPENAI_API_KEY found.\n\n"
+                    "To enable the AI agent, run the app with:\n"
+                    "  OPENAI_API_KEY='sk-...' python3 -m streamlit run full_app.py\n\n"
+                    "Or create ~/.streamlit/secrets.toml with:\n"
+                    "  OPENAI_API_KEY = 'sk-...'\n\n"
+                    "--- Retrieved code chunks (no GPT) ---\n"
                 )
-                answer = response.choices[0].message.content
-
-            except Exception as e:
-                # Fallback: return raw retrieved chunks without GPT
-                answer = f"⚠️ GPT call failed: {e}\n\nFalling back to raw retrieved chunks:\n\n"
                 for chunk in retrieved:
                     answer += f"\n📄 {chunk['repo']}/{chunk['path']} L{chunk['line_start']}–{chunk['line_end']}\n"
-                    answer += chunk['text'][:400] + "\n---\n"
+                    answer += chunk['text'][:500] + "\n---\n"
+            else:
+                try:
+                    from openai import OpenAI
+                    client = OpenAI(api_key=OPENAI_API_KEY)
+                    response = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            *history_for_gpt,
+                            {"role": "user", "content": (
+                                f"Question: {user_q}\n\n"
+                                f"Relevant code chunks from the Worth AI repositories:\n\n{context}"
+                            )},
+                        ],
+                        temperature=0.1,
+                        max_tokens=1200,
+                    )
+                    answer = response.choices[0].message.content
+
+                except Exception as e:
+                    answer = f"⚠️ GPT call failed: {e}\n\nFalling back to raw retrieved chunks:\n\n"
+                    for chunk in retrieved:
+                        answer += f"\n📄 {chunk['repo']}/{chunk['path']} L{chunk['line_start']}–{chunk['line_end']}\n"
+                        answer += chunk['text'][:400] + "\n---\n"
 
         # Store answer + sources
         st.session_state["agent_history"].append({
