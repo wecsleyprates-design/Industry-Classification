@@ -191,7 +191,7 @@ The Level 1 XGBoost match confidence score for the winning source.
 This is the raw output of `entity_matching_20250127 v1`.
 
 - **≥ 0.80** = matched (entity found in vendor database)
-- **< 0.80** = weak match (but code still used if it wins the ZI vs EFX comparison)
+- **< 0.80** = weak entity match. **Important:** Pipeline A Rule 4 states there is NO minimum confidence cutoff — a low-confidence NAICS code is still a valid candidate and wins if it is the highest available. Pipeline B (ZI vs EFX comparison in customer_table.sql) also uses this score to determine the winner, but does not drop either code for being below a threshold.
 
 #### `Prod: UK SIC returned`
 Whether OpenCorporates returned a UK SIC code in its `industry_code_uids`

@@ -361,7 +361,7 @@
     <div class="flow-arrow">↓</div>
     <div class="flow-box">② Integration tasks triggered asynchronously → Trulioo, ZoomInfo, OpenCorporates, SERP, Equifax each write raw JSON to <code>integration_data.request_response</code></div>
     <div class="flow-arrow">↓</div>
-    <div class="flow-box">③ FactEngine runs on demand → each source's getter queries <code>request_response WHERE platform_id = X</code> → extracts candidate code → <code>factWithHighestConfidence()</code> picks winner</div>
+    <div class="flow-box">③ FactEngine applies 6 rules per field: (1) <code>factWithHighestConfidence()</code> — highest conf wins if gap &gt;5%; (2) <code>weightedFactSelector()</code> tie-break by weight [Middesk 2.0 &gt; OC 0.9 &gt; ZI 0.8 &gt; EFX 0.7 &gt; AI 0.1]; (3) <code>manualOverride()</code> always wins first; (4) <strong>no minimum confidence cutoff</strong>; (5) AI safety net fires when &lt;1 non-AI NAICS source; (6) <code>removeNaicsCode()</code> — if AI returned invalid code → replaced with 561499 (NAICS_OF_LAST_RESORT)</div>
     <div class="flow-arrow">↓</div>
     <div class="flow-box">④ Kafka <code>UPDATE_NAICS_CODE</code> event: <code>{ business_id, naics_code, naics_title, platform }</code></div>
     <div class="flow-arrow">↓</div>

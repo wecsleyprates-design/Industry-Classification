@@ -297,9 +297,17 @@ td.par { color:#ED8936; font-weight:700; }
         <div style="font-size:0.78em;margin-top:6px">
           There is <strong>no ML model</strong> for choosing which NAICS code to assign.<br/><br/>
           The classification decision is made by a <strong>deterministic rule</strong>:<br/><br/>
-          <code style="font-size:0.9em">factWithHighestConfidence()</code><br/>
-          <code style="font-size:0.9em">winner = argmax(source.confidence × weight)</code><br/><br/>
-          This rule:<br/>
+          <strong>Pipeline A uses 6 rules (in order):</strong><br/>
+          <span style="font-size:0.82em">
+          1️⃣ <code>factWithHighestConfidence()</code> — highest conf wins if gap &gt; 5%<br/>
+          2️⃣ <code>weightedFactSelector()</code> — tie-break: Middesk(2.0)&gt;OC(0.9)&gt;ZI(0.8)&gt;EFX(0.7)&gt;AI(0.1)<br/>
+          3️⃣ <code>manualOverride()</code> — analyst override always wins<br/>
+          4️⃣ <strong>No minimum confidence cutoff</strong> — low-conf code still wins if only valid candidate<br/>
+          5️⃣ AI safety net — fires when &lt;1 non-AI source has naics_code<br/>
+          6️⃣ <code>removeNaicsCode()</code> — if AI code not in <code>core_naics_code</code> → replaced with <code>561499</code>
+          </span><br/><br/>
+          <strong>Pipeline B (customer_files):</strong> <code>WHEN zi_match_confidence &gt; efx_match_confidence THEN zi_c_naics6 ELSE efx_primnaicscode</code> — winner-takes-ALL fields; OC/Liberty/Middesk ignored.<br/><br/>
+          Worth AI limitations:<br/>
           • Cannot learn from feedback<br/>
           • Cannot detect conflicts systematically<br/>
           • Cannot output probabilities<br/>
@@ -510,7 +518,11 @@ td.par { color:#ED8936; font-weight:700; }
         <div style="font-size:0.76em;margin-top:5px">HIGH → 0.20 &nbsp;|&nbsp; MED → 0.15 &nbsp;|&nbsp; LOW → 0.10<br/>Even "HIGH" loses to OpenCorporates (0.90)</div>
       </div>
       <div class="card card-orange">
-        <div style="font-size:0.76em"><strong>Last resort:</strong> If NAICS not in <code>core_naics_code</code>, replaced with hardcoded <code>561499</code> (Administrative Services)</div>
+        <div style="font-size:0.76em"><strong>561499 appears via 3 paths (Rule 6):</strong><br/>
+        (a) No vendor found a matching record → AI fires → prompt returns <code>NAICS_OF_LAST_RESORT="561499"</code><br/>
+        (b) AI returned a hallucinated code not in <code>core_naics_code</code> → <code>removeNaicsCode()</code> → 561499<br/>
+        (c) AI had no evidence → prompt instructs last resort → 561499<br/>
+        <strong style="color:#FFB300">NOT caused by low confidence cutoff (Rule 4: no minimum threshold exists)</strong></div>
       </div>
     </div>
     <div>

@@ -474,18 +474,24 @@ td.par{color:#ED8936;font-weight:700;}
   <div class="two-col">
     <div>
       <div class="flow flow-r" style="text-align:left;padding:12px;margin-bottom:8px">
-        <div style="font-weight:800;font-size:0.68em;margin-bottom:6px">Phase 4A — Worth AI: Deterministic Rule</div>
-        <div style="font-size:0.78em">
-          <code>factWithHighestConfidence()</code><br/>
-          winner = argmax(confidence × weight)<br/><br/>
-          OC: 0.97 × 0.90 = 0.873 ← WINS<br/>
-          ZI: 0.94 × 0.80 = 0.752<br/>
-          EFX: 0.91 × 0.70 = 0.637<br/>
-          TRU: 0.62 × 0.70 = 0.434<br/><br/>
-          Output: NAICS 334118 (no probability)<br/>
-          UK SIC: ❌ dropped<br/>
-          AML signals: ❌ none<br/>
-          Confidence: ❌ text string only
+        <div style="font-weight:800;font-size:0.68em;margin-bottom:6px">Phase 4A — Worth AI: 6-Rule Fact Engine (Pipeline A)</div>
+        <div style="font-size:0.74em">
+          <strong>Rules applied in order:</strong><br/>
+          1. <code>factWithHighestConfidence()</code> — highest conf wins if gap &gt;5%<br/>
+          2. <code>weightedFactSelector()</code> — tie-break by weight<br/>
+          &nbsp;&nbsp; OC(0.9)&gt;ZI(0.8)&gt;EFX(0.7)&gt;AI(0.1)<br/>
+          3. <code>manualOverride()</code> — always wins first<br/>
+          4. <strong>No minimum confidence cutoff</strong><br/>
+          &nbsp;&nbsp; (low-conf candidate still wins if only valid)<br/>
+          5. AI safety net — fires when &lt;1 non-AI NAICS source<br/>
+          6. <code>removeNaicsCode()</code> — invalid code → 561499<br/><br/>
+          Example (all valid, gap &gt;5%):<br/>
+          OC: 0.97×0.90=0.873 ← WINS<br/>
+          ZI: 0.94×0.80=0.752<br/>
+          EFX: 0.91×0.70=0.637<br/><br/>
+          Pipeline B: WHEN zi_conf&gt;efx_conf THEN zi_naics ELSE efx_naics<br/>
+          (OC/Liberty/Middesk ignored; all fields from winner)<br/><br/>
+          Output: NAICS 334118 (no probability) · UK SIC ❌ · AML ❌
         </div>
       </div>
     </div>
@@ -679,7 +685,15 @@ P(NAICS 722511) = 0.14  ← LOW CONFIDENCE ⚠️
       <div class="flow flow-g" style="padding:6px"><strong>PHASE 1</strong> — Applicant submits form<br/>Name + Address + Country (only input from user)</div>
       <div class="flow" style="padding:6px"><strong>PHASE 2</strong> — 6 vendor API calls (parallel)<br/>OC/Trulioo: live API · Equifax/ZI: Redshift lookup<br/>All stored in integration_data.request_response</div>
       <div class="flow flow-o" style="padding:6px"><strong>PHASE 3</strong> — Entity Matching XGBoost (Model 1)<br/>26 features: name + address similarity<br/>Output: match_confidence per source</div>
-      <div class="flow flow-r" style="padding:8px;border-width:3px"><strong>PHASE 4A — WORTH AI</strong><br/>factWithHighestConfidence()<br/>→ ONE NAICS code (no probability)<br/>→ ONE MCC (via JOIN)<br/>→ NO UK SIC · NO AML signals</div>
+      <div class="flow flow-r" style="padding:8px;border-width:3px"><strong>PHASE 4A — WORTH AI (Pipeline A, 6 rules)</strong><br/>
+      1. factWithHighestConfidence() — highest wins if gap &gt;5%<br/>
+      2. weightedFactSelector() — tie-break by source weight<br/>
+      3. manualOverride() — always wins<br/>
+      4. No minimum confidence cutoff — low-conf still eligible<br/>
+      5. AI safety net — fires when &lt;1 non-AI NAICS source<br/>
+      6. removeNaicsCode() — invalid AI code → 561499<br/>
+      → ONE NAICS · ONE MCC (via lookup) · NO UK SIC · NO AML signals<br/>
+      <em style="font-size:0.78em">Pipeline B: WHEN zi_conf &gt; efx_conf THEN zi_naics ELSE efx_naics (winner-takes-all fields; OC ignored)</em></div>
     </div>
 
     <div style="display:flex;align-items:center;justify-content:center;flex-direction:column;gap:4px">

@@ -241,7 +241,7 @@ The Fact Engine computes **one confidence score per vendor source** (not per ind
 | Corporation Type | `corporation_type` | Middesk → OC | `business_entity_verification.entity_type` |
 | Number of Employees | `employee_count` | ZoomInfo → Equifax | `zoominfo_standard_ml_2.zi_c_employee_count` |
 | Annual Revenue | `annual_revenue` | Equifax → ZoomInfo | `equifax_us_standardized.efx_annual_sales` |
-| **NAICS Code** | **`naics_code`** | **Middesk (2.0) > OC (0.9) > ZI (0.8) > Trulioo (0.8) > EFX (0.7) > AI (0.1)** | **`rds_warehouse_public.facts`** |
+| **NAICS Code** | **`naics_code`** | **6 rules: (1) factWithHighestConfidence() — highest wins if gap >5%; (2) weightedFactSelector() tie-break: Middesk(2.0)>OC(0.9)>ZI(0.8)=Trulioo(0.8)>EFX(0.7)>AI(0.1); (3) manualOverride() always wins; (4) NO minimum confidence cutoff; (5) AI fires when <1 non-AI source has NAICS; (6) removeNaicsCode() — invalid AI code → 561499. Note: 561499 is a last resort output, NOT a source in the priority chain.** | **`rds_warehouse_public.facts`** |
 | **MCC Code** | **`mcc_code`** | **Path A: vendor direct → Path B: crosswalk → Path C: AI** | **`rds_warehouse_public.facts`** |
 | Industry Name | `industry` | Derived from NAICS sector (first 2 digits) | `core_business_industries` |
 | MBE / WBE / VBE | `minority_owned` etc. | Equifax → ZoomInfo | `equifax_us_standardized.efx_minority_business_enterprise` |

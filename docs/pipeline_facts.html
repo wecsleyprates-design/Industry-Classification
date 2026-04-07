@@ -392,7 +392,7 @@ ELSE efx_primnaicscode      -- Equifax NAICS + ALL EFX firmographic data wins</c
     </div>
     <div class="card card-purple">
       <h4>Rule 5 — AI safety net</h4>
-      <p>AI enrichment triggers when fewer than 3 sources returned a code.<br>Weight = 0.1 so AI rarely wins unless vendors found nothing.</p>
+      <p>AI enrichment triggers when fewer than <strong>1 non-AI source</strong> returned a <code>naics_code</code> (minimumSources=1) AND total sources &lt; maximumSources=3.<br>Weight = 0.1 so AI rarely wins unless vendors found nothing.</p>
     </div>
     <div class="card card-gray">
       <h4>Rule 6 — Last resort: <code>"561499"</code></h4>
@@ -469,7 +469,7 @@ ELSE efx_primnaicscode      -- Equifax NAICS + ALL EFX firmographic data wins</c
     <!-- naics_code -->
     <div class="fact-card">
       <div class="fn">naics_code</div>
-      <div class="fd">The 6-digit NAICS 2022 winner — chosen from all sources by highest XGBoost confidence.</div>
+      <div class="fd">The 6-digit NAICS 2022 winner — chosen by 6 rules: (1) highest confidence wins if gap &gt;5%; (2) source weight tie-break; (3) manual override first; (4) no minimum confidence cutoff; (5) AI safety net; (6) removeNaicsCode() → 561499 if invalid. Sources include EFX, ZI, OC (us_naics UIDs), SERP, Trulioo, AI (weight=0.1).</div>
       <div class="fs">Sources: Middesk · OC · ZI · TRU · EFX · AI</div>
       <div class="fs">Storage: <code>facts</code> + <code>data_businesses.naics_id</code></div>
       <div class="fp">{ "code": "722511", "source": { "confidence": 0.95, "platformId": 16 }, "alternatives": [...] }</div>

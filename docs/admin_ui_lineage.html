@@ -238,7 +238,7 @@
     <tr><td>Business Age</td><td><code>year_of_incorporation</code></td><td>Middesk SOS → OC</td><td><code>business_entity_verification.incorporation_date</code></td></tr>
     <tr><td>Corporation Type</td><td><code>corporation_type</code></td><td>Middesk → OC</td><td><code>business_entity_verification.entity_type</code></td></tr>
     <tr><td>Employees</td><td><code>employee_count</code></td><td>ZoomInfo → Equifax</td><td><code>zoominfo_standard_ml_2.zi_c_employee_count</code></td></tr>
-    <tr><td><strong>NAICS Code</strong></td><td><code>naics_code</code></td><td><strong>Middesk &gt; OC &gt; ZI &gt; Trulioo &gt; EFX &gt; AI &gt; 561499</strong></td><td><code>rds_warehouse_public.facts</code></td></tr>
+    <tr><td><strong>NAICS Code</strong></td><td><code>naics_code</code></td><td><strong>Middesk &gt; OC &gt; ZI &gt; Trulioo &gt; EFX &gt; AI (6 rules, no min cutoff) → <em>561499 is last resort</em> via removeNaicsCode() or AI prompt, not a priority source</strong></td><td><code>rds_warehouse_public.facts</code></td></tr>
     <tr><td><strong>MCC Code</strong></td><td><code>mcc_code</code></td><td><strong>Vendor direct → NAICS crosswalk → AI</strong></td><td><code>rds_warehouse_public.facts</code></td></tr>
     <tr><td>Industry Name</td><td><code>industry</code></td><td>First 2 digits of NAICS → sector lookup</td><td><code>core_business_industries</code></td></tr>
     <tr><td>MBE / WBE / VBE</td><td><code>minority_owned</code> etc.</td><td>Equifax → ZoomInfo</td><td><code>equifax_us_standardized.efx_minority_business_enterprise</code></td></tr>

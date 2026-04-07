@@ -509,7 +509,7 @@ Result: naics_code = "541511"  source=Middesk  confidence=0.95
 
 **[PIPELINE A ONLY]**
 
-Three edge cases arise: no source returned a code at all, the winning source returned an invalid code, or no source passed the confidence threshold.
+Three edge cases arise: no source returned a code at all, the winning source returned an invalid code, or (contrary to common assumption) the Fact Engine does NOT drop codes for low confidence — Rule 4 confirms there is no minimum confidence cutoff.
 
 #### Case 1 — No source returned any NAICS code
 
@@ -528,9 +528,9 @@ What the Fact Engine does [rules.ts line 45]:
   → AI Enrichment triggered (if < 3 sources already returned NAICS)
 ```
 
-#### Case 2 — No source hit the confidence threshold
+#### Case 2 — All sources returned values but all have low confidence (Rule 4: no cutoff applies)
 
-There is **no hard minimum confidence threshold** in the Fact Engine. The code in `rules.ts`:
+There is **no hard minimum confidence threshold** in the Fact Engine (this is Rule 4 of the 6 winner-selection rules). The code in `rules.ts`:
 
 ```typescript
 // factWithHighestConfidence() [rules.ts line 36–56]:
