@@ -1832,3 +1832,252 @@ FIELD_CODE_REFERENCES = {
             "confidence = 0.15 + isTaskSuccess(middesk,'name')×0.2 + ... → business_verified when confidence high"),
     ],
 }
+
+# ── Per-aspect provenance: WHAT is hardcoded vs WHAT comes from source code ───
+# Structure: FIELD_PROVENANCE[field_key][aspect] = list of provenance dicts
+# aspect can be: "description", "admin_ui", "transformation", "w360", "sources",
+#                "source_<vendor_key>", "storage", "null_reason", "rule"
+
+def prov(claim, origin_type, repo=None, path=None, line_start=None, line_end=None,
+         how_to_verify=None, is_hardcoded=False, spreadsheet_ref=None):
+    """Build a single provenance entry."""
+    url = None
+    if repo and path and line_start:
+        base = REPO_BASE_URLS.get(repo, "")
+        url = f"{base}/{path}#L{line_start}" + (f"-L{line_end}" if line_end else "")
+    return {
+        "claim": claim,
+        "origin_type": origin_type,        # "source_code", "hardcoded_from_reading", "spreadsheet", "admin_ui_observation"
+        "is_hardcoded": is_hardcoded,       # True if value is hardcoded in lineage_data.py (not read at runtime)
+        "repo": repo,
+        "path": path,
+        "line_start": line_start,
+        "line_end": line_end,
+        "url": url,
+        "how_to_verify": how_to_verify,
+        "spreadsheet_ref": spreadsheet_ref,
+    }
+
+FIELD_PROVENANCE = {
+
+  "tin.value": {
+    "description": [
+        prov(
+            "tin.value is the raw EIN submitted by the applicant",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/kyb/index.ts",
+            line_start=399, line_end=428,
+            how_to_verify="Open kyb/index.ts line 399. The tin_submitted getter reads businessDetails.tin and calls maskString(tin). The 'businessDetails' source is the applicant's onboarding submission.",
+            is_hardcoded=True,
+        ),
+        prov(
+            "The VERIFICATION field is tin_match_boolean.value (true/false), not tin.value",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/kyb/index.ts",
+            line_start=482, line_end=491,
+            how_to_verify="Open kyb/index.ts line 482. tin_match_boolean: { dependencies: ['tin_match'], fn: (engine) => engine.getResolvedFact('tin_match')?.value?.status === 'success' }. TRUE = success, FALSE = anything else.",
+            is_hardcoded=True,
+        ),
+        prov(
+            "TRUE = TIN matches legal name per IRS via Middesk TIN task",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/kyb/index.ts",
+            line_start=437, line_end=449,
+            how_to_verify="Open kyb/index.ts line 437. tin_match getter: middesk.reviewTasks.find(task => task.key === 'tin'). Returns {status, message, sublabel}. status='success' means IRS confirmed TIN+name match.",
+            is_hardcoded=True,
+        ),
+    ],
+    "admin_ui": [
+        prov(
+            "Admin UI location: KYB → Background → Business Registration card: Tax ID Number (EIN)",
+            "admin_ui_observation",
+            how_to_verify="Observed by reading the admin.joinworth.com portal UI and the case-service API that builds the KYB response. Also in the UCM Working Session spreadsheet [WS] UCM Q/A tab row for tin.value.",
+            is_hardcoded=True,
+            spreadsheet_ref="[WS] UCM Q/A tab, row 2 — API Field Name: tin.value, W360: Yes",
+        ),
+    ],
+    "transformation": [
+        prov(
+            "Requires transformation: tin.value (integer EIN) → tin_match_boolean.value (boolean)",
+            "spreadsheet",
+            how_to_verify="Confirmed in [WS] UCM Q/A spreadsheet column F 'Requires Transformation?' and column H 'Decisions/To-Dos': 'UCM should use the tin_match_boolean.value which includes true or false'.",
+            is_hardcoded=True,
+            spreadsheet_ref="[WS] UCM Q/A tab row 2, columns E-H",
+        ),
+    ],
+    "w360": [
+        prov(
+            "Worth 360 Report: Yes",
+            "spreadsheet",
+            how_to_verify="Column I 'W360' in [WS] UCM Q/A spreadsheet row 2 = 'Yes'. Also confirmed in column H decision: 'Need to display on Worth 360 Report'.",
+            is_hardcoded=True,
+            spreadsheet_ref="[WS] UCM Q/A tab row 2, column I = 'Yes'",
+        ),
+    ],
+    "source_middesk": [
+        prov(
+            "Middesk weight=2.0, platform_id=16",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/sources.ts",
+            line_start=251, line_end=253,
+            how_to_verify="Open sources.ts line 251-253: platformId: INTEGRATION_ID.MIDDESK, weight: 2",
+            is_hardcoded=True,
+        ),
+        prov(
+            "Confidence model: base 0.15 + 0.20 each for name/TIN/address/SOS tasks passing (max 0.95)",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/sources.ts",
+            line_start=233, line_end=238,
+            how_to_verify="Open sources.ts lines 233-238: confidence = 0.15; confidence += isTaskSuccess(middeskRecord, 'name') ? 0.2 : 0; confidence += isTaskSuccess(middeskRecord, 'tin') ? 0.2 : 0; ... etc.",
+            is_hardcoded=True,
+        ),
+        prov(
+            "Storage: integration_data.request_response (platform_id=16)",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/sources.ts",
+            line_start=49, line_end=70,
+            how_to_verify="Open sources.ts line 49: db('integration_data.request_response').where({business_id, platform_id: INTEGRATION_ID.MIDDESK}). All vendor raw responses stored in this table.",
+            is_hardcoded=True,
+        ),
+        prov(
+            "For tin.value: reviewTasks[key='tin'].status — SUCCESS maps to TRUE",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/kyb/index.ts",
+            line_start=437, line_end=449,
+            how_to_verify="Open kyb/index.ts line 437: tin_match getter reads middesk.reviewTasks.find(task => task.key === 'tin').",
+            is_hardcoded=True,
+        ),
+    ],
+    "source_businessDetails": [
+        prov(
+            "Applicant Submission weight=1.0, platform_id=0 — submitted at onboarding",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/sources.ts",
+            line_start=147, line_end=165,
+            how_to_verify="Open sources.ts line 147-165: businessDetails source getter reads from the case-service data_businesses record. Weight=1 (default). This is the applicant's submitted data.",
+            is_hardcoded=True,
+        ),
+        prov(
+            "Storage: rds_cases_public.data_businesses (submitted TIN masked)",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="case-service/src/api/v1/modules/case-management/case-management.ts",
+            line_start=1555, line_end=1574,
+            how_to_verify="Open case-management.ts line 1555: getCaseByIDQuery SELECT includes data_businesses. The TIN is stored masked. Raw TIN used for Middesk submission only.",
+            is_hardcoded=True,
+        ),
+    ],
+    "source_trulioo": [
+        prov(
+            "Trulioo weight=0.8, platform_id=38",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/sources.ts",
+            line_start=805, line_end=810,
+            how_to_verify="Open sources.ts line 805-810: platformId: INTEGRATION_ID.TRULIOO, weight: 0.8 — comment says 'High weight for UK/Canada businesses'.",
+            is_hardcoded=True,
+        ),
+        prov(
+            "Trulioo performs TIN-to-name match for UK/Canada; falls back for US",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/rules.ts",
+            line_start=134, line_end=160,
+            how_to_verify="Open rules.ts line 134: truliooPreferredRule — checks if business country is GB or CA. If yes, prefers Trulioo source. US businesses fall back to factWithHighestConfidence.",
+            is_hardcoded=True,
+        ),
+    ],
+    "rule": [
+        prov(
+            "factWithHighestConfidence — Middesk wins (weight=2.0) when TIN task passes",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/rules.ts",
+            line_start=36, line_end=57,
+            how_to_verify="Open rules.ts line 36: factWithHighestConfidence reduces over candidates, picking highest confidence. Middesk base confidence=0.75 (all 4 tasks pass) beats ZI=0.8×match_conf and OC=0.9×match_conf for most US businesses.",
+            is_hardcoded=True,
+        ),
+        prov(
+            "manualOverride always checked first — analyst override beats any vendor",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/rules.ts",
+            line_start=109, line_end=123,
+            how_to_verify="Open rules.ts line 109: manualOverride fn reads engine.getManualSource()?.rawResponse?.[factName]. If present → returned immediately before any other rule.",
+            is_hardcoded=True,
+        ),
+    ],
+  },
+
+  "sos_active.value": {
+    "description": [
+        prov(
+            "sos_active is computed from sos_filings — true if any filing has active=true",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/kyb/index.ts",
+            line_start=1426, line_end=1440,
+            how_to_verify="Open kyb/index.ts line 1426. sos_active getter: checks if any sos_filings item has active===true.",
+            is_hardcoded=True,
+        ),
+    ],
+    "source_middesk": [
+        prov(
+            "sos_filings from Middesk: registrations[n].status === 'active' → active=true",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/kyb/index.ts",
+            line_start=717, line_end=780,
+            how_to_verify="Open kyb/index.ts line 717. sos_filings Middesk source maps registrations[n]: { active: status==='active', entity_type, filing_date, state, officers }.",
+            is_hardcoded=True,
+        ),
+    ],
+  },
+
+  "mcc_code": {
+    "description": [
+        prov(
+            "mcc_code_found = AI direct response (mcc_code from GPT)",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/businessDetails/index.ts",
+            line_start=391, line_end=415,
+            how_to_verify="Open businessDetails/index.ts line 391. mcc_code_found: { source: AINaicsEnrichment, path: 'response.mcc_code' }.",
+            is_hardcoded=True,
+        ),
+        prov(
+            "mcc_code_from_naics calculated via rel_naics_mcc lookup table",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/facts/businessDetails/index.ts",
+            line_start=399, line_end=415,
+            how_to_verify="Open businessDetails/index.ts line 399. mcc_code_from_naics: depends on naics_code, calls internalGetNaicsCode(naics_code) then finds mcc_code from result.",
+            is_hardcoded=True,
+        ),
+        prov(
+            "NAICS_OF_LAST_RESORT = '561499' — AI returns this when no evidence",
+            "source_code",
+            repo="SIC-UK-Codes",
+            path="integration-service/lib/aiEnrichment/aiNaicsEnrichment.ts",
+            line_start=67, line_end=67,
+            how_to_verify="Open aiNaicsEnrichment.ts line 67: public readonly NAICS_OF_LAST_RESORT = '561499'",
+            is_hardcoded=True,
+        ),
+    ],
+  },
+}
+
+PROVENANCE_ORIGIN_LABELS = {
+    "source_code":             ("🔗 Source Code", "#60A5FA"),
+    "hardcoded_from_reading":  ("📝 Hardcoded (derived from reading source code)", "#FCD34D"),
+    "spreadsheet":             ("📊 Spreadsheet", "#34D399"),
+    "admin_ui_observation":    ("🖥️ Admin UI observation", "#A78BFA"),
+}

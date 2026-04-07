@@ -18,6 +18,7 @@ from lineage_data import (
     PIPELINE_OVERVIEW, NULL_CAUSE_TYPES, FIELD_NULL_CAUSES,
     CONFIDENCE_SUPPRESSION_FACT, PIPELINE_A_NAICS_RULES,
     FIELD_CODE_REFERENCES, REPO_BASE_URLS,
+    FIELD_PROVENANCE, PROVENANCE_ORIGIN_LABELS,
 )
 from rag_builder import load_or_build, search as rag_search
 
@@ -159,6 +160,57 @@ def card(text, style=""):
 
 def sh(text):
     st.markdown(f'<div class="sh">{text}</div>', unsafe_allow_html=True)
+
+def show_provenance(field_key, aspect, label=None):
+    """
+    Render an inline '📍 Where does this come from?' expander
+    for a specific aspect (description, admin_ui, transformation, w360,
+    source_middesk, source_trulioo, rule, null_reason, etc.)
+    of a given field.
+    """
+    provs = FIELD_PROVENANCE.get(field_key, {}).get(aspect, [])
+    if not provs:
+        return
+    expander_label = f"📍 Where does this come from? {'— ' + label if label else ''}"
+    with st.expander(expander_label, expanded=False):
+        for p in provs:
+            otype = p.get("origin_type", "hardcoded_from_reading")
+            olabel, ocolor = PROVENANCE_ORIGIN_LABELS.get(
+                otype, ("📝 Documented", "#94A3B8"))
+
+            is_hc = p.get("is_hardcoded", False)
+            hc_note = (
+                "⚠️ This value is **hardcoded** in `lineage_data.py` — it was "
+                "written by reading the source code manually, not read at runtime "
+                "from any database or API. Click the link below to verify."
+                if is_hc else
+                "✅ This value is read directly from a live data source."
+            )
+
+            st.markdown(
+                f'<div style="background:#0A1628;border:1px solid #1E3A5F;'
+                f'border-left:4px solid {ocolor};border-radius:6px;'
+                f'padding:10px 14px;margin-bottom:8px;">'
+                f'<div style="font-size:.78rem;color:{ocolor};font-weight:700;'
+                f'margin-bottom:4px;">{olabel}</div>'
+                f'<div style="color:#E2E8F0;font-size:.88rem;font-weight:600;'
+                f'margin-bottom:4px;">{p.get("claim","")}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            st.caption(hc_note)
+
+            if p.get("url"):
+                st.markdown(
+                    f'🔗 **Verify in source code:** '
+                    f'[{p["repo"]} / {p["path"]} L{p["line_start"]}–{p.get("line_end",p["line_start"])}]({p["url"]})'
+                )
+            if p.get("spreadsheet_ref"):
+                st.markdown(f'📊 **Spreadsheet reference:** {p["spreadsheet_ref"]}')
+            if p.get("how_to_verify"):
+                st.markdown(f'**How to verify:** {p["how_to_verify"]}')
+            st.markdown("---")
+
 
 # ═══════════════════════════════════════════════════════════════════
 # SIDEBAR NAVIGATION
@@ -336,18 +388,31 @@ if section == "🏷️  KYB API Field Lineage":
         st.markdown(f'<div class="cb">API Field:  {fld["api_field_path"]}\nFact name:  {fld["api_fact_name"]}</div>',
                     unsafe_allow_html=True)
 
-        t1,t2,t3,t4,t5,t6,t7 = st.tabs(["📖 Description","📡 Sources","🗄️ Storage","⚠️ Null/Blank","📋 Rules","❓ UCM Q&A","📚 Source Citations"])
+        t1,t2,t3,t4,t5,t6 = st.tabs(["📖 Description","📡 Sources","🗄️ Storage","⚠️ Null/Blank","📋 Rules","❓ UCM Q&A"])
 
         with t1:
             st.markdown(fld["description"])
+            show_provenance(sel, "description", "field description text")
+            st.markdown("")
             card(f'📍 <b>Admin UI:</b> {fld["admin_ui_location"]}', "card-purple")
+            show_provenance(sel, "admin_ui", "Admin UI location")
             c1,c2,c3 = st.columns(3)
             c1.markdown(f"**Requires transformation?** {'✅ Yes' if fld['requires_transformation'] else '❌ No'}")
             if fld.get("transformation_note"): c1.caption(fld["transformation_note"])
+            with c1: show_provenance(sel, "transformation", "transformation requirement")
             c2.markdown(f"**Worth 360?** {'✅ Yes' if fld.get('w360') else '❌ No'}")
+            with c2: show_provenance(sel, "w360", "Worth 360 flag")
             c3.markdown(f"**W360 display:** {'Decisional' if fld['data_type']=='Risk' else 'Info/Decisional'}")
 
         with t2:
+            st.markdown(
+                '<div class="card" style="background:#0A1628;border-left-color:#FCD34D;font-size:.82rem;">'
+                '<b style="color:#FCD34D;">⚠️ About source weights and confidence models:</b> '
+                '<span style="color:#94A3B8;">The weights, platform IDs, and confidence formulas shown below '
+                'are hardcoded in lineage_data.py after reading the actual source code. '
+                'Click <b>📍 Where does this come from?</b> under each source to see '
+                'the exact file + line that proves each value.</span></div>',
+                unsafe_allow_html=True)
             for sk in fld["sources"]:
                 src = SOURCES.get(sk, {})
                 detail = fld.get("source_detail", {}).get(sk, "")
@@ -361,6 +426,8 @@ if section == "🏷️  KYB API Field Lineage":
                         st.markdown(f"**Confidence Model:** {src.get('confidence_model','?')}")
                         st.markdown(f"**Storage:** `{src.get('storage','?')}`")
                     if detail: st.markdown(f"**For this field:** {detail}")
+                    # Inline provenance for this specific source
+                    show_provenance(sel, f"source_{sk}", f"{src.get('name',sk)} — weight, confidence model, storage")
             flow = "\n".join(f"  {SOURCES.get(s,{}).get('name',s)} (pid={SOURCES.get(s,{}).get('platform_id','?')}, w={SOURCES.get(s,{}).get('weight','?')})"
                              for s in fld["sources"])
             st.code(f"Business Submitted\n       │\n       ▼\nVendor lookups (parallel):\n{flow}\n       │\n       ▼\nFact Engine: {fld['fact_engine_rule']}\n       │\n       ▼\nrds_warehouse_public.facts  name='{fld['api_fact_name']}'\n       │\n       ▼\nAdmin UI: {fld['admin_ui_location']}", language=None)
@@ -393,6 +460,7 @@ WHERE business_id = '<id>'
 
         with t5:
             st.markdown(f'<div class="cb">Rule: {fld["fact_engine_rule"]}</div>', unsafe_allow_html=True)
+            show_provenance(sel, "rule", "Fact Engine rule applied")
             sorted_src = sorted([(k,SOURCES[k]) for k in fld["sources"] if k in SOURCES],
                                 key=lambda x: -x[1].get("weight",0))
             thtml2 = '<table class="t"><tr><th>Source</th><th>Platform ID</th><th>Weight</th><th>Confidence Model</th></tr>'
@@ -420,39 +488,6 @@ WHERE business_id = '<id>'
                 else: st.warning("No confirmed answers yet.")
             if fld.get("ucm_rule"):
                 card(f'⚖️ <b>UCM Rule:</b> {fld["ucm_rule"]}', "card-purple")
-
-        with t7:
-            st.markdown("### 📚 Source Citations — Where This Information Comes From")
-            st.markdown(
-                '<div class="card" style="background:#061B1B;border-left-color:#2DD4BF;">'
-                '<b style="color:#2DD4BF;">How to verify this information</b><br>'
-                '<span style="color:#94A3B8;font-size:.85rem;">'
-                'Every claim in this app was derived from reading the actual source code. '
-                'Each citation below links to the exact file + line range in the GitHub repo '
-                'where the claim is confirmed. Click any link to verify in your browser.'
-                '</span></div>', unsafe_allow_html=True)
-
-            refs = FIELD_CODE_REFERENCES.get(sel, [])
-            if refs:
-                for r in refs:
-                    url = r.get("url", "")
-                    gh_label = f"{r['repo']} / {r['path']}" + (f" L{r['line_start']}–{r['line_end']}" if r['line_start'] else "")
-                    st.markdown(
-                        f'<div class="card" style="background:#0E1E38;border-left-color:#60A5FA;margin-bottom:8px;">'
-                        f'<div style="font-size:.78rem;color:#60A5FA;font-family:Courier New;">'
-                        f'<a href="{url}" target="_blank" style="color:#60A5FA;text-decoration:none;">🔗 {gh_label}</a>'
-                        f'</div>'
-                        f'<div style="color:#FCD34D;font-weight:600;margin:4px 0 2px 0;font-size:.88rem;">Claim: {r["claim"]}</div>'
-                        f'<div style="color:#94A3B8;font-size:.82rem;">{r["what_it_proves"]}</div>'
-                        f'</div>', unsafe_allow_html=True)
-            else:
-                st.info("Detailed code citations for this field are not yet mapped. Use the 🤖 AI Agent to search for it — ask: 'Where is the code for {sel}?'")
-
-            st.markdown("---")
-            st.markdown("#### Repos Available for Verification")
-            for repo_name, base_url in REPO_BASE_URLS.items():
-                st.markdown(f"- **{repo_name}**: [{base_url}]({base_url})")
-            st.caption("Note: joinworth/microsites and joinworth/report-service are private org repos not accessible from this agent.")
 
     # ══════════════════════════════════════════════════
     # KYB PAGE: SOURCE REFERENCE
