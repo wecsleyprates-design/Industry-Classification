@@ -161,55 +161,61 @@ def card(text, style=""):
 def sh(text):
     st.markdown(f'<div class="sh">{text}</div>', unsafe_allow_html=True)
 
-def show_provenance(field_key, aspect, label=None):
+def _provenance_body(provs):
+    """Render provenance entries inline (no expander wrapper)."""
+    for p in provs:
+        otype = p.get("origin_type", "hardcoded_from_reading")
+        olabel, ocolor = PROVENANCE_ORIGIN_LABELS.get(otype, ("📝 Documented", "#94A3B8"))
+        is_hc = p.get("is_hardcoded", False)
+        hc_note = (
+            "⚠️ **Hardcoded** in `lineage_data.py` — written by reading source code, "
+            "not fetched at runtime. Click the link to verify."
+            if is_hc else
+            "✅ Read directly from a live data source at runtime."
+        )
+        st.markdown(
+            f'<div style="background:#0A1628;border:1px solid #1E3A5F;'
+            f'border-left:4px solid {ocolor};border-radius:6px;'
+            f'padding:8px 12px;margin:4px 0 4px 0;">'
+            f'<span style="font-size:.75rem;color:{ocolor};font-weight:700;">{olabel}</span><br>'
+            f'<span style="color:#E2E8F0;font-size:.86rem;font-weight:600;">{p.get("claim","")}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        st.caption(hc_note)
+        if p.get("url"):
+            st.markdown(
+                f'🔗 **Source:** [{p["repo"]} / {p["path"]} '
+                f'L{p["line_start"]}–{p.get("line_end", p["line_start"])}]({p["url"]})'
+            )
+        if p.get("spreadsheet_ref"):
+            st.markdown(f'📊 **Spreadsheet:** {p["spreadsheet_ref"]}')
+        if p.get("how_to_verify"):
+            st.caption(f'How to verify: {p["how_to_verify"]}')
+        st.markdown("---")
+
+
+def show_provenance(field_key, aspect, label=None, inline=False):
     """
-    Render an inline '📍 Where does this come from?' expander
-    for a specific aspect (description, admin_ui, transformation, w360,
-    source_middesk, source_trulioo, rule, null_reason, etc.)
-    of a given field.
+    Render provenance for a specific aspect of a field.
+    inline=True  → renders content directly (no expander) — use inside st.expander()
+    inline=False → wraps in a '📍 Where does this come from?' expander (default)
     """
     provs = FIELD_PROVENANCE.get(field_key, {}).get(aspect, [])
     if not provs:
         return
-    expander_label = f"📍 Where does this come from? {'— ' + label if label else ''}"
-    with st.expander(expander_label, expanded=False):
-        for p in provs:
-            otype = p.get("origin_type", "hardcoded_from_reading")
-            olabel, ocolor = PROVENANCE_ORIGIN_LABELS.get(
-                otype, ("📝 Documented", "#94A3B8"))
-
-            is_hc = p.get("is_hardcoded", False)
-            hc_note = (
-                "⚠️ This value is **hardcoded** in `lineage_data.py` — it was "
-                "written by reading the source code manually, not read at runtime "
-                "from any database or API. Click the link below to verify."
-                if is_hc else
-                "✅ This value is read directly from a live data source."
-            )
-
-            st.markdown(
-                f'<div style="background:#0A1628;border:1px solid #1E3A5F;'
-                f'border-left:4px solid {ocolor};border-radius:6px;'
-                f'padding:10px 14px;margin-bottom:8px;">'
-                f'<div style="font-size:.78rem;color:{ocolor};font-weight:700;'
-                f'margin-bottom:4px;">{olabel}</div>'
-                f'<div style="color:#E2E8F0;font-size:.88rem;font-weight:600;'
-                f'margin-bottom:4px;">{p.get("claim","")}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-            st.caption(hc_note)
-
-            if p.get("url"):
-                st.markdown(
-                    f'🔗 **Verify in source code:** '
-                    f'[{p["repo"]} / {p["path"]} L{p["line_start"]}–{p.get("line_end",p["line_start"])}]({p["url"]})'
-                )
-            if p.get("spreadsheet_ref"):
-                st.markdown(f'📊 **Spreadsheet reference:** {p["spreadsheet_ref"]}')
-            if p.get("how_to_verify"):
-                st.markdown(f'**How to verify:** {p["how_to_verify"]}')
-            st.markdown("---")
+    if inline:
+        st.markdown(
+            f'<div style="background:#0A1220;border-left:3px solid #2563EB;'
+            f'padding:6px 10px;margin:6px 0;font-size:.78rem;color:#60A5FA;">'
+            f'📍 <b>Provenance — {label or aspect}</b></div>',
+            unsafe_allow_html=True,
+        )
+        _provenance_body(provs)
+    else:
+        expander_label = f"📍 Where does this come from? {'— ' + label if label else ''}"
+        with st.expander(expander_label, expanded=False):
+            _provenance_body(provs)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -427,7 +433,8 @@ if section == "🏷️  KYB API Field Lineage":
                         st.markdown(f"**Storage:** `{src.get('storage','?')}`")
                     if detail: st.markdown(f"**For this field:** {detail}")
                     # Inline provenance for this specific source
-                    show_provenance(sel, f"source_{sk}", f"{src.get('name',sk)} — weight, confidence model, storage")
+                    # inline=True because we're already inside st.expander — nesting is forbidden
+                    show_provenance(sel, f"source_{sk}", f"{src.get('name',sk)} — weight, confidence model, storage", inline=True)
             flow = "\n".join(f"  {SOURCES.get(s,{}).get('name',s)} (pid={SOURCES.get(s,{}).get('platform_id','?')}, w={SOURCES.get(s,{}).get('weight','?')})"
                              for s in fld["sources"])
             st.code(f"Business Submitted\n       │\n       ▼\nVendor lookups (parallel):\n{flow}\n       │\n       ▼\nFact Engine: {fld['fact_engine_rule']}\n       │\n       ▼\nrds_warehouse_public.facts  name='{fld['api_fact_name']}'\n       │\n       ▼\nAdmin UI: {fld['admin_ui_location']}", language=None)
