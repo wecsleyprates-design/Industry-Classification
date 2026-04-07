@@ -184,11 +184,20 @@ with st.sidebar:
     st.markdown("---")
 
     if section == "🏷️  KYB API Field Lineage":
-        st.markdown("**Filters**")
-        f_section = st.multiselect("Section", ALL_SECTIONS, default=ALL_SECTIONS)
-        f_type    = st.multiselect("Data Type", ALL_DATA_TYPES, default=ALL_DATA_TYPES)
-        f_null    = st.selectbox("Null / Blank is…",
-                                  ["All", "Expected Behaviour", "Potential Error"])
+        kyb_page = st.radio("View",
+            ["🏠 Overview", "🔎 Field Explorer",
+             "📡 Source Reference", "📋 Pipeline Diagram",
+             "❓ UCM Q&A Tracker"],
+            label_visibility="collapsed")
+        st.markdown("---")
+        if kyb_page in ("🏠 Overview", "🔎 Field Explorer"):
+            st.markdown("**Filters**")
+            f_section = st.multiselect("Section", ALL_SECTIONS, default=ALL_SECTIONS)
+            f_type    = st.multiselect("Data Type", ALL_DATA_TYPES, default=ALL_DATA_TYPES)
+            f_null    = st.selectbox("Null / Blank is…",
+                                      ["All", "Expected Behaviour", "Potential Error"])
+        else:
+            f_section = ALL_SECTIONS; f_type = ALL_DATA_TYPES; f_null = "All"
     elif section == "⚠️  NAICS / MCC 561499 Report":
         naics_page = st.radio("View",
             ["📊 Executive Summary", "🔍 Root-Cause Analysis",
@@ -212,32 +221,7 @@ with st.sidebar:
 if section == "🏷️  KYB API Field Lineage":
     sh("🏷️  KYB API Field Lineage — UCM Working Session Mapping")
 
-    # ── metrics ──
-    c1,c2,c3,c4,c5 = st.columns(5)
-    with c1: st.markdown(styled_metric("Fields Mapped", len(FIELD_LINEAGE)), unsafe_allow_html=True)
-    with c2: st.markdown(styled_metric("Vendor Sources", len(SOURCES)), unsafe_allow_html=True)
-    with c3: st.markdown(styled_metric("Fact Engine Rules", len(RULES)), unsafe_allow_html=True)
-    with c4:
-        n_ok = sum(1 for v in FIELD_LINEAGE.values() if not v["null_is_error"])
-        st.markdown(styled_metric("Null = Expected", n_ok, "#34D399"), unsafe_allow_html=True)
-    with c5:
-        n_err = sum(1 for v in FIELD_LINEAGE.values() if v["null_is_error"])
-        st.markdown(styled_metric("Null = Error", n_err, "#F87171"), unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # ── SoS callout ──
-    card("""
-    <b>🔑 Why do some businesses show "No Registry Data to Display"?</b><br><br>
-    The admin portal shows two very different outcomes for two businesses:<br>
-    &nbsp;&nbsp;• <b>DSS NAILS LLC</b> — Business Registration ✅ Verified, but "No Registry Data to Display"<br>
-    &nbsp;&nbsp;• <b>Pizza and a Chef LLC</b> — Full Secretary of State Filings (FL, Active, LLC, 05/31/2023)<br><br>
-    <b>This is NOT a Worth confidence rule.</b> It is entirely the Middesk (SoS) API response:<br>
-    Middesk searches all 50 US SoS databases by TIN + name. If it finds a filing → card shows.
-    If not found → "No Registry Data to Display". Worth shows whatever Middesk returns.
-    """, "card-amber")
-
-    # ── filter ──
+    # ── shared: apply filters ──
     filtered = {k: v for k, v in FIELD_LINEAGE.items()
                 if (not f_section or v["section"] in f_section)
                 and (not f_type or v["data_type"] in f_type)
@@ -245,146 +229,302 @@ if section == "🏷️  KYB API Field Lineage":
                      or (f_null == "Expected Behaviour" and not v["null_is_error"])
                      or (f_null == "Potential Error" and v["null_is_error"]))}
 
-    # ── overview table ──
-    st.markdown("### All Fields at a Glance")
-    st.markdown(
-        '<div style="background:#0F2040;border:1px solid #2563EB;border-radius:6px;'
-        'padding:8px 14px;font-size:.82rem;color:#93C5FD;margin-bottom:10px;">'
-        '💡 Hover the <u>underlined</u> ✅ No / ⚠️ Yes cells for a tooltip with cause details. '
-        'Expand any row below for the full breakdown.</div>',
-        unsafe_allow_html=True)
+    # ══════════════════════════════════════════════════
+    # KYB PAGE: OVERVIEW
+    # ══════════════════════════════════════════════════
+    if kyb_page == "🏠 Overview":
+        # metrics
+        c1,c2,c3,c4,c5 = st.columns(5)
+        with c1: st.markdown(styled_metric("Fields Mapped", len(FIELD_LINEAGE)), unsafe_allow_html=True)
+        with c2: st.markdown(styled_metric("Vendor Sources", len(SOURCES)), unsafe_allow_html=True)
+        with c3: st.markdown(styled_metric("Fact Engine Rules", len(RULES)), unsafe_allow_html=True)
+        with c4:
+            n_ok = sum(1 for v in FIELD_LINEAGE.values() if not v["null_is_error"])
+            st.markdown(styled_metric("Null = Expected", n_ok, "#34D399"), unsafe_allow_html=True)
+        with c5:
+            n_err = sum(1 for v in FIELD_LINEAGE.values() if v["null_is_error"])
+            st.markdown(styled_metric("Null = Error", n_err, "#F87171"), unsafe_allow_html=True)
+        st.markdown("---")
+        card("""
+        <b>🔑 Why do some businesses show "No Registry Data to Display"?</b><br><br>
+        • <b>DSS NAILS LLC</b> — Business Registration ✅ Verified, but "No Registry Data to Display"<br>
+        • <b>Pizza and a Chef LLC</b> — Full Secretary of State Filings (FL, Active, LLC, 05/31/2023)<br><br>
+        <b>This is NOT a Worth confidence rule.</b> Middesk searches all 50 US SoS databases.
+        If a filing is found → card shows. If not found → "No Registry Data to Display".
+        """, "card-amber")
 
     def null_tip(is_error, key):
         causes = FIELD_NULL_CAUSES.get(key, [])
-        lines = ["⚠️ NULL IS AN ERROR — required field missing" if is_error
-                 else "✅ NULL IS EXPECTED — Worth never suppresses based on confidence (Rule 4)", ""]
+        lines = ["NULL IS AN ERROR — required field missing" if is_error
+                 else "NULL IS EXPECTED — Worth never suppresses based on confidence (Rule 4)", ""]
         for ct, detail in causes[:5]:
             info = NULL_CAUSE_TYPES.get(ct, {})
-            lines.append(f"{info.get('icon','•')} {info.get('label','')}: {detail}")
-        tip = "\n".join(lines)
+            safe_detail = detail.replace('"', "'").replace('<', '').replace('>', '')
+            lines.append(f"{info.get('icon','•')} {info.get('label', ct)}: {safe_detail}")
+        tip = "\n".join(lines).replace("'", "`")
         if is_error:
-            return (f'<span title="{tip}" style="color:#FCA5A5;font-weight:700;'
-                    f'border-bottom:2px dotted #FCA5A5;cursor:help;">⚠️ Yes</span>')
-        return (f'<span title="{tip}" style="color:#6EE7B7;font-weight:700;'
-                f'border-bottom:2px dotted #6EE7B7;cursor:help;">✅ No</span>')
+            return (f"<span title='{tip}' style=\"color:#FCA5A5;font-weight:700;"
+                    f"border-bottom:2px dotted #FCA5A5;cursor:help;\">⚠️ Yes</span>")
+        return (f"<span title='{tip}' style=\"color:#6EE7B7;font-weight:700;"
+                f"border-bottom:2px dotted #6EE7B7;cursor:help;\">✅ No</span>")
 
-    thtml = """<table class="t"><tr>
-      <th>API Field Path</th><th>Display Name</th><th>Section</th>
-      <th>Type</th><th>Primary Sources</th><th>Null=Error? (hover)</th><th>W360</th>
-    </tr>"""
-    for key, fld in filtered.items():
-        srcs = " ".join(sbadge(s) for s in fld["sources"][:3])
-        sec_c = {"KYB":"#60A5FA","KYC":"#A78BFA"}.get(fld["section"],"#94A3B8")
-        typ_c = {"Verification":"#93C5FD","Prefill":"#86EFAC",
-                 "Risk":"#FCA5A5","Industry":"#FCD34D"}.get(fld["data_type"],"#CBD5E1")
-        thtml += (f"<tr>"
-                  f"<td><code>{fld['api_field_path']}</code></td>"
-                  f"<td style='color:#E2E8F0'>{fld['display_name']}</td>"
-                  f"<td style='color:{sec_c};font-weight:600'>{fld['section']}</td>"
-                  f"<td style='color:{typ_c}'>{fld['data_type']}</td>"
-                  f"<td>{srcs}</td>"
-                  f"<td style='text-align:center'>{null_tip(fld['null_is_error'], key)}</td>"
-                  f"<td style='text-align:center;color:#6EE7B7'>{'✅' if fld.get('w360') else '<span style=color:#475569>—</span>'}</td>"
-                  "</tr>")
-    st.markdown(thtml + "</table>", unsafe_allow_html=True)
-    st.markdown("---")
+    # ── overview table (only on Overview page) ──
+    if kyb_page == "🏠 Overview":
+        st.markdown("### All Fields at a Glance")
+        st.markdown(
+            '<div style="background:#0F2040;border:1px solid #2563EB;border-radius:6px;'
+            'padding:8px 14px;font-size:.82rem;color:#93C5FD;margin-bottom:10px;">'
+            '💡 Hover the <u>underlined</u> ✅ No / ⚠️ Yes cells for a tooltip with cause details. '
+            'Expand any row below for the full breakdown.</div>',
+            unsafe_allow_html=True)
+        thtml = """<table class="t"><tr>
+          <th>API Field Path</th><th>Display Name</th><th>Section</th>
+          <th>Type</th><th>Primary Sources</th><th>Null=Error? (hover)</th><th>W360</th>
+        </tr>"""
+        for key, fld in filtered.items():
+            srcs = " ".join(sbadge(s) for s in fld["sources"][:3])
+            sec_c = {"KYB":"#60A5FA","KYC":"#A78BFA"}.get(fld["section"],"#94A3B8")
+            typ_c = {"Verification":"#93C5FD","Prefill":"#86EFAC",
+                     "Risk":"#FCA5A5","Industry":"#FCD34D"}.get(fld["data_type"],"#CBD5E1")
+            thtml += (f"<tr>"
+                      f"<td><code>{fld['api_field_path']}</code></td>"
+                      f"<td style='color:#E2E8F0'>{fld['display_name']}</td>"
+                      f"<td style='color:{sec_c};font-weight:600'>{fld['section']}</td>"
+                      f"<td style='color:{typ_c}'>{fld['data_type']}</td>"
+                      f"<td>{srcs}</td>"
+                      f"<td style='text-align:center'>{null_tip(fld['null_is_error'], key)}</td>"
+                      f"<td style='text-align:center;color:#6EE7B7'>{'✅' if fld.get('w360') else '<span style=color:#475569>—</span>'}</td>"
+                      "</tr>")
+        st.markdown(thtml + "</table>", unsafe_allow_html=True)
+        st.markdown("---")
+        st.markdown("**Click any field below for full detail:**")
+        for key, fld in filtered.items():
+            causes = FIELD_NULL_CAUSES.get(key, [])
+            ni = "⚠️" if fld["null_is_error"] else "✅"
+            with st.expander(f"{ni}  **{fld['display_name']}**  ·  `{fld['api_field_path']}`"):
+                srcs_h = " ".join(sbadge(s) for s in fld["sources"])
+                st.markdown(srcs_h, unsafe_allow_html=True)
+                st.markdown(fld["description"])
+                if causes:
+                    for ct, detail in causes:
+                        info = NULL_CAUSE_TYPES.get(ct, {})
+                        c = info.get("colour","#94A3B8")
+                        st.markdown(
+                            f'<span class="pill" style="background:{c}22;color:{c};'
+                            f'border:1px solid {c}55;">{info.get("icon","•")} {info.get("label","")}</span> '
+                            f'<span style="color:#94A3B8;font-size:.82rem;">{detail}</span>',
+                            unsafe_allow_html=True)
 
-    # ── per-field explorer ──
-    st.markdown("### 🔎 Field Detail Explorer")
-    sel = st.selectbox("Select a field",
+    # ══════════════════════════════════════════════════
+    # KYB PAGE: FIELD EXPLORER
+    # ══════════════════════════════════════════════════
+    elif kyb_page == "🔎 Field Explorer":
+        sh("🔎 Field Detail Explorer")
+        sel = st.selectbox("Select a field",
                        list(filtered.keys()),
                        format_func=lambda k: f"{filtered[k]['api_field_path']}  ·  {filtered[k]['display_name']}")
-    fld = filtered[sel]
-    st.markdown(f"## {fld['display_name']}")
-    st.markdown(" ".join(sbadge(s) for s in fld["sources"]), unsafe_allow_html=True)
-    st.markdown(f'<div class="cb">API Field:  {fld["api_field_path"]}\nFact name:  {fld["api_fact_name"]}</div>',
-                unsafe_allow_html=True)
+        fld = filtered[sel]
+        st.markdown(f"## {fld['display_name']}")
+        st.markdown(" ".join(sbadge(s) for s in fld["sources"]), unsafe_allow_html=True)
+        st.markdown(f'<div class="cb">API Field:  {fld["api_field_path"]}\nFact name:  {fld["api_fact_name"]}</div>',
+                    unsafe_allow_html=True)
 
-    t1,t2,t3,t4,t5,t6 = st.tabs(["📖 Description","📡 Sources","🗄️ Storage","⚠️ Null/Blank","📋 Rules","❓ UCM Q&A"])
+        t1,t2,t3,t4,t5,t6 = st.tabs(["📖 Description","📡 Sources","🗄️ Storage","⚠️ Null/Blank","📋 Rules","❓ UCM Q&A"])
 
-    with t1:
-        st.markdown(fld["description"])
-        card(f'📍 <b>Admin UI:</b> {fld["admin_ui_location"]}', "card-purple")
-        c1,c2,c3 = st.columns(3)
-        c1.markdown(f"**Requires transformation?** {'✅ Yes' if fld['requires_transformation'] else '❌ No'}")
-        if fld.get("transformation_note"): c1.caption(fld["transformation_note"])
-        c2.markdown(f"**Worth 360?** {'✅ Yes' if fld.get('w360') else '❌ No'}")
-        c3.markdown(f"**W360 display:** {'Decisional' if fld['data_type']=='Risk' else 'Info/Decisional'}")
+        with t1:
+            st.markdown(fld["description"])
+            card(f'📍 <b>Admin UI:</b> {fld["admin_ui_location"]}', "card-purple")
+            c1,c2,c3 = st.columns(3)
+            c1.markdown(f"**Requires transformation?** {'✅ Yes' if fld['requires_transformation'] else '❌ No'}")
+            if fld.get("transformation_note"): c1.caption(fld["transformation_note"])
+            c2.markdown(f"**Worth 360?** {'✅ Yes' if fld.get('w360') else '❌ No'}")
+            c3.markdown(f"**W360 display:** {'Decisional' if fld['data_type']=='Risk' else 'Info/Decisional'}")
 
-    with t2:
-        for sk in fld["sources"]:
-            src = SOURCES.get(sk, {})
-            detail = fld.get("source_detail", {}).get(sk, "")
-            with st.expander(f"**{src.get('name', sk)}** — weight {src.get('weight','?')} · platform_id {src.get('platform_id','?')}"):
-                a,b = st.columns(2)
-                with a:
-                    st.markdown(f"**Platform ID:** `{src.get('platform_id','?')}`")
-                    st.markdown(f"**Weight:** `{src.get('weight','?')}`")
-                    st.markdown(f"**API Type:** {src.get('api_type','?')}")
-                with b:
-                    st.markdown(f"**Confidence Model:** {src.get('confidence_model','?')}")
-                    st.markdown(f"**Storage:** `{src.get('storage','?')}`")
-                if detail: st.markdown(f"**For this field:** {detail}")
+        with t2:
+            for sk in fld["sources"]:
+                src = SOURCES.get(sk, {})
+                detail = fld.get("source_detail", {}).get(sk, "")
+                with st.expander(f"**{src.get('name', sk)}** — weight {src.get('weight','?')} · platform_id {src.get('platform_id','?')}"):
+                    a,b = st.columns(2)
+                    with a:
+                        st.markdown(f"**Platform ID:** `{src.get('platform_id','?')}`")
+                        st.markdown(f"**Weight:** `{src.get('weight','?')}`")
+                        st.markdown(f"**API Type:** {src.get('api_type','?')}")
+                    with b:
+                        st.markdown(f"**Confidence Model:** {src.get('confidence_model','?')}")
+                        st.markdown(f"**Storage:** `{src.get('storage','?')}`")
+                    if detail: st.markdown(f"**For this field:** {detail}")
+            flow = "\n".join(f"  {SOURCES.get(s,{}).get('name',s)} (pid={SOURCES.get(s,{}).get('platform_id','?')}, w={SOURCES.get(s,{}).get('weight','?')})"
+                             for s in fld["sources"])
+            st.code(f"Business Submitted\n       │\n       ▼\nVendor lookups (parallel):\n{flow}\n       │\n       ▼\nFact Engine: {fld['fact_engine_rule']}\n       │\n       ▼\nrds_warehouse_public.facts  name='{fld['api_fact_name']}'\n       │\n       ▼\nAdmin UI: {fld['admin_ui_location']}", language=None)
 
-        flow = "\n".join(f"  {SOURCES.get(s,{}).get('name',s)} (pid={SOURCES.get(s,{}).get('platform_id','?')}, w={SOURCES.get(s,{}).get('weight','?')})"
-                         for s in fld["sources"])
-        st.code(f"Business Submitted\n       │\n       ▼\nVendor lookups (parallel):\n{flow}\n       │\n       ▼\nFact Engine: {fld['fact_engine_rule']}\n       │\n       ▼\nrds_warehouse_public.facts  name='{fld['api_fact_name']}'\n       │\n       ▼\nAdmin UI: {fld['admin_ui_location']}", language=None)
-
-    with t3:
-        for tbl in fld["storage_tables"]: st.markdown(f"- `{tbl}`")
-        st.code("""-- rds_warehouse_public.facts schema
+        with t3:
+            for tbl in fld["storage_tables"]: st.markdown(f"- `{tbl}`")
+            st.code("""-- rds_warehouse_public.facts schema
 SELECT * FROM facts
 WHERE business_id = '<id>'
   AND name = '{fact_name}';
 -- value JSONB: { "value": ..., "source": { "platformId": N, "confidence": X }, "alternatives": [...] }""", language="sql")
 
-    with t4:
-        nc = "card-red" if fld["null_is_error"] else "card-green"
-        card(f'{"⚠️" if fld["null_is_error"] else "✅"} <b>NULL is: {"an error" if fld["null_is_error"] else "expected behaviour"}</b><br>{fld["null_reason"]}', nc)
-        causes = FIELD_NULL_CAUSES.get(sel, [])
-        if causes:
-            st.markdown("#### Possible Causes")
-            for ct, detail in causes:
-                info = NULL_CAUSE_TYPES.get(ct, {})
-                c = info.get("colour", "#94A3B8")
-                st.markdown(
-                    f'<div class="card" style="border-left-color:{c};background:#0E1E38;margin-bottom:6px;">'
-                    f'<span class="pill" style="background:{c}22;color:{c};border:1px solid {c}55;">'
-                    f'{info.get("icon","•")} {info.get("label","")}</span><br>'
-                    f'<b style="color:#E2E8F0;font-size:.9rem;">{detail}</b><br>'
-                    f'<span style="color:#94A3B8;font-size:.82rem;">{info.get("explanation","")}</span>'
-                    f'</div>', unsafe_allow_html=True)
-        st.markdown(fld["null_blank_scenario"])
+        with t4:
+            nc = "card-red" if fld["null_is_error"] else "card-green"
+            card(f'{"⚠️" if fld["null_is_error"] else "✅"} <b>NULL is: {"an error" if fld["null_is_error"] else "expected behaviour"}</b><br>{fld["null_reason"]}', nc)
+            causes = FIELD_NULL_CAUSES.get(sel, [])
+            if causes:
+                st.markdown("#### Possible Causes")
+                for ct, detail in causes:
+                    info = NULL_CAUSE_TYPES.get(ct, {})
+                    c = info.get("colour", "#94A3B8")
+                    st.markdown(
+                        f'<div class="card" style="border-left-color:{c};background:#0E1E38;margin-bottom:6px;">'
+                        f'<span class="pill" style="background:{c}22;color:{c};border:1px solid {c}55;">'
+                        f'{info.get("icon","•")} {info.get("label","")}</span><br>'
+                        f'<b style="color:#E2E8F0;font-size:.9rem;">{detail}</b><br>'
+                        f'<span style="color:#94A3B8;font-size:.82rem;">{info.get("explanation","")}</span>'
+                        f'</div>', unsafe_allow_html=True)
+            st.markdown(fld["null_blank_scenario"])
 
-    with t5:
-        st.markdown(f'<div class="cb">Rule: {fld["fact_engine_rule"]}</div>', unsafe_allow_html=True)
-        sorted_src = sorted([(k,SOURCES[k]) for k in fld["sources"] if k in SOURCES],
-                            key=lambda x: -x[1].get("weight",0))
-        thtml2 = '<table class="t"><tr><th>Source</th><th>Platform ID</th><th>Weight</th><th>Confidence Model</th></tr>'
-        for sk, src in sorted_src:
+        with t5:
+            st.markdown(f'<div class="cb">Rule: {fld["fact_engine_rule"]}</div>', unsafe_allow_html=True)
+            sorted_src = sorted([(k,SOURCES[k]) for k in fld["sources"] if k in SOURCES],
+                                key=lambda x: -x[1].get("weight",0))
+            thtml2 = '<table class="t"><tr><th>Source</th><th>Platform ID</th><th>Weight</th><th>Confidence Model</th></tr>'
+            for sk, src in sorted_src:
+                w = src.get("weight", 0)
+                wc = "#FCD34D" if w >= 2 else ("#6EE7B7" if w >= 0.8 else "#94A3B8")
+                bc, bl = SOURCE_BADGE.get(sk, ("b-grey", sk))
+                thtml2 += (f"<tr><td><span class='badge {bc}'>{bl}</span></td>"
+                           f"<td><code>{src.get('platform_id','?')}</code></td>"
+                           f"<td><b style='color:{wc};font-size:1rem;'>{w}</b></td>"
+                           f"<td style='font-size:.82rem;color:#94A3B8;'>{src.get('confidence_model','?')}</td></tr>")
+            st.markdown(thtml2 + "</table>", unsafe_allow_html=True)
+
+        with t6:
+            a,b = st.columns(2)
+            with a:
+                st.markdown("**GPN Questions:**")
+                if fld["gpn_questions"]:
+                    card(f'❓ {fld["gpn_questions"]}', "card-amber")
+                else: st.info("No questions raised.")
+            with b:
+                st.markdown("**Confirmed Answers:**")
+                if fld["confirmed_answers"]:
+                    card(f'{fld["confirmed_answers"]}', "card-green")
+                else: st.warning("No confirmed answers yet.")
+            if fld.get("ucm_rule"):
+                card(f'⚖️ <b>UCM Rule:</b> {fld["ucm_rule"]}', "card-purple")
+
+    # ══════════════════════════════════════════════════
+    # KYB PAGE: SOURCE REFERENCE
+    # ══════════════════════════════════════════════════
+    elif kyb_page == "📡 Source Reference":
+        sh("📡 Vendor Source Reference — All Sources Used in Worth AI KYB")
+        for sk, src in SOURCES.items():
+            bc, bl = SOURCE_BADGE.get(sk, ("b-grey", sk))
             w = src.get("weight", 0)
             wc = "#FCD34D" if w >= 2 else ("#6EE7B7" if w >= 0.8 else "#94A3B8")
-            bc, bl = SOURCE_BADGE.get(sk, ("b-grey", sk))
-            thtml2 += (f"<tr><td><span class='badge {bc}'>{bl}</span></td>"
-                       f"<td><code>{src.get('platform_id','?')}</code></td>"
-                       f"<td><b style='color:{wc};font-size:1rem;'>{w}</b></td>"
-                       f"<td style='font-size:.82rem;color:#94A3B8;'>{src.get('confidence_model','?')}</td></tr>")
-        st.markdown(thtml2 + "</table>", unsafe_allow_html=True)
+            with st.expander(f"**{src['name']}**  ·  platform_id={src['platform_id']}  ·  weight={src['weight']}"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown(f"**Platform ID:** `{src['platform_id']}`")
+                    st.markdown(f"**Weight:** <b style='color:{wc}'>{src['weight']}</b>", unsafe_allow_html=True)
+                    st.markdown(f"**Scope:** `{src['scope']}`")
+                    st.markdown(f"**API Type:** {src['api_type']}")
+                with c2:
+                    st.markdown(f"**Confidence Model:** {src['confidence_model']}")
+                    st.markdown(f"**Storage:** `{src['storage']}`")
+                st.markdown(f"**Description:** {src['description']}")
+                used = [v["display_name"] for v in FIELD_LINEAGE.values() if sk in v["sources"]]
+                if used:
+                    st.markdown(f"**Used for:** {', '.join(used)}")
+        st.markdown("---")
+        st.markdown("### Source Weight Comparison")
+        weight_df = pd.DataFrame(
+            sorted([(s["name"], s["weight"]) for s in SOURCES.values()], key=lambda x: -x[1]),
+            columns=["Source", "Weight"]
+        )
+        st.bar_chart(weight_df.set_index("Source"))
+        card("MAX_CONFIDENCE_INDEX = 55. Entity-match confidence = match.index / 55. "
+             "A match.index of 55 = confidence 1.0 (perfect match).")
 
-    with t6:
-        a,b = st.columns(2)
-        with a:
-            st.markdown("**GPN Questions:**")
-            if fld["gpn_questions"]:
-                card(f'❓ {fld["gpn_questions"]}', "card-amber")
-            else: st.info("No questions raised.")
-        with b:
-            st.markdown("**Confirmed Answers:**")
-            if fld["confirmed_answers"]:
-                card(f'{fld["confirmed_answers"]}', "card-green")
-            else: st.warning("No confirmed answers yet.")
-        if fld.get("ucm_rule"):
-            card(f'⚖️ <b>UCM Rule:</b> {fld["ucm_rule"]}', "card-purple")
+    # ══════════════════════════════════════════════════
+    # KYB PAGE: PIPELINE DIAGRAM
+    # ══════════════════════════════════════════════════
+    elif kyb_page == "📋 Pipeline Diagram":
+        sh("📋 Pipeline Diagram — How KYB Facts Flow from Vendor to Customer")
+        st.markdown(PIPELINE_OVERVIEW)
+        st.markdown("---")
+        st.markdown("### Why 'No Registry Data to Display' Appears")
+        st.code("""Business Submitted
+       │
+       ▼
+Middesk API called (platform_id=16, weight=2.0)
+│  Middesk queries Secretary of State databases by TIN + Business Name
+│
+├──► SoS filing FOUND → sos_filings[] populated
+│       → Admin UI: Secretary of State Filings card with full data
+│       → Example: Pizza and a Chef LLC (FL, 05/31/2023, LLC, Active)
+│
+└──► SoS filing NOT FOUND → sos_filings = []
+        → Admin UI: "No Registry Data to Display"
+        → "No Secretary of State filings were found for the Tax ID Number (EIN)"
+        → Example: DSS NAILS LLC
+        → NOT a Worth confidence rule — if Middesk finds nothing, nothing shows""", language=None)
+        st.markdown("---")
+        st.markdown("### Fact Engine Rule Execution Order")
+        st.code("""For EVERY field, the Fact Engine runs rules in this order:
+1. manualOverride()  ← ALWAYS FIRST. Analyst manual value wins everything.
+2. factWithHighestConfidence() — pick vendor with highest confidence (gap > 5%)
+3. weightedFactSelector() — tie-break if within 5%: Middesk(2.0)>OC(0.9)>ZI(0.8)>EFX(0.7)>AI(0.1)
+4. NO minimum confidence cutoff — low-conf candidate still wins if only valid option
+5. AI safety net — fires when <1 non-AI source has naics_code
+6. removeNaicsCode() — if AI code not in core_naics_code → replaced with 561499
+If no valid options → fact is NULL (no valid vendor response found)""", language=None)
+        tref = """<table class="t"><tr><th>Table</th><th>Schema</th><th>Contains</th><th>Written By</th></tr>
+        <tr><td><code>facts</code></td><td>rds_warehouse_public</td><td>All 200+ resolved facts per business (JSONB)</td><td>warehouse-service (Kafka facts.v1)</td></tr>
+        <tr><td><code>request_response</code></td><td>integration_data</td><td>Raw vendor API responses per platform_id</td><td>integration-service per vendor call</td></tr>
+        <tr><td><code>data_businesses</code></td><td>rds_cases_public</td><td>Core business record: naics_id, mcc_id, industry, name</td><td>case-service</td></tr>
+        <tr><td><code>data_owners</code></td><td>rds_cases_public</td><td>Owner records: name, SSN (masked), DOB, address</td><td>case-service</td></tr>
+        <tr><td><code>customer_files</code></td><td>datascience</td><td>Pipeline B wide table (ZI vs EFX winner)</td><td>warehouse-service batch</td></tr>
+        </table>"""
+        st.markdown(tref, unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════
+    # KYB PAGE: UCM Q&A TRACKER
+    # ══════════════════════════════════════════════════
+    elif kyb_page == "❓ UCM Q&A Tracker":
+        sh("❓ UCM Q&A Tracker — Working Session Questions & Confirmed Answers")
+        show_open = st.checkbox("Show only fields with open / pending items (⏳)", value=False)
+        for key, fld in FIELD_LINEAGE.items():
+            has_pending = "⏳" in fld.get("confirmed_answers", "")
+            if show_open and not has_pending:
+                continue
+            icon = "⏳" if has_pending else "✅"
+            with st.expander(f"{icon}  **{fld['display_name']}**  ·  `{fld['api_field_path']}`"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown("**GPN Questions / Notes:**")
+                    if fld["gpn_questions"]:
+                        card(f'❓ {fld["gpn_questions"]}', "card-amber")
+                    else:
+                        st.info("No questions raised.")
+                with c2:
+                    st.markdown("**Confirmed Answers / Decisions:**")
+                    if fld["confirmed_answers"]:
+                        bc = "card-amber" if has_pending else "card-green"
+                        card(fld["confirmed_answers"], bc)
+                    else:
+                        st.warning("No confirmed answers yet.")
+                st.markdown(f"**UCM Rule:** {fld.get('ucm_rule','Not defined')}")
+                st.markdown(f"**Requires Transformation:** {'Yes — ' + fld.get('transformation_note','') if fld.get('requires_transformation') else 'No'}")
+                st.markdown(f"**Worth 360 Report:** {'✅ Yes' if fld.get('w360') else '❌ No'}")
+        st.markdown("---")
+        total = len(FIELD_LINEAGE)
+        pending = sum(1 for v in FIELD_LINEAGE.values() if "⏳" in v.get("confirmed_answers",""))
+        c1,c2,c3 = st.columns(3)
+        with c1: st.metric("Total Fields Mapped", total)
+        with c2: st.metric("✅ Confirmed / Closed", total - pending)
+        with c3: st.metric("⏳ Pending / Open", pending)
 
 
 # ╔═══════════════════════════════════════════════════════════════════╗
