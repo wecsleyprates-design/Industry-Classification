@@ -244,11 +244,6 @@ def render_field(f):
             if f.get("null_cause"):
                 st.markdown("**⚠️ When blank/N/A — all scenarios:**")
                 card(f"{f['null_cause']}", "card-amber")
-                card(
-                    "<b>Rule 4 reminder:</b> Low confidence does NOT cause blank. "
-                    "A vendor with confidence=0.05 still wins if it is the only one with a value. "
-                    "Blank only occurs when ALL valid candidates have null/empty values AND AI enrichment also returned null "
-                    "(which in practice should not happen — AI returns '561499' as last resort).", "card-green")
 
             if f.get("badges"):
                 st.markdown("**🏷️ Possible badges/states shown in admin portal:**")
