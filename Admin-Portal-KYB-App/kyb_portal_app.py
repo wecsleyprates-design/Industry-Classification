@@ -120,6 +120,7 @@ with st.sidebar:
 
     section = st.radio("Navigate", [
         "🗺️  KYB Tab Map",
+        "🔄  End-to-End Workflow",
         "🃏  Card-by-Card Lineage",
         "🏷️  Field Lineage Explorer",
         "🔰  Badge & State Decoder",
@@ -134,6 +135,22 @@ with st.sidebar:
 # ╔═══════════════════════════════════════════════════════════════════╗
 # ║  1 — KYB TAB MAP                                                  ║
 # ╚═══════════════════════════════════════════════════════════════════╝
+# ─── Key discoveries from microsites source code ───────────────────────
+# Used by multiple sections below
+ENTITY_JURISDICTION_NOTE = (
+    "Domestic = business originally formed in this state (foreign_domestic='domestic'). "
+    "Foreign = formed in another state, registered to operate here (foreign_domestic='foreign'). "
+    "Source: EntityJurisdictionCell.tsx — JURISDICTION_CONFIG maps 'domestic'→Primary badge, 'foreign'→Secondary badge."
+)
+SOS_BADGE_NOTE = (
+    "SOSBadge.tsx: isInvalidated→INVALIDATED(warning). sosFiling.active=true→VERIFIED(info/blue). "
+    "sosFiling.active=false→MISSING ACTIVE FILING(error/red). "
+    "SOSFilingCard title: US businesses='Secretary of State Filings', non-US='Registration Filing'. "
+    "IMPORTANT: WatchlistsTab — backend consolidates ALL hits (business+person) into watchlist.value.metadata. "
+    "No separate people endpoint needed (changed in BEST-65). "
+    "Website Status 'Unknown' = websiteData not loaded yet or status field absent."
+)
+
 if section == "🗺️  KYB Tab Map":
     sh("🗺️  KYB Tab — Complete Field Map (Admin Portal)")
 
@@ -292,6 +309,266 @@ if section == "🗺️  KYB Tab Map":
 # ╔═══════════════════════════════════════════════════════════════════╗
 # ║  2 — FIELD LINEAGE EXPLORER                                       ║
 # ╚═══════════════════════════════════════════════════════════════════╝
+# ╔═══════════════════════════════════════════════════════════════════╗
+# ║  END-TO-END WORKFLOW                                              ║
+# ╚═══════════════════════════════════════════════════════════════════╝
+elif section == "🔄  End-to-End Workflow":
+    sh("🔄  End-to-End Information Workflow — From Submission to Admin Portal Display")
+
+    card("""<b>The big picture: how does information get from the merchant to what the analyst sees?</b><br>
+    This section traces the complete journey of every piece of information in the KYB tab —
+    from the moment a merchant submits their application, through every vendor API call,
+    through the Fact Engine winner selection, through storage, through the API response,
+    all the way to the exact React component that renders it on screen.
+    """, "card-teal")
+
+    # Full workflow diagram
+    st.markdown("### 🔄 The Complete KYB Data Flow")
+    st.code("""
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  STAGE 1: MERCHANT SUBMITS APPLICATION (T+0:00)                             ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  Merchant fills form → POST /businesses/customers/{customerID}              ║
+║  Submitted data stored in:                                                  ║
+║    rds_cases_public.data_businesses  (name, tin, address, naics_code)       ║
+║    rds_cases_public.data_owners      (owners: name, DOB, SSN, address)      ║
+║    rds_cases_public.data_cases       (status='pending')                     ║
+║  Source in app: businessDetails (pid=0, weight=1.0) — always confidence=1.0 ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+                                    │
+                                    ▼
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  STAGE 2: VENDOR LOOKUPS (T+0:01 — all parallel)                           ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  Each vendor runs independently:                                            ║
+║                                                                             ║
+║  🏛️  Middesk (pid=16, weight=2.0) — Live REST API                          ║
+║       Input: business name + address + TIN                                  ║
+║       Output: SoS filings, TIN match (IRS), officers, watchlist, TIN verify ║
+║       Storage: integration_data.request_response (platform_id=16)           ║
+║       Confidence: 0.15 base + 0.20×tasks_passing (name/tin/address/sos)    ║
+║                                                                             ║
+║  🌐  OpenCorporates (pid=23, weight=0.9) — Redshift pre-loaded              ║
+║       Input: business name + jurisdiction                                    ║
+║       Output: SoS filings, registered name, industry_code_uids, officers    ║
+║       Storage: integration_data.request_response (pid=23) + oc_companies    ║
+║       Confidence: match.index / 55 (XGBoost entity-match model)             ║
+║                                                                             ║
+║  📊  ZoomInfo (pid=24, weight=0.8) — Redshift pre-loaded                   ║
+║       Input: business name + address                                         ║
+║       Output: NAICS, SIC, employees, revenue, website, phone                ║
+║       Storage: integration_data.request_response (pid=24) + zi tables       ║
+║       Confidence: match.index / 55                                           ║
+║                                                                             ║
+║  📋  Equifax (pid=17, weight=0.7) — Redshift pre-loaded                    ║
+║       Input: business name + address + TIN                                   ║
+║       Output: NAICS, SIC, employees, revenue, phone, minority/woman/veteran  ║
+║       Storage: integration_data.request_response (pid=17) + efx tables      ║
+║       Confidence: XGBoost prediction score                                   ║
+║                                                                             ║
+║  🔍  Trulioo (pid=38, weight=0.8) — Live REST API                          ║
+║       Input: business name + address (UK/CA preferred)                       ║
+║       Output: SoS, directors, watchlist screening, standardized industries   ║
+║       Storage: integration_data.request_response (pid=38)                   ║
+║                                                                             ║
+║  🌐  SERP / Web scrape (pid=22) — async                                    ║
+║       Output: website URL, Google Place ID, WHOIS domain data               ║
+║       Storage: integration_data.request_response (pid=22)                   ║
+║                                                                             ║
+║  🔐  Plaid IDV (pid=40) — per owner, OAuth flow                            ║
+║       Output: identity verification per owner (SUCCESS/FAILED/PENDING)      ║
+║       Storage: integration_data.request_response (pid=40)                   ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+                                    │
+                                    ▼
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  STAGE 3: FACT ENGINE — WINNER SELECTION (T+0:15)                          ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  For EVERY fact independently (200+ facts per business):                    ║
+║                                                                             ║
+║  Rule 0: manualOverride() ← ALWAYS FIRST                                   ║
+║  Rule 1: factWithHighestConfidence() — highest conf wins if gap > 5%        ║
+║  Rule 2: weightedFactSelector() — tie-break by weight                       ║
+║  Rule 3: combineFacts() — for arrays (addresses, names, people, watchlists) ║
+║  Rule 4: NO minimum confidence cutoff — low-conf still wins if only value   ║
+║  Rule 5: AI safety net — fires when <1 non-AI source has naics_code         ║
+║  Rule 6: removeNaicsCode() — invalid AI code → replaced with 561499         ║
+║                                                                             ║
+║  Output stored in: rds_warehouse_public.facts                               ║
+║    name='naics_code'  value={"value":"722511","source":{"platformId":23}}   ║
+║    name='sos_filings' value={"value":[{...},{...}],"source":...}            ║
+║    name='tin_match'   value={"value":{"status":"success"},"source":...}     ║
+║    name='watchlist'   value={"value":{"metadata":[...]},"source":...}       ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+                                    │
+                                    ▼
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  STAGE 4: KAFKA + DATABASE WRITES (T+0:19)                                 ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  Kafka: facts.v1 → CALCULATE_BUSINESS_FACTS event                          ║
+║  warehouse-service → rds_warehouse_public.facts (JSONB per fact)            ║
+║  case-service → rds_cases_public.data_businesses                            ║
+║    naics_id → FK to core_naics_code WHERE code = naics_code.value           ║
+║    mcc_id   → FK to core_mcc_code (via rel_naics_mcc lookup)                ║
+║    industry → FK to core_business_industries (2-digit NAICS prefix)         ║
+║  data_cases.status: 'pending' → 'under_review' or 'auto_approved'          ║
+║  data_integration_tasks_progress.is_complete: false → true                  ║
+║   (triggers: "Integration processing is now complete ✅" banner)            ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+                                    │
+                                    ▼
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  STAGE 5: API RESPONSE (when admin portal opens the case)                  ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  Portal calls these endpoints simultaneously:                               ║
+║                                                                             ║
+║  Background tab:                                                            ║
+║    GET /facts/business/:id/details → factsBusinessDetails                   ║
+║    (business_name, dba, primary_address, revenue, num_employees,            ║
+║     naics_code, mcc_code, industry, formation_date, phone, email,           ║
+║     minority_owned, woman_owned, veteran_owned)                             ║
+║                                                                             ║
+║  Business Registration tab:                                                 ║
+║    GET /facts/business/:id/kyb → kybFactsData                              ║
+║    (legal_name, tin, tin_match, tin_match_boolean,                          ║
+║     sos_filings[], sos_active, sos_match_boolean,                           ║
+║     names_submitted, addresses, people, watchlist)                          ║
+║                                                                             ║
+║  Contact Information tab: (same /kyb endpoint, no additional call)          ║
+║                                                                             ║
+║  Website tab:                                                               ║
+║    GET /verification/businesses/:id/website-data → businessWebsiteData     ║
+║    (url, domain.creation_date, domain.expiration_date, parked, status,     ║
+║     pages[], business_name_match)                                           ║
+║                                                                             ║
+║  Watchlists tab: (same /kyb endpoint — watchlist.value.metadata)           ║
+║    NOTE: backend consolidates ALL hits into watchlist.value.metadata.       ║
+║    No separate /people/watchlist call needed (changed in BEST-65).         ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+                                    │
+                                    ▼
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  STAGE 6: REACT RENDERING (admin.joinworth.com)                            ║
+╠══════════════════════════════════════════════════════════════════════════════╣
+║  Background tab: BackgroundTab.tsx                                          ║
+║    Cards: Business Details + Industry (from fieldConfigs.tsx)               ║
+║    business_name → factsBusinessDetails.data.business_name.value           ║
+║    legal_name    → getFactsKybData.data.legal_name.value (read-only)       ║
+║    naics_code    → factsBusinessDetails.data.naics_code.value (editable)   ║
+║    mcc_code      → factsBusinessDetails.data.mcc_code.value (editable)     ║
+║    Shows N/A (VALUE_NOT_AVAILABLE) when fact value is null/undefined        ║
+║                                                                             ║
+║  Business Registration tab: BusinessRegistrationTab.tsx                     ║
+║    Business Registration card: TinBadge (tin_match_boolean → Verified)     ║
+║      tin_match_boolean.value=true → ✅ Verified (blue, CheckBadgeIcon)     ║
+║      tin_match_boolean.value=false → ⚠️ Unverified (warning)               ║
+║    SOSFilingCard per sos_filings[n]:                                        ║
+║      SOSBadge: sosFiling.active=true → ✅ Verified (info/blue)             ║
+║      SOSBadge: sosFiling.active=false → 🔴 Missing Active Filing            ║
+║      EntityJurisdictionCell: foreign_domestic → Domestic/Primary badge     ║
+║      hasDirtyBusinessRegistrationFields → shows N/A for ALL SoS fields     ║
+║                                                                             ║
+║  Website tab: WebsiteTab.tsx                                                ║
+║    Editable: website URL (from fieldConfigs)                                ║
+║    Read-only: Creation Date, Expiration Date, Parked Domain, Status        ║
+║    isWebsiteDirty=true → all non-editable fields show N/A                  ║
+║    status='online' → ✅ Online badge (CheckCircleIcon)                      ║
+║                                                                             ║
+║  Watchlists tab: WatchlistsTab.tsx                                          ║
+║    watchlist.value.metadata grouped by entity_name                          ║
+║    Each entity: WatchlistHitCard or WatchlistHitNullState (No Hits)        ║
+║    WatchlistsScannedCard: shows all 14 lists with hit status                ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+""", language=None)
+
+    st.markdown("---")
+    st.markdown("### 🔑 Key Discoveries from Source Code Analysis")
+
+    discoveries = [
+        ("SOSFilingCard title changes by country",
+         "SOSFilingCard.tsx: US businesses → 'Secretary of State Filings'. "
+         "Non-US → 'Registration Filing'. Document title: US → 'Articles of Incorporation', non-US → 'Additional Information'.",
+         BLUE),
+        ("'Domestic Primary' vs 'Foreign Secondary' badge source",
+         "EntityJurisdictionCell.tsx: JURISDICTION_CONFIG maps domestic→{displayLabel:'Domestic',badgeLabel:'Primary'} "
+         "and foreign→{displayLabel:'Foreign',badgeLabel:'Secondary'}. "
+         "The 'Primary' badge is NOT from Middesk — it is the Worth portal's label for domestic filings.",
+         GREEN),
+        ("SoS fields go blank when analyst edits Business Registration fields",
+         "useBusinessRegistrationTabDetails.tsx: hasDirtyBusinessRegistrationFields=true → "
+         "all SoS rows show VALUE_NOT_AVAILABLE. "
+         "This prevents stale SoS data from showing while a re-verification is triggered by the edit.",
+         AMBER),
+        ("Watchlist: ALL hits now consolidated (no separate people endpoint)",
+         "WatchlistsTab.tsx comment: 'The backend now consolidates all watchlist hits (business + person) "
+         "into watchlist.value.metadata via trulioo_advanced_watchlist_results. "
+         "No separate endpoint is needed.' Feature flag: BEST_65_PROXY_FACT.",
+         TEAL),
+        ("Website non-editable fields go N/A when URL is edited",
+         "useWebsiteNonEditableFields.tsx: isWebsiteDirty=true → Creation Date, Expiration Date, "
+         "Parked Domain, Status all show N/A. "
+         "Reason: changing the website URL invalidates the WHOIS/status data until re-verified.",
+         PURPLE),
+        ("'Verified' in Business Registration = IRS TIN match, NOT SoS match",
+         "TinBadge.tsx: reads tin_match_boolean.value. "
+         "TIN Verified = IRS confirmed EIN+legal name match (via Middesk TIN Match service). "
+         "SoS Verified (on SoS card) = sosFiling.active=true (SoS filing found and active). "
+         "A business can be TIN Verified but have No Registry Data — these are independent checks.",
+         RED),
+        ("VALUE_NOT_AVAILABLE constant = 'N/A'",
+         "Every field uses VALUE_NOT_AVAILABLE from @/constants when the fact value is null/undefined. "
+         "This is the single constant used throughout all KYB components. "
+         "It is NOT a backend concept — it is a React display fallback.",
+         GREY),
+    ]
+
+    for title, detail, colour in discoveries:
+        st.markdown(
+            f'<div class="card" style="border-left-color:{colour};background:#0E1E38;margin-bottom:8px;">'
+            f'<b style="color:{colour};">{title}</b><br>'
+            f'<span style="color:#CBD5E1;font-size:.88rem;">{detail}</span>'
+            f'</div>', unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("### 📐 Source File Map — Where Each Card Comes From")
+
+    source_map = """<table class="t">
+    <tr><th>Admin Portal Card</th><th>Source File (microsites)</th><th>Key facts read</th><th>API endpoint</th></tr>
+    <tr><td>Business Details card</td><td><code>fieldConfigs.tsx L99-L391</code></td><td>business_name, dba, primary_address, revenue, employees, phone, email...</td><td>/facts/business/:id/details</td></tr>
+    <tr><td>Industry card</td><td><code>fieldConfigs.tsx L392-L469</code></td><td>industry, naics_code, naics_description, mcc_code, mcc_description</td><td>/facts/business/:id/details</td></tr>
+    <tr><td>Business Registration card (TIN)</td><td><code>TaxContent.tsx + TinBadge.tsx</code></td><td>legal_name, tin, tin_match_boolean</td><td>/facts/business/:id/kyb</td></tr>
+    <tr><td>SoS Filing card(s)</td><td><code>SOSFilingCard.tsx + SOSBadge.tsx + EntityJurisdictionCell.tsx</code></td><td>sos_filings[n].{active, entity_type, state, filing_date, filing_name, officers}</td><td>/facts/business/:id/kyb</td></tr>
+    <tr><td>No Registry Data message</td><td><code>useBusinessRegistrationTabDetails.tsx</code></td><td>sos_filings.value = [] (empty array)</td><td>/facts/business/:id/kyb</td></tr>
+    <tr><td>Addresses card</td><td><code>AddressesCard.tsx</code></td><td>addresses, addresses_deliverable, address_match_boolean, address_verification</td><td>/facts/business/:id/kyb</td></tr>
+    <tr><td>Business Names card</td><td><code>BusinessNamesCard.tsx</code></td><td>names_submitted, names_found, name_match_boolean</td><td>/facts/business/:id/kyb</td></tr>
+    <tr><td>Website Details card</td><td><code>WebsiteTab.tsx + useWebsiteNonEditableFields.tsx</code></td><td>website (editable), domain.creation_date, parked, status</td><td>/verification/.../website-data</td></tr>
+    <tr><td>Watchlists Scanned card</td><td><code>WatchlistsScannedCard.tsx</code></td><td>watchlist (14 lists shown)</td><td>/facts/business/:id/kyb</td></tr>
+    <tr><td>Watchlist Hit cards</td><td><code>WatchlistHitCard.tsx</code></td><td>watchlist.value.metadata grouped by entity_name</td><td>/facts/business/:id/kyb</td></tr>
+    </table>"""
+    st.markdown(source_map, unsafe_allow_html=True)
+
+    st.markdown("### 🗄️ Storage Tables Reference")
+    storage_rows = [
+        ("integration_data.request_response", "Raw vendor API responses (Middesk, ZI, EFX, Trulioo, Plaid, SERP)", "Written by integration-service per vendor call", "Redshift/PostgreSQL"),
+        ("rds_warehouse_public.facts", "All 200+ resolved facts per business as JSONB {value, source, alternatives[]}", "Written by warehouse-service via Kafka facts.v1", "PostgreSQL"),
+        ("rds_cases_public.data_businesses", "Core business record: naics_id→FK, mcc_id→FK, industry→FK, name, address", "Written by case-service on submission + updates", "PostgreSQL"),
+        ("rds_cases_public.data_owners", "Owner records: name, SSN (masked/encrypted), DOB, address, email, mobile", "Written by case-service on submission", "PostgreSQL"),
+        ("rds_cases_public.data_cases", "Case: status→core_case_statuses, business_id, customer_id, timestamps", "Written by case-service", "PostgreSQL"),
+        ("core_naics_code", "NAICS 2022 lookup: id, code (6-digit), label, description", "Static reference table", "PostgreSQL"),
+        ("core_mcc_code", "MCC lookup: id, code (4-digit), label", "Static reference table", "PostgreSQL"),
+        ("rel_naics_mcc", "NAICS→MCC mapping: naics_id → mcc_id", "Static reference table", "PostgreSQL"),
+        ("core_business_industries", "Industry sector lookup: id, name, naics_sector_code (2-digit)", "Static reference table", "PostgreSQL"),
+        ("datascience.customer_files", "Pipeline B wide table: primary_naics_code (ZI vs EFX winner-takes-all)", "Written by warehouse-service batch", "Redshift"),
+    ]
+    thtml = '<table class="t"><tr><th>Table</th><th>Contains</th><th>Written by</th><th>DB</th></tr>'
+    for table, contains, writer, db in storage_rows:
+        db_c = "#60A5FA" if db == "PostgreSQL" else "#FCD34D"
+        thtml += (f"<tr><td><code>{table}</code></td>"
+                  f"<td style='color:#94A3B8;font-size:.82rem;'>{contains}</td>"
+                  f"<td style='color:#475569;font-size:.78rem;'>{writer}</td>"
+                  f"<td><span style='color:{db_c};font-weight:700;'>{db}</span></td></tr>")
+    st.markdown(thtml + "</table>", unsafe_allow_html=True)
+
 # ╔═══════════════════════════════════════════════════════════════════╗
 # ║  CARD-BY-CARD LINEAGE                                             ║
 # ╚═══════════════════════════════════════════════════════════════════╝

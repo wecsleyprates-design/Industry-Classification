@@ -152,6 +152,58 @@ SOURCE_FILES = [
      "Joins data_businesses with core_naics_code, core_mcc_code, core_business_industries. "
      "Returns: naics_code, naics_title, mcc_code, mcc_title, industry_data, worth_score. "
      "Builds the KYB API response consumed by the admin portal Background tab."),
+    # ── Microsites — portal rendering source ──────────────────────────────
+    ("microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",
+     "ADMIN_PORTAL",
+     "DEFINITIVE Background tab field config — every field with fieldKey, label, section, editable flag. "
+     "business_name(L101 editable), legal_name(L116 read-only), dba(L131 editable), "
+     "primary_address(L146 editable), mailing_address(L172 editable), formation_date(L198 editable), "
+     "revenue(L214 editable), net_income(L271 editable), corporation(L288 editable dropdown), "
+     "num_employees(L303 editable), business_phone(L320 editable), email(L336 editable), "
+     "minority_owned(L350 editable dropdown), woman_owned(L364), veteran_owned(L378), "
+     "industry(L393 editable), naics_code(L408 editable), naics_description(L423 read-only), "
+     "mcc_code(L440 editable), mcc_description(L455 read-only)."),
+    ("microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/SOSBadge.tsx",
+     "ADMIN_PORTAL",
+     "SOSBadge — badge per SoS filing. "
+     "isInvalidated→INVALIDATED(warning). sosFiling.active=true→VERIFIED(info/blue,CheckBadgeIcon). "
+     "sosFiling.active=false→MISSING_ACTIVE_FILING(error/red,XCircleIcon). "
+     "Tooltip: 'An active filing was found and is in good standing.'"),
+    ("microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/TinBadge.tsx",
+     "ADMIN_PORTAL",
+     "TinBadge — TIN verification badge. "
+     "tin_match_boolean.value=true→Verified(info,CheckBadgeIcon). "
+     "tin_match.value.status='failure'→Unverified(warning,ExclamationTriangleIcon). "
+     "Reads tin_match_boolean, tin_match, tin facts from kybFactsData."),
+    ("microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/BusinessRegistrationTab/EntityJurisdictionCell.tsx",
+     "ADMIN_PORTAL",
+     "EntityJurisdictionCell — renders Domestic/Foreign + Primary/Secondary badge. "
+     "foreign_domestic='domestic'→Domestic + Primary badge. "
+     "foreign_domestic='foreign'→Foreign + Secondary badge. "
+     "undefined→N/A. Source: sos_filings[n].foreign_domestic from kyb facts."),
+    ("microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/BusinessRegistrationTab/useBusinessRegistrationTabDetails.tsx",
+     "ADMIN_PORTAL",
+     "Business Registration tab data hook — builds taxDetails and enhancedSosFilingsDetails arrays. "
+     "taxDetails: Business Name=legal_name.value, Tax ID=tin.value. "
+     "enhancedSosFilingsDetails maps sos_filings[n]: Filing Status(active→Active/Inactive), "
+     "Entity Jurisdiction Type(EntityJurisdictionCell), State, Registration Date, "
+     "Entity Type, Corporate Officers(CorporateOfficers component), Legal Entity Name. "
+     "shouldHideSosForIntegration=true→empty (integrations running). "
+     "hasDirtyBusinessRegistrationFields=true→shows N/A for all SOS fields."),
+    ("microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/WatchlistsTab/WatchlistsTab.tsx",
+     "ADMIN_PORTAL",
+     "WatchlistsTab — ALL hits consolidated in watchlist.value.metadata (business+person). "
+     "IMPORTANT: No separate people/watchlist endpoint needed — backend now consolidates via "
+     "trulioo_advanced_watchlist_results into watchlist.value.metadata. "
+     "groupWatchlistHitsByEntityName groups by entity_name. "
+     "BEST_65_PROXY_FACT feature flag controls proxy mode."),
+    ("microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/WebsiteTab/useWebsiteNonEditableFields.tsx",
+     "ADMIN_PORTAL",
+     "Website tab non-editable fields — Creation Date, Expiration Date, Parked Domain, Status. "
+     "isWebsiteDirty=true→all N/A (cleared when URL edited). "
+     "websiteData.domain.creation_date→formatSourceDate(). "
+     "status='online'→CheckCircleIcon badge. parked→Yes/No. "
+     "Status values: online(success), offline(error), unknown(secondary)."),
 ]
 
 CHUNK_SIZE = 30
