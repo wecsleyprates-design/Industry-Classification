@@ -105,26 +105,32 @@ rag_index = get_rag()
 @st.cache_data
 def load_ucm_fields():
     import openpyxl
-    path = "/workspace/AI-Powered-NAICS-Industry-Classification-Agent/naics_mcc_classifier/[GPN version] Worth Field Outputs_Working Session Disussions_020426.xlsx"
-    try:
-        wb = openpyxl.load_workbook(path)
-        ws = wb['WS UCM QA']
-        fields = []
-        for row in ws.iter_rows(min_row=2, max_row=ws.max_row, values_only=True):
-            if not any(row[:16]): continue
-            if row[4]:
-                fields.append({
-                    'section': row[0] or '', 'data_type': row[1] or '',
-                    'internal_name': row[2] or '', 'api_endpoint': row[3] or '',
-                    'api_field': row[4], 'requires_transform': row[5],
-                    'gpn_questions': str(row[6] or '')[:400],
-                    'decisions': str(row[7] or '')[:400],
-                    'w360': row[8], 'description': str(row[9] or '')[:300],
-                    'display_ucm': row[10], 'decisional': row[11],
-                })
-        return fields
-    except Exception as e:
-        return []
+    # Try both locations — Admin-Portal-KYB repo (cloned) and workspace backup
+    for path in [
+        "/tmp/Admin-Portal-KYB/[GPN version] Worth Field Outputs_Working Session Disussions_020426.xlsx",
+        "/workspace/AI-Powered-NAICS-Industry-Classification-Agent/naics_mcc_classifier/[GPN version] Worth Field Outputs_Working Session Disussions_020426.xlsx",
+    ]:
+        try:
+            wb = openpyxl.load_workbook(path)
+            ws = wb['WS UCM QA']
+            fields = []
+            for row in ws.iter_rows(min_row=2, max_row=ws.max_row, values_only=True):
+                if not any(row[:16]): continue
+                if row[4]:
+                    fields.append({
+                        'section': str(row[0] or '').strip(), 'data_type': str(row[1] or '').strip(),
+                        'internal_name': str(row[2] or '').strip(), 'api_endpoint': str(row[3] or '').strip(),
+                        'api_field': str(row[4]).strip(), 'requires_transform': str(row[5] or '').strip(),
+                        'gpn_questions': str(row[6] or '').strip()[:600],
+                        'decisions': str(row[7] or '').strip()[:600],
+                        'w360': str(row[8] or '').strip(), 'description': str(row[9] or '').strip()[:400],
+                        'display_ucm': str(row[10] or '').strip(), 'decisional': str(row[11] or '').strip(),
+                    })
+            if fields:
+                return fields
+        except Exception:
+            continue
+    return []
 
 UCM_FIELDS = load_ucm_fields()
 
@@ -156,7 +162,7 @@ with st.sidebar:
 # SHARED: field card renderer
 # ════════════════════════════════════════════════════════════════════════════
 def render_field(f):
-    """Render a single field card with full lineage in an expander."""
+    """Render a single field card with full deep lineage in an expander."""
     edit_icon = "✏️ Editable" if f.get("editable") else "🔒 Read-Only"
     col = GREEN if f.get("editable") else GREY
     st.markdown(
@@ -167,46 +173,131 @@ def render_field(f):
         f'{"".join(badge(t, "grey") for t in f.get("tags",[]))}'
         f'</div>'
         f'<div style="font-size:.78rem;color:#475569;">'
-        f'Fact: <code>{f["fact"]}</code> · API: <code>{f["api"]}</code>'
+        f'Fact name in rds_warehouse_public.facts: <code>{f["fact"]}</code> · API endpoint: <code>{f["api"]}</code>'
         f'</div>'
         f'</div>', unsafe_allow_html=True)
 
     with st.expander(f"🔍 Full lineage — {f['label']}", expanded=False):
+
+        # ── Column legend (always shown) ──────────────────────────────
+        st.markdown(
+            '<div class="card card-teal" style="font-size:.8rem;padding:8px 14px;margin-bottom:8px;">'
+            '<b>📖 Column meanings:</b><br>'
+            '<b>Source</b> = which vendor/system provides this value.<br>'
+            '<b>PID</b> = platform_id in integration_data.request_response table — the vendor identifier used throughout Worth AI.<br>'
+            '<b>Weight</b> = Worth\'s static trust score for this vendor (set in sources.ts). Used ONLY as tie-break when two sources have confidence within 5% (WEIGHT_THRESHOLD=0.05). NOT from XGBoost.<br>'
+            '<b>Confidence</b> = how sure the vendor is about its match quality. Each vendor computes this differently: '
+            'Middesk=task-based (0.15+0.20×tasks), ZI/OC/EFX=match.index/55 (XGBoost entity-match), AI=GPT self-reported.<br>'
+            '<b>Data field</b> = the exact path in the vendor\'s response object where this value is read from.<br>'
+            '<b>Winner rule</b> = factWithHighestConfidence() compares confidences; if gap ≤5% → weightedFactSelector() uses Weight as tie-break. manualOverride() always runs first. Rule 4: no minimum confidence cutoff.'
+            '</div>', unsafe_allow_html=True)
+
         c1, c2 = st.columns([3, 2])
         with c1:
             if f.get("sources"):
-                src_html = '<table class="t"><tr><th>Source</th><th>PID</th><th>Weight</th><th>Data field</th></tr>'
+                src_html = ('<table class="t"><tr>'
+                            '<th title="Vendor or system that provides this value">Source</th>'
+                            '<th title="platform_id in integration_data.request_response — vendor identifier">PID</th>'
+                            '<th title="Static trust score (sources.ts). Used for tie-breaking when confidence gap ≤5%. NOT from XGBoost.">Weight ⓘ</th>'
+                            '<th title="Exact field path in vendor response + how confidence is computed">Data field + Confidence model</th>'
+                            '</tr>')
                 for name, pid, w, detail in f["sources"]:
-                    wn = float(w.replace("w=","")) if str(w).startswith("w=") else 0
-                    wc = "#FCD34D" if wn>=2 else ("#6EE7B7" if wn>=0.8 else "#94A3B8")
-                    src_html += f"<tr><td style='color:#E2E8F0;font-weight:600'>{name}</td><td><code>{pid}</code></td><td><b style='color:{wc}'>{w}</b></td><td style='color:#94A3B8;font-size:.78rem'>{detail}</td></tr>"
+                    wn = float(w.replace("w=","").replace("w≈","")) if any(str(w).startswith(p) for p in ["w=","w≈"]) else 0
+                    wc = "#FCD34D" if wn>=2 else ("#6EE7B7" if wn>=0.8 else ("#FCD34D" if wn>=0.5 else "#94A3B8"))
+                    pid_note = " (vendor)" if pid and pid.startswith("pid=") else (" (calculated — no vendor)" if "calculated" in str(pid).lower() else "")
+                    src_html += (f"<tr><td style='color:#E2E8F0;font-weight:600'>{name}</td>"
+                                 f"<td><code>{pid}</code><span style='color:#475569;font-size:.72rem'>{pid_note}</span></td>"
+                                 f"<td><b style='color:{wc}'>{w}</b></td>"
+                                 f"<td style='color:#94A3B8;font-size:.78rem'>{detail}</td></tr>")
                 st.markdown(src_html + "</table>", unsafe_allow_html=True)
+
             if f.get("rule"):
-                card(f"<b>Winner rule:</b> {f['rule']}")
+                st.markdown("**🏆 Winner selection — full mechanics:**")
+                card(f"{f['rule']}", "card-green")
+
+            if f.get("editable") is not None:
+                editable_explain = (
+                    "<b>✏️ Editable = TRUE:</b> Analyst can override this value in the admin portal. "
+                    "Override stored in facts JSONB: override: {value, userId, timestamp}. "
+                    "manualOverride() rule fires first and wins unconditionally over all vendor data."
+                ) if f.get("editable") else (
+                    "<b>🔒 Read-Only = TRUE:</b> This field is NOT editable by analysts. "
+                    "Value is either auto-derived (calculated fact) or comes directly from vendor verification. "
+                    "Source: editable=false in fieldConfigs.tsx."
+                )
+                card(editable_explain)
+
             if f.get("storage"):
-                st.markdown("**Storage:**")
-                for s in f["storage"]: st.markdown(f"- `{s}`")
+                st.markdown("**🗄️ Where this value is stored:**")
+                for s in f["storage"]:
+                    st.markdown(f"- `{s}`")
+                st.markdown(
+                    '<div style="font-size:.78rem;color:#475569;margin-top:4px;">'
+                    'The facts table uses JSONB: <code>{"value":..., "source":{"platformId":N,"confidence":X}, "alternatives":[...]}</code><br>'
+                    'alternatives[] contains ALL vendor responses before the winner was selected — full audit trail.'
+                    '</div>', unsafe_allow_html=True)
+
             if f.get("null_cause"):
-                card(f"⚠️ <b>When blank/N/A:</b> {f['null_cause']}", "card-amber")
+                st.markdown("**⚠️ When blank/N/A — all scenarios:**")
+                card(f"{f['null_cause']}", "card-amber")
+                card(
+                    "<b>Rule 4 reminder:</b> Low confidence does NOT cause blank. "
+                    "A vendor with confidence=0.05 still wins if it is the only one with a value. "
+                    "Blank only occurs when ALL valid candidates have null/empty values AND AI enrichment also returned null "
+                    "(which in practice should not happen — AI returns '561499' as last resort).", "card-green")
+
             if f.get("badges"):
-                st.markdown("**Possible badges/states:**")
+                st.markdown("**🏷️ Possible badges/states shown in admin portal:**")
                 for btext, bclass, bexplain in f["badges"]:
                     st.markdown(
                         f'{portal_badge(btext, bclass)} — <span style="color:#94A3B8;font-size:.85rem;">{bexplain}</span>',
                         unsafe_allow_html=True)
+
             if f.get("react_src"):
+                st.markdown("**📍 Source code that renders this field:**")
                 st.markdown(src(*f["react_src"]), unsafe_allow_html=True)
+
         with c2:
             if f.get("sql"):
-                st.markdown("**Verify in DB:**")
+                st.markdown("**🔍 Verify in database (SQL):**")
                 st.code(f["sql"], language="sql")
-            if f.get("python"):
-                st.markdown("**Load in Python:**")
-                st.code(f["python"], language="python")
+                st.markdown(
+                    '<div style="font-size:.75rem;color:#475569;">'
+                    'Replace <code>&lt;id&gt;</code> or <code>&lt;business_id&gt;</code> with the actual business UUID. '
+                    'PostgreSQL for facts/cases tables. Redshift for datascience.customer_files.'
+                    '</div>', unsafe_allow_html=True)
+
+            st.markdown("**🐍 Load in Python:**")
+            fact_name = f["fact"].split("/")[0].strip().split(" ")[0].replace("[]","")
+            st.code(f"""import psycopg2, pandas as pd, json
+
+# Connect to PostgreSQL (facts table)
+conn = psycopg2.connect(
+    host='<rds_host>', dbname='<dbname>',
+    user='<user>', password='<password>'
+)
+
+# Load the fact
+df = pd.read_sql(
+    "SELECT name, value FROM rds_warehouse_public.facts "
+    "WHERE business_id = %s AND name = %s",
+    conn, params=['<business_id>', '{fact_name}']
+)
+if not df.empty:
+    fact = df['value'].iloc[0]
+    if isinstance(fact, str): fact = json.loads(fact)
+    print("Value:", fact.get('value'))
+    print("Source PID:", fact.get('source',{{}}).get('platformId'))
+    print("Confidence:", fact.get('source',{{}}).get('confidence'))
+    print("Alternatives:", len(fact.get('alternatives', [])))
+conn.close()""", language="python")
+
             if f.get("gpn_q"):
-                card(f"❓ <b>UCM Q:</b> {f['gpn_q']}", "card-amber")
+                st.markdown("**❓ UCM Working Session Question:**")
+                card(f"{f['gpn_q']}", "card-amber")
             if f.get("gpn_a"):
-                card(f"✅ <b>Decision:</b> {f['gpn_a']}", "card-green")
+                st.markdown("**✅ Confirmed Decision/Answer:**")
+                card(f"{f['gpn_a']}", "card-green")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -974,12 +1065,13 @@ ORDER BY hit->>'entity_name';""", language="sql")
 elif tab == "🔑 KYB API Fields":
     sh("🔑 KYB API Field Names — UCM Working Session Lineage")
 
-    card(f"""Source: <code>[GPN version] Worth Field Outputs_Working Session Disussions_020426.xlsx</code> — <code>[WS] UCM Q/A</code> tab column E.<br>
-    Total API fields: <b>{len(UCM_FIELDS)}</b> fields loaded from the spreadsheet.<br>
-    For each field: full lineage, which sub-tab it appears in, which fact it maps to, which sources provide it, what badges it can show, and how to verify it in the database.""")
+    card(f"""<b>Source:</b> <code>[GPN version] Worth Field Outputs_Working Session Disussions_020426.xlsx</code> — <code>[WS] UCM Q/A</code> tab column E.<br>
+    <b>Total API fields loaded:</b> <b>{len(UCM_FIELDS)}</b> fields from the spreadsheet.<br>
+    For each field: full lineage (Admin Portal location, fact name, vendors, confidence models, winner rule, storage tables, null/blank scenarios, badges/states, SQL to verify, Python to load, UCM Q&A).""")
 
     if not UCM_FIELDS:
-        card("⚠️ Could not load spreadsheet. Check path to [GPN version] Worth Field Outputs file.", "card-red")
+        card("⚠️ Spreadsheet not found. Ensure the Admin-Portal-KYB repo is cloned at /tmp/Admin-Portal-KYB/", "card-red")
+        st.code("git clone git@github.com:wecsleyprates-design/Admin-Portal-KYB.git /tmp/Admin-Portal-KYB", language="bash")
     else:
         sections = sorted(set(f['section'] for f in UCM_FIELDS if f['section']))
         selected_section = st.radio("Filter by Section", ["All"] + sections, horizontal=True)
@@ -988,79 +1080,72 @@ elif tab == "🔑 KYB API Fields":
         sel_field = st.selectbox("Select API Field", [f['api_field'] for f in filtered])
         ucm = next((f for f in filtered if f['api_field'] == sel_field), None)
 
+        # Full deep field catalog for all 28 UCM fields
+        UCM_DEEP = {
+            "tin.value": {"label":"Tax ID (EIN) + Verified Badge","fact":"tin / tin_match / tin_match_boolean","api":"/facts/business/:id/kyb","editable":True,"tags":["✏️ Editable","🔐 IRS TIN Match","UCM: use tin_match_boolean NOT tin.value"],"sources":[("Applicant","pid=0","w=1.0","EIN integer submitted at onboarding — always masked after submission. This IS tin.value (raw integer). NOT what UCM should use for verification."),("Middesk","pid=16","w=2.0","IRS TIN Match service: reviewTasks[key='tin'].status. Returns {status:'success'|'failure',message,sublabel}. THIS drives the Verified/Unverified badge via tin_match_boolean."),("Trulioo","pid=38","w=0.8","TIN-to-name match for UK/Canada businesses only. Falls back for US. truliooPreferredRule applies for GB/CA.")],"rule":"tin.value = raw masked EIN (applicant submitted). UCM MUST use tin_match_boolean.value (boolean) NOT tin.value (integer). tin_match_boolean = (tin_match.value.status === 'success'). TinBadge.tsx: true→✅Verified(info/blue), false→⚠️Unverified(warning). Winner: factWithHighestConfidence() — Middesk wins (w=2.0) for US.","storage":["rds_warehouse_public.facts name='tin_submitted' (masked EIN string)","rds_warehouse_public.facts name='tin_match' {status,message,sublabel}","rds_warehouse_public.facts name='tin_match_boolean' (boolean: status==='success')","integration_data.request_response (pid=16 Middesk raw IRS response)"],"null_cause":"Unverified badge: IRS did not confirm TIN+name match. Causes: wrong EIN, name mismatch, sole proprietor using personal SSN, EIN not yet in IRS records. Blank tin.value: applicant did not submit (extremely rare).","badges":[("✅ Verified","badge-verified","tin_match_boolean=true → IRS confirmed EIN+legal name are a valid registered match"),("⚠️ Unverified","badge-unverified","tin_match_boolean=false → IRS could not confirm match"),("⚠️ [status]","badge-unverified","capitalize(tin_match.value.status) when status is neither success nor failure (e.g. 'in_review')")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/TinBadge.tsx",1,48,"TinBadge exact badge logic"),"sql":"SELECT name, value->>'value' AS val, value->'source'->>'platformId' AS pid\nFROM rds_warehouse_public.facts\nWHERE business_id='<id>' AND name IN ('tin','tin_submitted','tin_match','tin_match_boolean');","gpn_q":"tin.value is an integer — how does it transform to Verified/Unverified? Are you talking about tin_match_boolean.value?","gpn_a":"UCM should use tin_match_boolean.value (includes true or false). tin.value is the raw tax id. Unverified maps to False, Verified maps to True. UCM Rule: Unverified → Fail the rule. All other results → Pass the rule."},
+            "watchlist.hits.value": {"label":"Watchlist Hit Count","fact":"watchlist_hits / watchlist.value.metadata.length","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","14 Lists Scanned","All entities consolidated"],"sources":[("Middesk","pid=16","—","reviewTasks[type='watchlist'] — OFAC, BIS, State Dept lists for the business entity"),("Trulioo","pid=38","—","Business + person watchlist screening via trulioo_advanced_watchlist_results (ALL hits consolidated since BEST-65)"),("Combined","combineWatchlistMetadata()","—","Merges ALL hits, deduplicates by type|title|entity_name|url key. Adverse media FILTERED OUT (→ Public Records tab).")],"rule":"watchlist.hits.value = watchlist.value.metadata.length (count after deduplication). WatchlistsTab.tsx: badge = metadata.length>0 ? 'N Hits Found'(red) : 'No Hits'(green). groupWatchlistHitsByEntityName() groups hits by entity name across business names + officers. IMPORTANT: since BEST-65, NO separate /people/watchlist endpoint — all consolidated.","storage":["rds_warehouse_public.facts name='watchlist_hits' (integer count)","rds_warehouse_public.facts name='watchlist' {metadata:[{type,entity_name,url}],message:''}","rds_warehouse_public.facts name='watchlist_raw' (full pre-filter data)"],"null_cause":"0 hits = watchlist scan ran and found nothing (NORMAL expected state). NULL hit_count = watchlist scan not yet completed (integrations still processing). Section hidden for Canadian businesses (excludedCountriesForVerification).","badges":[("✅ No Hits","badge-nohits","metadata.length=0 — all 14 lists scanned, no matches found"),("🔴 N Hits Found","badge-hits","metadata.length>0 — N unique hits across OFAC/BIS/State Dept after deduplication")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/WatchlistsTab/WatchlistsTab.tsx",190,215,"groupWatchlistHitsByEntityName logic"),"sql":"SELECT value->>'value'->>'metadata' FROM rds_warehouse_public.facts WHERE business_id='<id>' AND name='watchlist';\n\n-- Count hits:\nSELECT jsonb_array_length(value->'value'->'metadata') AS hit_count\nFROM rds_warehouse_public.facts WHERE business_id='<id>' AND name='watchlist_raw';"},
+            "watchlist.value.metadata": {"label":"Watchlist Hit Detail Metadata","fact":"watchlist.value.metadata[]","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","Array per Hit","Adverse Media Excluded"],"sources":[("Middesk+Trulioo combined","combineWatchlistMetadata()","—","rules.ts L273-344: deduplicates by type|metadata.title|entity_name|url. Filters out ADVERSE_MEDIA type (→ Public Records tab).")],"rule":"combineWatchlistMetadata() rule. Each hit: {type, metadata:{title,agency}, entity_name, url, entity_type:'BUSINESS'|'PERSON', list_country}. Dedup key: type|title/agency|entity_name|url.","storage":["rds_warehouse_public.facts name='watchlist_raw' (full merged before adverse-media filter)"],"null_cause":"Empty array = no hits found. Adverse media hits present in watchlist_raw but EXCLUDED from watchlist.value.metadata (filtered out by combineWatchlistMetadata).","badges":[],"react_src":("SIC_UK","integration-service/lib/facts/rules.ts",273,344,"combineWatchlistMetadata deduplication and adverse media filter"),"sql":"-- All hits including type:\nSELECT hit->>'type', hit->'metadata'->>'title', hit->>'entity_name', hit->>'url'\nFROM rds_warehouse_public.facts, jsonb_array_elements(value->'value'->'metadata') AS hit\nWHERE business_id='<id>' AND name='watchlist_raw';"},
+            "legal_name.value": {"label":"Legal Business Name (Business Registration card)","fact":"legal_name","api":"/facts/business/:id/kyb","editable":True,"tags":["✏️ Editable","🔍 Vendor-Discovered","NOT applicant-submitted"],"sources":[("Middesk","pid=16","w=2.0","businessEntityVerification.name — name found in SoS records via IRS TIN match"),("OpenCorporates","pid=23","w=0.9","firmographic.name — registered name in global OC registry"),("Trulioo","pid=38","w=0.8","clientData.businessName for UK/Canada")],"rule":"factWithHighestConfidence() — Middesk wins (w=2.0) for US. legal_name.value is the VERIFIED name from public records. IMPORTANT: NOT pre-filled by Worth — Global/UCM sends Legal Name + Tax ID. Worth compares submitted name against IRS via Middesk.","storage":["rds_warehouse_public.facts name='legal_name'"],"null_cause":"Empty when: (1) Middesk still processing integrations, (2) Middesk found no entity in SoS. NOT a failure — means entity lookup not yet complete.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/BusinessRegistrationTab/useBusinessRegistrationTabDetails.tsx",72,82,"taxDetails Business Name"),"sql":"SELECT value->>'value' AS legal_name, value->'source'->>'platformId' AS pid\nFROM rds_warehouse_public.facts WHERE business_id='<id>' AND name='legal_name';","gpn_q":"Worth Discussion: We don't see company_name in KYB documentation. UCM found legal_name, but not company_name.value. What UCM rule is needed?","gpn_a":"Per Gavin, the field is legal_name. Per Ben, this is NOT pre-filled. Global sends Legal Name & Tax ID. Worth compares against IRS. Tax ID Verification & Legal Name use the SAME UCM Rule. No Action Needed."},
+            "dba_found.value[n]": {"label":"DBA Names (Contact Information)","fact":"dba_found (array)","api":"/facts/business/:id/kyb","editable":True,"tags":["✏️ Editable","Array of DBAs","combineFacts merges all"],"sources":[("Middesk","pid=16","w=2.0","names[] where submitted=false — trade names Middesk found in SoS"),("ZoomInfo","pid=24","w=0.8","zi_c_tradename field"),("OpenCorporates","pid=23","w=0.9","alternate_names from OC registry"),("SERP","pid=22","w=0.5","DBA extracted from web scraping"),("Applicant","pid=0","w=1.0","DBA submitted at onboarding")],"rule":"combineFacts() — merges DBA names from ALL sources into deduplicated array. Verification via name_match_boolean.value (TRUE=Verified, FALSE=Unverified). Name comparison uses name_match_boolean not dba_found directly.","storage":["rds_warehouse_public.facts name='dba_found' (array of discovered DBAs)","rds_warehouse_public.facts name='dba' (submitted DBA from applicant)"],"null_cause":"Empty array = business operates only under legal name. Very common — NOT an error. Section only renders when names_submitted.value.length > 0.","badges":[("✅ Verified","badge-verified","name_match_boolean=true: submitted name/DBA found in SoS/public records"),("❌ Failure","badge-missing","name_match_boolean=false: name not confirmed")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/BusinessNamesCard.tsx",1,30,"BusinessNamesCard"),"sql":"SELECT name, value->>'value' FROM rds_warehouse_public.facts WHERE business_id='<id>' AND name IN ('dba','dba_found');\nSELECT value->>'value' AS name_match_boolean FROM rds_warehouse_public.facts WHERE business_id='<id>' AND name='name_match_boolean';","gpn_q":"How does dba_found.value[n] (array) transform to Verified/Unverified? DBA Verified: Rule passes. DBA Unverified: Rule fails.","gpn_a":"name_match_boolean.value governs DBA Names, alternate names. True=Verified, False=Unverified. Worth 360 Report shows Verified or Unverified. Logic uses data including confidence score."},
+            "google_profile.address": {"label":"Google Business Profile — Address","fact":"address_verification (Google component)","api":"/facts/business/:id/kyb + Google Places API","editable":False,"tags":["🔒 Read-Only","SERP→Google Places","Match/No Match"],"sources":[("SERP","pid=22","w=0.5","SERP scraper finds google_place_id → calls Google Places API → gets address"),("Google Places API","pid=29","w=0.6","address_match field from business listing")],"rule":"AddressesCard.tsx: googleProfileMatch = (googleProfileData.data.business_match.toLowerCase()==='match found') AND (googleProfileData.data.address_match.toLowerCase()==='match'). enrichAddressesWithStatusFor360ReportParity() applies to submitted AND reported addresses.","storage":["rds_warehouse_public.facts name='address_verification' {status,sublabel,message}","rds_warehouse_public.facts name='address_match_boolean' (boolean)","integration_data.request_response (pid=22 SERP, pid=29 Google)"],"null_cause":"Google Profile badge shows 'Unverified' when: (1) no Google Business Profile found, (2) SERP found no Place ID, (3) Google address doesn't match submitted. Many businesses have no Google listing — NOT an error.","badges":[("✅ Google Profile","badge-verified","googleProfileMatch=true: Google BProfile confirms same business name AND same address"),("⚠️ Google Profile","badge-unverified","googleProfileMatch=false: Google not found or shows different address/name")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/AddressesCard.tsx",218,228,"googleProfileMatch logic"),"sql":"SELECT name, value->>'value' FROM rds_warehouse_public.facts WHERE business_id='<id>' AND name IN ('address_verification','address_match_boolean','google_place_id');","gpn_q":"What is the Google-Profile endpoint? What UCM rule is needed? Need to display on Worth 360 Report.","gpn_a":"Action Item: Gavin to provide Google Profile documentation. UCM Team can investigate Worth 360 mapping to find these details. Note: This info is on the Worth 360 Report."},
+            "google_profile.business_name": {"label":"Google Business Profile — Business Name","fact":"names_found + name_match_boolean","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","SERP→Google Places"],"sources":[("SERP+Google Places","pid=22,29","—","Google Business Profile name field. Compared against submitted name for Match/No Match.")],"rule":"names_found uses combineFacts (all sources merged). name_match_boolean governs Verified badge. Google name contributes to name match evaluation.","storage":["rds_warehouse_public.facts name='names_found' (array)","rds_warehouse_public.facts name='name_match_boolean' (boolean)"],"null_cause":"No Google Business Profile found — SERP could not find a Google Place ID for this business.","badges":[("✅ Verified","badge-verified","name_match_boolean=true: submitted business name matches public records including Google"),("❌ Failure","badge-missing","name_match_boolean=false: name not confirmed")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/BusinessNamesCard.tsx",1,30,"Business Names section"),"sql":"SELECT value->>'value' FROM rds_warehouse_public.facts WHERE business_id='<id>' AND name IN ('names_found','name_match_boolean');"},
+            "mcc_code": {"label":"MCC Code (Background tab)","fact":"mcc_code / mcc_code_found / mcc_code_from_naics","api":"/facts/business/:id/details","editable":True,"tags":["✏️ Editable","🤖 AI + Calculated","3 internal facts"],"sources":[("AI Enrichment (mcc_code_found)","pid=31","—","response.mcc_code directly from GPT-5-mini (preferred). Fires when all vendor NAICS are null."),("Calculated from NAICS (mcc_code_from_naics)","calculated","—","rel_naics_mcc lookup: winning naics_id → mcc_id. Dependency on naics_code fact."),("Combined (mcc_code)","combined","—","mcc_code = mcc_code_found?.value ?? mcc_code_from_naics?.value. AI-provided preferred.")],"rule":"mcc_code is NOT from a competitive vendor selection. It is: (1) AI-provided MCC if AI enrichment ran, OR (2) calculated from winning NAICS via rel_naics_mcc table. When AI returns 5614 (last resort), mcc_description = 'Fallback MCC per instructions...' — KNOWN BUG (Gap G5), editable=false so analyst cannot fix.","storage":["rds_warehouse_public.facts name='mcc_code'","rds_warehouse_public.facts name='mcc_code_found' (AI direct)","rds_warehouse_public.facts name='mcc_code_from_naics' (calculated)","rds_cases_public.data_businesses.mcc_id → core_mcc_code.id"],"null_cause":"Almost never null — rel_naics_mcc calculates MCC when NAICS exists. 5614 shown with 'Fallback MCC...' when AI had no evidence (Gap G5 — mcc_description is read-only).","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",440,469,"mcc_code + mcc_description fieldConfigs"),"sql":"SELECT name, value->>'value' FROM rds_warehouse_public.facts WHERE business_id='<id>' AND name IN ('mcc_code','mcc_code_found','mcc_code_from_naics','mcc_description');","gpn_q":"MCC code is needed for UCM. Where does it come from?","gpn_a":"MCC comes from AI enrichment (NAICS→MCC map + AI-returned MCC). 5614 is the AI fallback when no industry evidence. 'Fallback MCC per instructions...' description is a known bug."},
+            "people.value[n].name, people.value[n].titles[n]": {"label":"Corporate Officers (Business Registration)","fact":"people.value[] filtered by sos.id","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","Per Filing Filtered","combineFacts"],"sources":[("Middesk","pid=16","w=2.0","registrations[n].officers — officers per state filing, matched to specific sos.id"),("OpenCorporates","pid=23","w=0.9","officers array from OC company record"),("Trulioo","pid=38","w=0.8","principals/directors from Trulioo KYB response")],"rule":"combineFacts() — all people from all sources merged. Business Registration tab shows: people.value.filter(person => person.source.some(src => src.id === sos.id)). Each SoS filing card shows ONLY officers linked to THAT specific filing's sos.id.","storage":["rds_warehouse_public.facts name='people' (array of {name, titles[], source[], jurisdictions[]})"],"null_cause":"N/A per filing when no officers linked to that sos.id. Common when state doesn't require officer disclosure. Entire people section empty if no SoS filing found.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/BusinessRegistrationTab/useBusinessRegistrationTabDetails.tsx",197,240,"Corporate Officers row — filtered by sos.id"),"sql":"SELECT value->>'value' AS people FROM rds_warehouse_public.facts WHERE business_id='<id>' AND name='people';"},
+            "sos_active.value": {"label":"SoS Filing Status (Active/Inactive)","fact":"sos_filings[n].active / sos_active","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","Per Filing","Drives SoS badge"],"sources":[("Middesk","pid=16","w=2.0","registrations[n].status === 'active' → active=true. Middesk queries SoS databases by TIN+name."),("OpenCorporates","pid=23","w=0.9","current_status: 'Active'→true, 'Dissolved'→false")],"rule":"sos_active = any(sos_filings[n].active === true). SOSBadge.tsx: sosFiling.active=true→VERIFIED(info/blue,CheckBadgeIcon,tooltip='An active filing was found'). sosFiling.active=false→MISSING ACTIVE FILING(error/red). sos_active=null→N/A. SOSFilingCard title: US='Secretary of State Filings', non-US='Registration Filing'.","storage":["rds_warehouse_public.facts name='sos_filings' (array of filings, each with active: boolean)","rds_warehouse_public.facts name='sos_active' (boolean: any filing active?)","rds_warehouse_public.facts name='sos_match_boolean'"],"null_cause":"'No Registry Data to Display' = sos_filings.value=[] (empty array). Middesk searched all 50 US SoS databases by TIN+name and found ZERO registrations. NOT a confidence threshold — if Middesk finds nothing, nothing is shown.","badges":[("✅ Verified","badge-verified","sosFiling.active=true: active SoS filing found and in good standing"),("🔴 Missing Active Filing","badge-missing","sosFiling.active=false: filing found but inactive/dissolved"),("⚠️ Invalidated","badge-unverified","isInvalidated=true: filing marked invalid")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/SOSBadge.tsx",12,60,"SOSBadge exact logic"),"sql":"SELECT elem->>'state', elem->>'active', elem->>'entity_type', elem->>'filing_date'\nFROM rds_warehouse_public.facts, jsonb_array_elements(value->'value') AS elem\nWHERE business_id='<id>' AND name='sos_filings';"},
+            "sos_filings.value[n].state": {"label":"SoS Filing State","fact":"sos_filings[n].state","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","Per Filing","2-letter code"],"sources":[("Middesk","pid=16","w=2.0","registrations[n].registration_state — 2-letter US state code"),("OpenCorporates","pid=23","w=0.9","jurisdiction_code split by '_' → second part uppercased: 'us_fl'→'FL'")],"rule":"Shown per filing card. Format: 2-letter state code. EntityJurisdictionCell.tsx maps foreign_domestic to Domestic(Primary) or Foreign(Secondary) badge — 'Primary' is Worth's label, NOT Middesk's.","storage":["Within sos_filings array: state field"],"null_cause":"N/A if registration_state absent from SoS record (uncommon).","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/BusinessRegistrationTab/EntityJurisdictionCell.tsx",1,35,"Domestic/Foreign + Primary/Secondary badges"),"sql":"SELECT elem->>'state', elem->>'foreign_domestic' FROM rds_warehouse_public.facts, jsonb_array_elements(value->'value') AS elem WHERE business_id='<id>' AND name='sos_filings';"},
+            "sos_filings.value[n].filing_date": {"label":"SoS Registration Date","fact":"sos_filings[n].filing_date","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","ISO date → MM-DD-YYYY"],"sources":[("Middesk","pid=16","w=2.0","registrations[n].registration_date — ISO date string from SoS database"),("OpenCorporates","pid=23","w=0.9","incorporation_date from OC record")],"rule":"Formatted by convertToLocalDate(new Date(sos.filing_date), 'MM-DD-YYYY') in index.tsx L300. useBusinessRegistrationTabDetails.tsx: formatSourceDate() for display.","storage":["Within sos_filings array: filing_date field per filing"],"null_cause":"N/A if date absent from SoS registry record. Shows 'N/A' for that specific field.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/BusinessRegistrationTab/useBusinessRegistrationTabDetails.tsx",163,175,"Registration Date row"),"sql":"SELECT elem->>'filing_date' FROM rds_warehouse_public.facts, jsonb_array_elements(value->'value') AS elem WHERE business_id='<id>' AND name='sos_filings';"},
+            "sos_filings.value[n].entity_type": {"label":"SoS Entity Type (Corporation Type)","fact":"sos_filings[n].entity_type","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","Normalised","Per Filing"],"sources":[("Middesk","pid=16","w=2.0","registrations[n].entity_type — raw string from SoS (e.g. 'Llc')"),("OpenCorporates","pid=23","w=0.9","company_type normalised: 'Limited Liability Company'→'llc', 'Incorporated'→'corporation'")],"rule":"Worth normalises entity_type: 'Limited Liability Company'→'llc', 'Incorporated'→'corporation', 'Limited Liability Partnership'→'llp'. useBusinessRegistrationTabDetails.tsx L178-195.","storage":["Within sos_filings array: entity_type field"],"null_cause":"N/A if state doesn't disclose entity type. Different from Background tab Corporation Type (which is a separate independently-selected fact).","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/BusinessRegistrationTab/useBusinessRegistrationTabDetails.tsx",178,195,"Entity Type row"),"sql":"SELECT elem->>'entity_type' FROM rds_warehouse_public.facts, jsonb_array_elements(value->'value') AS elem WHERE business_id='<id>' AND name='sos_filings';"},
+            "status": {"label":"Case Status (Case Results panel)","fact":"data_cases.status → core_case_statuses","api":"GET /cases/:id (case management API)","editable":True,"tags":["✏️ Analyst can change","Pending→Under Review/Approved","Not from facts table"],"sources":[("Worth Score engine","calculated","—","Auto-Approved when all UCM rules pass AND score above configured threshold"),("Manual","analyst","—","Analyst can change status via admin portal (PATCH /cases/:id)"),("Middesk","pid=16","—","businessEntityVerification.status feeds verification_status fact (separate from case status)")],"rule":"Case status lives in rds_cases_public.data_cases.status (FK to core_case_statuses). NOT a Fact Engine fact. Transitions: Pending→Under Review (rules fail) or Auto-Approved (all pass). 'Pending' = initial state while integrations run (not null). Worth Score shows '-' until calculation completes. case-management.ts getCaseByIDQuery L1555-1574 joins data_cases + core_case_statuses.","storage":["rds_cases_public.data_cases.status → core_case_statuses.id","core_case_statuses: {id, code:'pending'|'under_review'|'auto_approved'|'archived', label}"],"null_cause":"Shows 'Pending' (with loading bars) initially — not null. '-' for Worth Score means not yet calculated. 'Pending' disappears when all integrations complete and score is calculated.","badges":[("Pending","badge-unknown","Integrations still running, Worth Score not yet calculated"),("Under Review","badge-unverified","One or more UCM rules failed — analyst review required"),("Auto-Approved","badge-verified","All rules passed AND score above threshold"),("Archived","badge-unknown","Case closed — cannot reopen without action")],"react_src":("SIC_UK","case-service/src/api/v1/modules/case-management/case-management.ts",1555,1574,"getCaseByIDQuery — joins data_cases + core_case_statuses"),"sql":"SELECT dc.id, cs.code AS status, cs.label, dc.created_at\nFROM rds_cases_public.data_cases dc\nJOIN core_case_statuses cs ON cs.id = dc.status\nWHERE dc.business_id = '<id>';"},
+            "domain.creation_date": {"label":"Website Domain Creation Date (Website tab)","fact":"websiteData.domain.creation_date","api":"/verification/businesses/:id/website-data","editable":False,"tags":["🔒 Read-Only","WHOIS Data","N/A when URL edited"],"sources":[("SERP","pid=22","w=0.5","SERP scraper performs WHOIS lookup on found domain → creation_date field"),("Verdata","pid=35","w=0.6","domain age check via WHOIS")],"rule":"useWebsiteNonEditableFields.tsx: isWebsiteDirty=true → all non-editable fields show N/A (cleared when URL is edited). websiteData.domain.creation_date → formatSourceDate() for display. IMPORTANT: when analyst edits the website URL, all derived fields (Creation Date, Expiration Date, Parked Domain, Status) immediately show N/A until re-verification runs.","storage":["Via /verification/businesses/:id/website-data endpoint — not stored in facts table","integration_data.request_response (pid=22 SERP, pid=35 Verdata WHOIS data)"],"null_cause":"N/A when: (1) no website found, (2) WHOIS privacy protection enabled, (3) URL just edited (isWebsiteDirty=true). Many businesses have no website — N/A is common and NOT an error.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/WebsiteTab/useWebsiteNonEditableFields.tsx",60,80,"Creation Date non-editable field"),"sql":"-- Not in facts table — check SERP raw response:\nSELECT response FROM integration_data.request_response WHERE business_id='<id>' AND platform_id=22 ORDER BY requested_at DESC LIMIT 1;"},
+        }
+
         if ucm:
-            st.markdown(f"## `{ucm['api_field']}`")
-            col1, col2, col3 = st.columns(3)
-            col1.markdown(f"**Section:** {ucm['section'] or '—'}")
-            col2.markdown(f"**Data Type:** {ucm['data_type'] or '—'}")
-            col3.markdown(f"**W360:** {'✅ Yes' if ucm['w360']=='Yes' else '❌ No'}")
-            if ucm['description']:
-                card(ucm['description'])
+            # Build a render_field-compatible dict from UCM data + deep catalog
+            api_field = ucm['api_field']
+            deep = UCM_DEEP.get(api_field)
 
-            # Map to existing field lineage
-            FIELD_MAPPING = {
-                "tin.value": ("🏛️ Business Registration","tin + tin_match_boolean","Middesk IRS TIN Match → reviewTasks[key='tin']","rds_warehouse_public.facts name='tin_match_boolean'"),
-                "watchlist.hits.value": ("🔍 Watchlists","watchlist_hits / watchlist.value.metadata.length","Middesk + Trulioo → combineWatchlistMetadata()","rds_warehouse_public.facts name='watchlist_hits'"),
-                "watchlist.value.metadata": ("🔍 Watchlists","watchlist.value.metadata[]","Middesk reviewTasks + Trulioo trulioo_advanced_watchlist_results","rds_warehouse_public.facts name='watchlist_raw'"),
-                "legal_name.value": ("🏛️ Business Registration","legal_name","Middesk BEV.name (pid=16,w=2.0) → IRS confirmed name","rds_warehouse_public.facts name='legal_name'"),
-                "dba_found.value[n]": ("📬 Contact Information","dba_found (array)","combineFacts: Middesk names[submitted=false] + ZI + OC + SERP","rds_warehouse_public.facts name='dba_found'"),
-                "google_profile.address": ("📬 Contact Information","address_verification (Google)","SERP→Google Places API: address_match comparison","rds_warehouse_public.facts name='address_verification'"),
-                "google_profile.business_name": ("📬 Contact Information","names_found + name_match_boolean","SERP→Google Places: business_name_match","rds_warehouse_public.facts name='names_found'"),
-                "mcc_code": ("📋 Background","mcc_code","AI mcc_code_found ?? calculated mcc_code_from_naics","rds_warehouse_public.facts name='mcc_code'"),
-                "people.value[n].name, people.value[n].titles[n]": ("🏛️ Business Registration","people (filtered by sos.id)","Middesk officers + OC + Trulioo → combineFacts","rds_warehouse_public.facts name='people'"),
-                "sos_active.value": ("🏛️ Business Registration","sos_filings[n].active / sos_active","Middesk registrations[n].status === 'active'","rds_warehouse_public.facts name='sos_active'"),
-                "sos_filings.value[n].state": ("🏛️ Business Registration","sos_filings[n].state","Middesk registration_state","rds_warehouse_public.facts name='sos_filings'"),
-                "sos_filings.value[n].filing_date": ("🏛️ Business Registration","sos_filings[n].filing_date","Middesk registration_date → convertToLocalDate(MM-DD-YYYY)","rds_warehouse_public.facts name='sos_filings'"),
-                "sos_filings.value[n].entity_type": ("🏛️ Business Registration","sos_filings[n].entity_type","Middesk entity_type (normalised)","rds_warehouse_public.facts name='sos_filings'"),
-                "status": ("🏛️ Business Registration","data_cases.status → core_case_statuses","Case status: Pending/Under Review/Auto-Approved/Archived","rds_cases_public.data_cases.status"),
-                "domain.creation_date": ("🌐 Website","websiteData.domain.creation_date","SERP WHOIS + Verdata domain check","Via /verification/.../website-data endpoint"),
-                "data.applicant.status": ("🏛️ Business Registration","tin_match / verification_status","Middesk BEV.status → Verified badge","rds_warehouse_public.facts name='tin_match_boolean'"),
-                "owners[n].first_name": ("KYC Tab","data_owners.first_name","Applicant submitted at onboarding","rds_cases_public.data_owners.first_name"),
-                "owners[n].last_name": ("KYC Tab","data_owners.last_name","Applicant submitted at onboarding","rds_cases_public.data_owners.last_name"),
-                "owners[n].date_of_birth": ("KYC Tab","data_owners.date_of_birth","Applicant submitted — used for Plaid IDV","rds_cases_public.data_owners (encrypted)"),
-                "owners[n].ssn": ("KYC Tab","data_owners.ssn (masked)","Applicant submitted — masked after submission, used by Plaid","rds_cases_public.data_owners (masked)"),
-                "owners[n].mobile": ("KYC Tab","data_owners.mobile","Applicant submitted — used to send Plaid IDV link","rds_cases_public.data_owners.mobile"),
-                "owners[n].email": ("KYC Tab","data_owners.email","Applicant submitted — used to send Plaid IDV link","rds_cases_public.data_owners.email"),
-                "synthetic_identity_risk_score": ("KYC Tab","caseTabValues.synthetic_identity_risk_score","Plaid IDV synthetic risk signals","Via /cases/:id/tab-values endpoint"),
-                "stolen_identity_risk_score": ("KYC Tab","caseTabValues.stolen_identity_risk_score","Plaid IDV stolen identity risk signals","Via /cases/:id/tab-values endpoint"),
-                "verification_result.account_verification_response.code": ("Banking Tab","verification_status (banking)","Plaid Auth / micro-deposit codes: VERIFIED/PENDING/FAILED","integration_data.request_response (pid=40)"),
-                "verification_result.account_authentication_response.verification_response": ("KYC Tab","idv_status / idv_passed_boolean","Plaid IDV per-owner: SUCCESS/FAILED/PENDING status counts","rds_warehouse_public.facts name='idv_status'"),
-            }
+            st.markdown(f"## `{api_field}`")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.markdown(f"**Section:** {ucm['section'] or '—'}")
+            m2.markdown(f"**Data Type:** {ucm['data_type'] or '—'}")
+            m3.markdown(f"**W360:** {'✅ Yes' if ucm.get('w360')=='Yes' else '❌ No'}")
+            m4.markdown(f"**Requires Transform:** {ucm.get('requires_transform') or '—'}")
+            if ucm.get('description'):
+                card(f"<b>Description (from UCM Working Session):</b> {ucm['description']}")
+            if ucm.get('decisional'):
+                card(f"<b>Decisional/Info Only:</b> {ucm['decisional']}")
 
-            mapping = FIELD_MAPPING.get(sel_field)
-            if mapping:
-                portal_loc, fact_name, source_desc, storage = mapping
-                st.markdown("### 📍 Lineage")
-                lineage_html = f"""<table class="t">
-                <tr><th>Dimension</th><th>Value</th></tr>
-                <tr><td>Admin Portal Location</td><td style='color:#60A5FA'>{portal_loc}</td></tr>
-                <tr><td>Fact / Data Path</td><td><code>{fact_name}</code></td></tr>
-                <tr><td>Source / Vendor</td><td style='color:#94A3B8'>{source_desc}</td></tr>
-                <tr><td>Storage</td><td><code>{storage}</code></td></tr>
-                </table>"""
-                st.markdown(lineage_html, unsafe_allow_html=True)
-
-            if ucm['gpn_questions']:
-                st.markdown("### ❓ GPN Questions")
-                card(ucm['gpn_questions'], "card-amber")
-            if ucm['decisions']:
-                st.markdown("### ✅ Confirmed Decisions")
-                card(ucm['decisions'], "card-green")
-            if ucm['requires_transform']:
-                card(f"<b>Requires Transformation:</b> {ucm['requires_transform']}")
-
-            # SQL verification
-            sql_map = {
-                "tin.value": "SELECT name, value->>'value' AS val FROM rds_warehouse_public.facts WHERE business_id='<id>' AND name IN ('tin','tin_submitted','tin_match','tin_match_boolean');",
-                "watchlist.hits.value": "SELECT value->>'value' AS hit_count FROM rds_warehouse_public.facts WHERE business_id='<id>' AND name='watchlist_hits';",
-                "legal_name.value": "SELECT value->>'value' FROM rds_warehouse_public.facts WHERE business_id='<id>' AND name='legal_name';",
-                "mcc_code": "SELECT name, value->>'value' FROM rds_warehouse_public.facts WHERE business_id='<id>' AND name IN ('mcc_code','mcc_code_found','mcc_code_from_naics','mcc_description');",
-                "sos_active.value": "SELECT elem->>'state' AS state, elem->>'active' AS active, elem->>'entity_type' AS type FROM rds_warehouse_public.facts, jsonb_array_elements(value->'value') AS elem WHERE business_id='<id>' AND name='sos_filings';",
-                "status": "SELECT status, label FROM data_cases dc JOIN core_case_statuses cs ON cs.id=dc.status WHERE dc.business_id='<id>';",
-            }
-            sql = sql_map.get(sel_field, f"SELECT name, value FROM rds_warehouse_public.facts WHERE business_id='<id>' AND name='{fact_name if mapping else sel_field}';")
-            st.markdown("### 🔍 Verify in Database")
-            st.code(sql, language="sql")
+            if deep:
+                # Use the shared render_field pattern with deep data
+                render_field({
+                    "label": deep["label"],
+                    "fact": deep["fact"],
+                    "api": deep["api"],
+                    "editable": deep.get("editable"),
+                    "tags": deep.get("tags", []),
+                    "sources": deep.get("sources", []),
+                    "rule": deep.get("rule"),
+                    "storage": deep.get("storage", []),
+                    "null_cause": deep.get("null_cause"),
+                    "badges": deep.get("badges", []),
+                    "react_src": deep.get("react_src"),
+                    "sql": deep.get("sql"),
+                    "gpn_q": ucm.get("gpn_questions"),
+                    "gpn_a": ucm.get("decisions"),
+                })
+            else:
+                # Fallback for fields not yet in deep catalog
+                if ucm.get("gpn_questions"):
+                    st.markdown("### ❓ UCM Working Session Question")
+                    card(ucm["gpn_questions"], "card-amber")
+                if ucm.get("decisions"):
+                    st.markdown("### ✅ Confirmed Decisions")
+                    card(ucm["decisions"], "card-green")
+                # Generic SQL
+                fact_key = api_field.replace(".value","").replace("[n]","").replace("[]","").split(",")[0].strip()
+                st.markdown("### 🔍 Verify in Database")
+                st.code(f"SELECT name, value FROM rds_warehouse_public.facts WHERE business_id='<id>' AND name='{fact_key}';", language="sql")
+                card(f"⚠️ Deep lineage for '{api_field}' not yet mapped. Use the 🤖 AI Agent tab to ask: 'Where does {api_field} come from?'", "card-amber")
 
 
 # ════════════════════════════════════════════════════════════════════════════
