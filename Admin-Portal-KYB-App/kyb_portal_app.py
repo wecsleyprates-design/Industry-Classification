@@ -562,6 +562,761 @@ elif section == "🏷️  Field Lineage Explorer":
                  "and Trulioo responses with matching fields, it is shown once."),
             ],
         },
+        # ── UCM Q/A Spreadsheet fields ─────────────────────────────────────
+        "tin.value [UCM: Tax ID Verification]": {
+            "ui_label": "Tax ID Number (EIN) — Verification", "sub_tab": "Business Registration",
+            "fact_name": "tin_match / tin_match_boolean",
+            "api_path": "GET /facts/business/:id/kyb → kybFactsData.data.tin_match.value.status",
+            "react_code": "index.tsx L137-L149: tin_match.value.status==='success' → badge 'Verified' (green_tick). status==='failure' → 'Not Found' (red).",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/KnowYourBusiness/index.tsx",
+            "react_lines": (133, 150),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (399, 491),
+            "sources_ordered": [
+                ("Middesk", "pid=16", "w=2.0", "reviewTasks.find(task => task.key==='tin'). IRS TIN Match. Returns {status, message, sublabel}."),
+                ("Trulioo", "pid=38", "w=0.8", "UK/Canada businesses only — TIN-to-name match via Trulioo KYB API."),
+                ("Applicant submission", "pid=0", "w=1.0", "tin_submitted: raw EIN from onboarding form (masked). NOT used for verification — only display."),
+            ],
+            "winner_rule": "tin.value = raw EIN from applicant (tin_submitted fact). The VERIFICATION is tin_match_boolean.value (bool). UCM should use tin_match_boolean.value not tin.value directly.",
+            "storage": [
+                "rds_warehouse_public.facts  name='tin_submitted'  (masked EIN string)",
+                "rds_warehouse_public.facts  name='tin_match'  {status, message, sublabel}",
+                "rds_warehouse_public.facts  name='tin_match_boolean'  (boolean: status==='success')",
+                "integration_data.request_response  (pid=16 Middesk raw response)",
+            ],
+            "null_cause": "Verified badge missing: Middesk has not yet completed (integrations processing). "
+                          "Not Found: IRS did not confirm TIN+name match (wrong EIN, name mismatch, or not in IRS records). "
+                          "tin.value itself is never null if applicant submitted it — it is always shown masked.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (768, 790),
+            "questions": [
+                ("UCM: tin.value is an integer — how does it transform to Verified/Unverified?",
+                 "tin.value is the raw EIN integer. UCM should use tin_match_boolean.value (boolean) for verification display. "
+                 "TRUE = Verified (TIN+name match confirmed by IRS via Middesk). FALSE = Unverified. "
+                 "Confirmed decision: Unverified → Fail the UCM rule. All other results → Pass."),
+                ("What does 'Verified' mean here — verified against what?",
+                 "Verified = Middesk submitted the EIN + business legal name to the IRS TIN Matching program. "
+                 "The IRS confirmed the TIN and name are a registered match. "
+                 "This is an IRS check, not a Secretary of State check."),
+            ],
+        },
+        "watchlist.hits.value [UCM: Watchlist Hit Count]": {
+            "ui_label": "Watchlist — Hit Count", "sub_tab": "Watchlists",
+            "fact_name": "watchlist_hits / watchlist",
+            "api_path": "GET /facts/business/:id/kyb → kybFactsData.data.watchlist.value.metadata.length",
+            "react_code": "index.tsx L558-L574: badge = metadata.length > 0 ? 'N Hits Found' : 'No Hits'. "
+                          "Badge type: metadata.length > 0 → red_exclamation_circle, else → green_tick.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/KnowYourBusiness/index.tsx",
+            "react_lines": (558, 575),
+            "backend_fact_file": "integration-service/lib/facts/rules.ts",
+            "backend_fact_lines": (273, 344),
+            "sources_ordered": [
+                ("Middesk", "pid=16", "—", "reviewTasks watchlist review — OFAC, BIS, State Dept lists for the business entity."),
+                ("Trulioo (business)", "pid=38", "—", "Business watchlist screening via Trulioo KYB."),
+                ("Trulioo (person)", "pid=38", "—", "Per-owner screening: GET /verification/businesses/:id/people/watchlist endpoint."),
+            ],
+            "winner_rule": "combineWatchlistMetadata rule — merges ALL sources, deduplicates by type|title|entity_name|url key. "
+                           "Adverse media hits FILTERED OUT (separate Public Records tab).",
+            "storage": [
+                "rds_warehouse_public.facts  name='watchlist'  {metadata:[], message:''}",
+                "rds_warehouse_public.facts  name='watchlist_hits'  (integer count)",
+                "rds_warehouse_public.facts  name='watchlist_raw'  (full merged data before filtering)",
+            ],
+            "null_cause": "'No Hits' = watchlist.value.metadata.length === 0 — scan ran and found nothing (normal expected state). "
+                          "Section hidden entirely for Canadian businesses. NULL metadata = scan not yet completed.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (763, 793),
+            "questions": [
+                ("Which 14 lists are checked?",
+                 "OFAC: SDN, Capta, Foreign Sanctions Evaders, Non-SDN Menu-Based, Non-SDN Iranian, "
+                 "Non-SDN Chinese Military-Industrial Complex, Non-SDN Palestinian Legislative Council, Sectoral Sanctions (8). "
+                 "BIS: Entity List, Denied Persons, Military End User, Unverified List (4). "
+                 "State Dept: ITAR Debarred, Nonproliferation Sanctions (2). Total = 14."),
+                ("watchlist.hits.value is an integer — what does it represent?",
+                 "It is the count of unique watchlist hits after deduplication via combineWatchlistMetadata. "
+                 "0 = No Hits (green badge). N > 0 = N Hits Found (red badge). "
+                 "The metadata array contains the individual hit details."),
+            ],
+        },
+        "watchlist.value.metadata [UCM: Watchlist Metadata]": {
+            "ui_label": "Watchlist — Individual Hit Details", "sub_tab": "Watchlists",
+            "fact_name": "watchlist",
+            "api_path": "GET /facts/business/:id/kyb → kybFactsData.data.watchlist.value.metadata[]",
+            "react_code": "WatchlistTitle.tsx: renders each list with hit status. "
+                          "index.tsx L685-L708: HitCard per hit {title, agency, country, sourceLink}.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/KnowYourBusiness/index.tsx",
+            "react_lines": (685, 708),
+            "backend_fact_file": "integration-service/lib/facts/rules.ts",
+            "backend_fact_lines": (273, 344),
+            "sources_ordered": [
+                ("Middesk + Trulioo (combined)", "pid=16,38", "—", "combineWatchlistMetadata merges hits from all sources with deduplication."),
+            ],
+            "winner_rule": "combineWatchlistMetadata deduplicates by type|metadata.title|entity_name|url. "
+                           "Each hit has: type, metadata.title (agency name), entity_name, url, entity_type (BUSINESS|PERSON).",
+            "storage": ["rds_warehouse_public.facts  name='watchlist'  {metadata:[{type, metadata:{title,agency}, entity_name, url, entity_type}], message:''}"],
+            "null_cause": "Empty array [] = no hits found (normal). NULL metadata = watchlist scan not yet completed.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (763, 793),
+            "questions": [
+                ("What structure does each metadata hit have?",
+                 "Each hit: { type: 'sanctions'|'pep'|'adverse_media', metadata: {title, agency}, "
+                 "entity_name, url, entity_type: 'BUSINESS'|'PERSON', list_country }. "
+                 "Adverse media hits are filtered out from this array (shown in Public Records instead)."),
+            ],
+        },
+        "legal_name.value [UCM: Legal Name]": {
+            "ui_label": "Business Name / Legal Entity Name", "sub_tab": "Business Registration",
+            "fact_name": "legal_name",
+            "api_path": "GET /facts/business/:id/kyb → kybFactsData.data.legal_name.value",
+            "react_code": "index.tsx L236: kybFactsData?.data?.legal_name?.value ?? ''",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/KnowYourBusiness/index.tsx",
+            "react_lines": (224, 244),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (192, 239),
+            "sources_ordered": [
+                ("Middesk", "pid=16", "w=2.0", "businessEntityVerification.name — the name Middesk found in SoS records."),
+                ("OpenCorporates", "pid=23", "w=0.9", "firmographic.name — registered name in OC registry."),
+                ("Trulioo", "pid=38", "w=0.8", "clientData.businessName from Trulioo KYB response."),
+                ("Applicant submission", "pid=0", "w=1.0", "Business name submitted at onboarding (businessDetails source)."),
+            ],
+            "winner_rule": "factWithHighestConfidence() — Middesk wins (weight=2.0) for US businesses. "
+                           "legal_name.value is the VERIFIED name from public records, shown in Business Registration card header.",
+            "storage": [
+                "rds_warehouse_public.facts  name='legal_name'",
+                "rds_cases_public.data_businesses.name  (submitted name)",
+            ],
+            "null_cause": "Empty string when: (1) Middesk not yet completed, (2) no vendor returned a legal name. "
+                          "NOTE: UCM confirmed legal_name is NOT pre-filled — Global sends Legal Name + Tax ID, Worth compares and returns match result.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (763, 793),
+            "questions": [
+                ("Is legal_name pre-filled by Worth or submitted by the applicant?",
+                 "NOT pre-filled by Worth. Global/UCM sends the Legal Name + Tax ID. "
+                 "Worth compares the submitted Legal Name against the IRS TIN record via Middesk. "
+                 "legal_name.value is what Worth FOUND in public records (Middesk SoS), not what was submitted. "
+                 "The submitted name is in names_submitted and business_name facts."),
+                ("Can Business Name and Legal Entity Name ever disagree?",
+                 "Yes — Business Name in the card header is legal_name.value (found by Middesk in SoS). "
+                 "Legal Entity Name in each SoS filing row is sos_filings[n].filing_name (the specific state filing name). "
+                 "These can differ when a business uses different names in different states."),
+            ],
+        },
+        "dba_found.value[n] [UCM: DBA Name]": {
+            "ui_label": "DBA (Doing Business As) Names", "sub_tab": "Contact Information",
+            "fact_name": "dba_found",
+            "api_path": "GET /facts/business/:id/kyb → kybFactsData.data.dba_found (array)",
+            "react_code": "Business.tsx L190-L200: businessDetailFacts?.dba?.value rendered as array. "
+                          "DBA verification via name_match_boolean.value.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/CompanyProfile/Business.tsx",
+            "react_lines": (179, 205),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (318, 355),
+            "sources_ordered": [
+                ("Middesk", "pid=16", "w=2.0", "names[] array where submitted=false — trade names Middesk discovered in SoS."),
+                ("ZoomInfo", "pid=24", "w=0.8", "zi_c_tradename field from ZoomInfo firmographic data."),
+                ("OpenCorporates", "pid=23", "w=0.9", "alternate_names from OC company record."),
+                ("SERP / Verdata", "pid=22,35", "w=0.3", "DBA extracted from web scraping and Verdata."),
+                ("Applicant submission", "pid=0", "w=1.0", "DBA submitted by applicant at onboarding."),
+            ],
+            "winner_rule": "combineFacts rule — deduplicates and merges DBA names from ALL sources into single array. "
+                           "DBA VERIFICATION uses name_match_boolean.value (TRUE=Verified, FALSE=Unverified).",
+            "storage": [
+                "rds_warehouse_public.facts  name='dba_found'  (array of strings)",
+                "rds_warehouse_public.facts  name='dba'  (submitted DBA from applicant)",
+            ],
+            "null_cause": "Empty array: business operates only under legal name (no DBA registered anywhere). "
+                          "This is common and NOT an error. DBA section only renders when names_submitted.value.length > 0.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (763, 793),
+            "questions": [
+                ("How does dba_found.value[n] (array) transform to Verified/Unverified?",
+                 "name_match_boolean.value governs DBA verification: TRUE=Verified, FALSE=Unverified. "
+                 "The name_match_boolean is computed from Middesk name task result. "
+                 "The array dba_found shows which DBA names were found. The verification badge applies to the section overall."),
+                ("Can DBA be verified if the submitted DBA is different from what Middesk found?",
+                 "If the submitted DBA appears in Middesk's names[] for this business, name_match → success → Verified. "
+                 "If Middesk found a completely different name, name_match → failure → Unverified."),
+            ],
+        },
+        "google_profile.address [UCM: Google Address]": {
+            "ui_label": "Google Business Profile — Address", "sub_tab": "Contact Information",
+            "fact_name": "address_verification (Google profile component)",
+            "api_path": "GET /facts/business/:id/kyb → kybFactsData.data.address_verification / address_match",
+            "react_code": "index.tsx L413-L444: Google Profile badge from address_verification.value.sublabel and address_match. "
+                          "Contact Information sub-tab shows 'Google Profile' badge per address.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/KnowYourBusiness/index.tsx",
+            "react_lines": (406, 482),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (60, 120),
+            "sources_ordered": [
+                ("Google Places API", "pid=29", "w=0.6", "Address field from Google Business Profile listing for this business."),
+                ("SERP scraping", "pid=22", "w=0.5", "SERP scraper finds google_place_id, then Google Places API is called."),
+            ],
+            "winner_rule": "factWithHighestConfidence() for address_verification fact. "
+                           "Google Profile address compared against submitted address → Match/No Match → Verified/Unverified badge.",
+            "storage": [
+                "rds_warehouse_public.facts  name='google_place_id'",
+                "rds_warehouse_public.facts  name='address_verification'  {status, sublabel, message, addresses[]}",
+                "rds_warehouse_public.facts  name='address_match_boolean'  (boolean)",
+            ],
+            "null_cause": "Google Profile badge shows 'Unverified' when: (1) business has no Google Business Profile, "
+                          "(2) SERP scraping found no Place ID, (3) Google address does not match submitted address. "
+                          "Many legitimate businesses have no Google Business listing — this is NOT an error.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (763, 793),
+            "questions": [
+                ("What does 'Unverified' mean for Google Profile address?",
+                 "Unverified = Google Business Profile either (a) not found for this business, "
+                 "or (b) found but shows a different address than what was submitted. "
+                 "The admin portal shows 'Unverified' badge (amber) from address_verification.value.sublabel. "
+                 "This does NOT mean the address is wrong — many businesses have no Google listing."),
+            ],
+        },
+        "google_profile.business_name [UCM: Google Business Name]": {
+            "ui_label": "Google Business Profile — Business Name", "sub_tab": "Contact Information",
+            "fact_name": "names_found (Google component) / name_match",
+            "api_path": "GET /facts/business/:id/kyb → names_found, name_match_boolean",
+            "react_code": "index.tsx L488-L544: Business Names section. name_match_boolean controls Verified badge.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/KnowYourBusiness/index.tsx",
+            "react_lines": (485, 547),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (192, 319),
+            "sources_ordered": [
+                ("Google Places API", "pid=29", "—", "Name from Google Business Profile listing."),
+                ("SERP scraping", "pid=22", "—", "Business name found via web search."),
+            ],
+            "winner_rule": "names_found uses combineFacts (all sources merged). name_match_boolean governs the Verified badge.",
+            "storage": ["rds_warehouse_public.facts  name='names_found'  (array)", "rds_warehouse_public.facts  name='name_match_boolean'  (boolean)"],
+            "null_cause": "No Google Business Profile found for this business — SERP could not find a Google Place ID.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (763, 793),
+            "questions": [
+                ("What is the Google-Profile endpoint?",
+                 "The admin portal fetches Google Business Profile data via the SERP scraping pipeline. "
+                 "SERP (platform_id=22) searches for the business, finds its google_place_id, "
+                 "then calls the Google Places API to retrieve name, address, phone. "
+                 "The google_place_id fact stores the ID; address_verification and names_found store the results."),
+            ],
+        },
+        "sos_active.value [UCM: SoS Active Status]": {
+            "ui_label": "Secretary of State — Filing Status (Active/Inactive)", "sub_tab": "Business Registration",
+            "fact_name": "sos_active",
+            "api_path": "GET /facts/business/:id/kyb → kybFactsData.data.sos_filings[n].active",
+            "react_code": "index.tsx L312-L316: sos.active != null ? capitalize(sos.active ? 'Active' : 'Inactive') : 'N/A'",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/KnowYourBusiness/index.tsx",
+            "react_lines": (307, 316),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (717, 780),
+            "sources_ordered": [
+                ("Middesk", "pid=16", "w=2.0", "registrations[n].status === 'active' → active=true. Middesk queries SoS by TIN+name."),
+                ("OpenCorporates", "pid=23", "w=0.9", "current_status: 'Active' → true; 'Dissolved' → false."),
+            ],
+            "winner_rule": "sos_active is computed from sos_filings: any filing with active=true → sos_active=true. "
+                           "SoS badge uses sos_match_boolean AND sos_active together (getSosBadgeConfig in SectionHeader.tsx).",
+            "storage": [
+                "rds_warehouse_public.facts  name='sos_active'  (boolean)",
+                "rds_warehouse_public.facts  name='sos_filings'  (array, each with active: boolean field)",
+            ],
+            "null_cause": "'N/A' when sos.active === null (Middesk did not return a status for this specific filing). "
+                          "'No Registry Data to Display' when sos_filings array is empty (Middesk found no SoS filings at all). "
+                          "This is NOT a confidence rule — if Middesk finds nothing, nothing is shown.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (763, 793),
+            "questions": [
+                ("'No Registry Data' vs blank sos_active — what is the difference?",
+                 "'No Registry Data to Display' = sos_filings array is empty (Middesk found NO state registrations for this EIN+name). "
+                 "sos_active = null/N/A = Middesk found a filing but did not return a status field for it. "
+                 "sos_active = false = Filing found but status is 'inactive', 'dissolved', etc."),
+            ],
+        },
+        "sos_filings.value[n].state [UCM: SoS State]": {
+            "ui_label": "Secretary of State — State", "sub_tab": "Business Registration",
+            "fact_name": "sos_filings[n].state",
+            "api_path": "GET /facts/business/:id/kyb → kybFactsData.data.sos_filings[n].state",
+            "react_code": "index.tsx L329-L331: sos.state || 'N/A'",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/KnowYourBusiness/index.tsx",
+            "react_lines": (325, 332),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (717, 780),
+            "sources_ordered": [
+                ("Middesk", "pid=16", "w=2.0", "registrations[n].registration_state — 2-letter state code from SoS."),
+                ("OpenCorporates", "pid=23", "w=0.9", "jurisdiction_code split by '_' → second part → uppercase (e.g. 'us_fl' → 'FL')."),
+            ],
+            "winner_rule": "sos_filings array populated from Middesk registrations (primary) + OC sosFilings (appended if not duplicate).",
+            "storage": ["rds_warehouse_public.facts  name='sos_filings'  (array of SoSRegistration objects)"],
+            "null_cause": "Shows 'N/A' when registration_state is missing from Middesk record. "
+                          "No SoS data at all = sos_filings array empty.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (763, 793),
+            "questions": [
+                ("What is Entity Jurisdiction Type 'Domestic Primary'?",
+                 "'Domestic' comes from sos_filings[n].foreign_domestic. "
+                 "Middesk jurisdiction field: if it contains 'domestic' → 'domestic'. For OC: home_jurisdiction === jurisdiction → 'domestic'. "
+                 "'Primary' is the Worth UI label for index=0 in the sos_filings array (first filing = primary). "
+                 "It is NOT a vendor field — it is a Worth portal label."),
+            ],
+        },
+        "sos_filings.value[n].filing_date [UCM: SoS Registration Date]": {
+            "ui_label": "Secretary of State — Registration Date", "sub_tab": "Business Registration",
+            "fact_name": "sos_filings[n].filing_date",
+            "api_path": "GET /facts/business/:id/kyb → kybFactsData.data.sos_filings[n].filing_date",
+            "react_code": "index.tsx L298-L305: sos.filing_date ? convertToLocalDate(new Date(sos.filing_date), 'MM-DD-YYYY') : 'N/A'",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/KnowYourBusiness/index.tsx",
+            "react_lines": (295, 306),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (717, 780),
+            "sources_ordered": [
+                ("Middesk", "pid=16", "w=2.0", "registrations[n].registration_date — ISO date from SoS database."),
+                ("OpenCorporates", "pid=23", "w=0.9", "incorporation_date from OC company record."),
+            ],
+            "winner_rule": "Each sos_filing in the array has its own filing_date. Middesk records appear first.",
+            "storage": ["rds_warehouse_public.facts  name='sos_filings'  (each item has filing_date field)"],
+            "null_cause": "Shows 'N/A' when registration_date absent in SoS registry record. "
+                          "Date is normalised to MM-DD-YYYY format by convertToLocalDate() in the React component.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (763, 793),
+            "questions": [
+                ("Is Registration Date the SoS date or the date Worth first saw the business?",
+                 "It is the Secretary of State registration_date from Middesk — the actual date the business filed with the SoS. "
+                 "NOT the date Worth processed the business. "
+                 "Worth normalises the date format to MM-DD-YYYY for display."),
+            ],
+        },
+        "sos_filings.value[n].entity_type [UCM: SoS Entity Type]": {
+            "ui_label": "Secretary of State — Entity Type", "sub_tab": "Business Registration",
+            "fact_name": "sos_filings[n].entity_type",
+            "api_path": "GET /facts/business/:id/kyb → kybFactsData.data.sos_filings[n].entity_type",
+            "react_code": "index.tsx L320-L323: sos.entity_type || 'N/A'",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/KnowYourBusiness/index.tsx",
+            "react_lines": (317, 324),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (717, 860),
+            "sources_ordered": [
+                ("Middesk", "pid=16", "w=2.0", "registrations[n].entity_type — raw string from SoS (e.g. 'Llc', 'Corp')."),
+                ("OpenCorporates", "pid=23", "w=0.9", "company_type normalized: 'Limited Liability Company' → 'llc', 'Incorporated' → 'corporation', etc."),
+            ],
+            "winner_rule": "Worth normalises entity_type: 'llc', 'corporation', 'llp', 'lp', 'sole proprietorship'. "
+                           "Admin portal shows the raw value from Middesk (e.g. 'Llc') capitalised.",
+            "storage": ["rds_warehouse_public.facts  name='sos_filings'  (each item has entity_type field)"],
+            "null_cause": "Shows 'N/A' when entity_type absent from SoS registry record. "
+                          "Most state SoS records include entity_type — absence is unusual.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (763, 793),
+            "questions": [
+                ("Is entity_type the same as Corporation Type in the Background tab?",
+                 "No — Business Registration tab shows entity_type from sos_filings[n] (SoS official filing). "
+                 "Background tab shows bus_struct.value (from Fact Engine, separate fact). "
+                 "They may differ: one is the SoS-registered type, the other is the Fact Engine winner from multiple vendors."),
+            ],
+        },
+        "status [UCM: Case/Applicant Status]": {
+            "ui_label": "Case Status / Applicant Status", "sub_tab": "Case Results panel",
+            "fact_name": "verification_status / compliance_status",
+            "api_path": "GET /cases/:id → case_management.ts getCaseByIDQuery (data_cases.status → core_case_statuses.code)",
+            "react_code": "CaseDetails.tsx: status from data_cases.status joined to core_case_statuses. "
+                          "Shows: Pending / Under Review / Auto-Approved / Archived.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/CaseDetails.tsx",
+            "react_lines": (1, 50),
+            "backend_fact_file": "case-service/src/api/v1/modules/case-management/case-management.ts",
+            "backend_fact_lines": (1555, 1574),
+            "sources_ordered": [
+                ("Middesk", "pid=16", "—", "businessEntityVerification.status feeds verification_status fact."),
+                ("Trulioo", "pid=38", "—", "clientData.status for UK/Canada businesses."),
+                ("Manual override", "pid=0", "—", "Analyst can manually change case status via admin portal."),
+                ("Worth Score engine", "calculated", "—", "Auto-Approved when all rules pass and score above threshold."),
+            ],
+            "winner_rule": "Case status is NOT a Fact Engine fact — it lives in rds_cases_public.data_cases.status "
+                           "→ core_case_statuses.code. Transitions: Pending → Under Review (rules fail) or Auto-Approved (all pass).",
+            "storage": [
+                "rds_cases_public.data_cases.status → core_case_statuses.id",
+                "core_case_statuses: {id, code: 'pending'|'under_review'|'auto_approved'|'archived', label}",
+                "rds_warehouse_public.facts  name='verification_status'  (Middesk/Trulioo verification status)",
+            ],
+            "null_cause": "Shows 'Pending' (with loading bars) while integrations are processing. "
+                          "This is NOT null — Pending is the initial state. Worth Score shows '-' until calculation completes.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (1, 10),
+            "questions": [
+                ("What transitions a case from Pending to Under Review vs Auto-Approved?",
+                 "Auto-Approved: all UCM decisioning rules pass AND Worth Score above configured threshold. "
+                 "Under Review: one or more rules fail (e.g. TIN Unverified, watchlist hits found, IDV failed). "
+                 "The threshold and rules are configured per customer/integration settings."),
+                ("Can an analyst manually change the status?",
+                 "Yes — analysts can change status via the admin portal. "
+                 "Manual changes go through the case-service API (PATCH /cases/:id). "
+                 "Manual status is stored in data_cases.status."),
+            ],
+        },
+        "domain.creation_date [UCM: Domain Creation Date]": {
+            "ui_label": "Website — Domain Creation Date", "sub_tab": "Website",
+            "fact_name": "website (domain metadata)",
+            "api_path": "GET /verification/businesses/:id/website-data → useGetBusinessWebsite",
+            "react_code": "WebsiteReview.tsx or CompanyProfile/WebsiteReview.tsx: creation_date field from website data.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/CompanyProfile/WebsiteReview.tsx",
+            "react_lines": (1, 50),
+            "backend_fact_file": "integration-service/lib/facts/sources.ts",
+            "backend_fact_lines": (415, 430),
+            "sources_ordered": [
+                ("SERP scraping", "pid=22", "w=0.5", "SERP scraper performs WHOIS lookup on found domain → creation_date."),
+                ("Verdata", "pid=35", "w=0.6", "Verdata/VerifiedFirst performs domain age check via WHOIS."),
+            ],
+            "winner_rule": "factWithHighestConfidence() for website fact. Domain creation date part of WHOIS data.",
+            "storage": [
+                "rds_warehouse_public.facts  name='website'  (includes domain metadata)",
+                "integration_data.request_response  (pid=22 SERP, pid=35 Verdata raw WHOIS data)",
+            ],
+            "null_cause": "Shows 'N/A' when: (1) no website found for the business, "
+                          "(2) WHOIS data unavailable (domain privacy protection enabled), "
+                          "(3) SERP scraping did not complete. "
+                          "Many businesses with no website will show N/A for all domain fields.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (763, 793),
+            "questions": [
+                ("What does 'Creation Date: N/A' mean?",
+                 "Either (a) no website was found for this business — SERP could not find a domain, "
+                 "or (b) the domain has WHOIS privacy protection enabled, "
+                 "or (c) SERP/Verdata integration did not complete. "
+                 "This is expected for many small businesses with no public web presence."),
+            ],
+        },
+        "data.applicant.status [UCM: Business Verified Status]": {
+            "ui_label": "Business Registration — Verified/Not Verified badge", "sub_tab": "Business Registration",
+            "fact_name": "verification_status / business_verified",
+            "api_path": "GET /facts/business/:id/kyb → kybFactsData.data.tin_match (drives the Business Registration Verified badge)",
+            "react_code": "index.tsx L133-L150: Business Registration SectionHeader gets badgeText from tin_match.value.status. "
+                          "'success' → 'Verified' (green_tick). 'failure' → 'Not Found' (red).",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/KnowYourBusiness/index.tsx",
+            "react_lines": (133, 150),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (618, 630),
+            "sources_ordered": [
+                ("Middesk", "pid=16", "w=2.0", "Overall businessEntityVerification.status: 'completed'/'in_review'/'failed'."),
+                ("Trulioo", "pid=38", "w=0.8", "clientData.status for UK/Canada businesses."),
+            ],
+            "winner_rule": "data.applicant.status maps to tin_match.value.status for the Business Registration card badge. "
+                           "Middesk 'completed' → 'Verified'. 'failed' → 'Not Found'.",
+            "storage": [
+                "rds_warehouse_public.facts  name='verification_status'  (Middesk/Trulioo overall status)",
+                "rds_warehouse_public.facts  name='tin_match'  (drives the Business Registration badge)",
+            ],
+            "null_cause": "Badge missing: integrations still processing (is_integration_complete=false). "
+                          "Badge shows 'Not Found': Middesk could not confirm TIN+name via IRS.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (763, 793),
+            "questions": [
+                ("How does data.applicant.status map to the Business Registration badge?",
+                 "The Business Registration card badge is driven by tin_match.value.status (IRS TIN match). "
+                 "data.applicant.status is the overall applicant/case status (Pending/Under Review/Auto-Approved). "
+                 "These are different concepts: tin_match drives the Business Registration Verified badge; "
+                 "data.applicant.status drives the Case Results panel on the right side."),
+            ],
+        },
+        "owners[n].first_name [UCM: Owner First Name]": {
+            "ui_label": "Owner First Name", "sub_tab": "KYC tab → Owner cards",
+            "fact_name": "owners (submitted data)",
+            "api_path": "GET /businesses/:id → data_owners.first_name",
+            "react_code": "KYC/Owners component: owner.first_name from applicant submission.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/",
+            "react_lines": (1, 1),
+            "backend_fact_file": "case-service/src/api/v1/modules/case-management/case-management.ts",
+            "backend_fact_lines": (1555, 1574),
+            "sources_ordered": [("Applicant submission", "pid=0", "w=1.0", "Submitted at onboarding — NOT discovered by Worth.")],
+            "winner_rule": "Direct read from rds_cases_public.data_owners. No Fact Engine competition — applicant-submitted.",
+            "storage": ["rds_cases_public.data_owners.first_name"],
+            "null_cause": "NULL only if applicant did not provide — required field in most flows.",
+            "w360": False, "w360_file": "report.ts", "w360_lines": (1, 1),
+            "questions": [
+                ("Is owner first name discovered by Worth or submitted by the applicant?",
+                 "Submitted by the applicant at onboarding. Worth does NOT discover owner names from external sources. "
+                 "Worth only verifies the submitted owners against watchlists and IDV."),
+            ],
+        },
+        "owners[n].last_name [UCM: Owner Last Name]": {
+            "ui_label": "Owner Last Name", "sub_tab": "KYC tab → Owner cards",
+            "fact_name": "owners (submitted data)",
+            "api_path": "GET /businesses/:id → data_owners.last_name",
+            "react_code": "KYC/Owners component: owner.last_name from applicant submission.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/",
+            "react_lines": (1, 1),
+            "backend_fact_file": "case-service/src/api/v1/modules/case-management/case-management.ts",
+            "backend_fact_lines": (1555, 1574),
+            "sources_ordered": [("Applicant submission", "pid=0", "w=1.0", "Submitted at onboarding.")],
+            "winner_rule": "Direct read from rds_cases_public.data_owners.",
+            "storage": ["rds_cases_public.data_owners.last_name"],
+            "null_cause": "NULL only if not submitted by applicant.",
+            "w360": False, "w360_file": "report.ts", "w360_lines": (1, 1),
+            "questions": [],
+        },
+        "owners[n].date_of_birth [UCM: Owner DOB]": {
+            "ui_label": "Owner Date of Birth", "sub_tab": "KYC tab → Owner cards",
+            "fact_name": "owners (submitted data)",
+            "api_path": "GET /businesses/:id → data_owners.date_of_birth (encrypted)",
+            "react_code": "KYC/Owners: DOB used for Plaid IDV — not displayed directly after submission.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/",
+            "react_lines": (1, 1),
+            "backend_fact_file": "case-service/src/api/v1/modules/case-management/case-management.ts",
+            "backend_fact_lines": (1555, 1574),
+            "sources_ordered": [("Applicant submission", "pid=0", "w=1.0", "Submitted at onboarding — used for Plaid IDV verification.")],
+            "winner_rule": "Stored encrypted. Used by Plaid IDV for identity verification. Not shown after submission.",
+            "storage": ["rds_cases_public.data_owners.date_of_birth  (encrypted)"],
+            "null_cause": "NULL if not submitted. Plaid IDV cannot complete without DOB.",
+            "w360": False, "w360_file": "report.ts", "w360_lines": (1, 1),
+            "questions": [
+                ("Is DOB ever shown to analysts?",
+                 "DOB is stored encrypted and is NOT displayed to analysts after initial submission. "
+                 "It is only used internally for Plaid IDV verification. "
+                 "The IDV result (pass/fail) is what analysts see."),
+            ],
+        },
+        "owners[n].ssn [UCM: Owner SSN]": {
+            "ui_label": "Owner SSN (last 4 shown)", "sub_tab": "KYC tab → Owner cards",
+            "fact_name": "tin_submitted (owner level)",
+            "api_path": "GET /businesses/:id → data_owners.ssn (always masked — last 4 only)",
+            "react_code": "KYC/Owners: shows masked SSN (last 4 digits). Full SSN used only by Plaid IDV.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/",
+            "react_lines": (1, 1),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (555, 610),
+            "sources_ordered": [("Applicant submission", "pid=0", "w=1.0", "Full SSN submitted at onboarding. Immediately masked — last 4 only stored in displayable form.")],
+            "winner_rule": "Full SSN used by Plaid IDV in their secure environment. API always returns masked version (last 4).",
+            "storage": ["rds_cases_public.data_owners  (SSN encrypted/masked)", "Plaid processes full SSN in their secure environment"],
+            "null_cause": "NULL if not submitted or not required for this flow. Some non-US flows use different ID type.",
+            "w360": False, "w360_file": "report.ts", "w360_lines": (1, 1),
+            "questions": [
+                ("Is the full SSN ever accessible after submission?",
+                 "No — the full SSN is only used at submission time for Plaid IDV. "
+                 "After that, only the last 4 digits are accessible via the API. "
+                 "Worth never stores or returns the full SSN in any API response."),
+            ],
+        },
+        "owners[n].address_line_1 [UCM: Owner Address]": {
+            "ui_label": "Owner Home Address", "sub_tab": "KYC tab → Owner cards",
+            "fact_name": "owners (submitted data)",
+            "api_path": "GET /businesses/:id → data_owners (address fields)",
+            "react_code": "KYC/Owners: address fields from applicant submission.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/",
+            "react_lines": (1, 1),
+            "backend_fact_file": "case-service/src/api/v1/modules/case-management/case-management.ts",
+            "backend_fact_lines": (1555, 1574),
+            "sources_ordered": [("Applicant submission", "pid=0", "w=1.0", "All address fields submitted at onboarding. Used for Plaid IDV address verification.")],
+            "winner_rule": "Direct read from rds_cases_public.data_owners. No vendor competition.",
+            "storage": ["rds_cases_public.data_owners  (address_line_1, address_line_2, address_city, address_state, address_country, address_postal_code, address_apartment)"],
+            "null_cause": "NULL if not submitted. address_line_2 and address_apartment are optional.",
+            "w360": False, "w360_file": "report.ts", "w360_lines": (1, 1),
+            "questions": [],
+        },
+        "owners[n].mobile [UCM: Owner Mobile]": {
+            "ui_label": "Owner Mobile Phone", "sub_tab": "KYC tab → Owner cards",
+            "fact_name": "owners (submitted data)",
+            "api_path": "GET /businesses/:id → data_owners.mobile",
+            "react_code": "KYC/Owners: mobile from applicant submission. Used to send Plaid IDV link.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/",
+            "react_lines": (1, 1),
+            "backend_fact_file": "case-service/src/api/v1/modules/case-management/case-management.ts",
+            "backend_fact_lines": (1555, 1574),
+            "sources_ordered": [("Applicant submission", "pid=0", "w=1.0", "Mobile submitted at onboarding for Plaid IDV SMS delivery.")],
+            "winner_rule": "Direct read from rds_cases_public.data_owners.",
+            "storage": ["rds_cases_public.data_owners.mobile"],
+            "null_cause": "NULL if not provided. Plaid uses email as fallback for IDV link delivery.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (1, 1),
+            "questions": [],
+        },
+        "owners[n].email [UCM: Owner Email]": {
+            "ui_label": "Owner Email", "sub_tab": "KYC tab → Owner cards",
+            "fact_name": "owners (submitted data)",
+            "api_path": "GET /businesses/:id → data_owners.email",
+            "react_code": "KYC/Owners: email from applicant submission. Used to send Plaid IDV link.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/",
+            "react_lines": (1, 1),
+            "backend_fact_file": "case-service/src/api/v1/modules/case-management/case-management.ts",
+            "backend_fact_lines": (1555, 1574),
+            "sources_ordered": [("Applicant submission", "pid=0", "w=1.0", "Email submitted at onboarding for Plaid IDV link delivery.")],
+            "winner_rule": "Direct read from rds_cases_public.data_owners.",
+            "storage": ["rds_cases_public.data_owners.email"],
+            "null_cause": "NULL if not provided — Plaid IDV link cannot be sent without email or mobile.",
+            "w360": False, "w360_file": "report.ts", "w360_lines": (1, 1),
+            "questions": [],
+        },
+        "synthetic_identity_risk_score [UCM: Synthetic Identity Risk]": {
+            "ui_label": "Synthetic Identity Risk Score", "sub_tab": "KYC tab → Owner cards",
+            "fact_name": "risk_score (synthetic)",
+            "api_path": "GET /cases/:id/tab-values → caseTabValues.synthetic_identity_risk_score",
+            "react_code": "CaseTabValuesResults.tsx: caseTabValues row 'synthetic_identity_risk_score'. "
+                          "Constant in caseTabValues.ts L21: 'synthetic_identity_risk_score' → 'Synthetic Identity Risk Score'.",
+            "react_file": "customer-admin-webapp-main/src/constants/caseTabValues.ts",
+            "react_lines": (21, 21),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (493, 555),
+            "sources_ordered": [
+                ("Plaid IDV", "pid=40", "—", "Plaid identity verification returns synthetic identity risk signals for each owner."),
+            ],
+            "winner_rule": "Computed from Plaid IDV response signals. High score = likely synthetic identity (fabricated from real+fake info).",
+            "storage": [
+                "integration_data.request_response  (pid=40 Plaid IDV raw response)",
+                "rds_warehouse_public.facts  name='risk_score'  (or as caseTabValues result)",
+            ],
+            "null_cause": "NULL when: (1) owner has not completed Plaid IDV, (2) Plaid did not return synthetic risk score, "
+                          "(3) IDV not available for this jurisdiction.",
+            "w360": False, "w360_file": "report.ts", "w360_lines": (1, 1),
+            "questions": [
+                ("What scale is the synthetic identity risk score on?",
+                 "The score comes from Plaid IDV signals and is typically 0-100 or 0-1 normalised. "
+                 "High score indicates higher likelihood of synthetic identity. "
+                 "Appears as a caseTabValues decisioning result row — the UCM team defines the threshold for pass/fail."),
+            ],
+        },
+        "stolen_identity_risk_score [UCM: Stolen Identity Risk]": {
+            "ui_label": "Stolen Identity Risk Score", "sub_tab": "KYC tab → Owner cards",
+            "fact_name": "risk_score (stolen)",
+            "api_path": "GET /cases/:id/tab-values → caseTabValues.stolen_identity_risk_score",
+            "react_code": "CaseTabValuesResults.tsx: caseTabValues row 'stolen_identity_risk_score'. "
+                          "Constant in caseTabValues.ts L22: 'stolen_identity_risk_score' → 'Stolen Identity Risk Score'.",
+            "react_file": "customer-admin-webapp-main/src/constants/caseTabValues.ts",
+            "react_lines": (22, 22),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (493, 555),
+            "sources_ordered": [
+                ("Plaid IDV", "pid=40", "—", "Plaid IDV returns stolen identity risk signals: SSN velocity, credit thin-file, DOB mismatch."),
+            ],
+            "winner_rule": "Computed from Plaid IDV signals. High score = likely stolen identity (someone else's real identity being used).",
+            "storage": [
+                "integration_data.request_response  (pid=40 Plaid IDV raw response)",
+                "rds_warehouse_public.facts  name='risk_score'  (or as caseTabValues result)",
+            ],
+            "null_cause": "Same as synthetic_identity_risk_score — NULL when Plaid IDV not yet complete.",
+            "w360": False, "w360_file": "report.ts", "w360_lines": (1, 1),
+            "questions": [
+                ("What is the difference between synthetic_identity and stolen_identity risk scores?",
+                 "Synthetic identity = a fabricated identity combining real and fake information (e.g. real SSN with fake name/DOB). "
+                 "Stolen identity = using another real person's complete identity. "
+                 "Both come from Plaid IDV signals but measure different fraud patterns."),
+            ],
+        },
+        "verification_result.account_verification_response.code [UCM: Bank Account Verification]": {
+            "ui_label": "Bank Account Verification Code", "sub_tab": "Banking tab",
+            "fact_name": "verification_status (banking)",
+            "api_path": "GET /banking/:businessId → bank verification status via Plaid Auth or micro-deposit",
+            "react_code": "Banking/BankVerification.tsx: account verification code and status.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/Banking/BankVerification.tsx",
+            "react_lines": (1, 50),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (493, 555),
+            "sources_ordered": [
+                ("Plaid Auth", "pid=40", "—", "Plaid Auth instant verification — verifies account ownership via bank login."),
+                ("Plaid Manual Verification", "pid=40", "—", "Micro-deposit verification — 2 small deposits confirmed by user."),
+            ],
+            "winner_rule": "Direct from Plaid API response. Common codes: VERIFIED, PENDING_AUTOMATIC_VERIFICATION, PENDING_MANUAL_VERIFICATION, VERIFICATION_FAILED.",
+            "storage": [
+                "integration_data.request_response  (pid=40 Plaid banking response)",
+                "rds_warehouse_public.facts  name='verification_status'  (banking verification code)",
+            ],
+            "null_cause": "NULL if banking section not submitted by applicant. PENDING if verification in progress.",
+            "w360": False, "w360_file": "report.ts", "w360_lines": (1, 1),
+            "questions": [
+                ("What are the possible verification codes and their meanings?",
+                 "VERIFIED = Plaid confirmed account ownership (instant or micro-deposit). "
+                 "PENDING_AUTOMATIC_VERIFICATION = Plaid Auth in progress. "
+                 "PENDING_MANUAL_VERIFICATION = Micro-deposits sent, waiting for user confirmation. "
+                 "VERIFICATION_FAILED = Account could not be verified. "
+                 "UCM rule: VERIFICATION_FAILED → fail; VERIFIED → pass; PENDING → hold for review."),
+            ],
+        },
+        "verification_result.account_authentication_response.verification_response [UCM: Owner IDV Result]": {
+            "ui_label": "Owner Identity Verification (IDV) Result", "sub_tab": "KYC tab → Owner cards",
+            "fact_name": "idv_status / idv_passed_boolean",
+            "api_path": "GET /facts/business/:id/kyb → idv_status, idv_passed_boolean",
+            "react_code": "KYC/Owners IDV status section: idv_status aggregates Plaid results. "
+                          "idv_passed_boolean = true if at least one SUCCESS across all required owners.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/",
+            "react_lines": (1, 1),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (493, 553),
+            "sources_ordered": [
+                ("Plaid IDV", "pid=40", "—", "Per-owner identity verification. Status: success/failed/pending/expired. "
+                                              "idv_status: {SUCCESS:N, FAILED:N, PENDING:N, EXPIRED:N} counts."),
+            ],
+            "winner_rule": "idv_status aggregates counts per status across all owners. "
+                           "idv_passed_boolean = idv_status.SUCCESS > 0. "
+                           "Worth maps Plaid status to: SUCCESS, FAILED, PENDING, EXPIRED, NEEDS_REVIEW.",
+            "storage": [
+                "integration_data.request_response  (pid=40 Plaid IDV per-owner response)",
+                "rds_warehouse_public.facts  name='idv_status'  {SUCCESS:N, FAILED:N, PENDING:N}",
+                "rds_warehouse_public.facts  name='idv_passed_boolean'  (boolean)",
+                "rds_warehouse_public.facts  name='idv_passed'  (count of SUCCESS)",
+            ],
+            "null_cause": "PENDING when owner has not yet clicked the Plaid IDV link. "
+                          "EXPIRED when link expired before completion. "
+                          "FAILED when Plaid could not match SSN/DOB/name against government records.",
+            "w360": False, "w360_file": "report.ts", "w360_lines": (1, 1),
+            "questions": [
+                ("What is the difference between idv_status and idv_passed_boolean?",
+                 "idv_status = {SUCCESS:2, FAILED:0, PENDING:1} — counts per status across ALL owners. "
+                 "idv_passed_boolean = true if idv_status.SUCCESS > 0 (at least one successful IDV). "
+                 "idv_passed = the number of successful IDV completions. "
+                 "UCM rule: FAILED → fail; SUCCESS → pass; PENDING → hold."),
+                ("Who initiates the Plaid IDV link?",
+                 "Worth sends the Plaid IDV link via email (and optionally SMS to mobile) using the owner.email and owner.mobile submitted at onboarding. "
+                 "The owner clicks the link, completes document or database verification via Plaid's UI, "
+                 "then Plaid posts the result back to Worth via webhook."),
+            ],
+        },
+        "people.value[n].name [UCM: Corporate Officers]": {
+            "ui_label": "Corporate Officers (per SoS filing)", "sub_tab": "Business Registration",
+            "fact_name": "people",
+            "api_path": "GET /facts/business/:id/kyb → kybFactsData.data.people.value (filtered per sos.id)",
+            "react_code": "index.tsx L361-L393: people.value filtered by person.source.some(src => src.id === sos.id). "
+                          "Shows: capitalize(officer.name) - capitalize(officer.title) per filing.",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/KnowYourBusiness/index.tsx",
+            "react_lines": (354, 394),
+            "backend_fact_file": "integration-service/lib/facts/kyb/index.ts",
+            "backend_fact_lines": (717, 780),
+            "sources_ordered": [
+                ("Middesk", "pid=16", "w=2.0", "registrations[n].officers array. Officers linked to specific SoS filing by sos.id."),
+                ("OpenCorporates", "pid=23", "w=0.9", "officers field from OC company record."),
+                ("Trulioo", "pid=38", "w=0.8", "business principals/directors from Trulioo KYB response."),
+            ],
+            "winner_rule": "combineFacts — people from all sources merged. Each person linked to specific SoS filing(s) via source.id. "
+                           "React filters people by sos.id to show only officers for THAT specific filing.",
+            "storage": [
+                "rds_warehouse_public.facts  name='people'  (array of {name, titles[], source[], jurisdictions[]})",
+            ],
+            "null_cause": "Shows 'N/A' when: (1) no SoS filing found (no officers data possible), "
+                          "(2) SoS filing found but state does not require officer disclosure. "
+                          "Corporate Officers section shows 'N/A' per filing when no officers are linked to that sos.id.",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (763, 793),
+            "questions": [
+                ("If a business has filings in 3 states, which officers are shown?",
+                 "Officers are shown PER FILING row. Each SoS filing card shows only the officers "
+                 "whose source.id matches that specific sos.id. "
+                 "If a person is an officer in all 3 states, they appear in all 3 filing cards. "
+                 "The filter is: people.value.filter(person => person.source.some(src => src.id === sos.id))."),
+            ],
+        },
+        "mcc_code [UCM: MCC Code]": {
+            "ui_label": "MCC Code", "sub_tab": "Background",
+            "fact_name": "mcc_code",
+            "api_path": "GET /facts/business/:id/details → businessDetailFacts.mcc_code.value",
+            "react_code": "Industry.tsx L55-L59: businessDetailFacts?.mcc_code?.value ?? business?.mcc_code ?? '-'",
+            "react_file": "customer-admin-webapp-main/src/pages/Cases/CompanyProfile/Industry.tsx",
+            "react_lines": (53, 59),
+            "backend_fact_file": "integration-service/lib/facts/businessDetails/index.ts",
+            "backend_fact_lines": (391, 440),
+            "sources_ordered": [
+                ("AI Enrichment (mcc_code_found)", "pid=31", "—", "response.mcc_code from GPT-5-mini. Direct AI-provided MCC."),
+                ("Calculated from NAICS (mcc_code_from_naics)", "calculated", "—", "rel_naics_mcc lookup: winning naics_id → mcc_id."),
+                ("Combined (mcc_code)", "combined", "—", "mcc_code_found?.value ?? mcc_code_from_naics?.value"),
+            ],
+            "winner_rule": "mcc_code = AI-provided MCC (preferred) OR calculated from winning NAICS via rel_naics_mcc. "
+                           "NOT a competitive vendor selection. mcc_description shows AI text or core_mcc_code.label.",
+            "storage": [
+                "rds_warehouse_public.facts  name='mcc_code'",
+                "rds_warehouse_public.facts  name='mcc_code_found'  (AI direct)",
+                "rds_warehouse_public.facts  name='mcc_code_from_naics'  (calculated)",
+                "rds_cases_public.data_businesses.mcc_id → core_mcc_code.id",
+                "core_mcc_code  (lookup: code, label)",
+                "rel_naics_mcc  (naics_id → mcc_id mapping)",
+            ],
+            "null_cause": "MCC is almost never null — if NAICS exists, rel_naics_mcc calculates MCC. "
+                          "5614 shown with 'Fallback MCC per instructions...' when AI had no evidence (Gap G5 — known bug).",
+            "w360": True, "w360_file": "report.ts", "w360_lines": (763, 793),
+            "questions": [
+                ("What is the difference between mcc_code, mcc_code_found, and mcc_code_from_naics?",
+                 "mcc_code_found = AI enrichment directly returned this MCC in its response. "
+                 "mcc_code_from_naics = calculated by looking up winning naics_code in rel_naics_mcc table. "
+                 "mcc_code = mcc_code_found ?? mcc_code_from_naics (AI-provided preferred). "
+                 "The user sees the mcc_code value. mcc_description is stored separately."),
+                ("Why does MCC Description say 'Fallback MCC per instructions...'?",
+                 "When the AI has no vendor evidence and returns 5614 as last resort, the system prompt produces this internal debug text. "
+                 "It is stored in mcc_description fact and displayed directly in the Background tab. "
+                 "Fix (Gap G5): change AI prompt to return 'Classification pending — insufficient public data available.' instead."),
+            ],
+        },
     }
 
     selected_field = st.selectbox("Select a field to explore its lineage",
