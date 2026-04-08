@@ -1875,15 +1875,22 @@ print("\\n=== Equifax raw NAICS ==="); print(df_efx.to_string())
 pg.close(); rs.close()""", language="python")
 
     import os
-    OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+    # Read key: (1) Streamlit Cloud secrets, (2) env var, (3) local secrets.toml
+    OPENAI_API_KEY = ""
+    try:
+        OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", "")
+    except Exception:
+        pass
+    if not OPENAI_API_KEY:
+        OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
     if not OPENAI_API_KEY:
         try:
             import tomllib, pathlib
             for sp in [pathlib.Path.home()/".streamlit"/"secrets.toml",
                        pathlib.Path(__file__).parent/".streamlit"/"secrets.toml"]:
                 if sp.exists():
-                    with open(sp,"rb") as f: secrets = tomllib.load(f)
-                    OPENAI_API_KEY = secrets.get("OPENAI_API_KEY","")
+                    with open(sp,"rb") as f: sec = tomllib.load(f)
+                    OPENAI_API_KEY = sec.get("OPENAI_API_KEY","")
                     if OPENAI_API_KEY: break
         except Exception: pass
 
