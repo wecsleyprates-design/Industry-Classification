@@ -398,33 +398,151 @@ if tab == "📋 Background":
         Source: <code>fieldConfigs.tsx L392-L469</code> — all 5 Industry field definitions.<br>
         Industry Name + NAICS Code are editable. Description fields are read-only (derived).""")
 
+        # ── Deep explanation panel shown above INDUSTRY fields ──────────
+        with st.expander("📚 Deep Dive: How the Fact Engine Selects NAICS Winners — Full Workflow", expanded=False):
+            st.markdown("### Complete NAICS Winner Selection — Step-by-Step (from source code)")
+            steps = [
+                ("Step 1", "isValidFactValue() Filter — runs BEFORE any rule",
+                 "rules.ts + factEngine.ts L162-165",
+                 "Filters out vendors that returned null/empty NAICS. Only non-empty NAICS codes compete.\n"
+                 "isValidFactValue() → FALSE (excluded) for: undefined, '', [], {}.\n"
+                 "isValidFactValue() → TRUE (valid candidate) for: any non-empty string including '561499', null, 0, false.\n"
+                 "If 0 vendors pass this filter → validOptions=[] → AI enrichment fires.", GREEN),
+                ("Step 2", "manualOverride() — ALWAYS prepended first",
+                 "rules.ts L109-123",
+                 "factEngine.ts L178: rules.unshift(manualOverride) — analyst override beats everything.\n"
+                 "If analyst set NAICS via PATCH /facts/override → wins unconditionally, no model needed.\n"
+                 "Stored in fact JSONB: override: { value, userId, timestamp }", AMBER),
+                ("Step 3", "factWithHighestConfidence() — main selection",
+                 "rules.ts L35-57",
+                 "Iterates all validOptions, picks highest confidence.\n"
+                 "EACH VENDOR COMPUTES ITS OWN CONFIDENCE (not one shared model):\n"
+                 "  • Middesk: 0.15 base + 0.20×(name task) + 0.20×(TIN task) + 0.20×(address task) + 0.20×(SoS task) = max 0.95\n"
+                 "  • ZI/OC/EFX: match.index / MAX_CONFIDENCE_INDEX(55) = 0–1.0 (XGBoost entity-match)\n"
+                 "  • AI: self-reported HIGH/MED/LOW from GPT-5-mini\n"
+                 "IF |conf_A - conf_B| > 0.05 → higher confidence wins outright\n"
+                 "IF |conf_A - conf_B| ≤ 0.05 → TIE → go to Step 4", BLUE),
+                ("Step 4", "weightedFactSelector() — Tie-Break (only when confidences within 5%)",
+                 "rules.ts L61-74",
+                 "TIE-BREAK uses source WEIGHT (static config in sources.ts), NOT confidence:\n"
+                 "  Middesk=2.0 > OC=0.9 > ZI=0.8 = Trulioo=0.8 > EFX=0.7 > SERP=0.3 > Applicant=0.2 > AI=0.1\n"
+                 "WHY these weights? Middesk highest = direct SoS+IRS data. AI lowest = last resort.\n"
+                 "EFX comment in sources.ts: 'relies upon manual files being ingested at some unknown cadence'.\n"
+                 "On exact tie (same weight): left/primary fact wins (primaryFactWeight >= otherFactWeight)", PURPLE),
+                ("Step 5", "Rule 4 — NO Minimum Confidence Cutoff",
+                 "rules.ts (confirmed by absence)",
+                 "NO code says 'if confidence < X, reject this vendor.'\n"
+                 "Even confidence=0.05 is valid if it is the ONLY source that returned a NAICS code.\n"
+                 "Confidence determines WHO WINS, never WHETHER a vendor is eligible.\n"
+                 "Low-confidence NAICS is stored and shown — confidence visible in fact's source.confidence field.", RED),
+                ("Step 6", "AI Enrichment Trigger",
+                 "aiNaicsEnrichment.ts L61-64",
+                 "FIRES WHEN: n_non_AI_sources_with_NAICS < minimumSources(1) AND total_sources < maximumSources(3)\n"
+                 "= ALL of OC, ZI, EFX, Middesk, Trulioo, SERP returned null/empty naics_code.\n"
+                 "AI receives: business_name + primary_address + (website if available) — NO vendor NAICS in prompt.\n"
+                 "System prompt: 'If no evidence → return naics_code 561499 as last resort.'\n"
+                 "AI weight=0.1 → AI only wins if ALL other sources have empty NAICS (which is why it fired).", TEAL),
+                ("Step 7", "removeNaicsCode() — Final Safety Net (Rule 6)",
+                 "aiNaicsEnrichment.ts L215-241",
+                 "After AI returns a code: internalGetNaicsCode(code) checks if it exists in core_naics_code table.\n"
+                 "IF valid (has naics_label) → code stored as-is.\n"
+                 "IF invalid (hallucinated/wrong format) → removeNaicsCode() → code = NAICS_OF_LAST_RESORT = '561499'.\n"
+                 "'561499' IS valid in core_naics_code → passes validation → stored and shown to user.\n"
+                 "Original invalid code saved in response.naics_removed for audit.", GREY),
+            ]
+            for step_num, step_name, step_src, step_detail, step_col in steps:
+                st.markdown(
+                    f'<div class="card" style="border-left-color:{step_col};background:#0A1628;margin-bottom:8px;">'
+                    f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:4px;">'
+                    f'<span style="color:{step_col};font-weight:900;font-size:1.1rem;">{step_num}</span>'
+                    f'<span style="color:#E2E8F0;font-weight:700;">{step_name}</span>'
+                    f'<span style="color:#475569;font-size:.75rem;font-family:Courier New;">{step_src}</span>'
+                    f'</div>'
+                    f'<pre style="color:{step_col};font-size:.80rem;white-space:pre-wrap;background:transparent;border:none;padding:0;margin:0;">{step_detail}</pre>'
+                    f'</div>', unsafe_allow_html=True)
+
+            st.markdown("### Complete Scenario Table — What the user ALWAYS sees")
+            st.code("""
+Scenario                                   | What Fact Engine does              | User sees
+-------------------------------------------|-----------------------------------|------------------
+All 6 vendors return valid NAICS codes     | factWithHighestConfidence() picks  | Real NAICS code
+                                           | highest confidence winner          | (e.g. 722511)
+
+3 vendors return NAICS, 3 return null      | Same rule, 3 candidates           | Real NAICS code
+                                           | AI does NOT fire (min=1 met)       | from best of 3
+
+1 vendor returns NAICS, 5 return null      | That vendor wins (Rule 4: no min  | Real NAICS code
+                                           | cutoff, even if confidence=0.05)   | even if low conf
+
+0 vendors return NAICS + AI has evidence   | AI fires → finds real NAICS        | Real NAICS code
+(website, name keywords)                   | via website/web search             | from AI
+
+0 vendors return NAICS + AI has no evid.  | AI fires → NAICS_OF_LAST_RESORT   | 561499 (always,
+                                           | system prompt returns 561499       | never blank)
+
+0 vendors + AI returns invalid/hallucin.  | removeNaicsCode() → 561499        | 561499
+
+Analyst manually set NAICS                 | manualOverride() first → wins      | Analyst's code
+
+CONCLUSION: NAICS is NEVER blank in practice. AI always returns 561499 when it has
+no evidence. '-' should not appear unless an integration task failed or is still running.
+            """, language=None)
+
         INDUSTRY = [
             {"label":"Industry Name","fact":"industry","api":"/facts/business/:id/details","editable":True,
-             "tags":["✏️ Editable","🔢 NAICS-Derived"],
-             "sources":[("Derived from NAICS","calculated","—","2-digit sector → core_business_industries.name"),
-                        ("ZoomInfo","pid=24","w=0.8","zi_c_industry (if available)"),
-                        ("Applicant","pid=0","w=0.2","industry name from onboarding form")],
-             "rule":"Dependent fact — reads resolved naics_code 2-digit prefix → core_business_industries lookup.",
+             "tags":["✏️ Editable","🔢 NAICS-Derived (calculated)","❌ Not XGBoost","🔗 PostgreSQL Lookup"],
+             "sources":[("Derived from NAICS (calculated)","No PID — source:null","confidence=0.9 (hardcoded)","Takes first 2 digits of winning naics_code → internalGetIndustries(sectorCode) → core_business_industries lookup. NOT XGBoost. NOT ML. Pure DB lookup."),
+                        ("Trulioo","pid=38","w=0.7","standardizedIndustries[n].industryName — from Trulioo KYB response (secondary)"),
+                        ("Applicant","pid=0","w=0.2","industry name submitted at onboarding (fallback only)")],
+             "rule":"DEPENDENT FACT (source:null, businessDetails/index.ts L287). Reads resolved naics_code → sectorCode = naics_code.substring(0,2) → internalGetIndustries(sectorCode) → HTTP call to internal API → core_business_industries table lookup → returns industries[0].name. If naics_code=null → fn() returns undefined → Industry Name='-'. The confidence=0.9 is HARDCODED (not XGBoost) — means '90% confident the lookup is correct once we have a NAICS code.'",
              "storage":["rds_warehouse_public.facts name='industry' {name, id}","rds_cases_public.data_businesses.industry → core_business_industries.id"],
-             "null_cause":"'-' when naics_code is null. NAICS 561499 → 'Administrative and Support and Waste Management Services'.",
+             "null_cause":"ONLY '-' when naics_code itself is null/undefined AND internalGetIndustries returned empty. In practice this should not occur because AI returns 561499 (not null). NAICS 561499 sectorCode='56' → 'Administrative and Support and Waste Management and Remediation Services' (always shown, never blank).",
              "badges":[],
              "react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",393,407,"fieldKey: industry"),
-             "sql":"SELECT f.value->>'value' AS industry, cbi.name AS db_name\nFROM rds_warehouse_public.facts f\nJOIN rds_cases_public.data_businesses db ON db.id=f.business_id::uuid\nJOIN core_business_industries cbi ON cbi.id=db.industry\nWHERE f.business_id='<id>' AND f.name='industry';"},
+             "sql":"-- How industry is calculated:\nSELECT SUBSTRING(cnc.code, 1, 2) AS sector_code, cbi.name AS industry_name\nFROM core_naics_code cnc\nJOIN core_business_industries cbi ON cbi.sector_code = SUBSTRING(cnc.code, 1, 2)::integer\nWHERE cnc.code = '722511';  -- example\n\n-- Check a business's current industry:\nSELECT f.value->>'value' AS industry_fact, cbi.name AS db_industry,\n       (SELECT value->>'value' FROM rds_warehouse_public.facts WHERE business_id=f.business_id AND name='naics_code') AS naics\nFROM rds_warehouse_public.facts f\nJOIN rds_cases_public.data_businesses db ON db.id=f.business_id::uuid\nJOIN core_business_industries cbi ON cbi.id=db.industry\nWHERE f.business_id='<id>' AND f.name='industry';"},
             {"label":"NAICS Code","fact":"naics_code","api":"/facts/business/:id/details","editable":True,
-             "tags":["✏️ Editable","7 Sources","🤖 AI Last Resort"],
-             "sources":[("OpenCorporates","pid=23","w=0.9","industry_code_uids → us_naics-XXXXXX"),
-                        ("ZoomInfo","pid=24","w=0.8","zi_c_naics6"),
-                        ("Trulioo","pid=38","w=0.7","standardizedIndustries[n].naicsCode"),
-                        ("Equifax","pid=17","w=0.7","efx.primnaicscode"),
-                        ("SERP","pid=22","w=0.3","businessLegitimacyClassification.naics_code"),
-                        ("Applicant","pid=0","w=0.2","naics_code from onboarding form"),
-                        ("AI Enrichment","pid=31","w=0.1","GPT-5-mini response.naics_code (last resort=561499)")],
-             "rule":"factWithHighestConfidence() → weightedFactSelector() tie-break → manualOverride() FIRST. Rule 4: NO minimum confidence cutoff. Rule 6: removeNaicsCode() if invalid → 561499.",
-             "storage":["rds_warehouse_public.facts name='naics_code'","rds_cases_public.data_businesses.naics_id → core_naics_code"],
-             "null_cause":"Shows '-' only if ALL vendors null AND AI returned null. AI returns '561499' not null when no evidence.",
+             "tags":["✏️ Editable","7 Sources","🤖 AI Last Resort = 561499","⚙️ 6-Rule Winner Selection"],
+             "sources":[
+                 ("OpenCorporates","pid=23","w=0.9",
+                  "Lineage: warehouse.oc_companies_latest → industry_code_uids field (pipe-delimited: 'us_naics-722511|uk_sic-56101'). Code parses for 'us_naics-' prefix. CONFIDENCE: match.index/55 from XGBoost entity-matching model (entity_matching_20250127 v1). Weight=0.9 because OC has global coverage + authoritative registry data."),
+                 ("ZoomInfo","pid=24","w=0.8",
+                  "Lineage: zoominfo.comp_standard_global → zi_c_naics6 field (6-digit NAICS). CONFIDENCE: match.index/55 from XGBoost entity-matching. Weight=0.8 — strong US B2B firmographic coverage."),
+                 ("Trulioo","pid=38","w=0.7",
+                  "Lineage: Trulioo live KYB API → clientData.standardizedIndustries[n].naicsCode. CONFIDENCE: status-based (completed→high, failed→low). Weight=0.7. Preferred for UK/Canada via truliooPreferredRule."),
+                 ("Equifax","pid=17","w=0.7",
+                  "Lineage: warehouse.equifax_us_latest → efx.primnaicscode field. CONFIDENCE: XGBoost entity-match score. Weight=0.7 — sources.ts comment: 'relies upon manual files being ingested at some unknown cadence' — hence lower weight than OC/ZI."),
+                 ("SERP","pid=22","w=0.3",
+                  "Lineage: SERP web scraping → businessLegitimacyClassification.naics_code. CONFIDENCE: heuristic/presence-based. Weight=0.3 — web scraping less reliable than structured vendor data."),
+                 ("Applicant","pid=0","w=0.2",
+                  "Lineage: onboarding form → data_businesses → businessDetails source. Schema enforced: /^\\d{6}$/. CONFIDENCE: always 1.0 for submitted values. Weight=0.2 — merchant may self-report incorrectly."),
+                 ("AI Enrichment","pid=31","w=0.1",
+                  "FIRES ONLY when all 6 above return null NAICS (minimumSources=1 not met). Receives: business_name + primary_address + website (if available). CONFIDENCE: GPT self-reported HIGH/MED/LOW. Weight=0.1 — last resort. Returns NAICS_OF_LAST_RESORT='561499' when no evidence. removeNaicsCode() replaces hallucinated codes with 561499.")],
+             "rule": (
+                 "1. manualOverride() — ALWAYS FIRST (analyst override via PATCH /facts/override wins unconditionally)\n"
+                 "2. isValidFactValue() — filters out vendors that returned null/empty NAICS BEFORE any rule\n"
+                 "3. factWithHighestConfidence() — each vendor's confidence computed by its OWN model:\n"
+                 "   • Middesk: 0.15 base + 0.20×(name/TIN/address/SoS tasks) = max 0.95\n"
+                 "   • ZI/OC/EFX: match.index / 55 (XGBoost entity-match score)\n"
+                 "   • AI: GPT self-reported confidence mapped to numeric\n"
+                 "4. weightedFactSelector() TIE-BREAK — fires when |conf_A - conf_B| ≤ 0.05:\n"
+                 "   Uses static weight: Middesk(2.0) > OC(0.9) > ZI(0.8)=Trulioo(0.8) > EFX(0.7) > SERP(0.3) > Applicant(0.2) > AI(0.1)\n"
+                 "5. Rule 4: NO minimum confidence cutoff — low confidence still wins if it is the only valid candidate\n"
+                 "6. removeNaicsCode() — after AI: validates code against core_naics_code table. Invalid → '561499'."
+             ),
+             "storage":["rds_warehouse_public.facts name='naics_code' {value, source:{platformId,confidence,updatedAt}, alternatives:[]}","rds_cases_public.data_businesses.naics_id → core_naics_code.id",
+                        "Pipeline B: datascience.customer_files.primary_naics_code (ZI vs EFX winner-takes-all, separate pipeline)"],
+             "null_cause": (
+                 "NAICS is NEVER blank in practice:\n"
+                 "• If ANY vendor returns a NAICS code → it is shown (even at confidence=0.01)\n"
+                 "• If ALL vendors return null → AI fires → returns '561499' (never null)\n"
+                 "• If AI hallucinated invalid code → removeNaicsCode() → '561499' (never blank)\n"
+                 "• '-' only appears if: (a) AI enrichment task itself crashed, OR (b) integrations not yet complete\n"
+                 "• Low confidence does NOT cause '-' — Rule 4 prohibits minimum confidence cutoff\n"
+                 "• If winning source has a match but its NAICS field is empty → that source excluded from competition → next source wins → cascade to AI if needed"
+             ),
              "badges":[],
              "react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",408,422,"fieldKey: naics_code"),
-             "sql":"SELECT value->>'value' AS naics, value->'source'->>'platformId' AS winning_pid,\n       jsonb_array_length(value->'alternatives') AS n_alternatives\nFROM rds_warehouse_public.facts WHERE business_id='<id>' AND name='naics_code';\n\n-- See all vendor responses:\nSELECT alt->>'platformId' AS pid, alt->>'value' AS naics\nFROM rds_warehouse_public.facts,\n     jsonb_array_elements(value->'alternatives') AS alt\nWHERE business_id='<id>' AND name='naics_code';\n\n-- Pipeline B check:\nSELECT primary_naics_code, zi_c_naics6, efx_primnaicscode\nFROM datascience.customer_files WHERE business_id='<id>';"},
+             "sql":"-- Main fact (winning NAICS + confidence):\nSELECT value->>'value' AS naics,\n       value->'source'->>'platformId' AS winning_pid,\n       value->'source'->>'confidence' AS winning_confidence,\n       jsonb_array_length(value->'alternatives') AS n_alternatives\nFROM rds_warehouse_public.facts WHERE business_id='<id>' AND name='naics_code';\n\n-- ALL vendor responses before winner was selected:\nSELECT alt->>'platformId' AS vendor_pid,\n       alt->>'value' AS naics_code,\n       alt->>'confidence' AS confidence\nFROM rds_warehouse_public.facts,\n     jsonb_array_elements(value->'alternatives') AS alt\nWHERE business_id='<id>' AND name='naics_code'\nORDER BY (alt->>'confidence')::float DESC;\n\n-- Pipeline B (batch, ZI vs EFX only):\nSELECT primary_naics_code, zi_c_naics6, efx_primnaicscode,\n       zi_match_confidence, efx_match_confidence\nFROM datascience.customer_files WHERE business_id='<id>';\n\n-- Check if AI fired (no vendor had NAICS):\nSELECT value->'source'->>'platformId' AS winning_pid,\n       CASE WHEN value->'source'->>'platformId' = '31' THEN 'AI fired — all vendors were null'\n            ELSE 'Vendor won: pid=' || value->'source'->>'platformId'\n       END AS interpretation\nFROM rds_warehouse_public.facts WHERE business_id='<id>' AND name='naics_code';"},
             {"label":"NAICS Description","fact":"naics_description","api":"/facts/business/:id/details","editable":False,
              "tags":["🔒 Read-Only","🔢 Auto-Derived"],
              "sources":[("core_naics_code lookup","calculated","—","label WHERE code = naics_code.value")],
