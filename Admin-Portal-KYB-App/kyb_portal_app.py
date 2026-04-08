@@ -1250,109 +1250,377 @@ elif tab == "🤖 AI Agent":
     sh("🤖 KYB Intelligence Agent — Ask Anything About the Admin Portal")
 
     # ── DB connection helper panel ──────────────────────────────────────
-    with st.expander("🗄️  Database Connection Guide — PostgreSQL + Redshift", expanded=False):
-        st.markdown("### Confirmed PostgreSQL Tables (rds_warehouse_public / rds_cases_public)")
-        st.markdown("Source: `warehouse-service/datapooler/adapters/db/models/facts.py` + `case-management.ts`")
-        pg_tbl = """<table class="t"><tr><th>Schema.Table</th><th>DB</th><th>Key columns</th><th>Connection</th></tr>
-        <tr><td><code>rds_warehouse_public.facts</code></td><td>PostgreSQL</td>
-            <td><code>business_id</code> VARCHAR, <code>name</code> VARCHAR, <code>value</code> JSONB, <code>received_at</code> TIMESTAMPTZ</td>
-            <td>psycopg2, port 5432</td></tr>
-        <tr><td><code>rds_cases_public.data_businesses</code></td><td>PostgreSQL</td>
-            <td><code>id</code> UUID, <code>name</code>, <code>naics_id</code> FK, <code>mcc_id</code> FK, <code>industry</code> FK, <code>tin</code></td>
-            <td>psycopg2, port 5432</td></tr>
-        <tr><td><code>rds_cases_public.data_cases</code></td><td>PostgreSQL</td>
-            <td><code>id</code> UUID, <code>business_id</code> FK, <code>status</code> FK, <code>created_at</code></td>
-            <td>psycopg2, port 5432</td></tr>
-        <tr><td><code>rds_cases_public.data_owners</code></td><td>PostgreSQL</td>
-            <td><code>id</code>, <code>first_name</code>, <code>last_name</code>, <code>email</code>, <code>mobile</code>, <code>date_of_birth</code> (encrypted), <code>ssn</code> (masked)</td>
-            <td>psycopg2, port 5432</td></tr>
-        <tr><td><code>integration_data.request_response</code></td><td>PostgreSQL</td>
-            <td><code>business_id</code>, <code>platform_id</code> INT, <code>response</code> JSONB, <code>requested_at</code></td>
-            <td>psycopg2, port 5432</td></tr>
-        <tr><td><code>core_naics_code</code></td><td>PostgreSQL</td>
-            <td><code>id</code>, <code>code</code> VARCHAR(6), <code>label</code></td>
-            <td>psycopg2, port 5432</td></tr>
-        <tr><td><code>core_mcc_code</code></td><td>PostgreSQL</td>
-            <td><code>id</code>, <code>code</code> VARCHAR(4), <code>label</code></td>
-            <td>psycopg2, port 5432</td></tr>
-        <tr><td><code>core_business_industries</code></td><td>PostgreSQL</td>
-            <td><code>id</code>, <code>name</code>, <code>sector_code</code> INT (2-digit NAICS)</td>
-            <td>psycopg2, port 5432</td></tr>
-        </table>"""
-        st.markdown(pg_tbl, unsafe_allow_html=True)
+    with st.expander("🗄️  Complete Database Reference — All Tables, All Columns, All Queries", expanded=False):
+        st.markdown("### Connection Templates")
+        col_pg, col_rs = st.columns(2)
+        with col_pg:
+            st.markdown("**PostgreSQL (RDS) — port 5432**")
+            st.code("""import psycopg2
 
-        st.markdown("### Confirmed Redshift Tables (datascience / warehouse)")
-        st.markdown("Source: `warehouse-service/datapooler/adapters/redshift/customer_file/tables/customer_table.sql`")
-        rs_tbl = """<table class="t"><tr><th>Schema.Table</th><th>DB</th><th>Confirmed columns</th><th>Connection</th></tr>
-        <tr><td><code>datascience.customer_files</code></td><td>Redshift</td>
-            <td><code>business_id</code>, <code>primary_naics_code</code> INT, <code>mcc_code</code>, <code>worth_score</code>,
-            <code>zi_match_confidence</code> FLOAT, <code>efx_match_confidence</code> FLOAT, <code>match_confidence</code>,
-            <code>employee_count</code> INT, <code>year_established</code> INT, <code>company_name</code>, <code>tax_id</code>,
-            <code>name_verification</code>, <code>address_verification</code>, <code>tin_verification</code>,
-            <code>corporate_filing_business_name</code>, <code>corporate_filing_filling_date</code>,
-            <code>corporate_filing_incorporation_state</code>, <code>corporate_filing_corporation_type</code>,
-            <code>corporate_filing_secretary_of_state_status</code></td>
-            <td>psycopg2, port 5439</td></tr>
-        <tr><td><code>warehouse.latest_score</code></td><td>Redshift</td>
-            <td><code>business_id</code>, <code>score</code> (worth score), <code>created_at</code></td>
-            <td>psycopg2, port 5439</td></tr>
-        </table>"""
-        st.markdown(rs_tbl, unsafe_allow_html=True)
-
-        st.markdown("### ❓ What I need from you to complete Redshift queries")
-        card("""The following Redshift tables are referenced in the code but I cannot verify their exact column names without access.
-        To complete the queries for vendor-level data, please provide the column names for:
-
-        <b>1. zoominfo.comp_standard_global</b> (ZoomInfo firmographic source)<br>
-        &nbsp;&nbsp;→ I need: the exact column names for NAICS code, SIC code, employees, revenue, website, phone, address, company name<br>
-        &nbsp;&nbsp;→ <b>Where to find:</b> <code>SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='zoominfo' AND table_name='comp_standard_global' ORDER BY ordinal_position;</code><br><br>
-
-        <b>2. warehouse.equifax_us_latest</b> (Equifax source)<br>
-        &nbsp;&nbsp;→ I need: column names for NAICS, SIC, employees, state, revenue, email, minority/woman/veteran flags<br>
-        &nbsp;&nbsp;→ <b>Where to find:</b> <code>SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='warehouse' AND table_name='equifax_us_latest' ORDER BY ordinal_position;</code><br><br>
-
-        <b>3. warehouse.oc_companies_latest</b> (OpenCorporates source)<br>
-        &nbsp;&nbsp;→ I need: column names for company name, industry_code_uids, jurisdiction, registered_address<br>
-        &nbsp;&nbsp;→ <b>Where to find:</b> <code>SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='warehouse' AND table_name='oc_companies_latest' ORDER BY ordinal_position;</code><br><br>
-
-        <b>4. datascience.zoominfo_matches_custom_inc_ml</b> (ZI entity match results)<br>
-        &nbsp;&nbsp;→ I need: column names for business_id, match.index, confidence fields<br><br>
-
-        <b>5. datascience.efx_matches_custom_inc_ml</b> (EFX entity match results)<br>
-        &nbsp;&nbsp;→ Same as above<br><br>
-
-        Run the <code>information_schema.columns</code> queries above in your Redshift environment and share the output — I can then build complete, accurate queries for all vendor-level data.""", "card-amber")
-
-        st.markdown("### Template: PostgreSQL connection")
-        st.code("""import psycopg2
-
-pg_conn = psycopg2.connect(
+pg = psycopg2.connect(
     host='your-rds-endpoint.rds.amazonaws.com',
     port=5432,
-    dbname='postgres',        # confirm your DB name
+    dbname='postgres',
     user='your_pg_username',
     password='your_pg_password',
-    sslmode='require'         # required for RDS
+    sslmode='require'
 )""", language="python")
+        with col_rs:
+            st.markdown("**Redshift — port 5439**")
+            st.code("""import psycopg2
 
-        st.markdown("### Template: Redshift connection")
-        st.code("""import psycopg2
-
-rs_conn = psycopg2.connect(
-    host='your-cluster.us-east-1.redshift.amazonaws.com',
+rs = psycopg2.connect(
+    host='your-cluster.redshift.amazonaws.com',
     port=5439,
-    dbname='dev',             # confirm your Redshift DB name
+    dbname='dev',
     user='your_rs_username',
     password='your_rs_password',
     sslmode='require'
+)""", language="python")
+
+        st.markdown("---")
+        st.markdown("### PostgreSQL Tables — Confirmed from source code")
+        pg_tbl = """<table class="t"><tr><th>Schema.Table</th><th>Key columns (all confirmed)</th><th>Source file</th></tr>
+        <tr><td><code>rds_warehouse_public.facts</code></td>
+            <td><code>business_id</code> VARCHAR (PK), <code>name</code> VARCHAR (PK), <code>value</code> JSONB, <code>received_at</code> TIMESTAMPTZ<br>
+            JSONB structure: <code>{"value":..., "source":{"platformId":N,"confidence":X,"updatedAt":""}, "override":{"value":"","userId":""}, "alternatives":[...]}</code></td>
+            <td>facts.py L8-16</td></tr>
+        <tr><td><code>rds_cases_public.data_businesses</code></td>
+            <td><code>id</code> UUID, <code>name</code> VARCHAR, <code>naics_id</code>→core_naics_code, <code>mcc_id</code>→core_mcc_code, <code>industry</code>→core_business_industries, <code>tin</code> (masked)</td>
+            <td>case-management.ts L1555</td></tr>
+        <tr><td><code>rds_cases_public.data_cases</code></td>
+            <td><code>id</code> UUID, <code>business_id</code> FK, <code>status</code>→core_case_statuses, <code>created_at</code>, <code>customer_id</code></td>
+            <td>case-management.ts L1555</td></tr>
+        <tr><td><code>rds_cases_public.data_owners</code></td>
+            <td><code>id</code>, <code>first_name</code>, <code>last_name</code>, <code>email</code>, <code>mobile</code>, <code>date_of_birth</code> (encrypted), <code>ssn</code> (masked last 4)</td>
+            <td>case-management.ts</td></tr>
+        <tr><td><code>integration_data.request_response</code></td>
+            <td><code>business_id</code>, <code>platform_id</code> INT, <code>response</code> JSONB (full raw vendor response), <code>requested_at</code></td>
+            <td>sources.ts L49</td></tr>
+        <tr><td><code>core_naics_code</code></td><td><code>id</code>, <code>code</code> VARCHAR(6), <code>label</code> VARCHAR</td><td>case-management.ts</td></tr>
+        <tr><td><code>core_mcc_code</code></td><td><code>id</code>, <code>code</code> VARCHAR(4), <code>label</code> VARCHAR</td><td>case-management.ts</td></tr>
+        <tr><td><code>core_business_industries</code></td><td><code>id</code>, <code>name</code> VARCHAR, <code>sector_code</code> INT (2-digit NAICS prefix)</td><td>businessDetails/index.ts L297</td></tr>
+        <tr><td><code>rel_naics_mcc</code></td><td><code>naics_id</code>→core_naics_code, <code>mcc_id</code>→core_mcc_code</td><td>businessDetails/index.ts L408</td></tr>
+        </table>"""
+        st.markdown(pg_tbl, unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.markdown("### Redshift Tables — All columns confirmed from schemas you provided")
+
+        rs_tables = [
+            ("datascience.customer_files", "Pipeline B output (winner-takes-all: ZI vs EFX)",
+             ["business_id", "primary_naics_code INT (ZI or EFX winner)", "mcc_code", "mcc_desc",
+              "worth_score", "match_confidence FLOAT", "zi_match_confidence FLOAT", "efx_match_confidence FLOAT",
+              "company_name (from ZI or EFX winner)", "tax_id", "employee_count INT", "year_established INT",
+              "name_verification", "address_verification", "tin_verification", "watchlist_verification",
+              "sos_domestic_verification", "sos_match_verification",
+              "corporate_filing_business_name", "corporate_filing_filling_date",
+              "corporate_filing_incorporation_state", "corporate_filing_corporation_type",
+              "corporate_filing_secretary_of_state_status", "primary_naics_description",
+              "phone_number", "latitude FLOAT", "longitude FLOAT", "gov_flag", "nonprofit_flag", "edu_flag",
+              "sos_online_firm_coverage", "average_rating", "total_review_count"],
+             "customer_table.sql"),
+            ("zoominfo.comp_standard_global", "ZoomInfo firmographic data — primary NAICS source",
+             ["zi_c_location_id BIGINT", "zi_c_company_id BIGINT", "zi_c_name VARCHAR", "zi_c_url VARCHAR",
+              "zi_c_street / zi_c_city / zi_c_state / zi_c_zip / zi_c_country",
+              "zi_c_employees INT", "zi_c_revenue BIGINT", "zi_c_phone VARCHAR",
+              "zi_c_naics2 / zi_c_naics4 / zi_c_naics6 VARCHAR (6-digit NAICS)",
+              "zi_c_naics_top3 VARCHAR (pipe-delimited top 3)", "zi_c_naics_confidence_score FLOAT",
+              "zi_c_naics_top3_confidence_scores VARCHAR",
+              "zi_c_sic2 / zi_c_sic3 / zi_c_sic4 / zi_c_sic_top3 VARCHAR",
+              "zi_c_industry_primary / zi_c_sub_industry_primary VARCHAR",
+              "zi_c_year_founded VARCHAR", "zi_c_ein VARCHAR",
+              "zi_c_linkedin_url / zi_c_facebook_url / zi_c_twitter_url"],
+             "information_schema.columns (you provided)"),
+            ("warehouse.equifax_us_latest", "Equifax firmographic data — NAICS/SIC/employee source",
+             ["efx_id BIGINT", "efx_name / efx_legal_name VARCHAR",
+              "efx_address / efx_city / efx_state / efx_zipcode / efx_ctryname",
+              "efx_primnaicscode BIGINT (primary NAICS)", "efx_secnaics1-4 BIGINT (secondary NAICS codes)",
+              "efx_primnaicsdesc / efx_secnaicsdesc1-2 VARCHAR",
+              "efx_primsic BIGINT / efx_secsic1-4 BIGINT (SIC codes)",
+              "efx_corpempcnt BIGINT (corporate employee count)", "efx_locempcnt BIGINT (location employees)",
+              "efx_corpamount / efx_locamount BIGINT (revenue)",
+              "efx_yrest BIGINT (year established)",
+              "efx_web VARCHAR (website)", "efx_phone / efx_faxphone BIGINT",
+              "efx_email VARCHAR", "efx_mbe / efx_wbe / efx_vet VARCHAR (minority/woman/veteran flags)",
+              "efx_nonprofit / efx_gov / efx_edu VARCHAR",
+              "efx_ceoname / efx_cioname / efx_cfoname VARCHAR"],
+             "information_schema.columns (you provided)"),
+            ("warehouse.oc_companies_latest", "OpenCorporates global registry — NAICS + international coverage",
+             ["company_number VARCHAR", "jurisdiction_code VARCHAR (e.g. 'us_fl', 'gb')",
+              "name / normalised_name VARCHAR", "company_type VARCHAR",
+              "current_status VARCHAR (Active/Dissolved/etc.)",
+              "incorporation_date VARCHAR", "dissolution_date VARCHAR",
+              "industry_code_uids VARCHAR (pipe-delimited: 'us_naics-722511|uk_sic-56101')",
+              "number_of_employees VARCHAR",
+              "registered_address.street_address / .locality / .region / .postal_code / .country",
+              "home_jurisdiction_code / home_jurisdiction_company_number",
+              "inactive BOOLEAN", "has_been_liquidated BOOLEAN",
+              "latest_accounts_cash / _assets / _liabilities FLOAT"],
+             "information_schema.columns (you provided)"),
+            ("datascience.zoominfo_matches_custom_inc_ml", "ZI entity match results — which businesses matched ZI records",
+             ["business_id VARCHAR", "zi_c_company_id BIGINT", "zi_c_location_id BIGINT",
+              "zi_es_location_id VARCHAR", "zi_probability FLOAT (XGBoost confidence: 0-1)",
+              "similarity_index INT (0-55: match.index / 55 = confidence)"],
+             "smb_zoominfo_standardized_joined.sql + your schema"),
+            ("datascience.efx_matches_custom_inc_ml", "EFX entity match results — which businesses matched Equifax records",
+             ["business_id VARCHAR", "efx_id BIGINT",
+              "efx_probability FLOAT (XGBoost confidence 0-1, NULL if from similarity_index)",
+              "similarity_index INT (0-55, NULL if from XGBoost — same MAX_CONFIDENCE_INDEX=55)"],
+             "efx_match_select.sql"),
+            ("datascience.oc_matches_custom_inc_ml", "OC entity match results — which businesses matched OpenCorporates records",
+             ["business_id VARCHAR", "company_number VARCHAR", "jurisdiction_code VARCHAR",
+              "oc_probability FLOAT (XGBoost confidence 0-1, NULL if from similarity_index)",
+              "similarity_index INT (0-55, NULL if from XGBoost)"],
+             "oc_match_select.sql"),
+        ]
+        for tname, purpose, cols, source in rs_tables:
+            with st.expander(f"**{tname}** — {purpose}"):
+                st.markdown(f"**Source confirmed:** `{source}`")
+                st.markdown("**Columns:**")
+                for c in cols:
+                    st.markdown(f"- `{c}`")
+
+        st.markdown("---")
+        st.markdown("### ✅ Complete ready-to-run queries (using confirmed column names)")
+
+        st.markdown("#### Query 1 — Full NAICS/MCC lineage for one business (PostgreSQL)")
+        st.code("""-- COPY AND RUN IN POSTGRESQL
+-- Replace 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' with your business UUID
+
+WITH business_id AS (SELECT 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'::varchar AS id)
+
+-- Step 1: Winning NAICS fact and all vendor alternatives
+SELECT
+    f.name,
+    f.value->>'value'                              AS winning_value,
+    f.value->'source'->>'platformId'               AS winning_platform_id,
+    f.value->'source'->>'confidence'               AS winning_confidence,
+    f.value->'override'->>'value'                  AS analyst_override,
+    f.value->'override'->>'userId'                 AS overridden_by,
+    jsonb_array_length(COALESCE(f.value->'alternatives','[]'::jsonb)) AS num_alternatives,
+    f.received_at
+FROM rds_warehouse_public.facts f, business_id b
+WHERE f.business_id = b.id
+  AND f.name IN ('naics_code','mcc_code','industry','naics_description','mcc_description',
+                 'business_name','legal_name','tin_match_boolean','sos_active')
+ORDER BY f.name;""", language="sql")
+
+        st.markdown("#### Query 2 — All vendor NAICS responses before winner was selected (PostgreSQL)")
+        st.code("""-- Shows every vendor's NAICS code + confidence used in competition
+SELECT
+    alt->>'platformId'   AS vendor_pid,
+    CASE alt->>'platformId'
+        WHEN '16' THEN 'Middesk'
+        WHEN '23' THEN 'OpenCorporates'
+        WHEN '24' THEN 'ZoomInfo'
+        WHEN '17' THEN 'Equifax'
+        WHEN '38' THEN 'Trulioo'
+        WHEN '22' THEN 'SERP'
+        WHEN '31' THEN 'AI Enrichment'
+        ELSE 'Other'
+    END                  AS vendor_name,
+    alt->>'value'        AS naics_code,
+    alt->>'confidence'   AS confidence
+FROM rds_warehouse_public.facts,
+     jsonb_array_elements(COALESCE(value->'alternatives','[]'::jsonb)) AS alt
+WHERE business_id = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+  AND name = 'naics_code'
+ORDER BY (alt->>'confidence')::float DESC NULLS LAST;""", language="sql")
+
+        st.markdown("#### Query 3 — ZoomInfo raw NAICS data for a business (Redshift)")
+        st.code("""-- Shows raw ZI firmographic data for a matched business
+-- Requires: business_id from your case, run in Redshift
+SELECT
+    m.business_id,
+    m.zi_c_location_id,
+    m.zi_probability              AS zi_match_confidence,
+    m.similarity_index,
+    m.similarity_index / 55.0     AS similarity_as_confidence,  -- MAX_CONFIDENCE_INDEX = 55
+    z.zi_c_name                   AS zi_company_name,
+    z.zi_c_naics6                 AS zi_naics_code,
+    z.zi_c_naics_confidence_score AS zi_naics_confidence,
+    z.zi_c_naics_top3             AS zi_naics_top3,
+    z.zi_c_naics_top3_confidence_scores,
+    z.zi_c_sic4                   AS zi_sic_code,
+    z.zi_c_employees              AS zi_employees,
+    z.zi_c_revenue                AS zi_revenue,
+    z.zi_c_url                    AS zi_website,
+    z.zi_c_state                  AS zi_state,
+    z.zi_c_city                   AS zi_city,
+    z.zi_c_year_founded           AS zi_year_founded,
+    z.zi_c_ein                    AS zi_ein
+FROM datascience.zoominfo_matches_custom_inc_ml m
+JOIN zoominfo.comp_standard_global z
+    ON z.zi_c_location_id = m.zi_c_location_id
+WHERE m.business_id = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx';""", language="sql")
+
+        st.markdown("#### Query 4 — Equifax raw NAICS data for a business (Redshift)")
+        st.code("""-- Shows raw Equifax firmographic data for a matched business
+SELECT
+    m.business_id,
+    m.efx_id,
+    m.efx_probability             AS efx_match_confidence,
+    m.similarity_index,
+    m.similarity_index / 55.0     AS similarity_as_confidence,
+    e.efx_name                    AS efx_company_name,
+    e.efx_legal_name,
+    e.efx_primnaicscode           AS efx_primary_naics,
+    e.efx_primnaicsdesc           AS efx_primary_naics_desc,
+    e.efx_secnaics1               AS efx_secondary_naics1,
+    e.efx_secnaics2               AS efx_secondary_naics2,
+    e.efx_primsic                 AS efx_primary_sic,
+    e.efx_primsicdesc             AS efx_primary_sic_desc,
+    e.efx_corpempcnt              AS efx_corp_employees,
+    e.efx_corpamount              AS efx_corp_revenue,
+    e.efx_yrest                   AS efx_year_established,
+    e.efx_web                     AS efx_website,
+    e.efx_state,
+    e.efx_mbe                     AS minority_owned,
+    e.efx_wbe                     AS woman_owned,
+    e.efx_vet                     AS veteran_owned,
+    e.efx_email
+FROM datascience.efx_matches_custom_inc_ml m
+JOIN warehouse.equifax_us_latest e
+    ON e.efx_id = m.efx_id
+WHERE m.business_id = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx';""", language="sql")
+
+        st.markdown("#### Query 5 — OpenCorporates raw data for a business (Redshift)")
+        st.code("""-- Shows OC registry data. industry_code_uids contains ALL taxonomies pipe-delimited:
+-- e.g. 'us_naics-722511|uk_sic-56101|ca_naics-722511'
+SELECT
+    m.business_id,
+    m.company_number,
+    m.jurisdiction_code,
+    m.oc_probability              AS oc_match_confidence,
+    m.similarity_index,
+    o.name                        AS oc_company_name,
+    o.company_type,
+    o.current_status,             -- 'Active', 'Dissolved', etc.
+    o.incorporation_date,
+    o.industry_code_uids,         -- parse for 'us_naics-XXXXXX'
+    o."registered_address.region" AS registered_state,
+    o."registered_address.country" AS registered_country,
+    o.home_jurisdiction_code,
+    o.inactive,
+    o.has_been_liquidated,
+    -- Extract NAICS from pipe-delimited industry_code_uids:
+    SPLIT_PART(
+        REGEXP_SUBSTR(industry_code_uids, 'us_naics-[0-9]+'),
+        '-', 2
+    ) AS extracted_us_naics
+FROM datascience.oc_matches_custom_inc_ml m
+JOIN warehouse.oc_companies_latest o
+    ON o.company_number   = m.company_number
+   AND o.jurisdiction_code = m.jurisdiction_code
+WHERE m.business_id = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx';""", language="sql")
+
+        st.markdown("#### Query 6 — Pipeline B output: who won NAICS (ZI vs EFX) (Redshift)")
+        st.code("""-- Shows Pipeline B winner-takes-all result
+-- WHEN zi_match_confidence > efx_match_confidence THEN ZI NAICS ELSE EFX NAICS
+SELECT
+    business_id,
+    primary_naics_code,
+    mcc_code,
+    mcc_desc,
+    zi_match_confidence,
+    efx_match_confidence,
+    match_confidence,             -- = MAX(zi_conf, efx_conf)
+    CASE
+        WHEN zi_match_confidence > efx_match_confidence THEN 'ZoomInfo (pid=24)'
+        ELSE 'Equifax (pid=17)'
+    END                           AS pipeline_b_winner,
+    employee_count,
+    year_established,
+    worth_score,
+    company_name,
+    tax_id,
+    name_verification,
+    address_verification,
+    tin_verification,
+    sos_match_verification,
+    corporate_filing_business_name,
+    corporate_filing_secretary_of_state_status
+FROM datascience.customer_files
+WHERE business_id = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx';""", language="sql")
+
+        st.markdown("#### Query 7 — Full Python: load all 6 vendor responses + Pipeline B (ready to run)")
+        st.code("""import psycopg2
+import pandas as pd
+
+BID = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'  # replace with real UUID
+
+# PostgreSQL connection (RDS)
+pg = psycopg2.connect(
+    host='your-rds-endpoint.rds.amazonaws.com', port=5432,
+    dbname='postgres', user='your_pg_user', password='your_pg_pass',
+    sslmode='require'
 )
 
-# Alternative: AWS Data Wrangler (handles credentials via IAM)
-import awswrangler as wr
-df = wr.redshift.read_sql_query(
-    sql="SELECT * FROM datascience.customer_files WHERE business_id='<id>' LIMIT 1",
-    con=wr.redshift.connect('your-glue-connection-name')
-)""", language="python")
+# Redshift connection
+rs = psycopg2.connect(
+    host='your-cluster.redshift.amazonaws.com', port=5439,
+    dbname='dev', user='your_rs_user', password='your_rs_pass',
+    sslmode='require'
+)
+
+# 1. Winning NAICS from Pipeline A (PostgreSQL facts table)
+SQL_FACTS = (
+    "SELECT name, value->>'value' AS value, "
+    "value->'source'->>'platformId' AS winning_pid, "
+    "value->'source'->>'confidence' AS confidence, "
+    "value->'override'->>'value' AS analyst_override "
+    "FROM rds_warehouse_public.facts "
+    "WHERE business_id = %(bid)s "
+    "AND name IN ('naics_code','mcc_code','mcc_description','industry','business_name','legal_name') "
+    "ORDER BY name"
+)
+df_facts = pd.read_sql(SQL_FACTS, pg, params={'bid': BID})
+print("=== Pipeline A (Facts table) ==="); print(df_facts.to_string())
+
+# 2. All vendor alternatives for NAICS
+SQL_ALTS = (
+    "SELECT alt->>'platformId' AS pid, alt->>'value' AS naics, alt->>'confidence' AS confidence "
+    "FROM rds_warehouse_public.facts, "
+    "jsonb_array_elements(COALESCE(value->'alternatives','[]'::jsonb)) alt "
+    "WHERE business_id = %(bid)s AND name = 'naics_code' "
+    "ORDER BY (alt->>'confidence')::float DESC NULLS LAST"
+)
+df_alts = pd.read_sql(SQL_ALTS, pg, params={'bid': BID})
+print("\\n=== All vendor NAICS ==="); print(df_alts.to_string())
+
+# 3. Pipeline B (Redshift)
+SQL_PIPB = (
+    "SELECT primary_naics_code, zi_match_confidence, efx_match_confidence, "
+    "CASE WHEN zi_match_confidence > efx_match_confidence THEN 'ZoomInfo' ELSE 'Equifax' END AS winner, "
+    "worth_score, employee_count FROM datascience.customer_files WHERE business_id = %(bid)s"
+)
+df_pipb = pd.read_sql(SQL_PIPB, rs, params={'bid': BID})
+print("\\n=== Pipeline B ==="); print(df_pipb.to_string())
+
+# 4. ZI raw NAICS (Redshift)
+SQL_ZI = (
+    "SELECT m.zi_probability, m.similarity_index, z.zi_c_naics6, "
+    "z.zi_c_naics_confidence_score, z.zi_c_naics_top3, z.zi_c_name, z.zi_c_employees "
+    "FROM datascience.zoominfo_matches_custom_inc_ml m "
+    "JOIN zoominfo.comp_standard_global z ON z.zi_c_location_id = m.zi_c_location_id "
+    "WHERE m.business_id = %(bid)s"
+)
+df_zi = pd.read_sql(SQL_ZI, rs, params={'bid': BID})
+print("\\n=== ZoomInfo raw NAICS ==="); print(df_zi.to_string())
+
+# 5. EFX raw NAICS (Redshift)
+SQL_EFX = (
+    "SELECT m.efx_probability, m.similarity_index, e.efx_primnaicscode, "
+    "e.efx_primnaicsdesc, e.efx_corpempcnt, e.efx_name, e.efx_mbe, e.efx_wbe, e.efx_vet "
+    "FROM datascience.efx_matches_custom_inc_ml m "
+    "JOIN warehouse.equifax_us_latest e ON e.efx_id = m.efx_id "
+    "WHERE m.business_id = %(bid)s"
+)
+df_efx = pd.read_sql(SQL_EFX, rs, params={'bid': BID})
+print("\\n=== Equifax raw NAICS ==="); print(df_efx.to_string())
+
+pg.close(); rs.close()""", language="python")
 
     import os
     OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
