@@ -257,38 +257,134 @@ def render_field(f):
                 st.markdown(src(*f["react_src"]), unsafe_allow_html=True)
 
         with c2:
+            # ── DB connection note ──────────────────────────────────────
+            st.markdown(
+                '<div class="card card-purple" style="font-size:.78rem;padding:8px 12px;margin-bottom:8px;">'
+                '<b>📌 Before running these queries, substitute:</b><br>'
+                "<code>'abc123-de45-...'</code> → your actual business UUID "
+                "(find it in the admin portal URL: <code>admin.joinworth.com/cases/&lt;caseId&gt;</code> "
+                "→ case detail → business.id field via GET /cases/:id)<br>"
+                '<b>PostgreSQL tables</b> (rds_warehouse_public, rds_cases_public): '
+                'use psycopg2 with your RDS credentials.<br>'
+                '<b>Redshift tables</b> (datascience.customer_files): '
+                'use your Redshift endpoint with psycopg2 or AWS Data Wrangler.'
+                '</div>', unsafe_allow_html=True)
+
             if f.get("sql"):
-                st.markdown("**🔍 Verify in database (SQL):**")
-                st.code(f["sql"], language="sql")
-                st.markdown(
-                    '<div style="font-size:.75rem;color:#475569;">'
-                    'Replace <code>&lt;id&gt;</code> or <code>&lt;business_id&gt;</code> with the actual business UUID. '
-                    'PostgreSQL for facts/cases tables. Redshift for datascience.customer_files.'
-                    '</div>', unsafe_allow_html=True)
+                st.markdown("**🔍 SQL — copy and run directly:**")
+                # Replace placeholder <id> with a realistic example UUID comment
+                sql_clean = f["sql"].replace(
+                    "'<id>'", "'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'  -- replace with real business UUID"
+                ).replace(
+                    "'<business_id>'", "'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'  -- replace with real business UUID"
+                )
+                st.code(sql_clean, language="sql")
 
-            st.markdown("**🐍 Load in Python:**")
-            fact_name = f["fact"].split("/")[0].strip().split(" ")[0].replace("[]","")
-            st.code(f"""import psycopg2, pandas as pd, json
+            # ── Python snippet — fully runnable ──────────────────────────
+            fact_name_raw = f["fact"].split("/")[0].strip().split(" ")[0].replace("[]","")
+            # Pick clean fact name for query
+            fact_name_clean = fact_name_raw.split("+")[0].strip().rstrip(".")
+            is_redshift = "customer_files" in f.get("sql", "") or "datascience" in f.get("sql", "")
+            db_note = "Redshift" if is_redshift else "PostgreSQL (RDS)"
 
-# Connect to PostgreSQL (facts table)
+            st.markdown(f"**🐍 Python — {db_note}:**")
+            if is_redshift:
+                st.code(f"""import psycopg2
+import pandas as pd
+
+# Redshift connection — replace with your actual credentials
 conn = psycopg2.connect(
-    host='<rds_host>', dbname='<dbname>',
-    user='<user>', password='<password>'
+    host='your-cluster.redshift.amazonaws.com',
+    port=5439,
+    dbname='dev',          # your Redshift database name
+    user='your_username',
+    password='your_password'
 )
 
-# Load the fact
-df = pd.read_sql(
-    "SELECT name, value FROM rds_warehouse_public.facts "
-    "WHERE business_id = %s AND name = %s",
-    conn, params=['<business_id>', '{fact_name}']
+BUSINESS_ID = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'  # replace
+
+df = pd.read_sql(\"\"\"
+    SELECT
+        business_id,
+        primary_naics_code,
+        mcc_code,
+        zi_match_confidence,
+        efx_match_confidence,
+        match_confidence,
+        employee_count,
+        worth_score
+    FROM datascience.customer_files
+    WHERE business_id = %(business_id)s
+    LIMIT 1
+\"\"\", conn, params={{'business_id': BUSINESS_ID}})
+
+print(df.to_string())
+conn.close()""", language="python")
+            else:
+                st.code(f"""import psycopg2
+import pandas as pd
+import json
+
+# PostgreSQL (RDS) connection — replace with your actual credentials
+conn = psycopg2.connect(
+    host='your-rds-endpoint.rds.amazonaws.com',
+    port=5432,
+    dbname='postgres',     # your database name
+    user='your_username',
+    password='your_password'
 )
-if not df.empty:
-    fact = df['value'].iloc[0]
-    if isinstance(fact, str): fact = json.loads(fact)
-    print("Value:", fact.get('value'))
-    print("Source PID:", fact.get('source',{{}}).get('platformId'))
-    print("Confidence:", fact.get('source',{{}}).get('confidence'))
-    print("Alternatives:", len(fact.get('alternatives', [])))
+
+BUSINESS_ID = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'  # replace
+FACT_NAME   = '{fact_name_clean}'
+
+# ── Fetch the winning fact ────────────────────────────────────────
+with conn.cursor() as cur:
+    cur.execute(\"\"\"
+        SELECT
+            name,
+            value->>'value'                        AS fact_value,
+            value->'source'->>'platformId'         AS winning_platform_id,
+            value->'source'->>'confidence'         AS winning_confidence,
+            value->'source'->>'updatedAt'          AS last_updated,
+            value->'override'->>'value'            AS analyst_override,
+            value->'override'->>'userId'           AS override_by_user,
+            jsonb_array_length(
+                COALESCE(value->'alternatives', '[]'::jsonb)
+            )                                      AS num_alternatives,
+            received_at
+        FROM rds_warehouse_public.facts
+        WHERE business_id = %(bid)s
+          AND name        = %(name)s
+    \"\"\", {{'bid': BUSINESS_ID, 'name': FACT_NAME}})
+
+    row = cur.fetchone()
+    if row:
+        cols = [d[0] for d in cur.description]
+        result = dict(zip(cols, row))
+        for k, v in result.items():
+            print(f"{{k:30s}}: {{v}}")
+
+# ── See ALL vendor alternatives before winner was chosen ──────────
+with conn.cursor() as cur:
+    cur.execute(\"\"\"
+        SELECT
+            alt->>'platformId'   AS vendor_pid,
+            alt->>'value'        AS vendor_value,
+            alt->>'confidence'   AS vendor_confidence
+        FROM rds_warehouse_public.facts,
+             jsonb_array_elements(
+                 COALESCE(value->'alternatives', '[]'::jsonb)
+             ) AS alt
+        WHERE business_id = %(bid)s
+          AND name        = %(name)s
+        ORDER BY (alt->>'confidence')::float DESC NULLS LAST
+    \"\"\", {{'bid': BUSINESS_ID, 'name': FACT_NAME}})
+
+    print("\\n-- All vendor responses (sorted by confidence) --")
+    for r in cur.fetchall():
+        pid, val, conf = r
+        print(f"  PID {{pid:>4}}  confidence={{conf or 'N/A':>6}}  value={{val}}")
+
 conn.close()""", language="python")
 
             if f.get("gpn_q"):
@@ -1152,6 +1248,111 @@ elif tab == "🔑 KYB API Fields":
 # ════════════════════════════════════════════════════════════════════════════
 elif tab == "🤖 AI Agent":
     sh("🤖 KYB Intelligence Agent — Ask Anything About the Admin Portal")
+
+    # ── DB connection helper panel ──────────────────────────────────────
+    with st.expander("🗄️  Database Connection Guide — PostgreSQL + Redshift", expanded=False):
+        st.markdown("### Confirmed PostgreSQL Tables (rds_warehouse_public / rds_cases_public)")
+        st.markdown("Source: `warehouse-service/datapooler/adapters/db/models/facts.py` + `case-management.ts`")
+        pg_tbl = """<table class="t"><tr><th>Schema.Table</th><th>DB</th><th>Key columns</th><th>Connection</th></tr>
+        <tr><td><code>rds_warehouse_public.facts</code></td><td>PostgreSQL</td>
+            <td><code>business_id</code> VARCHAR, <code>name</code> VARCHAR, <code>value</code> JSONB, <code>received_at</code> TIMESTAMPTZ</td>
+            <td>psycopg2, port 5432</td></tr>
+        <tr><td><code>rds_cases_public.data_businesses</code></td><td>PostgreSQL</td>
+            <td><code>id</code> UUID, <code>name</code>, <code>naics_id</code> FK, <code>mcc_id</code> FK, <code>industry</code> FK, <code>tin</code></td>
+            <td>psycopg2, port 5432</td></tr>
+        <tr><td><code>rds_cases_public.data_cases</code></td><td>PostgreSQL</td>
+            <td><code>id</code> UUID, <code>business_id</code> FK, <code>status</code> FK, <code>created_at</code></td>
+            <td>psycopg2, port 5432</td></tr>
+        <tr><td><code>rds_cases_public.data_owners</code></td><td>PostgreSQL</td>
+            <td><code>id</code>, <code>first_name</code>, <code>last_name</code>, <code>email</code>, <code>mobile</code>, <code>date_of_birth</code> (encrypted), <code>ssn</code> (masked)</td>
+            <td>psycopg2, port 5432</td></tr>
+        <tr><td><code>integration_data.request_response</code></td><td>PostgreSQL</td>
+            <td><code>business_id</code>, <code>platform_id</code> INT, <code>response</code> JSONB, <code>requested_at</code></td>
+            <td>psycopg2, port 5432</td></tr>
+        <tr><td><code>core_naics_code</code></td><td>PostgreSQL</td>
+            <td><code>id</code>, <code>code</code> VARCHAR(6), <code>label</code></td>
+            <td>psycopg2, port 5432</td></tr>
+        <tr><td><code>core_mcc_code</code></td><td>PostgreSQL</td>
+            <td><code>id</code>, <code>code</code> VARCHAR(4), <code>label</code></td>
+            <td>psycopg2, port 5432</td></tr>
+        <tr><td><code>core_business_industries</code></td><td>PostgreSQL</td>
+            <td><code>id</code>, <code>name</code>, <code>sector_code</code> INT (2-digit NAICS)</td>
+            <td>psycopg2, port 5432</td></tr>
+        </table>"""
+        st.markdown(pg_tbl, unsafe_allow_html=True)
+
+        st.markdown("### Confirmed Redshift Tables (datascience / warehouse)")
+        st.markdown("Source: `warehouse-service/datapooler/adapters/redshift/customer_file/tables/customer_table.sql`")
+        rs_tbl = """<table class="t"><tr><th>Schema.Table</th><th>DB</th><th>Confirmed columns</th><th>Connection</th></tr>
+        <tr><td><code>datascience.customer_files</code></td><td>Redshift</td>
+            <td><code>business_id</code>, <code>primary_naics_code</code> INT, <code>mcc_code</code>, <code>worth_score</code>,
+            <code>zi_match_confidence</code> FLOAT, <code>efx_match_confidence</code> FLOAT, <code>match_confidence</code>,
+            <code>employee_count</code> INT, <code>year_established</code> INT, <code>company_name</code>, <code>tax_id</code>,
+            <code>name_verification</code>, <code>address_verification</code>, <code>tin_verification</code>,
+            <code>corporate_filing_business_name</code>, <code>corporate_filing_filling_date</code>,
+            <code>corporate_filing_incorporation_state</code>, <code>corporate_filing_corporation_type</code>,
+            <code>corporate_filing_secretary_of_state_status</code></td>
+            <td>psycopg2, port 5439</td></tr>
+        <tr><td><code>warehouse.latest_score</code></td><td>Redshift</td>
+            <td><code>business_id</code>, <code>score</code> (worth score), <code>created_at</code></td>
+            <td>psycopg2, port 5439</td></tr>
+        </table>"""
+        st.markdown(rs_tbl, unsafe_allow_html=True)
+
+        st.markdown("### ❓ What I need from you to complete Redshift queries")
+        card("""The following Redshift tables are referenced in the code but I cannot verify their exact column names without access.
+        To complete the queries for vendor-level data, please provide the column names for:
+
+        <b>1. zoominfo.comp_standard_global</b> (ZoomInfo firmographic source)<br>
+        &nbsp;&nbsp;→ I need: the exact column names for NAICS code, SIC code, employees, revenue, website, phone, address, company name<br>
+        &nbsp;&nbsp;→ <b>Where to find:</b> <code>SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='zoominfo' AND table_name='comp_standard_global' ORDER BY ordinal_position;</code><br><br>
+
+        <b>2. warehouse.equifax_us_latest</b> (Equifax source)<br>
+        &nbsp;&nbsp;→ I need: column names for NAICS, SIC, employees, state, revenue, email, minority/woman/veteran flags<br>
+        &nbsp;&nbsp;→ <b>Where to find:</b> <code>SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='warehouse' AND table_name='equifax_us_latest' ORDER BY ordinal_position;</code><br><br>
+
+        <b>3. warehouse.oc_companies_latest</b> (OpenCorporates source)<br>
+        &nbsp;&nbsp;→ I need: column names for company name, industry_code_uids, jurisdiction, registered_address<br>
+        &nbsp;&nbsp;→ <b>Where to find:</b> <code>SELECT column_name, data_type FROM information_schema.columns WHERE table_schema='warehouse' AND table_name='oc_companies_latest' ORDER BY ordinal_position;</code><br><br>
+
+        <b>4. datascience.zoominfo_matches_custom_inc_ml</b> (ZI entity match results)<br>
+        &nbsp;&nbsp;→ I need: column names for business_id, match.index, confidence fields<br><br>
+
+        <b>5. datascience.efx_matches_custom_inc_ml</b> (EFX entity match results)<br>
+        &nbsp;&nbsp;→ Same as above<br><br>
+
+        Run the <code>information_schema.columns</code> queries above in your Redshift environment and share the output — I can then build complete, accurate queries for all vendor-level data.""", "card-amber")
+
+        st.markdown("### Template: PostgreSQL connection")
+        st.code("""import psycopg2
+
+pg_conn = psycopg2.connect(
+    host='your-rds-endpoint.rds.amazonaws.com',
+    port=5432,
+    dbname='postgres',        # confirm your DB name
+    user='your_pg_username',
+    password='your_pg_password',
+    sslmode='require'         # required for RDS
+)""", language="python")
+
+        st.markdown("### Template: Redshift connection")
+        st.code("""import psycopg2
+
+rs_conn = psycopg2.connect(
+    host='your-cluster.us-east-1.redshift.amazonaws.com',
+    port=5439,
+    dbname='dev',             # confirm your Redshift DB name
+    user='your_rs_username',
+    password='your_rs_password',
+    sslmode='require'
+)
+
+# Alternative: AWS Data Wrangler (handles credentials via IAM)
+import awswrangler as wr
+df = wr.redshift.read_sql_query(
+    sql="SELECT * FROM datascience.customer_files WHERE business_id='<id>' LIMIT 1",
+    con=wr.redshift.connect('your-glue-connection-name')
+)""", language="python")
 
     import os
     OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
