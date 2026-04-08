@@ -120,6 +120,7 @@ with st.sidebar:
 
     section = st.radio("Navigate", [
         "🗺️  KYB Tab Map",
+        "🃏  Card-by-Card Lineage",
         "🏷️  Field Lineage Explorer",
         "🔰  Badge & State Decoder",
         "⚠️  NAICS / MCC Deep Dive",
@@ -291,6 +292,720 @@ if section == "🗺️  KYB Tab Map":
 # ╔═══════════════════════════════════════════════════════════════════╗
 # ║  2 — FIELD LINEAGE EXPLORER                                       ║
 # ╚═══════════════════════════════════════════════════════════════════╝
+# ╔═══════════════════════════════════════════════════════════════════╗
+# ║  CARD-BY-CARD LINEAGE                                             ║
+# ╚═══════════════════════════════════════════════════════════════════╝
+elif section == "🃏  Card-by-Card Lineage":
+    sh("🃏  Card-by-Card Lineage — Every Card in Every KYB Sub-Tab")
+
+    card("""<b>Source of truth for this section:</b>
+    Every field label, editability, data path, and fact name comes directly from
+    <code>microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx</code>
+    (470 lines) — the authoritative field configuration file for the Background tab.
+    This file defines every card, every field, whether it is editable, which fact it reads, and which API call loads it.
+    """, "card-teal")
+    st.markdown(src_ref("ADMIN_PORTAL",
+        "microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",
+        99, 470, "BACKGROUND_TAB_FIELD_CONFIGS — every Background tab field definition"),
+        unsafe_allow_html=True)
+
+    kyb_subtab = st.radio("Select Sub-Tab", [
+        "📋 Background — Business Details Card",
+        "📋 Background — Industry Card",
+        "🏛️ Business Registration — All Cards",
+        "📬 Contact Information — All Cards",
+        "🌐 Website — All Cards",
+        "🔍 Watchlists — All Cards",
+    ], horizontal=False)
+
+    if kyb_subtab == "📋 Background — Business Details Card":
+        sh("📋 Background Sub-Tab — Business Details Card")
+        card("""<b>API calls that populate this card:</b><br>
+        • <code>GET /facts/business/:id/details</code> → <code>factsBusinessDetails</code> (businessDetails, financials)<br>
+        • <code>GET /facts/business/:id/kyb</code> → <code>getFactsKybData</code> (legal_name, email, corporation, minority/woman/veteran)<br>
+        Source: <code>BackgroundTab.tsx</code> — <code>useBackgroundTabData(businessId)</code>
+        """)
+
+        BDET_FIELDS = [
+            {
+                "label": "Provided Business Name",
+                "fieldKey": "business_name",
+                "editable": True,
+                "loadingKey": "businessDetails",
+                "dataPath": "factsBusinessDetails.data.business_name.value",
+                "factName": "business_name",
+                "apiEndpoint": "GET /facts/business/:id/details",
+                "sources": [
+                    ("Applicant submission", "pid=0", "w=1.0", "Submitted at onboarding form — this is the name the merchant provided"),
+                    ("ZoomInfo", "pid=24", "w=0.8", "zi_c_name from ZoomInfo firmographic data"),
+                    ("Equifax", "pid=17", "w=0.7", "efx_name from Equifax business record"),
+                ],
+                "winner_rule": "factWithHighestConfidence() — applicant submission (confidence=1.0) usually wins unless manually overridden",
+                "storage": "rds_warehouse_public.facts name='business_name' + rds_cases_public.data_businesses.name",
+                "null_cause": "Empty string only if applicant did not submit a name (very rare — required field)",
+                "editable_note": "Editable by analyst. Override stored as: facts.value.override = {value, userId, timestamp}",
+                "tags": ["✏️ Editable", "📝 Applicant Submitted"],
+                "react_lines": (101, 115),
+                "verify_sql": """SELECT name, value->>'value' AS fact_value,
+       value->'source'->>'platformId' AS source_pid,
+       value->'override'->>'value' AS override_value
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>' AND name = 'business_name';""",
+            },
+            {
+                "label": "Legal Business Name",
+                "fieldKey": "legal_name",
+                "editable": False,
+                "loadingKey": "kyb",
+                "dataPath": "getFactsKybData.data.legal_name.value",
+                "factName": "legal_name",
+                "apiEndpoint": "GET /facts/business/:id/kyb",
+                "sources": [
+                    ("Middesk", "pid=16", "w=2.0", "businessEntityVerification.name — name found in SoS records via IRS TIN match"),
+                    ("OpenCorporates", "pid=23", "w=0.9", "firmographic.name from OC global registry"),
+                    ("Trulioo", "pid=38", "w=0.8", "clientData.businessName for UK/Canada"),
+                ],
+                "winner_rule": "factWithHighestConfidence() — Middesk wins (weight=2.0) for US. Read-only field.",
+                "storage": "rds_warehouse_public.facts name='legal_name'",
+                "null_cause": "Empty string when: (1) Middesk still processing, (2) Middesk could not confirm entity",
+                "editable_note": "NOT editable (editable=false in fieldConfigs.tsx L120). Read-only — shows what Middesk found.",
+                "tags": ["🔒 Read-Only", "🔍 Vendor-Discovered"],
+                "react_lines": (116, 130),
+                "verify_sql": """SELECT name, value->>'value' AS legal_name,
+       value->'source'->>'platformId' AS source_pid
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>' AND name = 'legal_name';""",
+            },
+            {
+                "label": "DBA (Doing Business As)",
+                "fieldKey": "dba",
+                "editable": True,
+                "loadingKey": "businessDetails",
+                "dataPath": "factsBusinessDetails.data.dba.value",
+                "factName": "dba / dba_found",
+                "apiEndpoint": "GET /facts/business/:id/details",
+                "sources": [
+                    ("Middesk", "pid=16", "w=2.0", "names[] where submitted=false — DBA names Middesk found in SoS"),
+                    ("ZoomInfo", "pid=24", "w=0.8", "zi_c_tradename from ZoomInfo firmographic"),
+                    ("OpenCorporates", "pid=23", "w=0.9", "alternate_names from OC registry"),
+                    ("Applicant submission", "pid=0", "w=1.0", "DBA submitted at onboarding"),
+                ],
+                "winner_rule": "combineFacts — all DBA names from all sources merged and deduplicated into array",
+                "storage": "rds_warehouse_public.facts name='dba_found' (discovered) + name='dba' (submitted)",
+                "null_cause": "Empty when business operates only under legal name. Very common — NOT an error.",
+                "editable_note": "Editable by analyst. Override stored in dba fact.",
+                "tags": ["✏️ Editable", "📝 Multi-Source Array"],
+                "react_lines": (131, 145),
+                "verify_sql": """SELECT name, value->>'value' AS dba_value
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name IN ('dba', 'dba_found', 'names_found');""",
+            },
+            {
+                "label": "Business Address",
+                "fieldKey": "primary_address",
+                "editable": True,
+                "loadingKey": "businessDetails",
+                "dataPath": "factsBusinessDetails.data.primary_address_string.value",
+                "factName": "primary_address / primary_address_string",
+                "apiEndpoint": "GET /facts/business/:id/details",
+                "sources": [
+                    ("Middesk", "pid=16", "w=2.0", "businessEntityVerification addresses + addressSources"),
+                    ("OpenCorporates", "pid=23", "w=0.9", "firmographic registered_address"),
+                    ("ZoomInfo", "pid=24", "w=0.8", "zi_c_street, zi_c_city, zi_c_state, zi_c_zip"),
+                    ("Equifax", "pid=17", "w=0.7", "efx_address1, efx_city, efx_state"),
+                    ("Applicant submission", "pid=0", "w=1.0", "address submitted at onboarding"),
+                ],
+                "winner_rule": "factWithHighestConfidence() for primary_address. combineFacts for addresses array.",
+                "storage": "rds_warehouse_public.facts name='primary_address' (object) + name='primary_address_string' (formatted string)",
+                "null_cause": "Empty if applicant did not submit address or all vendors returned no address.",
+                "editable_note": "Editable. Has showSuggestionIcon — suggests addresses from vendor data.",
+                "tags": ["✏️ Editable", "🗺️ Has Google Maps Pin", "💡 Suggestions Available"],
+                "react_lines": (146, 171),
+                "verify_sql": """SELECT name, value->>'value' AS addr,
+       value->'source'->>'platformId' AS source
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name IN ('primary_address', 'primary_address_string', 'addresses');""",
+            },
+            {
+                "label": "Mailing Address",
+                "fieldKey": "mailing_address",
+                "editable": True,
+                "loadingKey": "businessDetails",
+                "dataPath": "factsBusinessDetails.data.mailing_address_strings.value",
+                "factName": "mailing_address / mailing_address_strings",
+                "apiEndpoint": "GET /facts/business/:id/details",
+                "sources": [("Applicant submission", "pid=0", "w=1.0", "Mailing address submitted at onboarding (if different from primary)")],
+                "winner_rule": "Direct from applicant submission. Worth does not discover mailing addresses from vendors.",
+                "storage": "rds_warehouse_public.facts name='mailing_address' + name='mailing_address_strings'",
+                "null_cause": "N/A when no mailing address submitted (same as primary address or not provided).",
+                "editable_note": "Editable. separate from primary_address.",
+                "tags": ["✏️ Editable", "📝 Applicant Submitted"],
+                "react_lines": (172, 197),
+                "verify_sql": """SELECT name, value FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name IN ('mailing_address', 'mailing_address_strings');""",
+            },
+            {
+                "label": "Business Age",
+                "fieldKey": "formation_date",
+                "editable": True,
+                "loadingKey": "kyb",
+                "dataPath": "getFactsKybData.data.formation_date.value",
+                "factName": "formation_date",
+                "apiEndpoint": "GET /facts/business/:id/kyb",
+                "sources": [
+                    ("Middesk", "pid=16", "w=2.0", "businessEntityVerification.formation_date from SoS"),
+                    ("OpenCorporates", "pid=23", "w=0.9", "incorporation_date from OC registry"),
+                    ("ZoomInfo", "pid=24", "w=0.8", "zi_c_year_founded"),
+                    ("Equifax", "pid=17", "w=0.7", "efx_yrest (year established)"),
+                ],
+                "winner_rule": "factWithHighestConfidence() — Middesk wins. Display formatted as: 'MM/DD/YYYY (N years)'",
+                "storage": "rds_warehouse_public.facts name='formation_date' + name='year_established'",
+                "null_cause": "N/A when no SoS filing found AND no vendor returned formation date.",
+                "editable_note": "Editable (date input type). formatDisplayValue converts to 'MM/DD/YYYY (N years)' format.",
+                "tags": ["✏️ Editable", "📅 Date Field", "🔢 Computed Age Display"],
+                "react_lines": (198, 213),
+                "verify_sql": """SELECT name, value->>'value' AS date_value
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name IN ('formation_date', 'year_established');""",
+            },
+            {
+                "label": "Annual Revenue",
+                "fieldKey": "revenue",
+                "editable": True,
+                "loadingKey": "financials",
+                "dataPath": "getFactsFinancialsData.data.revenue.value",
+                "factName": "revenue",
+                "apiEndpoint": "GET /facts/business/:id/financials",
+                "sources": [
+                    ("ZoomInfo", "pid=24", "w=0.8", "zi_c_revenue — annual revenue from ZI firmographic"),
+                    ("Equifax", "pid=17", "w=0.7", "efx_locamount or efx_corpamount × 1000"),
+                    ("Accounting/Rutter", "pid=various", "—", "Accounting integration data (if connected)"),
+                ],
+                "winner_rule": "factWithHighestConfidence(). Tooltip: 'This value is generated using the most reputable source available.'",
+                "storage": "rds_warehouse_public.facts name='revenue' + name='revenue_all_sources'",
+                "null_cause": "N/A when no vendor has revenue data for this business.",
+                "editable_note": "Editable. formatDisplayValue: getCurrencyDisplayValue() formats as $XXX,XXX.",
+                "tags": ["✏️ Editable", "💰 Currency Format", "ℹ️ Has Tooltip"],
+                "react_lines": (214, 240),
+                "verify_sql": """SELECT name, value->>'value' AS revenue,
+       value->'source'->>'platformId' AS source_pid
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name IN ('revenue', 'revenue_all_sources', 'revenue_confidence');""",
+            },
+            {
+                "label": "Avg. Annual Revenue",
+                "fieldKey": "revenue_equally_weighted_average",
+                "editable": False,
+                "loadingKey": "financials",
+                "dataPath": "getFactsFinancialsData.data.revenue_equally_weighted_average.value",
+                "factName": "revenue_equally_weighted_average",
+                "apiEndpoint": "GET /facts/business/:id/financials",
+                "sources": [("Calculated", "calculated", "—", "Equally weighted average across all revenue sources")],
+                "winner_rule": "Calculated fact — average of all revenue values from all sources.",
+                "storage": "rds_warehouse_public.facts name='revenue_equally_weighted_average'",
+                "null_cause": "N/A when no revenue sources available.",
+                "editable_note": "Read-only (editable=false). Calculated automatically.",
+                "tags": ["🔒 Read-Only", "🔢 Calculated", "ℹ️ Has Tooltip"],
+                "react_lines": (241, 270),
+                "verify_sql": """SELECT value->>'value' AS avg_revenue
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name = 'revenue_equally_weighted_average';""",
+            },
+            {
+                "label": "Net Income",
+                "fieldKey": "net_income",
+                "editable": True,
+                "loadingKey": "financials",
+                "dataPath": "getFactsFinancialsData.data.net_income.value",
+                "factName": "net_income",
+                "apiEndpoint": "GET /facts/business/:id/financials",
+                "sources": [("Accounting/Rutter", "pid=various", "—", "From connected accounting integration. Not from ZI/EFX.")],
+                "winner_rule": "Primarily from accounting integration data (Rutter/QuickBooks).",
+                "storage": "rds_warehouse_public.facts name='net_income' + name='is_net_income'",
+                "null_cause": "N/A for most businesses — only populated when accounting integration is connected.",
+                "editable_note": "Editable. formatDisplayValue: getCurrencyDisplayValue().",
+                "tags": ["✏️ Editable", "💰 Currency Format", "🔗 Accounting Integration"],
+                "react_lines": (271, 287),
+                "verify_sql": """SELECT name, value->>'value' AS net_income
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name IN ('net_income', 'is_net_income');""",
+            },
+            {
+                "label": "Corporation Type",
+                "fieldKey": "corporation",
+                "editable": True,
+                "loadingKey": "kyb",
+                "dataPath": "getFactsKybData.data.corporation.value",
+                "factName": "corporation",
+                "apiEndpoint": "GET /facts/business/:id/kyb",
+                "sources": [
+                    ("Middesk", "pid=16", "w=2.0", "registrations[0].entity_type normalised from SoS"),
+                    ("OpenCorporates", "pid=23", "w=0.9", "company_type → llc/corporation/llp/lp"),
+                    ("Applicant submission", "pid=0", "w=1.0", "corporation_type from onboarding form"),
+                ],
+                "winner_rule": "factWithHighestConfidence(). Dropdown with options: LLC, Corporation, Partnership, Sole Proprietorship, etc.",
+                "storage": "rds_warehouse_public.facts name='corporation' + rds_cases_public.data_businesses.corporation",
+                "null_cause": "N/A when no SoS filing found and applicant did not submit corporation type.",
+                "editable_note": "Editable dropdown. CORPORATION_TYPE_OPTIONS defined in constants/fieldOptions.",
+                "tags": ["✏️ Editable", "📋 Dropdown", "🏛️ SoS Source"],
+                "react_lines": (288, 302),
+                "verify_sql": """SELECT name, value->>'value' AS corp_type
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name = 'corporation';""",
+            },
+            {
+                "label": "Number of Employees",
+                "fieldKey": "num_employees",
+                "editable": True,
+                "loadingKey": "businessDetails",
+                "dataPath": "factsBusinessDetails.data.num_employees.value",
+                "factName": "num_employees",
+                "apiEndpoint": "GET /facts/business/:id/details",
+                "sources": [
+                    ("Equifax", "pid=17", "w=0.7", "efx_corpempcnt (corporate employee count)"),
+                    ("ZoomInfo", "pid=24", "w=0.8", "zi_c_employees"),
+                    ("OpenCorporates", "pid=23", "w=0.9", "number_of_employees from OC registry"),
+                ],
+                "winner_rule": "factWithHighestConfidence(). formatDisplayValue shows 'N/A' for empty values.",
+                "storage": "rds_warehouse_public.facts name='num_employees'",
+                "null_cause": "N/A when no vendor has employee count for this business. Common for small/new businesses.",
+                "editable_note": "Editable. Shows N/A in display mode if empty.",
+                "tags": ["✏️ Editable", "🔢 Numeric"],
+                "react_lines": (303, 319),
+                "verify_sql": """SELECT name, value->>'value' AS employees,
+       value->'source'->>'platformId' AS source_pid
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name = 'num_employees';""",
+            },
+            {
+                "label": "Business Phone Number",
+                "fieldKey": "business_phone",
+                "editable": True,
+                "loadingKey": "businessDetails",
+                "dataPath": "factsBusinessDetails.data.business_phone.value",
+                "factName": "business_phone",
+                "apiEndpoint": "GET /facts/business/:id/details",
+                "sources": [
+                    ("ZoomInfo", "pid=24", "w=0.8", "zi_c_phone from ZoomInfo firmographic"),
+                    ("SERP scraping", "pid=22", "w=0.5", "phone extracted from web scraping"),
+                    ("Middesk", "pid=16", "w=2.0", "phone_numbers[0] from Middesk verification"),
+                    ("Equifax", "pid=17", "w=0.7", "contact phone from Equifax record"),
+                ],
+                "winner_rule": "factWithHighestConfidence(). Formatted display via PhoneNumber component.",
+                "storage": "rds_warehouse_public.facts name='business_phone'",
+                "null_cause": "N/A when no vendor has phone data. Common for new or small businesses.",
+                "editable_note": "Editable. Placeholder: 'e.g. (800) 123-4567 or +18001234567'",
+                "tags": ["✏️ Editable", "📞 Phone Format"],
+                "react_lines": (320, 335),
+                "verify_sql": """SELECT value->>'value' AS phone
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name = 'business_phone';""",
+            },
+            {
+                "label": "Business Email",
+                "fieldKey": "email",
+                "editable": True,
+                "loadingKey": "kyb",
+                "dataPath": "getFactsKybData.data.email.value",
+                "factName": "email",
+                "apiEndpoint": "GET /facts/business/:id/kyb",
+                "sources": [
+                    ("Equifax", "pid=17", "w=0.7", "efx_email from Equifax contact data"),
+                ],
+                "winner_rule": "factWithHighestConfidence(). Equifax is the primary vendor providing business email.",
+                "storage": "rds_warehouse_public.facts name='email'",
+                "null_cause": "N/A — business email rarely in commercial databases. Common to see N/A here.",
+                "editable_note": "Editable text field.",
+                "tags": ["✏️ Editable", "📧 Email"],
+                "react_lines": (336, 349),
+                "verify_sql": """SELECT value->>'value' AS email FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>' AND name = 'email';""",
+            },
+            {
+                "label": "Minority Business Enterprise",
+                "fieldKey": "minority_owned",
+                "editable": True,
+                "loadingKey": "kyb",
+                "dataPath": "getFactsKybData.data.minority_owned.value",
+                "factName": "minority_owned",
+                "apiEndpoint": "GET /facts/business/:id/kyb",
+                "sources": [("Equifax", "pid=17", "w=0.7", "efx_minority_business_enterprise flag from Equifax")],
+                "winner_rule": "factWithHighestConfidence(). Dropdown: Yes / No / N/A",
+                "storage": "rds_warehouse_public.facts name='minority_owned'",
+                "null_cause": "N/A when Equifax does not have this flag for the business.",
+                "editable_note": "Editable dropdown: YES_NO_NA_OPTIONS",
+                "tags": ["✏️ Editable", "📋 Dropdown (Yes/No/N/A)", "🏢 Equifax Source"],
+                "react_lines": (350, 363),
+                "verify_sql": """SELECT value->>'value' AS minority_owned FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>' AND name = 'minority_owned';""",
+            },
+            {
+                "label": "Woman-Owned Business",
+                "fieldKey": "woman_owned",
+                "editable": True,
+                "loadingKey": "kyb",
+                "dataPath": "getFactsKybData.data.woman_owned.value",
+                "factName": "woman_owned",
+                "apiEndpoint": "GET /facts/business/:id/kyb",
+                "sources": [("Equifax", "pid=17", "w=0.7", "efx_woman_owned_business flag from Equifax")],
+                "winner_rule": "factWithHighestConfidence(). Dropdown: Yes / No / N/A",
+                "storage": "rds_warehouse_public.facts name='woman_owned'",
+                "null_cause": "N/A when Equifax does not have this flag.",
+                "editable_note": "Editable dropdown: YES_NO_NA_OPTIONS",
+                "tags": ["✏️ Editable", "📋 Dropdown (Yes/No/N/A)", "🏢 Equifax Source"],
+                "react_lines": (364, 377),
+                "verify_sql": """SELECT value->>'value' AS woman_owned FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>' AND name = 'woman_owned';""",
+            },
+            {
+                "label": "Veteran-Owned Business",
+                "fieldKey": "veteran_owned",
+                "editable": True,
+                "loadingKey": "kyb",
+                "dataPath": "getFactsKybData.data.veteran_owned.value",
+                "factName": "veteran_owned",
+                "apiEndpoint": "GET /facts/business/:id/kyb",
+                "sources": [("Equifax", "pid=17", "w=0.7", "efx_veteran_owned_business flag from Equifax")],
+                "winner_rule": "factWithHighestConfidence(). Dropdown: Yes / No / N/A",
+                "storage": "rds_warehouse_public.facts name='veteran_owned'",
+                "null_cause": "N/A when Equifax does not have this flag.",
+                "editable_note": "Editable dropdown: YES_NO_NA_OPTIONS",
+                "tags": ["✏️ Editable", "📋 Dropdown (Yes/No/N/A)", "🏢 Equifax Source"],
+                "react_lines": (378, 391),
+                "verify_sql": """SELECT value->>'value' AS veteran_owned FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>' AND name = 'veteran_owned';""",
+            },
+        ]
+
+        def render_field_card(f):
+            tag_html = " ".join(f'<span class="badge b-grey">{t}</span>' for t in f["tags"])
+            edit_icon = "✏️" if f["editable"] else "🔒"
+            col_label = GREEN if f["editable"] else GREY
+            st.markdown(
+                f'<div class="card" style="border-left-color:{col_label};background:#0E1E38;margin-bottom:8px;">'
+                f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">'
+                f'<span style="font-size:1rem;font-weight:700;color:#E2E8F0;">{edit_icon} {f["label"]}</span>'
+                f'{tag_html}'
+                f'</div>'
+                f'<div style="font-size:.8rem;color:#94A3B8;margin-bottom:4px;">'
+                f'Fact: <code>{f["factName"]}</code> · API: <code>{f["apiEndpoint"]}</code>'
+                f'</div>'
+                f'<div style="font-size:.8rem;color:#475569;">'
+                f'Data path: <code>{f["dataPath"]}</code>'
+                f'</div>'
+                f'</div>', unsafe_allow_html=True)
+
+            with st.expander(f"🔍 Full lineage for '{f['label']}'"):
+                c1, c2 = st.columns([3, 2])
+                with c1:
+                    st.markdown("**Sources (in priority order):**")
+                    src_tbl = '<table class="t"><tr><th>Source</th><th>PID</th><th>Weight</th><th>Data path</th></tr>'
+                    for name, pid, w, detail in f["sources"]:
+                        wnum = float(w.replace("w=","")) if w.startswith("w=") else 0
+                        wc = "#FCD34D" if wnum >= 2 else ("#6EE7B7" if wnum >= 0.8 else "#94A3B8")
+                        src_tbl += f"<tr><td style='color:#E2E8F0'>{name}</td><td><code>{pid}</code></td><td><b style='color:{wc}'>{w}</b></td><td style='font-size:.78rem;color:#94A3B8'>{detail}</td></tr>"
+                    st.markdown(src_tbl + "</table>", unsafe_allow_html=True)
+                    st.markdown(f"**Winner rule:** {f['winner_rule']}")
+                    st.markdown(f"**Storage:** `{f['storage']}`")
+                    if f.get("editable_note"):
+                        card(f"✏️ {f['editable_note']}", "card-green")
+                    card(f"⚠️ **When blank/N/A:** {f['null_cause']}", "card-amber")
+                with c2:
+                    st.markdown("**Verify with SQL:**")
+                    st.code(f["verify_sql"], language="sql")
+                    st.markdown("**Python to load:**")
+                    st.code(f"""import psycopg2, pandas as pd, json
+conn = psycopg2.connect(
+    host='<rds_host>', dbname='<db>',
+    user='<user>', password='<pw>'
+)
+df = pd.read_sql(
+    "SELECT name, value FROM rds_warehouse_public.facts "
+    "WHERE business_id = %s AND name = %s",
+    conn, params=['<business_id>', '{f["factName"].split("/")[0].strip()}']
+)
+# Parse JSONB value
+df['fact_value'] = df['value'].apply(lambda x: x.get('value') if isinstance(x, dict) else json.loads(x).get('value'))
+print(df[['name','fact_value']])""", language="python")
+                st.markdown(src_ref("ADMIN_PORTAL",
+                    "microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",
+                    f["react_lines"][0], f["react_lines"][1], f"fieldConfig for '{f['label']}'"),
+                    unsafe_allow_html=True)
+
+        st.markdown(f"### Business Details Card — {len(BDET_FIELDS)} fields")
+        for f in BDET_FIELDS:
+            render_field_card(f)
+
+    elif kyb_subtab == "📋 Background — Industry Card":
+        sh("📋 Background Sub-Tab — Industry Card")
+        card("""<b>API call:</b> <code>GET /facts/business/:id/details</code> → <code>factsBusinessDetails</code><br>
+        All 5 Industry card fields read from <code>factsBusinessDetails.data.*</code>.
+        Source: <code>fieldConfigs.tsx L392-L469</code> — all 5 field definitions.
+        Industry Name and NAICS Code are editable; Description fields are read-only.
+        """)
+        INDUSTRY_FIELDS = [
+            {
+                "label": "Industry Name",
+                "fieldKey": "industry",
+                "editable": True,
+                "dataPath": "factsBusinessDetails.data.industry.value.name",
+                "factName": "industry",
+                "sources": [
+                    ("Derived from NAICS", "calculated", "—", "2-digit NAICS sector prefix → core_business_industries lookup"),
+                    ("ZoomInfo", "pid=24", "w=0.8", "zi_c_industry field (if available)"),
+                    ("Applicant submission", "pid=0", "w=0.2", "industry name submitted at onboarding"),
+                ],
+                "winner_rule": "Dependent fact — reads resolved naics_code and maps 2-digit prefix to core_business_industries.name",
+                "storage": "rds_warehouse_public.facts name='industry' {name, id} + rds_cases_public.data_businesses.industry → core_business_industries.id",
+                "null_cause": "'-' when naics_code is null OR 2-digit NAICS prefix has no match in core_business_industries",
+                "editable_note": "Editable text field with suggestionKey='industry'",
+                "tags": ["✏️ Editable", "🔢 NAICS-Derived"],
+                "react_lines": (393, 407),
+                "verify_sql": """SELECT f.name, f.value->>'value' AS industry_value,
+       cbi.name AS industry_name
+FROM rds_warehouse_public.facts f
+LEFT JOIN rds_cases_public.data_businesses db ON db.id = f.business_id::uuid
+LEFT JOIN core_business_industries cbi ON cbi.id = db.industry
+WHERE f.business_id = '<business_id>' AND f.name = 'industry';""",
+            },
+            {
+                "label": "NAICS Code",
+                "fieldKey": "naics_code",
+                "editable": True,
+                "dataPath": "factsBusinessDetails.data.naics_code.value",
+                "factName": "naics_code",
+                "sources": [
+                    ("OpenCorporates", "pid=23", "w=0.9", "industry_code_uids parsed for us_naics-XXXXXX"),
+                    ("ZoomInfo", "pid=24", "w=0.8", "zi_c_naics6 from comp_standard_global"),
+                    ("Trulioo", "pid=38", "w=0.7", "standardizedIndustries[n].naicsCode"),
+                    ("Equifax", "pid=17", "w=0.7", "efx.primnaicscode from equifax_us_latest"),
+                    ("SERP", "pid=22", "w=0.3", "businessLegitimacyClassification.naics_code"),
+                    ("Applicant", "pid=0", "w=0.2", "naics_code submitted at onboarding"),
+                    ("AI Enrichment", "pid=31", "w=0.1", "GPT-5-mini response.naics_code (last resort=561499)"),
+                ],
+                "winner_rule": "factWithHighestConfidence() → weightedFactSelector() tie-break → manualOverride() first. Rule 4: NO minimum confidence cutoff.",
+                "storage": "rds_warehouse_public.facts name='naics_code' + rds_cases_public.data_businesses.naics_id → core_naics_code.id",
+                "null_cause": "Shows '-' only if ALL vendors null AND AI returned null. AI returns '561499' not null when no evidence.",
+                "editable_note": "Editable. schema: /^\\d{6}$/ — must be 6 digits. Override stores analyst correction.",
+                "tags": ["✏️ Editable", "🔢 6-Digit Code", "7 Sources"],
+                "react_lines": (408, 422),
+                "verify_sql": """-- Check NAICS from facts table (Pipeline A):
+SELECT value->>'value' AS naics_code,
+       value->'source'->>'platformId' AS winning_pid,
+       value->'source'->>'confidence' AS confidence,
+       jsonb_array_length(value->'alternatives') AS num_alternatives
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>' AND name = 'naics_code';
+
+-- Check all alternatives (every vendor's response):
+SELECT alt->>'platformId' as pid, alt->>'value' as naics
+FROM rds_warehouse_public.facts,
+     jsonb_array_elements(value->'alternatives') as alt
+WHERE business_id = '<business_id>' AND name = 'naics_code';
+
+-- Check Pipeline B (batch):
+SELECT primary_naics_code, zi_c_naics6, efx_primnaicscode,
+       zi_match_confidence, efx_match_confidence
+FROM datascience.customer_files
+WHERE business_id = '<business_id>';""",
+            },
+            {
+                "label": "NAICS Description",
+                "fieldKey": "naics_description",
+                "editable": False,
+                "dataPath": "factsBusinessDetails.data.naics_description.value",
+                "factName": "naics_description",
+                "sources": [("core_naics_code lookup", "calculated", "—", "label from core_naics_code WHERE code = naics_code.value")],
+                "winner_rule": "Read-only. Computed from winning naics_code → core_naics_code.label lookup.",
+                "storage": "rds_warehouse_public.facts name='naics_description' + core_naics_code.label",
+                "null_cause": "N/A when naics_code is null or not in core_naics_code table.",
+                "editable_note": "NOT editable (editable=false). Auto-derived from naics_code.",
+                "tags": ["🔒 Read-Only", "🔢 Auto-Derived"],
+                "react_lines": (423, 438),
+                "verify_sql": """SELECT f.value->>'value' AS naics_desc,
+       cnc.label AS db_label
+FROM rds_warehouse_public.facts f
+JOIN rds_cases_public.data_businesses db ON db.id = f.business_id::uuid
+JOIN core_naics_code cnc ON cnc.id = db.naics_id
+WHERE f.business_id = '<business_id>' AND f.name = 'naics_description';""",
+            },
+            {
+                "label": "MCC Code",
+                "fieldKey": "mcc_code",
+                "editable": True,
+                "dataPath": "factsBusinessDetails.data.mcc_code.value",
+                "factName": "mcc_code / mcc_code_found / mcc_code_from_naics",
+                "sources": [
+                    ("AI Enrichment (mcc_code_found)", "pid=31", "—", "response.mcc_code from GPT-5-mini (preferred)"),
+                    ("Calculated from NAICS", "calculated", "—", "rel_naics_mcc lookup: naics_id → mcc_id"),
+                ],
+                "winner_rule": "mcc_code = mcc_code_found?.value ?? mcc_code_from_naics?.value. AI-provided preferred over calculated.",
+                "storage": "rds_warehouse_public.facts name='mcc_code' + name='mcc_code_found' + name='mcc_code_from_naics' + rds_cases_public.data_businesses.mcc_id → core_mcc_code",
+                "null_cause": "Almost never null — if NAICS exists, rel_naics_mcc calculates MCC. 5614='Fallback' when AI had no evidence.",
+                "editable_note": "Editable. suggestionKey='mcc_code'. Override allows analyst correction.",
+                "tags": ["✏️ Editable", "🔢 4-Digit Code", "🤖 AI + Calculated"],
+                "react_lines": (440, 454),
+                "verify_sql": """SELECT name, value->>'value' AS mcc_value
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name IN ('mcc_code', 'mcc_code_found', 'mcc_code_from_naics', 'mcc_description');""",
+            },
+            {
+                "label": "MCC Description",
+                "fieldKey": "mcc_description",
+                "editable": False,
+                "dataPath": "factsBusinessDetails.data.mcc_description.value",
+                "factName": "mcc_description",
+                "sources": [
+                    ("AI Enrichment", "pid=31", "—", "AI prompt produces mcc_description text"),
+                    ("core_mcc_code lookup", "calculated", "—", "label from core_mcc_code WHERE code = mcc_code"),
+                ],
+                "winner_rule": "Read-only. Either AI-provided text OR core_mcc_code.label lookup.",
+                "storage": "rds_warehouse_public.facts name='mcc_description' + core_mcc_code.label",
+                "null_cause": "Shows 'Fallback MCC per instructions...' when AI had no evidence — KNOWN BUG (Gap G5). Should show 'Classification pending...' instead.",
+                "editable_note": "NOT editable (editable=false L461). This is why 'Fallback MCC per instructions...' cannot be manually corrected by analyst.",
+                "tags": ["🔒 Read-Only", "⚠️ Known Bug: Fallback Text Exposed"],
+                "react_lines": (455, 469),
+                "verify_sql": """SELECT value->>'value' AS mcc_desc FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>' AND name = 'mcc_description';
+-- If this shows 'Fallback MCC per instructions...' the AI had no vendor evidence""",
+            },
+        ]
+        st.markdown(f"### Industry Card — {len(INDUSTRY_FIELDS)} fields")
+        for f in INDUSTRY_FIELDS:
+            render_field_card(f)
+
+    elif kyb_subtab == "🏛️ Business Registration — All Cards":
+        sh("🏛️ Business Registration — Business Registration Card + SoS Filings Card")
+        card("""<b>API call:</b> <code>GET /facts/business/:id/kyb</code> → <code>kybFactsData</code><br>
+        Component: <code>KnowYourBusiness/index.tsx</code> L128-L403<br>
+        Two distinct cards: (1) Business Registration (TIN section) and (2) Secretary of State Filings
+        """)
+        thtml = '<table class="t"><tr><th>Card</th><th>Field</th><th>Fact Name</th><th>Source</th><th>Editable?</th><th>Blank/N/A when</th></tr>'
+        biz_reg_rows = [
+            ("Business Registration", "Business Name (header)", "legal_name.value", "Middesk BEV.name (pid=16, w=2.0)", "🔒 No", "Middesk not yet complete"),
+            ("Business Registration", "Tax ID (EIN)", "tin.value (masked)", "Applicant submitted (masked)", "🔒 No", "Applicant did not submit TIN"),
+            ("Business Registration", "✅/❌ Verified badge", "tin_match.value.status", "Middesk IRS TIN Match reviewTasks[key='tin']", "🔒 Auto", "Processing or IRS no match"),
+            ("SoS Filings", "Filing Status", "sos_filings[n].active", "Middesk registrations[n].status === 'active'", "🔒 No", "No SoS filing found → 'No Registry Data'"),
+            ("SoS Filings", "Entity Jurisdiction Type", "sos_filings[n].foreign_domestic", "Middesk jurisdiction field → domestic/foreign", "🔒 No", "No filing or jurisdiction field missing"),
+            ("SoS Filings", "State", "sos_filings[n].state", "Middesk registration_state (2-letter)", "🔒 No", "N/A if state absent from SoS record"),
+            ("SoS Filings", "Registration Date", "sos_filings[n].filing_date", "Middesk registrations[n].registration_date", "🔒 No", "N/A if date absent from SoS record"),
+            ("SoS Filings", "Entity Type", "sos_filings[n].entity_type", "Middesk entity_type (normalised: llc/corp/llp)", "🔒 No", "N/A if state doesn't disclose entity type"),
+            ("SoS Filings", "Corporate Officers", "people.value[] filtered by sos.id", "Middesk officers per filing, matched by sos.id", "🔒 No", "N/A if state doesn't require officer disclosure"),
+            ("SoS Filings", "Legal Entity Name", "sos_filings[n].filing_name", "Middesk registrations[n].name (SoS filing name)", "🔒 No", "N/A if filing has no name field"),
+            ("SoS Filings", "Articles of Incorporation", "sos_filings[n].url", "Middesk source URL (only if isDirectBusinessLink=true)", "🔒 No", "N/A if URL not a direct business link"),
+            ("SoS Filings badge", "✅ Verified badge", "sos_match_boolean=true AND sos_active=true", "SectionHeader.tsx getSosBadgeConfig()", "🔒 Auto", "No active filing found"),
+        ]
+        for card_name, field, fact, source, editable, blank in biz_reg_rows:
+            thtml += f"<tr><td style='color:#60A5FA;font-weight:600'>{card_name}</td><td style='color:#E2E8F0'>{field}</td><td><code>{fact}</code></td><td style='color:#94A3B8;font-size:.78rem'>{source}</td><td>{editable}</td><td style='color:#475569;font-size:.78rem'>{blank}</td></tr>"
+        st.markdown(thtml + "</table>", unsafe_allow_html=True)
+        st.markdown(src_ref("ADMIN_PORTAL",
+            "customer-admin-webapp-main/src/pages/Cases/KnowYourBusiness/index.tsx",
+            128, 403, "Business Registration + SoS Filings rendering"),
+            unsafe_allow_html=True)
+        st.code("""-- Verify TIN match result:
+SELECT name, value->>'value' AS status, value->>'message' AS message
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name IN ('tin_match', 'tin_match_boolean', 'tin_submitted');
+
+-- Verify SoS filings:
+SELECT name, jsonb_array_length(value->'value') AS filing_count,
+       value->'value'->0->>'state' AS first_state,
+       value->'value'->0->>'active' AS first_active
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name IN ('sos_filings', 'sos_active', 'sos_match_boolean');""", language="sql")
+
+    elif kyb_subtab == "📬 Contact Information — All Cards":
+        sh("📬 Contact Information Sub-Tab — Addresses + Business Names Cards")
+        card("API: <code>GET /facts/business/:id/kyb</code> → <code>kybFactsData</code> (same as Business Registration). "
+             "Component: <code>KnowYourBusiness/index.tsx</code> L406-L546.")
+        thtml = '<table class="t"><tr><th>Card</th><th>Field</th><th>Fact Name</th><th>Source</th><th>Blank when</th></tr>'
+        contact_rows = [
+            ("Addresses", "Submitted Address", "business_addresses_submitted.value[]", "Applicant onboarding form", "Applicant did not submit"),
+            ("Addresses", "Reported Address + Deliverable badge", "addresses.value[] + addresses_deliverable.value[]", "Middesk→OC→ZI combined via combineFacts. USPS deliverability check.", "No vendors found addresses"),
+            ("Addresses", "Business Registration badge", "address_match_boolean OR address_verification_boolean", "Middesk address verification task", "Not yet complete or not verified"),
+            ("Addresses", "Google Profile badge", "address_verification.value.sublabel (Google)", "SERP+Google Places API comparison", "No Google Business Profile found"),
+            ("Business Names", "Submitted Name", "names_submitted.value[]", "Applicant onboarding form", "Applicant did not submit"),
+            ("Business Names", "Reported Name", "names_found.value[]", "Middesk BEV→OC→ZI→SERP combined via combineFacts", "No vendor found business names"),
+            ("Business Names", "✅ Verified badge", "name_match_boolean.value", "Middesk name match task (submitted name found in SoS)", "Name not in SoS records"),
+        ]
+        for card_name, field, fact, source, blank in contact_rows:
+            thtml += f"<tr><td style='color:#2DD4BF;font-weight:600'>{card_name}</td><td style='color:#E2E8F0'>{field}</td><td><code>{fact}</code></td><td style='color:#94A3B8;font-size:.78rem'>{source}</td><td style='color:#475569;font-size:.78rem'>{blank}</td></tr>"
+        st.markdown(thtml + "</table>", unsafe_allow_html=True)
+        st.code("""SELECT name, jsonb_array_length(CASE WHEN jsonb_typeof(value->'value') = 'array' THEN value->'value' ELSE '[]' END) AS array_len,
+       value->>'value' AS val
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name IN ('addresses', 'addresses_deliverable', 'addresses_found',
+             'address_match_boolean', 'address_verification_boolean',
+             'names_submitted', 'names_found', 'name_match_boolean');""", language="sql")
+
+    elif kyb_subtab == "🌐 Website — All Cards":
+        sh("🌐 Website Sub-Tab — Website Details Card")
+        card("API: <code>GET /verification/businesses/:id/website-data</code> → <code>useGetBusinessWebsite</code> + "
+             "<code>GET /facts/business/:id/details</code>. Component: <code>WebsiteTab.tsx</code>.")
+        thtml = '<table class="t"><tr><th>Field</th><th>Fact Name</th><th>Source</th><th>Shows N/A when</th></tr>'
+        web_rows = [
+            ("Website URL", "website.value", "ZI.zi_c_url→businessDetails.official_website→SERP→Verdata→EFX.efx_web", "No website found by any source"),
+            ("Creation Date", "website.domain.creation_date", "SERP WHOIS lookup OR Verdata domain check", "No website found OR WHOIS privacy protection"),
+            ("Expiration Date", "website.domain.expiration_date", "SERP WHOIS OR Verdata", "No website OR WHOIS privacy"),
+            ("Parked Domain", "website.domain.parked", "SERP scraping analysis", "No = not parked or unknown"),
+            ("Status", "website.status OR website_found.value", "SERP + Verdata website status", "'Unknown' = verification not complete"),
+        ]
+        for field, fact, source, blank in web_rows:
+            thtml += f"<tr><td style='color:#E2E8F0;font-weight:600'>{field}</td><td><code>{fact}</code></td><td style='color:#94A3B8;font-size:.78rem'>{source}</td><td style='color:#475569;font-size:.78rem'>{blank}</td></tr>"
+        st.markdown(thtml + "</table>", unsafe_allow_html=True)
+        st.code("""SELECT name, value->>'value' AS website_value
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name IN ('website', 'website_found', 'website_status');""", language="sql")
+
+    elif kyb_subtab == "🔍 Watchlists — All Cards":
+        sh("🔍 Watchlists Sub-Tab — Watchlists Scanned + Individual Hits")
+        card("API: <code>GET /facts/business/:id/kyb</code> (watchlist fact) + "
+             "<code>GET /verification/businesses/:id/people/watchlist</code> (per-person hits).")
+        thtml = '<table class="t"><tr><th>Card/Section</th><th>Field</th><th>Source</th><th>No Hits when</th></tr>'
+        watch_rows = [
+            ("Watchlists Scanned", "Badge: No Hits / N Hits Found", "watchlist.value.metadata.length from combineWatchlistMetadata()", "metadata array is empty after deduplication"),
+            ("OFAC section", "SDN, Capta, Foreign Sanctions, Non-SDN (Iranian/Chinese/Palestinian), Sectoral", "Middesk reviewTasks[type='watchlist'] + Trulioo business screening", "No match on these lists"),
+            ("BIS section", "Entity List, Denied Persons, Military End User, Unverified List", "Middesk + Trulioo", "No match on BIS lists"),
+            ("State Dept section", "ITAR Debarred, Nonproliferation Sanctions", "Middesk + Trulioo", "No match on State Dept lists"),
+            ("Individual Hits (per person)", "Hits for [Business Name], [Officer Name]", "GET /verification/businesses/:id/people/watchlist → per-entity screening", "Person screened and clean"),
+        ]
+        for card_name, field, source, blank in watch_rows:
+            thtml += f"<tr><td style='color:#F87171;font-weight:600'>{card_name}</td><td style='color:#E2E8F0'>{field}</td><td style='color:#94A3B8;font-size:.78rem'>{source}</td><td style='color:#475569;font-size:.78rem'>{blank}</td></tr>"
+        st.markdown(thtml + "</table>", unsafe_allow_html=True)
+        card("⚠️ <b>Adverse media is NOT shown in Watchlists tab.</b> "
+             "combineWatchlistMetadata filters: filteredMetadata = allMetadata.filter(hit => hit.type !== WATCHLIST_HIT_TYPE.ADVERSE_MEDIA). "
+             "Adverse media appears in Public Records tab instead.", "card-amber")
+        st.code("""-- Watchlist fact:
+SELECT name, jsonb_array_length(value->'value'->'metadata') AS hit_count,
+       value->'value'->>'message' AS message
+FROM rds_warehouse_public.facts
+WHERE business_id = '<business_id>'
+AND name IN ('watchlist', 'watchlist_hits', 'watchlist_raw');
+
+-- Individual hit details:
+SELECT (hit->>'type') AS hit_type,
+       (hit->'metadata'->>'title') AS list_name,
+       (hit->>'entity_name') AS entity_name,
+       (hit->>'url') AS source_url
+FROM rds_warehouse_public.facts,
+     jsonb_array_elements(value->'value'->'metadata') AS hit
+WHERE business_id = '<business_id>' AND name = 'watchlist_raw';""", language="sql")
+
 elif section == "🏷️  Field Lineage Explorer":
     sh("🏷️  Field Lineage Explorer — Full Data Lineage per Admin Portal Field")
 
@@ -2017,18 +2732,34 @@ elif section == "🤖  AI Agent":
                         st.code(src["text"][:600] + ("…" if len(src["text"]) > 600 else ""),
                                 language="typescript" if src["path"].endswith(".tsx") or src["path"].endswith(".ts") else None)
 
-    # File / image upload
-    st.markdown("#### Upload a file or screenshot to discuss:")
-    uploaded = st.file_uploader("Upload screenshot, PDF, or Excel (optional)",
-                                 type=["png","jpg","jpeg","webp","pdf","xlsx"],
-                                 key="agent_upload")
+    # ── Image paste / upload ──────────────────────────────────────────
+    st.markdown("#### 📎 Attach a screenshot or file:")
+    st.markdown(
+        '<div class="card card-teal" style="font-size:.82rem;padding:8px 14px;">'
+        '💡 <b>To paste a screenshot:</b> Take a screenshot (Cmd+Shift+4 on Mac / Win+Shift+S on Windows), '
+        'then click "Browse files" and select the saved file — or drag & drop it into the uploader below. '
+        'The AI agent will read the image and identify every field and badge shown, '
+        'then trace its lineage to the source code.'
+        '</div>', unsafe_allow_html=True)
+
+    uploaded = st.file_uploader(
+        "Upload screenshot, PDF, or Excel (optional)",
+        type=["png","jpg","jpeg","webp","pdf","xlsx"],
+        key="agent_upload",
+        help="Upload a screenshot of the admin portal — the AI will identify every field and badge and explain where it comes from."
+    )
+
+    # Show uploaded image preview
+    if uploaded and uploaded.type.startswith("image/"):
+        st.image(uploaded, caption=f"📸 Uploaded: {uploaded.name}", use_column_width=True)
+        uploaded.seek(0)  # Reset after preview
 
     col_input, col_voice = st.columns([5, 1])
     with col_input:
-        user_q = st.chat_input("Ask about any field, badge, rule, or lineage in the KYB portal...")
+        user_q = st.chat_input("Ask about any field, badge, rule, or lineage — or paste a screenshot above and ask about it...")
     with col_voice:
         st.markdown("<br>", unsafe_allow_html=True)
-        use_voice = st.checkbox("🎙️", help="Voice input (experimental — type your transcription)")
+        use_voice = st.checkbox("🎙️", help="Voice: type your question after speaking it aloud")
 
     pending = st.session_state.pop("pending_q", None)
     if pending:
@@ -2066,12 +2797,15 @@ elif section == "🤖  AI Agent":
             ]
 
             system_prompt = """You are a precise technical assistant for the Worth AI platform admin portal KYB tab.
+
 You answer questions about:
 - Every field in the KYB tab (Background, Business Registration, Contact Information, Website, Watchlists sub-tabs)
-- What badge/status states mean and what code produces them
+- The exact card structure: Business Details card, Industry card, Secretary of State Filings card, etc.
+- What badge/status states mean and what code produces them (Verified, Unverified, No Registry Data, etc.)
 - NAICS/MCC codes, 561499 fallback, MCC description issues
 - The Fact Engine rules and vendor sources
 - Data lineage from vendor API → facts table → admin portal
+- Who provided each value, which source, where it is stored, how to verify it
 
 RULES:
 1. ALWAYS cite [FILE: path L123-L145] for every claim. Use exact line numbers from the chunks.
@@ -2080,7 +2814,51 @@ RULES:
 4. Use the integration-service chunks for 'what produces this' questions.
 5. Do NOT hallucinate. Only answer from provided chunks.
 6. End with: "✅ Click the source code chunks below to verify these claims."
-7. For image uploads: describe what you see in the screenshot and identify which field/badge it shows."""
+
+7. FOR SCREENSHOT/IMAGE UPLOADS: Identify every visible field, badge, and card in the screenshot.
+   For each element, explain: what fact/API field produces it, which vendor source provides the value,
+   what the badge state means, and what causes blank/N/A values.
+   Reference the fieldConfigs.tsx file which defines every Background tab field.
+
+8. ALWAYS PROVIDE VERIFICATION CODE when the user asks about data:
+   a) If data lives in REDSHIFT (datascience.customer_files, zoominfo/equifax tables):
+      Provide a SQL query like:
+      ```sql
+      SELECT primary_naics_code, zi_c_naics6, efx_primnaicscode, worth_score
+      FROM datascience.customer_files
+      WHERE business_id = '<business_id>'
+      LIMIT 1;
+      ```
+   b) If data lives in POSTGRESQL (rds_warehouse_public.facts, rds_cases_public.data_businesses):
+      Provide a SQL query like:
+      ```sql
+      SELECT name, value->>'value' as fact_value, value->'source'->>'platformId' as source_pid
+      FROM rds_warehouse_public.facts
+      WHERE business_id = '<business_id>'
+      AND name IN ('naics_code', 'mcc_code', 'tin_match_boolean', 'sos_filings')
+      ORDER BY name;
+      ```
+   c) If the user wants Python code to load and inspect:
+      Provide psycopg2/pandas code like:
+      ```python
+      import psycopg2, pandas as pd
+      conn = psycopg2.connect(host='<host>', dbname='<db>', user='<user>', password='<pw>')
+      df = pd.read_sql(
+          "SELECT name, value FROM rds_warehouse_public.facts WHERE business_id = %s",
+          conn, params=['<business_id>']
+      )
+      print(df)
+      ```
+   Always clarify which database (Redshift vs PostgreSQL) and which schema/table.
+
+9. FOR FIELD LINEAGE QUESTIONS, structure your answer as:
+   📍 WHERE in admin portal → exact card + sub-tab
+   📡 WHICH API call → exact endpoint
+   🔧 WHICH fact → exact fact name in rds_warehouse_public.facts
+   📦 WHICH source → vendor with platform_id and weight
+   🗄️ WHERE stored → exact schema.table
+   ✅ HOW TO VERIFY → SQL query to confirm the value
+   📝 WHY BLANK/N/A → exact condition from React code"""
 
             user_message: list = [{"type": "text", "text": f"Question: {full_query}\n\nCode chunks:\n{context}"}]
             if image_content:
