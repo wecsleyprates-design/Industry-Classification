@@ -271,121 +271,94 @@ def render_field(f):
                 '</div>', unsafe_allow_html=True)
 
             if f.get("sql"):
-                st.markdown("**🔍 SQL — copy and run directly:**")
-                # Replace placeholder <id> with a realistic example UUID comment
-                sql_clean = f["sql"].replace(
-                    "'<id>'", "'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'  -- replace with real business UUID"
-                ).replace(
-                    "'<business_id>'", "'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'  -- replace with real business UUID"
+                st.markdown("**🔍 SQL — copy and run directly (PostgreSQL/Redshift):**")
+                sql_display = (f["sql"]
+                    .replace("'<id>'", "'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'")
+                    .replace("'<business_id>'", "'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'")
                 )
-                st.code(sql_clean, language="sql")
+                st.code(sql_display, language="sql")
+                st.caption("Replace 'xxxxxxxx-...' with your actual business UUID. "
+                           "Find it in the admin portal URL or via GET /cases/:id response → business.id")
 
             # ── Python snippet — fully runnable ──────────────────────────
             fact_name_raw = f["fact"].split("/")[0].strip().split(" ")[0].replace("[]","")
-            # Pick clean fact name for query
-            fact_name_clean = fact_name_raw.split("+")[0].strip().rstrip(".")
-            is_redshift = "customer_files" in f.get("sql", "") or "datascience" in f.get("sql", "")
+            fact_name_clean = fact_name_raw.split("+")[0].strip().rstrip(".").split("(")[0]
+            is_redshift = "customer_files" in f.get("sql", "") or "datascience." in f.get("sql", "")
             db_note = "Redshift" if is_redshift else "PostgreSQL (RDS)"
 
-            st.markdown(f"**🐍 Python — {db_note}:**")
+            st.markdown(f"**🐍 Python — {db_note} (fully runnable):**")
+
+            # Build the SQL for Python using confirmed column names, no triple-quote nesting
+            sql_for_python = (f.get("sql", "")
+                .replace("'<id>'", "%(bid)s")
+                .replace("'<business_id>'", "%(bid)s")
+                .replace("\n", " ")
+                .strip()
+            )
+            if not sql_for_python or sql_for_python.startswith("--"):
+                sql_for_python = (
+                    "SELECT name, value->>'value' AS val, "
+                    "value->'source'->>'platformId' AS winning_pid, "
+                    "value->'source'->>'confidence' AS confidence "
+                    "FROM rds_warehouse_public.facts "
+                    "WHERE business_id = %(bid)s AND name = %(fact)s"
+                )
+
             if is_redshift:
-                st.code(f"""import psycopg2
-import pandas as pd
-
-# Redshift connection — replace with your actual credentials
-conn = psycopg2.connect(
-    host='your-cluster.redshift.amazonaws.com',
-    port=5439,
-    dbname='dev',          # your Redshift database name
-    user='your_username',
-    password='your_password'
-)
-
-BUSINESS_ID = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'  # replace
-
-df = pd.read_sql(\"\"\"
-    SELECT
-        business_id,
-        primary_naics_code,
-        mcc_code,
-        zi_match_confidence,
-        efx_match_confidence,
-        match_confidence,
-        employee_count,
-        worth_score
-    FROM datascience.customer_files
-    WHERE business_id = %(business_id)s
-    LIMIT 1
-\"\"\", conn, params={{'business_id': BUSINESS_ID}})
-
-print(df.to_string())
-conn.close()""", language="python")
+                st.code(
+                    "import psycopg2\n"
+                    "import pandas as pd\n\n"
+                    "# Redshift — replace with your credentials\n"
+                    "conn = psycopg2.connect(\n"
+                    "    host='your-cluster.redshift.amazonaws.com',\n"
+                    "    port=5439, dbname='dev',\n"
+                    "    user='your_username', password='your_password',\n"
+                    "    sslmode='require'\n"
+                    ")\n\n"
+                    "BUSINESS_ID = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'  # replace\n\n"
+                    "df = pd.read_sql(\n"
+                    f"    \"{sql_for_python}\",\n"
+                    "    conn, params={'bid': BUSINESS_ID}\n"
+                    ")\n"
+                    "print(df.to_string())\n"
+                    "conn.close()",
+                    language="python"
+                )
             else:
-                st.code(f"""import psycopg2
-import pandas as pd
-import json
+                st.code(
+                    "import psycopg2\n"
+                    "import pandas as pd\n"
+                    "import json\n\n"
+                    "# PostgreSQL (RDS) — replace with your credentials\n"
+                    "conn = psycopg2.connect(\n"
+                    "    host='your-rds-endpoint.rds.amazonaws.com',\n"
+                    "    port=5432, dbname='postgres',\n"
+                    "    user='your_username', password='your_password',\n"
+                    "    sslmode='require'\n"
+                    ")\n\n"
+                    "BUSINESS_ID = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'  # replace\n"
+                    f"FACT_NAME   = '{fact_name_clean}'\n\n"
+                    "df = pd.read_sql(\n"
+                    f"    \"{sql_for_python}\",\n"
+                    "    conn,\n"
+                    "    params={'bid': BUSINESS_ID, 'fact': FACT_NAME}\n"
+                    ")\n\n"
+                    "# Parse JSONB value column if present\n"
+                    "if 'value' in df.columns:\n"
+                    "    def parse(v):\n"
+                    "        if isinstance(v, str): v = json.loads(v)\n"
+                    "        if isinstance(v, dict):\n"
+                    "            return {'val': v.get('value'), 'pid': v.get('source',{}).get('platformId'),\n"
+                    "                    'conf': v.get('source',{}).get('confidence'), 'override': v.get('override')}\n"
+                    "        return {'val': v}\n"
+                    "    df2 = df['value'].apply(parse).apply(pd.Series)\n"
+                    "    print(pd.concat([df[['name']], df2], axis=1).to_string())\n"
+                    "else:\n"
+                    "    print(df.to_string())\n"
+                    "conn.close()",
+                    language="python"
+                )
 
-# PostgreSQL (RDS) connection — replace with your actual credentials
-conn = psycopg2.connect(
-    host='your-rds-endpoint.rds.amazonaws.com',
-    port=5432,
-    dbname='postgres',     # your database name
-    user='your_username',
-    password='your_password'
-)
-
-BUSINESS_ID = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'  # replace
-FACT_NAME   = '{fact_name_clean}'
-
-# ── Fetch the winning fact ────────────────────────────────────────
-with conn.cursor() as cur:
-    cur.execute(\"\"\"
-        SELECT
-            name,
-            value->>'value'                        AS fact_value,
-            value->'source'->>'platformId'         AS winning_platform_id,
-            value->'source'->>'confidence'         AS winning_confidence,
-            value->'source'->>'updatedAt'          AS last_updated,
-            value->'override'->>'value'            AS analyst_override,
-            value->'override'->>'userId'           AS override_by_user,
-            jsonb_array_length(
-                COALESCE(value->'alternatives', '[]'::jsonb)
-            )                                      AS num_alternatives,
-            received_at
-        FROM rds_warehouse_public.facts
-        WHERE business_id = %(bid)s
-          AND name        = %(name)s
-    \"\"\", {{'bid': BUSINESS_ID, 'name': FACT_NAME}})
-
-    row = cur.fetchone()
-    if row:
-        cols = [d[0] for d in cur.description]
-        result = dict(zip(cols, row))
-        for k, v in result.items():
-            print(f"{{k:30s}}: {{v}}")
-
-# ── See ALL vendor alternatives before winner was chosen ──────────
-with conn.cursor() as cur:
-    cur.execute(\"\"\"
-        SELECT
-            alt->>'platformId'   AS vendor_pid,
-            alt->>'value'        AS vendor_value,
-            alt->>'confidence'   AS vendor_confidence
-        FROM rds_warehouse_public.facts,
-             jsonb_array_elements(
-                 COALESCE(value->'alternatives', '[]'::jsonb)
-             ) AS alt
-        WHERE business_id = %(bid)s
-          AND name        = %(name)s
-        ORDER BY (alt->>'confidence')::float DESC NULLS LAST
-    \"\"\", {{'bid': BUSINESS_ID, 'name': FACT_NAME}})
-
-    print("\\n-- All vendor responses (sorted by confidence) --")
-    for r in cur.fetchall():
-        pid, val, conf = r
-        print(f"  PID {{pid:>4}}  confidence={{conf or 'N/A':>6}}  value={{val}}")
-
-conn.close()""", language="python")
 
             if f.get("gpn_q"):
                 st.markdown("**❓ UCM Working Session Question:**")
@@ -1375,11 +1348,15 @@ rs = psycopg2.connect(
              "oc_match_select.sql"),
         ]
         for tname, purpose, cols, source in rs_tables:
-            with st.expander(f"**{tname}** — {purpose}"):
-                st.markdown(f"**Source confirmed:** `{source}`")
-                st.markdown("**Columns:**")
-                for c in cols:
-                    st.markdown(f"- `{c}`")
+            st.markdown(
+                f'<div class="card" style="background:#0E1E38;border-left-color:#60A5FA;margin-bottom:8px;">'
+                f'<div style="color:#60A5FA;font-weight:700;font-family:Courier New;">{tname}</div>'
+                f'<div style="color:#94A3B8;font-size:.8rem;margin-bottom:4px;">{purpose} · Source: <code>{source}</code></div>'
+                f'<div style="color:#CBD5E1;font-size:.78rem;">' +
+                " · ".join(f"<code>{c}</code>" for c in cols) +
+                "</div></div>",
+                unsafe_allow_html=True
+            )
 
         st.markdown("---")
         st.markdown("### ✅ Complete ready-to-run queries (using confirmed column names)")
