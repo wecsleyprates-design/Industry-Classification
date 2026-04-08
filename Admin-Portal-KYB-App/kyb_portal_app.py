@@ -165,6 +165,258 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════════════════
 # SHARED: field card renderer
 # ════════════════════════════════════════════════════════════════════════════
+# ── Shared badge library — full details for every badge used in the app ───────
+BADGE_LIBRARY = {
+    # TIN / Business Registration
+    "tin_verified": (
+        "✅ Verified", "badge-verified",
+        "IRS confirmed the submitted EIN and legal business name are a valid registered match.",
+        "tin_match_boolean.value === true",
+        "Depends on: tin_match fact (Middesk IRS TIN Match task result). Middesk submits EIN+name to IRS TIN Matching program and returns {status:'success'}. tin_match_boolean is then computed as (status==='success'). Source: TinBadge.tsx L22-25.",
+        "No action required. Business is verified with the IRS."
+    ),
+    "tin_unverified": (
+        "⚠️ Unverified", "badge-unverified",
+        "IRS could not confirm the EIN and legal name are a registered match.",
+        "tin_match_boolean.value === false  OR  tin_match.value.status === 'failure'",
+        "Depends on: tin_match.value.status from Middesk IRS TIN Match task. Possible causes: (1) incorrect EIN submitted, (2) business name does not match IRS records, (3) sole proprietor using personal SSN instead of EIN, (4) EIN too new (not yet in IRS records). Source: TinBadge.tsx L27-35.",
+        "UCM Rule: Unverified → FAIL. Analyst should request correct EIN or IRS EIN confirmation letter. Check if applicant uploaded a shareholder document for manual verification."
+    ),
+    # SoS Filings
+    "sos_verified": (
+        "✅ Verified", "badge-verified",
+        "An active Secretary of State filing was found for this business and is in good standing.",
+        "sos_match_boolean.value === true  AND  sosFiling.active === true",
+        "Two independent facts must both be true: (1) sos_match_boolean=true (Middesk found a SoS filing for this TIN+name), (2) sosFiling.active=true (that filing's status === 'active'). Source: SOSBadge.tsx L17-28. Tooltip shown to analyst: 'An active filing was found and is in good standing.'",
+        "No action required. SoS registration is confirmed and active."
+    ),
+    "sos_missing_active": (
+        "🔴 Missing Active Filing", "badge-missing",
+        "A SoS filing was found but it is not currently active (inactive/dissolved), OR no filing was found at all.",
+        "sosFiling.active === false  OR  sos_match_boolean === false",
+        "Two sub-cases: (a) Filing found but inactive: sos_match_boolean=true AND sosFiling.active=false — Middesk found a record but status='inactive'/'dissolved'. (b) No filing at all: sos_match_boolean=false — Middesk searched all 50 US SoS databases by TIN+name and found nothing. Source: SOSBadge.tsx L30-41, SOSBadges.ts constants.",
+        "UCM Rule: Review required. Sub-case (a): check if business has re-filed or is operating illegally. Sub-case (b): verify EIN, check if sole proprietor (not required to file with SoS in most states), or if business name/address variant was used at registration."
+    ),
+    "sos_invalidated": (
+        "⚠️ Invalidated", "badge-unverified",
+        "This SoS filing has been marked as invalid by Worth AI (e.g. data quality issue flagged).",
+        "isInvalidated === true  (prop passed to SOSBadge component)",
+        "Depends on: isInvalidated prop from BusinessRegistrationTab. This is set when Worth detects a data inconsistency in the SoS record. Source: SOSBadge.tsx L14-16.",
+        "Analyst review required. Manually verify the SoS record via the state registry URL (Articles of Incorporation link in the SoS card)."
+    ),
+    "no_registry_data": (
+        "No Registry Data", "badge-unknown",
+        "Middesk searched all SoS databases and found zero registrations for this EIN+name combination.",
+        "isNonEmptyArray(sos_filings.value) === false  (sos_filings array is empty)",
+        "Depends on: sos_filings.value (array from facts table). If empty, 'No Registry Data to Display' card is shown instead of filing cards. This is NOT a confidence threshold — Worth shows exactly what Middesk returned. Source: BusinessRegistrationTab.tsx — shouldHideSosForIntegration check.",
+        "No immediate action if business is a sole proprietor (not required to file in most states). If business claims to be an LLC/Corp, investigate why no SoS record exists — may indicate misrepresentation."
+    ),
+    # Addresses
+    "address_verified": (
+        "✅ Business Registration", "badge-verified",
+        "The submitted address was confirmed in public business registration records (Middesk SoS data) AND matches at least one verified address.",
+        "address_verification_boolean.value === true  OR  address_match_boolean.value === true",
+        "Depends on: address_verification (Middesk address task result) and address_match_boolean. Middesk compares submitted address against SoS-registered address. enrichAddressesWithStatusFor360ReportParity() applies status to each address. Source: AddressesCard.tsx L240-244.",
+        "No action required. Address confirmed in public records."
+    ),
+    "address_google_verified": (
+        "✅ Google Profile", "badge-verified",
+        "Google Business Profile confirms the same address AND business name as submitted.",
+        "googleProfileMatch === true  (business_match='match found' AND address_match='match')",
+        "Depends on: googleProfileData.data.business_match AND address_match from Google Places API (via SERP). Both must match. Source: AddressesCard.tsx L223-227. The Google Place ID is found by SERP scraping first, then Google Places API is called.",
+        "No action required. Independent Google verification passed."
+    ),
+    "address_unverified": (
+        "⚠️ Business Registration", "badge-unverified",
+        "The submitted address could not be confirmed in public business registration records.",
+        "address_verification_boolean.value === false  AND  address_match_boolean.value === false",
+        "Depends on: address_verification.value.sublabel (shown as message under badge) and address_match_boolean. Address not found in Middesk SoS data or does not match registered address. Source: AddressesCard.tsx, KnowYourBusiness/index.tsx L413-444.",
+        "Analyst should verify address against state SoS website directly. May indicate: (1) business uses a virtual office, (2) address changed since SoS filing, (3) DBA address differs from registered address."
+    ),
+    "address_google_unverified": (
+        "⚠️ Google Profile", "badge-unverified",
+        "Google Business Profile shows a different address, or no Google Business Profile was found for this business.",
+        "googleProfileMatch === false  (no profile found OR address/name mismatch)",
+        "Depends on: Google Places API result. googleProfileMatch = (business_match==='match found') AND (address_match==='match'). If either fails, badge shows Unverified. Many legitimate businesses have no Google listing. Source: AddressesCard.tsx L223-228.",
+        "Low risk if business is new or brick-and-mortar without Google presence. Higher risk if business claimed to be an established restaurant/retail but has no Google listing."
+    ),
+    "address_deliverable": (
+        "✅ Deliverable", "badge-deliverable",
+        "USPS confirms this address is a valid mailable postal address.",
+        "address in addresses_deliverable.value[]  (USPS deliverability check passed)",
+        "Depends on: addresses_deliverable fact (array of USPS-verified addresses). addressesDeliverable() in KnowYourBusiness/index.tsx L82-106 compares each address against the deliverable set. Source: addresses_deliverable fact from integration-service.",
+        "Informational. Deliverable does NOT mean the business actually operates there — only that mail can be delivered. Combine with Business Registration badge for stronger verification."
+    ),
+    # Business Names
+    "name_verified": (
+        "✅ Verified", "badge-verified",
+        "The submitted business name (and/or DBA) was found in public business registration records.",
+        "name_match_boolean.value === true",
+        "Depends on: name_match_boolean fact (boolean derived from Middesk name task). Middesk's name task checks if submitted name matches SoS/IRS records. Source: BusinessNamesCard.tsx, name_match_boolean fact from kyb/index.ts.",
+        "No action required. Business name confirmed in public records."
+    ),
+    "name_failure": (
+        "❌ Failure", "badge-missing",
+        "The submitted business name was NOT found in public business registration records.",
+        "name_match_boolean.value === false  AND  name_match.value.status !== 'warning'",
+        "Depends on: name_match_boolean=false. Middesk could not confirm submitted name in SoS records. Source: KnowYourBusiness/index.tsx L499-505.",
+        "UCM Rule: Fail. Analyst should verify: (1) is the submitted name a DBA (not the legal name)? (2) Is there a spelling variant? (3) Did the business recently change names?"
+    ),
+    "name_warning": (
+        "⚠️ [sublabel]", "badge-unverified",
+        "Partial name match found — business found but under a different name variant.",
+        "name_match.value.status === 'warning'  (sublabel shows the specific reason)",
+        "Depends on: name_match.value.status and name_match.value.sublabel. Middesk returns a warning when the name partially matches (e.g. 'Unregistered' or 'DBA not found'). The sublabel text is shown to the analyst. Source: KnowYourBusiness/index.tsx L493-505.",
+        "Review the specific sublabel message. May be acceptable if DBA differs from legal name — check the Legal Business Name field for the registered name."
+    ),
+    # Watchlists
+    "watchlist_no_hits": (
+        "✅ No Hits", "badge-nohits",
+        "This entity (business name or officer name) was screened against all 14 watchlists and no matches were found.",
+        "watchlist.value.metadata.length === 0  (after deduplication by combineWatchlistMetadata)",
+        "Depends on: watchlist fact. ALL hits (business + person) are now consolidated in watchlist.value.metadata via Trulioo advanced watchlist screening (since BEST-65). No separate /people/watchlist endpoint needed. Source: WatchlistsTab.tsx L207, combineWatchlistMetadata rule in rules.ts L273-344.",
+        "No action required for this entity. Normal expected state."
+    ),
+    "watchlist_hits": (
+        "🔴 N Hits Found", "badge-hits",
+        "This entity was found on one or more government watchlists (OFAC, BIS, State Dept).",
+        "watchlist.value.metadata.length > 0  (N = count after deduplication)",
+        "Depends on: watchlist.value.metadata array. Each hit has: {type, metadata:{title,agency}, entity_name, url, entity_type:'BUSINESS'|'PERSON', list_country}. Hits deduplicated by type|title|entity_name|url key. ADVERSE MEDIA is filtered out (it goes to Public Records tab). Source: WatchlistsTab.tsx L207, WatchlistHitCard.tsx.",
+        "UCM Rule: IMMEDIATE REVIEW required. Check each hit: (a) Review the source URL/agency, (b) Determine if it is the same entity or a false positive (common name), (c) Escalate to compliance team if confirmed match. Do NOT auto-approve cases with active watchlist hits."
+    ),
+    # Website
+    "website_online": (
+        "✅ Online", "badge-online",
+        "The business website is live and accessible. SERP/Verdata successfully loaded the URL.",
+        "websiteData.status === 'online'",
+        "Depends on: websiteData.status from GET /verification/businesses/:id/website-data endpoint. SERP scraper or Verdata checks if the URL responds with HTTP 200. Source: useWebsiteNonEditableFields.tsx L105-115.",
+        "Positive signal. Website confirms business is operational. Review the website content for consistency with submitted industry/NAICS."
+    ),
+    "website_offline": (
+        "❌ Offline", "badge-offline",
+        "The business website URL was found but is not currently accessible or returning errors.",
+        "websiteData.status === 'offline'  (or HTTP error response)",
+        "Depends on: websiteData.status. SERP/Verdata checked the URL but received an error or no response. Source: useWebsiteNonEditableFields.tsx L108.",
+        "Risk signal. Could indicate: (1) website temporarily down, (2) business no longer operating, (3) domain expired. Check domain expiration date. Cross-reference with SoS filing status."
+    ),
+    "website_unknown": (
+        "Unknown", "badge-unknown",
+        "Website status could not be determined — either no URL was found or the status check did not complete.",
+        "websiteData === null  OR  websiteData.status is absent  OR  isWebsiteDirty === true",
+        "Depends on: websiteData.status and isWebsiteDirty state. Shows 'Unknown' when: (1) no website URL was found/submitted, (2) URL was just edited by analyst (isWebsiteDirty=true clears dependent fields), (3) SERP/Verdata integration not yet complete. Source: useWebsiteNonEditableFields.tsx L56-65.",
+        "If URL was just edited: wait for re-verification to complete. If no URL found: risk signal for established businesses — most legitimate businesses have a web presence."
+    ),
+    "website_match": (
+        "✅ Match", "badge-match",
+        "Google Business Profile confirms both the business name and address match the submitted information.",
+        "googleProfileData.data.business_match === 'match found'  AND  address_match === 'match'",
+        "Depends on: Google Places API result via SERP-found google_place_id. Both name and address must match. Source: AddressesCard.tsx L221-228.",
+        "Strong positive signal. Independent third-party (Google) confirms business identity and location."
+    ),
+    "website_no_match": (
+        "❌ No Match", "badge-nomatch",
+        "Google Business Profile found but shows different business name or address than submitted.",
+        "googleProfileData.data.business_match !== 'match found'  OR  address_match !== 'match'",
+        "Depends on: Google Places API. Either name or address (or both) do not match. Source: AddressesCard.tsx L221-228.",
+        "Review discrepancy: check if the Google listing is outdated, if the business recently moved, or if there is a different business at the same address."
+    ),
+    # Case status
+    "case_pending": (
+        "Pending", "badge-unknown",
+        "Integrations are still running. Vendor API calls have not all completed yet.",
+        "data_integration_tasks_progress.is_complete === false",
+        "Depends on: is_integration_complete flag from case-management.ts getCaseByIDQuery L1570-1574. The 'Integrations are currently processing' orange banner is shown while is_complete=false. Transitions to complete when all vendor tasks finish. Source: case-management.ts L1570.",
+        "Wait for integrations to complete before reviewing. Worth Score shows '-' until all data is collected."
+    ),
+    "case_under_review": (
+        "Under Review", "badge-unverified",
+        "One or more UCM decisioning rules failed. Analyst manual review is required.",
+        "data_cases.status → core_case_statuses.code = 'under_review'",
+        "Depends on: Worth Score calculation and UCM rule evaluation. Triggered when: (a) TIN Unverified, (b) watchlist hits found, (c) IDV failed for an owner, (d) Worth Score below auto-approve threshold, (e) other configured rules fail. Source: case-management.ts.",
+        "Analyst must review each failed rule and make a determination. Case will remain Under Review until manually moved to Approved or Archived."
+    ),
+    "case_auto_approved": (
+        "Auto-Approved", "badge-verified",
+        "All UCM decisioning rules passed AND the Worth Score is above the configured auto-approval threshold.",
+        "data_cases.status → core_case_statuses.code = 'auto_approved'",
+        "Depends on: UCM rule engine + Worth Score threshold (configured per customer/integration). All checks must pass: TIN verified, no watchlist hits, IDV passed for all required owners, address verified, score above threshold. Source: worth score engine + case-service.",
+        "Case is approved for processing. No analyst action required unless exception review is triggered."
+    ),
+    "case_archived": (
+        "Archived", "badge-unknown",
+        "The case has been closed and is no longer active.",
+        "data_cases.status → core_case_statuses.code = 'archived'",
+        "Depends on: manual analyst action (PATCH /cases/:id) or automated archival rule. Archived cases cannot be reopened without explicit action. Source: case-management.ts.",
+        "Case is closed. No further action unless reopened. Historical data is preserved."
+    ),
+    # Ownership flags
+    "minority_yes": (
+        "Yes", "badge-verified",
+        "Equifax data indicates this business is a Minority Business Enterprise (MBE).",
+        "efx_mbe = 'Y'  in warehouse.equifax_us_latest",
+        "Depends on: efx_mbe column from Equifax (pid=17, w=0.7). Equifax sets this flag based on business registration data and self-reported information. Source: businessDetails/index.ts minority_owned fact, equifax_us_latest.efx_mbe.",
+        "Informational. Confirm via official MBE certification if required for compliance."
+    ),
+    "minority_no": (
+        "No", "badge-missing",
+        "Equifax data indicates this business is NOT a Minority Business Enterprise.",
+        "efx_mbe ≠ 'Y'  in warehouse.equifax_us_latest",
+        "Depends on: efx_mbe column from Equifax. Value is 'N' or absent.",
+        "Informational. If merchant claims MBE status but field shows No, request official MBE certification documentation."
+    ),
+    "minority_na": (
+        "N/A", "badge-unknown",
+        "Equifax does not have MBE data for this business, or the business was not matched in Equifax.",
+        "minority_owned fact value is null/empty  OR  no Equifax match found",
+        "Depends on: Equifax entity match (efx_matches_custom_inc_ml). If business has no EFX match, the minority_owned fact will be null. Source: businessDetails/index.ts minority_owned, woman_owned, veteran_owned facts.",
+        "Cannot determine ownership status from Equifax. Consider requesting self-certification documentation from the merchant if MBE/WBE/VBE status is required."
+    ),
+    # IDV
+    "idv_verified": (
+        "✅ Verified (IDV)", "badge-verified",
+        "Identity verification (Plaid IDV) passed for this owner — Plaid confirmed SSN, DOB, and address against government/credit records.",
+        "idv_passed_boolean.value === true  (idv_status.SUCCESS > 0)",
+        "Depends on: idv_status fact (aggregated counts: {SUCCESS:N, FAILED:N, PENDING:N}) and idv_passed_boolean = idv_status.SUCCESS > 0. Plaid IDV checks: SSN via credit header, DOB match, name match, address match. Source: kyb/index.ts L493-552.",
+        "No action required. Owner identity confirmed."
+    ),
+    "idv_failed": (
+        "❌ Failed (IDV)", "badge-missing",
+        "Identity verification (Plaid IDV) failed — Plaid could not confirm the owner's identity against records.",
+        "idv_status.FAILED > 0  AND  idv_status.SUCCESS === 0",
+        "Depends on: idv_status.FAILED count. Plaid IDV fails when: (1) SSN not found in credit header, (2) DOB mismatch, (3) name mismatch, (4) identity appears synthetic or stolen. Source: kyb/index.ts L493-527, plaid IDV response.",
+        "UCM Rule: FAIL. Escalate to fraud/compliance team. Do NOT approve. Consider requesting government-issued photo ID for manual verification."
+    ),
+    "idv_pending": (
+        "⏳ Pending (IDV)", "badge-unknown",
+        "Owner has not yet completed the Plaid IDV flow — the IDV link was sent but not clicked, or is in progress.",
+        "idv_status.PENDING > 0  AND  idv_status.SUCCESS === 0",
+        "Depends on: idv_status.PENDING count. Pending when: (1) IDV email/SMS link not yet clicked, (2) owner started but did not complete, (3) link expired. Source: kyb/index.ts L493-527.",
+        "Resend the IDV link if expired. Follow up with the merchant to ensure all owners complete IDV before approval."
+    ),
+}
+
+
+def enrich_badges(badges):
+    """Convert any badge text in BADGE_LIBRARY to the full 6-tuple format."""
+    result = []
+    for b in badges:
+        if len(b) >= 6:
+            result.append(b)
+        else:
+            btext, bclass, bexplain = b[0], b[1], b[2]
+            # Try to find a matching library entry by class+text similarity
+            match = None
+            for key, lib_entry in BADGE_LIBRARY.items():
+                if lib_entry[1] == bclass and lib_entry[0].lower() in btext.lower():
+                    match = lib_entry
+                    break
+            if match:
+                result.append(match)
+            else:
+                result.append((btext, bclass, bexplain, None, None, None))
+    return result
+
+
 def render_field(f):
     """Render a single field card with full deep lineage in an expander."""
     edit_icon = "✏️ Editable" if f.get("editable") else "🔒 Read-Only"
@@ -247,10 +499,33 @@ def render_field(f):
 
             if f.get("badges"):
                 st.markdown("**🏷️ Possible badges/states shown in admin portal:**")
-                for btext, bclass, bexplain in f["badges"]:
+                for badge_entry in enrich_badges(f["badges"]):
+                    # Support both old 3-tuple and new 5-tuple with extra details
+                    if len(badge_entry) == 3:
+                        btext, bclass, bexplain = badge_entry
+                        bcondition = bdependency = baction = None
+                    else:
+                        btext, bclass, bexplain, bcondition, bdependency, baction = badge_entry
+
                     st.markdown(
-                        f'{portal_badge(btext, bclass)} — <span style="color:#94A3B8;font-size:.85rem;">{bexplain}</span>',
-                        unsafe_allow_html=True)
+                        f'<div style="background:#0A1628;border:1px solid #1E3A5F;border-radius:8px;'
+                        f'padding:10px 14px;margin-bottom:8px;">'
+                        f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px;">'
+                        f'{portal_badge(btext, bclass)}'
+                        f'<span style="color:#E2E8F0;font-size:.88rem;font-weight:600;">{bexplain}</span>'
+                        f'</div>'
+                        + (f'<div style="color:#94A3B8;font-size:.8rem;margin-bottom:3px;">'
+                           f'📐 <b style="color:#CBD5E1;">Condition:</b> <code>{bcondition}</code></div>'
+                           if bcondition else '')
+                        + (f'<div style="color:#94A3B8;font-size:.8rem;margin-bottom:3px;">'
+                           f'🔗 <b style="color:#CBD5E1;">Depends on:</b> {bdependency}</div>'
+                           if bdependency else '')
+                        + (f'<div style="color:#FCD34D;font-size:.8rem;">'
+                           f'💡 <b>Analyst action:</b> {baction}</div>'
+                           if baction else '')
+                        + '</div>',
+                        unsafe_allow_html=True
+                    )
 
             if f.get("react_src"):
                 st.markdown("**📍 Source code that renders this field:**")
