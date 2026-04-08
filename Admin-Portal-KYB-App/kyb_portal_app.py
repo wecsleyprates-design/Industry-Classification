@@ -104,10 +104,14 @@ rag_index = get_rag()
 # ── Load UCM spreadsheet fields ───────────────────────────────────────────────
 @st.cache_data
 def load_ucm_fields():
-    import openpyxl
+    import openpyxl, os
     # Try both locations — Admin-Portal-KYB repo (cloned) and workspace backup
     for path in [
+        # Primary: same folder as this app (uploaded to Industry-Classification/Admin-Portal-KYB-App/)
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "[GPN version] Worth Field Outputs_Working Session Disussions_020426.xlsx"),
+        # Fallback: Admin-Portal-KYB cloned repo
         "/tmp/Admin-Portal-KYB/[GPN version] Worth Field Outputs_Working Session Disussions_020426.xlsx",
+        # Fallback: workspace NAICS classifier folder
         "/workspace/AI-Powered-NAICS-Industry-Classification-Agent/naics_mcc_classifier/[GPN version] Worth Field Outputs_Working Session Disussions_020426.xlsx",
     ]:
         try:
