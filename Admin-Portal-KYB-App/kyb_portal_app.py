@@ -549,14 +549,16 @@ def render_field(f):
             fact_name_clean = fact_name_raw.split("+")[0].strip().rstrip(".").split("(")[0]
             is_redshift = "customer_files" in f.get("sql","") or "datascience." in f.get("sql","")
 
-            # ── CONFIRMED WORKING SQL (tested on your RDS) ────────────────
-            # value column is character varying — SELECT name, value works directly.
-            # json_extract_path_text() works on text/varchar without a cast.
-            # DO NOT use ->> or -> operators — they require native jsonb type.
-            st.markdown("**🔍 SQL — confirmed working on your PostgreSQL (RDS):**")
+            # ── CONFIRMED WORKING SQL (tested on production Redshift) ─────────
+            # DB is Redshift. value column is varchar (text JSON).
+            # ✅ Works: SELECT name, value FROM facts WHERE ...
+            # ✅ Works: JSON_EXTRACT_PATH_TEXT(value, 'key') — Redshift built-in, NO cast
+            # ❌ Fails: value::json  →  ERROR: type "json" does not exist
+            # ❌ Fails: value->>'key'  →  ERROR: operator does not exist
+            st.markdown("**🔍 SQL — confirmed working on your Redshift:**")
             bid_example = "'YOUR-BUSINESS-UUID-HERE'  -- replace with your business UUID"
             fact_sql_name = fact_name_clean if fact_name_clean else "business_name"
-            # Build SQL using json_extract_path_text (works on varchar JSON columns)
+            # Build SQL using Redshift JSON_EXTRACT_PATH_TEXT() (varchar, no cast)
             core_sql = (
                 f"-- Step 1: confirm row exists (ALWAYS works)\n"
                 f"SELECT name, received_at\n"
@@ -566,10 +568,10 @@ def render_field(f):
                 f"-- Step 2: extract the fact value (works on varchar JSON column)\n"
                 f"SELECT\n"
                 f"    name,\n"
-                f"    json_extract_path_text(value::json, 'value')                AS fact_value,\n"
-                f"    json_extract_path_text(value::json, 'source', 'platformId') AS winning_pid,\n"
-                f"    json_extract_path_text(value::json, 'source', 'confidence') AS confidence,\n"
-                f"    json_extract_path_text(value::json, 'override', 'value')    AS analyst_override,\n"
+                f"    JSON_EXTRACT_PATH_TEXT(value, 'value')                AS fact_value,\n"
+                f"    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS winning_pid,\n"
+                f"    JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') AS confidence,\n"
+                f"    JSON_EXTRACT_PATH_TEXT(value, 'override', 'value')    AS analyst_override,\n"
                 f"    received_at\n"
                 f"FROM rds_warehouse_public.facts\n"
                 f"WHERE business_id = {bid_example}\n"
@@ -593,7 +595,7 @@ def render_field(f):
             st.code(core_sql, language="sql")
             st.caption(
                 "✅ Confirmed: SELECT name, value FROM rds_warehouse_public.facts works directly. "
-                "json_extract_path_text() works on varchar JSON columns — no cast needed for step 1. "
+                "JSON_EXTRACT_PATH_TEXT() is Redshift-native — works on varchar/text JSON, no cast needed. "
                 "Replace the business UUID with your actual value."
             )
 
@@ -643,7 +645,7 @@ def render_field(f):
                     "row = cur.fetchone()\n\n"
                     "if row:\n"
                     "    name, value_text, received_at = row\n"
-                    "    # value column is character varying containing JSON\n"
+                    "    # value column is varchar (Redshift) — JSON stored as text; parse with json.loads()\n"
                     "    fact = json.loads(value_text)\n"
                     "    print(f'Fact name:       {name}')\n"
                     "    print(f'Value:           {fact.get(\"value\")}')\n"
@@ -712,7 +714,7 @@ if tab == "📋 Background":
              "null_cause":"Empty only if applicant skipped — required field.",
              "badges":[],
              "react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",101,115,"fieldKey: business_name"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') AS name, json_extract_path_text(value::json, 'source', 'platformId') AS pid,\n       json_extract_path_text(value::json, 'override', 'value') AS override\nFROM rds_warehouse_public.facts\nWHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='business_name';",
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS name, JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS pid,\n       JSON_EXTRACT_PATH_TEXT(value, 'override', 'value') AS override\nFROM rds_warehouse_public.facts\nWHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='business_name';",
              "python":"import psycopg2, pandas as pd\nconn = psycopg2.connect(host='<host>',dbname='<db>',user='<u>',password='<pw>')\ndf = pd.read_sql(\"SELECT value FROM rds_warehouse_public.facts WHERE business_id=%s AND name='business_name'\",conn,params=['YOUR-BUSINESS-UUID-HERE'])\nprint(df['value'].iloc[0])"},
             {"label":"Legal Business Name","fact":"legal_name","api":"/facts/business/:id/kyb","editable":False,
              "tags":["🔒 Read-Only","🔍 Vendor-Discovered"],
@@ -724,7 +726,7 @@ if tab == "📋 Background":
              "null_cause":"Empty when Middesk still processing or could not confirm entity.",
              "badges":[],
              "react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",116,130,"fieldKey: legal_name"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') AS legal_name FROM rds_warehouse_public.facts\nWHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='legal_name';"},
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS legal_name FROM rds_warehouse_public.facts\nWHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='legal_name';"},
             {"label":"DBA (Doing Business As)","fact":"dba / dba_found","api":"/facts/business/:id/details","editable":True,
              "tags":["✏️ Editable","📝 Multi-Source Array"],
              "sources":[("Middesk","pid=16","w=2.0","names[] where submitted=false"),
@@ -736,7 +738,7 @@ if tab == "📋 Background":
              "null_cause":"Empty = no DBA registered. Very common — NOT an error.",
              "badges":[],
              "react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",131,145,"fieldKey: dba"),
-             "sql":"SELECT name, json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts\nWHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('dba','dba_found');"},
+             "sql":"SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts\nWHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('dba','dba_found');"},
             {"label":"Business Address","fact":"primary_address","api":"/facts/business/:id/details","editable":True,
              "tags":["✏️ Editable","🗺️ Google Maps Pin","💡 Suggestions"],
              "sources":[("Middesk","pid=16","w=2.0","businessEntityVerification.addresses + addressSources"),
@@ -749,7 +751,7 @@ if tab == "📋 Background":
              "null_cause":"Empty if applicant skipped address or vendors returned nothing.",
              "badges":[],
              "react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",146,171,"fieldKey: primary_address"),
-             "sql":"SELECT name, json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts\nWHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('primary_address','primary_address_string','addresses');"},
+             "sql":"SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts\nWHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('primary_address','primary_address_string','addresses');"},
             {"label":"Mailing Address","fact":"mailing_address","api":"/facts/business/:id/details","editable":True,
              "tags":["✏️ Editable","📝 Applicant Submitted"],
              "sources":[("Applicant","pid=0","w=1.0","Mailing address submitted if different from primary")],
@@ -757,7 +759,7 @@ if tab == "📋 Background":
              "storage":["rds_warehouse_public.facts name='mailing_address'"],
              "null_cause":"N/A if same as primary or not provided.",
              "badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",172,197,"fieldKey: mailing_address"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='mailing_address';"},
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='mailing_address';"},
             {"label":"Business Age (Formation Date)","fact":"formation_date","api":"/facts/business/:id/kyb","editable":True,
              "tags":["✏️ Editable","📅 Date → Age Computed"],
              "sources":[("Middesk","pid=16","w=2.0","businessEntityVerification.formation_date from SoS"),
@@ -768,7 +770,7 @@ if tab == "📋 Background":
              "storage":["rds_warehouse_public.facts name='formation_date'","rds_warehouse_public.facts name='year_established'"],
              "null_cause":"N/A when no SoS filing found and no vendor returned formation date.",
              "badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",198,213,"fieldKey: formation_date"),
-             "sql":"SELECT name, json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('formation_date','year_established');"},
+             "sql":"SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('formation_date','year_established');"},
             {"label":"Annual Revenue","fact":"revenue","api":"/facts/business/:id/financials","editable":True,
              "tags":["✏️ Editable","💰 Currency","ℹ️ Tooltip: most reputable source"],
              "sources":[("ZoomInfo","pid=24","w=0.8","zi_c_revenue"),
@@ -778,7 +780,7 @@ if tab == "📋 Background":
              "storage":["rds_warehouse_public.facts name='revenue'"],
              "null_cause":"N/A when no vendor has revenue data.",
              "badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",214,240,"fieldKey: revenue"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') AS revenue, json_extract_path_text(value::json, 'source', 'platformId') AS pid\nFROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='revenue';"},
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS revenue, JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS pid\nFROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='revenue';"},
             {"label":"Avg. Annual Revenue","fact":"revenue_equally_weighted_average","api":"/facts/business/:id/financials","editable":False,
              "tags":["🔒 Read-Only","🔢 Calculated","ℹ️ Tooltip"],
              "sources":[("Calculated","—","—","Equal-weight average across all revenue sources")],
@@ -786,7 +788,7 @@ if tab == "📋 Background":
              "storage":["rds_warehouse_public.facts name='revenue_equally_weighted_average'"],
              "null_cause":"N/A when no revenue sources available.",
              "badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",241,270,"fieldKey: revenue_equally_weighted_average"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='revenue_equally_weighted_average';"},
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='revenue_equally_weighted_average';"},
             {"label":"Net Income","fact":"net_income","api":"/facts/business/:id/financials","editable":True,
              "tags":["✏️ Editable","💰 Currency","🔗 Accounting Only"],
              "sources":[("Accounting/Rutter","—","—","From connected accounting integration only")],
@@ -794,7 +796,7 @@ if tab == "📋 Background":
              "storage":["rds_warehouse_public.facts name='net_income'"],
              "null_cause":"N/A for most businesses — only when accounting integration connected.",
              "badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",271,287,"fieldKey: net_income"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('net_income','is_net_income');"},
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('net_income','is_net_income');"},
             {"label":"Corporation Type","fact":"corporation","api":"/facts/business/:id/kyb","editable":True,
              "tags":["✏️ Editable","📋 Dropdown"],
              "sources":[("Middesk","pid=16","w=2.0","registrations[0].entity_type normalised from SoS"),
@@ -804,7 +806,7 @@ if tab == "📋 Background":
              "storage":["rds_warehouse_public.facts name='corporation'"],
              "null_cause":"N/A when no SoS filing found and applicant did not submit.",
              "badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",288,302,"fieldKey: corporation"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='corporation';"},
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='corporation';"},
             {"label":"Number of Employees","fact":"num_employees","api":"/facts/business/:id/details","editable":True,
              "tags":["✏️ Editable","🔢 Numeric"],
              "sources":[("Equifax","pid=17","w=0.7","efx_corpempcnt"),
@@ -814,7 +816,7 @@ if tab == "📋 Background":
              "storage":["rds_warehouse_public.facts name='num_employees'"],
              "null_cause":"N/A — common for small/new businesses not in vendor databases.",
              "badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",303,319,"fieldKey: num_employees"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') AS employees, json_extract_path_text(value::json, 'source', 'platformId') AS pid\nFROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='num_employees';"},
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS employees, JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS pid\nFROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='num_employees';"},
             {"label":"Business Phone Number","fact":"business_phone","api":"/facts/business/:id/details","editable":True,
              "tags":["✏️ Editable","📞 Phone Format"],
              "sources":[("ZoomInfo","pid=24","w=0.8","zi_c_phone"),
@@ -825,7 +827,7 @@ if tab == "📋 Background":
              "storage":["rds_warehouse_public.facts name='business_phone'"],
              "null_cause":"N/A for new/small businesses not in vendor databases.",
              "badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",320,335,"fieldKey: business_phone"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='business_phone';"},
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='business_phone';"},
             {"label":"Business Email","fact":"email","api":"/facts/business/:id/kyb","editable":True,
              "tags":["✏️ Editable","📧 Email"],
              "sources":[("Equifax","pid=17","w=0.7","efx_email — primary vendor for business email")],
@@ -833,7 +835,7 @@ if tab == "📋 Background":
              "storage":["rds_warehouse_public.facts name='email'"],
              "null_cause":"N/A — business email rarely in commercial databases.",
              "badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",336,349,"fieldKey: email"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='email';"},
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='email';"},
             {"label":"Minority Business Enterprise","fact":"minority_owned","api":"/facts/business/:id/kyb","editable":True,
              "tags":["✏️ Editable","📋 Dropdown (Yes/No/N/A)","🏢 Equifax"],
              "sources":[("Equifax","pid=17","w=0.7","efx_minority_business_enterprise flag")],
@@ -841,17 +843,17 @@ if tab == "📋 Background":
              "storage":["rds_warehouse_public.facts name='minority_owned'"],
              "null_cause":"N/A when Equifax does not have this flag for the business.",
              "badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",350,363,"fieldKey: minority_owned"),
-             "sql":"SELECT name, json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('minority_owned','woman_owned','veteran_owned');"},
+             "sql":"SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('minority_owned','woman_owned','veteran_owned');"},
             {"label":"Woman-Owned Business","fact":"woman_owned","api":"/facts/business/:id/kyb","editable":True,
              "tags":["✏️ Editable","📋 Dropdown (Yes/No/N/A)","🏢 Equifax"],
              "sources":[("Equifax","pid=17","w=0.7","efx_woman_owned_business flag")],
              "rule":"Same as minority_owned.","storage":["rds_warehouse_public.facts name='woman_owned'"],"null_cause":"N/A when Equifax does not have flag.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",364,377,"fieldKey: woman_owned"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='woman_owned';"},
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='woman_owned';"},
             {"label":"Veteran-Owned Business","fact":"veteran_owned","api":"/facts/business/:id/kyb","editable":True,
              "tags":["✏️ Editable","📋 Dropdown (Yes/No/N/A)","🏢 Equifax"],
              "sources":[("Equifax","pid=17","w=0.7","efx_veteran_owned_business flag")],
              "rule":"Same as minority_owned.","storage":["rds_warehouse_public.facts name='veteran_owned'"],"null_cause":"N/A when Equifax does not have flag.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",378,391,"fieldKey: veteran_owned"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='veteran_owned';"},
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='veteran_owned';"},
         ]
         for f in BDET:
             render_field(f)
@@ -963,7 +965,7 @@ no evidence. '-' should not appear unless an integration task failed or is still
              "null_cause":"ONLY '-' when naics_code itself is null/undefined AND internalGetIndustries returned empty. In practice this should not occur because AI returns 561499 (not null). NAICS 561499 sectorCode='56' → 'Administrative and Support and Waste Management and Remediation Services' (always shown, never blank).",
              "badges":[],
              "react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",393,407,"fieldKey: industry"),
-             "sql":"-- How industry is calculated:\nSELECT SUBSTRING(cnc.code, 1, 2) AS sector_code, cbi.name AS industry_name\nFROM core_naics_code cnc\nJOIN core_business_industries cbi ON cbi.sector_code = SUBSTRING(cnc.code, 1, 2)::integer\nWHERE cnc.code = '722511';  -- example\n\n-- Check a business's current industry:\nSELECT f.json_extract_path_text(value::json, 'value') AS industry_fact, cbi.name AS db_industry,\n       (SELECT json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id=f.business_id AND name='naics_code') AS naics\nFROM rds_warehouse_public.facts f\nJOIN rds_cases_public.data_businesses db ON db.id=f.business_id::uuid\nJOIN core_business_industries cbi ON cbi.id=db.industry\nWHERE f.business_id='YOUR-BUSINESS-UUID-HERE' AND f.name='industry';"},
+             "sql":"-- How industry is calculated:\nSELECT SUBSTRING(cnc.code, 1, 2) AS sector_code, cbi.name AS industry_name\nFROM core_naics_code cnc\nJOIN core_business_industries cbi ON cbi.sector_code = SUBSTRING(cnc.code, 1, 2)::integer\nWHERE cnc.code = '722511';  -- example\n\n-- Check a business's current industry:\nSELECT f.JSON_EXTRACT_PATH_TEXT(value, 'value') AS industry_fact, cbi.name AS db_industry,\n       (SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id=f.business_id AND name='naics_code') AS naics\nFROM rds_warehouse_public.facts f\nJOIN rds_cases_public.data_businesses db ON db.id=f.business_id::uuid\nJOIN core_business_industries cbi ON cbi.id=db.industry\nWHERE f.business_id='YOUR-BUSINESS-UUID-HERE' AND f.name='industry';"},
             {"label":"NAICS Code","fact":"naics_code","api":"/facts/business/:id/details","editable":True,
              "tags":["✏️ Editable","7 Sources","🤖 AI Last Resort = 561499","⚙️ 6-Rule Winner Selection"],
              "sources":[
@@ -1014,7 +1016,7 @@ no evidence. '-' should not appear unless an integration task failed or is still
              "storage":["rds_warehouse_public.facts name='naics_description'","core_naics_code.label"],
              "null_cause":"N/A when naics_code is null or not in core_naics_code table.",
              "badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",423,438,"fieldKey: naics_description"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='naics_description';"},
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='naics_description';"},
             {"label":"MCC Code","fact":"mcc_code / mcc_code_found / mcc_code_from_naics","api":"/facts/business/:id/details","editable":True,
              "tags":["✏️ Editable","🤖 AI + Calculated"],
              "sources":[("AI Enrichment (mcc_code_found)","pid=31","—","response.mcc_code directly from GPT (preferred)"),
@@ -1023,7 +1025,7 @@ no evidence. '-' should not appear unless an integration task failed or is still
              "storage":["rds_warehouse_public.facts name='mcc_code'","rds_warehouse_public.facts name='mcc_code_found'","rds_warehouse_public.facts name='mcc_code_from_naics'","rds_cases_public.data_businesses.mcc_id → core_mcc_code"],
              "null_cause":"Almost never null — rel_naics_mcc calculates if NAICS exists. 5614 with 'Fallback MCC...' = AI had no evidence (Gap G5).",
              "badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",440,454,"fieldKey: mcc_code"),
-             "sql":"SELECT name, json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE'\nAND name IN ('mcc_code','mcc_code_found','mcc_code_from_naics','mcc_description');"},
+             "sql":"SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE'\nAND name IN ('mcc_code','mcc_code_found','mcc_code_from_naics','mcc_description');"},
             {"label":"MCC Description","fact":"mcc_description","api":"/facts/business/:id/details","editable":False,
              "tags":["🔒 Read-Only","⚠️ Known Bug: Fallback Text"],
              "sources":[("AI Enrichment","pid=31","—","AI prompt-generated text OR core_mcc_code.label lookup")],
@@ -1032,7 +1034,7 @@ no evidence. '-' should not appear unless an integration task failed or is still
              "null_cause":"Shows 'Fallback MCC per instructions (no industry evidence...)' when AI had no evidence. Should show 'Classification pending...' — fix pending.",
              "badges":[],
              "react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",455,469,"fieldKey: mcc_description"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') AS mcc_desc FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='mcc_description';\n-- If shows 'Fallback MCC per instructions...' → AI enrichment had no vendor evidence"},
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS mcc_desc FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='mcc_description';\n-- If shows 'Fallback MCC per instructions...' → AI enrichment had no vendor evidence"},
         ]
         for f in INDUSTRY:
             render_field(f)
@@ -1068,7 +1070,7 @@ elif tab == "🏛️ Business Registration":
              "null_cause":"Empty when Middesk still processing or could not confirm entity.",
              "badges":[],
              "react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/BusinessRegistrationTab/useBusinessRegistrationTabDetails.tsx",72,82,"taxDetails Business Name"),
-             "sql":"SELECT json_extract_path_text(value::json, 'value') AS legal_name FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='legal_name';"},
+             "sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS legal_name FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='legal_name';"},
             {"label":"Tax ID Number (EIN) + ✅/⚠️ Verified badge","fact":"tin + tin_match_boolean","api":"/facts/business/:id/kyb","editable":True,
              "tags":["✏️ Editable","🔐 IRS TIN Match"],
              "sources":[("Applicant","pid=0","w=1.0","EIN submitted at onboarding — always masked after submission"),
@@ -1083,7 +1085,7 @@ elif tab == "🏛️ Business Registration":
                  ("⚠️ [status]","badge-unverified","capitalize(tin_match.value.status) when status is neither success nor failure"),
              ],
              "react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/TinBadge.tsx",1,48,"TinBadge component"),
-             "sql":"SELECT name, json_extract_path_text(value::json, 'value') AS val FROM rds_warehouse_public.facts\nWHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('tin','tin_submitted','tin_match','tin_match_boolean');",
+             "sql":"SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') AS val FROM rds_warehouse_public.facts\nWHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('tin','tin_submitted','tin_match','tin_match_boolean');",
              "gpn_q":"tin.value is an integer — how does it transform to Verified/Unverified?",
              "gpn_a":"UCM should use tin_match_boolean.value (not tin.value). TRUE=Verified, FALSE=Unverified. Unverified→Fail UCM rule."},
         ]
@@ -1157,7 +1159,7 @@ elif tab == "🏛️ Business Registration":
                         ("OpenCorporates","pid=23","w=0.9","officers array from OC"),
                         ("Trulioo","pid=38","w=0.8","principals/directors")],
              "rule":"people.value filtered by person.source.some(src => src.id === sos.id). Shows only officers for THIS specific filing.",
-             "storage":["rds_warehouse_public.facts name='people' (array of {name, titles[], source[]})"],"null_cause":"N/A if state doesn't require officer disclosure.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/BusinessRegistrationTab/useBusinessRegistrationTabDetails.tsx",197,240,"Corporate Officers row"),"sql":"SELECT json_extract_path_text(value::json, 'value') AS people FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='people';"},
+             "storage":["rds_warehouse_public.facts name='people' (array of {name, titles[], source[]})"],"null_cause":"N/A if state doesn't require officer disclosure.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/BusinessRegistrationTab/useBusinessRegistrationTabDetails.tsx",197,240,"Corporate Officers row"),"sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS people FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='people';"},
             {"label":"Legal Entity Name (within each SoS card)","fact":"sos_filings[n].filing_name","api":"/facts/business/:id/kyb","editable":False,
              "tags":["🔒 Read-Only","Per Filing"],
              "sources":[("Middesk","pid=16","w=2.0","registrations[n].name — name of this specific SoS filing"),
@@ -1184,7 +1186,7 @@ elif tab == "🏛️ Business Registration":
         card("""Shown when applicant uploaded a document for manual TIN verification.<br>
         Source: <code>getFactsKybData.data.shareholder_document.value</code> → <code>{id, url, file_name}</code><br>
         Used when Middesk TIN match fails — applicant uploads IRS EIN letter or similar document for manual review.""")
-        st.code("SELECT json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='shareholder_document';", language="sql")
+        st.code("SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='shareholder_document';", language="sql")
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1229,7 +1231,7 @@ elif tab == "📬 Contact Information":
                  ("✅ Deliverable","badge-deliverable","address in addresses_deliverable — USPS confirmed this is a real mailable address"),
              ],
              "react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/AddressesCard.tsx",200,252,"AddressesCard submitted + reported"),
-             "sql":"SELECT name, json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts\nWHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN\n('business_addresses_submitted_strings','addresses','addresses_deliverable','address_verification','address_match_boolean');"},
+             "sql":"SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts\nWHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN\n('business_addresses_submitted_strings','addresses','addresses_deliverable','address_verification','address_match_boolean');"},
             {"label":"Reported Addresses + Verified / Deliverable badges","fact":"addresses + addresses_deliverable + address_verification","api":"/facts/business/:id/kyb","editable":False,
              "tags":["🔒 Read-Only","🔍 Multi-Source"],
              "sources":[("Middesk","pid=16","w=2.0","addressSources from businessEntityVerification — SoS registered addresses"),
@@ -1242,7 +1244,7 @@ elif tab == "📬 Contact Information":
              "null_cause":"No Addresses section if addresses.value.length=0. Each address gets own Deliverable badge independently.",
              "badges":[("✅ Deliverable","badge-deliverable","Address in addresses_deliverable array — USPS confirmed mailable"),("✅ Business Registration","badge-verified","address_verification confirms this address"),("⚠️ Business Registration","badge-unverified","Middesk address task failed for this address")],
              "react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/AddressesCard.tsx",229,252,"enrichAddressesWithStatusFor360ReportParity"),
-             "sql":"SELECT json_array_length(value::json->>'value')  -- or parse in Python AS count, json_extract_path_text(value::json, 'value') AS addrs\nFROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='addresses';\n\nSELECT json_extract_path_text(value::json, 'value') AS deliverable_addrs FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='addresses_deliverable';"},
+             "sql":"SELECT JSON_ARRAY_LENGTH(value, true)  -- or parse in Python AS count, JSON_EXTRACT_PATH_TEXT(value, 'value') AS addrs\nFROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='addresses';\n\nSELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS deliverable_addrs FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='addresses_deliverable';"},
         ]
         for f in ADDR_FIELDS: render_field(f)
 
@@ -1257,7 +1259,7 @@ elif tab == "📬 Contact Information":
              "null_cause":"Section hidden if names_submitted.value.length = 0.",
              "badges":[("✅ Verified","badge-verified","name_match_boolean=true: submitted name found in SoS/IRS records (Middesk name task success)"),("❌ Failure","badge-missing","name_match_boolean=false: name not confirmed in public records"),("⚠️ [sublabel]","badge-unverified","name_match.value.status='warning': partial match — shows sublabel text")],
              "react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/BusinessNamesCard.tsx",1,30,"BusinessNamesCard"),
-             "sql":"SELECT name, json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE'\nAND name IN ('names_submitted','names_found','name_match_boolean','name_match');"},
+             "sql":"SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE'\nAND name IN ('names_submitted','names_found','name_match_boolean','name_match');"},
             {"label":"Reported Names (from public records)","fact":"names_found","api":"/facts/business/:id/kyb","editable":False,
              "tags":["🔒 Read-Only","🔍 Multi-Source"],
              "sources":[("Middesk","pid=16","w=2.0","names[] — legal + trade names found in SoS"),
@@ -1265,7 +1267,7 @@ elif tab == "📬 Contact Information":
                         ("OpenCorporates","pid=23","w=0.9","alternate_names"),
                         ("SERP","pid=22","w=0.5","business name from web scraping")],
              "rule":"combineFacts() — all reported names merged and deduplicated.",
-             "storage":["rds_warehouse_public.facts name='names_found' (array)"],"null_cause":"Empty if no vendor found any names.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/BusinessNamesCard.tsx",1,30,"reported names section"),"sql":"SELECT json_extract_path_text(value::json, 'value') AS names_found FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='names_found';"},
+             "storage":["rds_warehouse_public.facts name='names_found' (array)"],"null_cause":"Empty if no vendor found any names.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/BusinessNamesCard.tsx",1,30,"reported names section"),"sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS names_found FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='names_found';"},
         ]
         for f in BN_FIELDS: render_field(f)
 
@@ -1308,7 +1310,7 @@ elif tab == "🌐 Website":
          "null_cause":"N/A when no website submitted and no vendor found a domain.",
          "badges":[],
          "react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/WebsiteTab/fieldConfigs.tsx",1,60,"website fieldConfig"),
-         "sql":"SELECT name, json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('website','website_found');"},
+         "sql":"SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('website','website_found');"},
         {"label":"Creation Date (WHOIS)","fact":"websiteData.domain.creation_date","api":"/verification/businesses/:id/website-data","editable":False,
          "tags":["🔒 Read-Only","📅 WHOIS Data","⚠️ N/A when URL edited"],
          "sources":[("SERP","pid=22","w=0.5","WHOIS lookup on found domain → creation_date"),
@@ -1456,15 +1458,15 @@ elif tab == "🔑 KYB API Fields":
 
         # Full deep field catalog for all 28 UCM fields
         UCM_DEEP = {
-            "tin.value": {"label":"Tax ID (EIN) + Verified Badge","fact":"tin / tin_match / tin_match_boolean","api":"/facts/business/:id/kyb","editable":True,"tags":["✏️ Editable","🔐 IRS TIN Match","UCM: use tin_match_boolean NOT tin.value"],"sources":[("Applicant","pid=0","w=1.0","EIN integer submitted at onboarding — always masked after submission. This IS tin.value (raw integer). NOT what UCM should use for verification."),("Middesk","pid=16","w=2.0","IRS TIN Match service: reviewTasks[key='tin'].status. Returns {status:'success'|'failure',message,sublabel}. THIS drives the Verified/Unverified badge via tin_match_boolean."),("Trulioo","pid=38","w=0.8","TIN-to-name match for UK/Canada businesses only. Falls back for US. truliooPreferredRule applies for GB/CA.")],"rule":"tin.value = raw masked EIN (applicant submitted). UCM MUST use tin_match_boolean.value (boolean) NOT tin.value (integer). tin_match_boolean = (tin_match.value.status === 'success'). TinBadge.tsx: true→✅Verified(info/blue), false→⚠️Unverified(warning). Winner: factWithHighestConfidence() — Middesk wins (w=2.0) for US.","storage":["rds_warehouse_public.facts name='tin_submitted' (masked EIN string)","rds_warehouse_public.facts name='tin_match' {status,message,sublabel}","rds_warehouse_public.facts name='tin_match_boolean' (boolean: status==='success')","integration_data.request_response (pid=16 Middesk raw IRS response)"],"null_cause":"Unverified badge: IRS did not confirm TIN+name match. Causes: wrong EIN, name mismatch, sole proprietor using personal SSN, EIN not yet in IRS records. Blank tin.value: applicant did not submit (extremely rare).","badges":[("✅ Verified","badge-verified","tin_match_boolean=true → IRS confirmed EIN+legal name are a valid registered match"),("⚠️ Unverified","badge-unverified","tin_match_boolean=false → IRS could not confirm match"),("⚠️ [status]","badge-unverified","capitalize(tin_match.value.status) when status is neither success nor failure (e.g. 'in_review')")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/TinBadge.tsx",1,48,"TinBadge exact badge logic"),"sql":"SELECT name, json_extract_path_text(value::json, 'value') AS val, json_extract_path_text(value::json, 'source', 'platformId') AS pid\nFROM rds_warehouse_public.facts\nWHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('tin','tin_submitted','tin_match','tin_match_boolean');","gpn_q":"tin.value is an integer — how does it transform to Verified/Unverified? Are you talking about tin_match_boolean.value?","gpn_a":"UCM should use tin_match_boolean.value (includes true or false). tin.value is the raw tax id. Unverified maps to False, Verified maps to True. UCM Rule: Unverified → Fail the rule. All other results → Pass the rule."},
-            "watchlist.hits.value": {"label":"Watchlist Hit Count","fact":"watchlist_hits / watchlist.value.metadata.length","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","14 Lists Scanned","All entities consolidated"],"sources":[("Middesk","pid=16","—","reviewTasks[type='watchlist'] — OFAC, BIS, State Dept lists for the business entity"),("Trulioo","pid=38","—","Business + person watchlist screening via trulioo_advanced_watchlist_results (ALL hits consolidated since BEST-65)"),("Combined","combineWatchlistMetadata()","—","Merges ALL hits, deduplicates by type|title|entity_name|url key. Adverse media FILTERED OUT (→ Public Records tab).")],"rule":"watchlist.hits.value = watchlist.value.metadata.length (count after deduplication). WatchlistsTab.tsx: badge = metadata.length>0 ? 'N Hits Found'(red) : 'No Hits'(green). groupWatchlistHitsByEntityName() groups hits by entity name across business names + officers. IMPORTANT: since BEST-65, NO separate /people/watchlist endpoint — all consolidated.","storage":["rds_warehouse_public.facts name='watchlist_hits' (integer count)","rds_warehouse_public.facts name='watchlist' {metadata:[{type,entity_name,url}],message:''}","rds_warehouse_public.facts name='watchlist_raw' (full pre-filter data)"],"null_cause":"0 hits = watchlist scan ran and found nothing (NORMAL expected state). NULL hit_count = watchlist scan not yet completed (integrations still processing). Section hidden for Canadian businesses (excludedCountriesForVerification).","badges":[("✅ No Hits","badge-nohits","metadata.length=0 — all 14 lists scanned, no matches found"),("🔴 N Hits Found","badge-hits","metadata.length>0 — N unique hits across OFAC/BIS/State Dept after deduplication")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/WatchlistsTab/WatchlistsTab.tsx",190,215,"groupWatchlistHitsByEntityName logic"),"sql":"SELECT json_extract_path_text(value::json, 'value', 'metadata') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='watchlist';\n\n-- Count hits:\nSELECT json_array_length(value::json->'value'->>'metadata')  -- parse in Python instead AS hit_count\nFROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='watchlist_raw';"},
+            "tin.value": {"label":"Tax ID (EIN) + Verified Badge","fact":"tin / tin_match / tin_match_boolean","api":"/facts/business/:id/kyb","editable":True,"tags":["✏️ Editable","🔐 IRS TIN Match","UCM: use tin_match_boolean NOT tin.value"],"sources":[("Applicant","pid=0","w=1.0","EIN integer submitted at onboarding — always masked after submission. This IS tin.value (raw integer). NOT what UCM should use for verification."),("Middesk","pid=16","w=2.0","IRS TIN Match service: reviewTasks[key='tin'].status. Returns {status:'success'|'failure',message,sublabel}. THIS drives the Verified/Unverified badge via tin_match_boolean."),("Trulioo","pid=38","w=0.8","TIN-to-name match for UK/Canada businesses only. Falls back for US. truliooPreferredRule applies for GB/CA.")],"rule":"tin.value = raw masked EIN (applicant submitted). UCM MUST use tin_match_boolean.value (boolean) NOT tin.value (integer). tin_match_boolean = (tin_match.value.status === 'success'). TinBadge.tsx: true→✅Verified(info/blue), false→⚠️Unverified(warning). Winner: factWithHighestConfidence() — Middesk wins (w=2.0) for US.","storage":["rds_warehouse_public.facts name='tin_submitted' (masked EIN string)","rds_warehouse_public.facts name='tin_match' {status,message,sublabel}","rds_warehouse_public.facts name='tin_match_boolean' (boolean: status==='success')","integration_data.request_response (pid=16 Middesk raw IRS response)"],"null_cause":"Unverified badge: IRS did not confirm TIN+name match. Causes: wrong EIN, name mismatch, sole proprietor using personal SSN, EIN not yet in IRS records. Blank tin.value: applicant did not submit (extremely rare).","badges":[("✅ Verified","badge-verified","tin_match_boolean=true → IRS confirmed EIN+legal name are a valid registered match"),("⚠️ Unverified","badge-unverified","tin_match_boolean=false → IRS could not confirm match"),("⚠️ [status]","badge-unverified","capitalize(tin_match.value.status) when status is neither success nor failure (e.g. 'in_review')")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/TinBadge.tsx",1,48,"TinBadge exact badge logic"),"sql":"SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') AS val, JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS pid\nFROM rds_warehouse_public.facts\nWHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('tin','tin_submitted','tin_match','tin_match_boolean');","gpn_q":"tin.value is an integer — how does it transform to Verified/Unverified? Are you talking about tin_match_boolean.value?","gpn_a":"UCM should use tin_match_boolean.value (includes true or false). tin.value is the raw tax id. Unverified maps to False, Verified maps to True. UCM Rule: Unverified → Fail the rule. All other results → Pass the rule."},
+            "watchlist.hits.value": {"label":"Watchlist Hit Count","fact":"watchlist_hits / watchlist.value.metadata.length","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","14 Lists Scanned","All entities consolidated"],"sources":[("Middesk","pid=16","—","reviewTasks[type='watchlist'] — OFAC, BIS, State Dept lists for the business entity"),("Trulioo","pid=38","—","Business + person watchlist screening via trulioo_advanced_watchlist_results (ALL hits consolidated since BEST-65)"),("Combined","combineWatchlistMetadata()","—","Merges ALL hits, deduplicates by type|title|entity_name|url key. Adverse media FILTERED OUT (→ Public Records tab).")],"rule":"watchlist.hits.value = watchlist.value.metadata.length (count after deduplication). WatchlistsTab.tsx: badge = metadata.length>0 ? 'N Hits Found'(red) : 'No Hits'(green). groupWatchlistHitsByEntityName() groups hits by entity name across business names + officers. IMPORTANT: since BEST-65, NO separate /people/watchlist endpoint — all consolidated.","storage":["rds_warehouse_public.facts name='watchlist_hits' (integer count)","rds_warehouse_public.facts name='watchlist' {metadata:[{type,entity_name,url}],message:''}","rds_warehouse_public.facts name='watchlist_raw' (full pre-filter data)"],"null_cause":"0 hits = watchlist scan ran and found nothing (NORMAL expected state). NULL hit_count = watchlist scan not yet completed (integrations still processing). Section hidden for Canadian businesses (excludedCountriesForVerification).","badges":[("✅ No Hits","badge-nohits","metadata.length=0 — all 14 lists scanned, no matches found"),("🔴 N Hits Found","badge-hits","metadata.length>0 — N unique hits across OFAC/BIS/State Dept after deduplication")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/WatchlistsTab/WatchlistsTab.tsx",190,215,"groupWatchlistHitsByEntityName logic"),"sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value', 'metadata') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='watchlist';\n\n-- Count hits:\nSELECT JSON_ARRAY_LENGTH(value, true)  -- parse in Python instead AS hit_count\nFROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='watchlist_raw';"},
             "watchlist.value.metadata": {"label":"Watchlist Hit Detail Metadata","fact":"watchlist.value.metadata[]","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","Array per Hit","Adverse Media Excluded"],"sources":[("Middesk+Trulioo combined","combineWatchlistMetadata()","—","rules.ts L273-344: deduplicates by type|metadata.title|entity_name|url. Filters out ADVERSE_MEDIA type (→ Public Records tab).")],"rule":"combineWatchlistMetadata() rule. Each hit: {type, metadata:{title,agency}, entity_name, url, entity_type:'BUSINESS'|'PERSON', list_country}. Dedup key: type|title/agency|entity_name|url.","storage":["rds_warehouse_public.facts name='watchlist_raw' (full merged before adverse-media filter)"],"null_cause":"Empty array = no hits found. Adverse media hits present in watchlist_raw but EXCLUDED from watchlist.value.metadata (filtered out by combineWatchlistMetadata).","badges":[],"react_src":("SIC_UK","integration-service/lib/facts/rules.ts",273,344,"combineWatchlistMetadata deduplication and adverse media filter"),"sql":"-- Fetch raw value text and parse in Python (see Python snippet)\nSELECT name, value, received_at\nFROM rds_warehouse_public.facts\nWHERE business_id = 'YOUR-BUSINESS-UUID-HERE'\n  AND name = 'fact_name';"},
-            "legal_name.value": {"label":"Legal Business Name (Business Registration card)","fact":"legal_name","api":"/facts/business/:id/kyb","editable":True,"tags":["✏️ Editable","🔍 Vendor-Discovered","NOT applicant-submitted"],"sources":[("Middesk","pid=16","w=2.0","businessEntityVerification.name — name found in SoS records via IRS TIN match"),("OpenCorporates","pid=23","w=0.9","firmographic.name — registered name in global OC registry"),("Trulioo","pid=38","w=0.8","clientData.businessName for UK/Canada")],"rule":"factWithHighestConfidence() — Middesk wins (w=2.0) for US. legal_name.value is the VERIFIED name from public records. IMPORTANT: NOT pre-filled by Worth — Global/UCM sends Legal Name + Tax ID. Worth compares submitted name against IRS via Middesk.","storage":["rds_warehouse_public.facts name='legal_name'"],"null_cause":"Empty when: (1) Middesk still processing integrations, (2) Middesk found no entity in SoS. NOT a failure — means entity lookup not yet complete.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/BusinessRegistrationTab/useBusinessRegistrationTabDetails.tsx",72,82,"taxDetails Business Name"),"sql":"SELECT json_extract_path_text(value::json, 'value') AS legal_name, json_extract_path_text(value::json, 'source', 'platformId') AS pid\nFROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='legal_name';","gpn_q":"Worth Discussion: We don't see company_name in KYB documentation. UCM found legal_name, but not company_name.value. What UCM rule is needed?","gpn_a":"Per Gavin, the field is legal_name. Per Ben, this is NOT pre-filled. Global sends Legal Name & Tax ID. Worth compares against IRS. Tax ID Verification & Legal Name use the SAME UCM Rule. No Action Needed."},
-            "dba_found.value[n]": {"label":"DBA Names (Contact Information)","fact":"dba_found (array)","api":"/facts/business/:id/kyb","editable":True,"tags":["✏️ Editable","Array of DBAs","combineFacts merges all"],"sources":[("Middesk","pid=16","w=2.0","names[] where submitted=false — trade names Middesk found in SoS"),("ZoomInfo","pid=24","w=0.8","zi_c_tradename field"),("OpenCorporates","pid=23","w=0.9","alternate_names from OC registry"),("SERP","pid=22","w=0.5","DBA extracted from web scraping"),("Applicant","pid=0","w=1.0","DBA submitted at onboarding")],"rule":"combineFacts() — merges DBA names from ALL sources into deduplicated array. Verification via name_match_boolean.value (TRUE=Verified, FALSE=Unverified). Name comparison uses name_match_boolean not dba_found directly.","storage":["rds_warehouse_public.facts name='dba_found' (array of discovered DBAs)","rds_warehouse_public.facts name='dba' (submitted DBA from applicant)"],"null_cause":"Empty array = business operates only under legal name. Very common — NOT an error. Section only renders when names_submitted.value.length > 0.","badges":[("✅ Verified","badge-verified","name_match_boolean=true: submitted name/DBA found in SoS/public records"),("❌ Failure","badge-missing","name_match_boolean=false: name not confirmed")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/BusinessNamesCard.tsx",1,30,"BusinessNamesCard"),"sql":"SELECT name, json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('dba','dba_found');\nSELECT json_extract_path_text(value::json, 'value') AS name_match_boolean FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='name_match_boolean';","gpn_q":"How does dba_found.value[n] (array) transform to Verified/Unverified? DBA Verified: Rule passes. DBA Unverified: Rule fails.","gpn_a":"name_match_boolean.value governs DBA Names, alternate names. True=Verified, False=Unverified. Worth 360 Report shows Verified or Unverified. Logic uses data including confidence score."},
-            "google_profile.address": {"label":"Google Business Profile — Address","fact":"address_verification (Google component)","api":"/facts/business/:id/kyb + Google Places API","editable":False,"tags":["🔒 Read-Only","SERP→Google Places","Match/No Match"],"sources":[("SERP","pid=22","w=0.5","SERP scraper finds google_place_id → calls Google Places API → gets address"),("Google Places API","pid=29","w=0.6","address_match field from business listing")],"rule":"AddressesCard.tsx: googleProfileMatch = (googleProfileData.data.business_match.toLowerCase()==='match found') AND (googleProfileData.data.address_match.toLowerCase()==='match'). enrichAddressesWithStatusFor360ReportParity() applies to submitted AND reported addresses.","storage":["rds_warehouse_public.facts name='address_verification' {status,sublabel,message}","rds_warehouse_public.facts name='address_match_boolean' (boolean)","integration_data.request_response (pid=22 SERP, pid=29 Google)"],"null_cause":"Google Profile badge shows 'Unverified' when: (1) no Google Business Profile found, (2) SERP found no Place ID, (3) Google address doesn't match submitted. Many businesses have no Google listing — NOT an error.","badges":[("✅ Google Profile","badge-verified","googleProfileMatch=true: Google BProfile confirms same business name AND same address"),("⚠️ Google Profile","badge-unverified","googleProfileMatch=false: Google not found or shows different address/name")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/AddressesCard.tsx",218,228,"googleProfileMatch logic"),"sql":"SELECT name, json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('address_verification','address_match_boolean','google_place_id');","gpn_q":"What is the Google-Profile endpoint? What UCM rule is needed? Need to display on Worth 360 Report.","gpn_a":"Action Item: Gavin to provide Google Profile documentation. UCM Team can investigate Worth 360 mapping to find these details. Note: This info is on the Worth 360 Report."},
-            "google_profile.business_name": {"label":"Google Business Profile — Business Name","fact":"names_found + name_match_boolean","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","SERP→Google Places"],"sources":[("SERP+Google Places","pid=22,29","—","Google Business Profile name field. Compared against submitted name for Match/No Match.")],"rule":"names_found uses combineFacts (all sources merged). name_match_boolean governs Verified badge. Google name contributes to name match evaluation.","storage":["rds_warehouse_public.facts name='names_found' (array)","rds_warehouse_public.facts name='name_match_boolean' (boolean)"],"null_cause":"No Google Business Profile found — SERP could not find a Google Place ID for this business.","badges":[("✅ Verified","badge-verified","name_match_boolean=true: submitted business name matches public records including Google"),("❌ Failure","badge-missing","name_match_boolean=false: name not confirmed")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/BusinessNamesCard.tsx",1,30,"Business Names section"),"sql":"SELECT json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('names_found','name_match_boolean');"},
-            "mcc_code": {"label":"MCC Code (Background tab)","fact":"mcc_code / mcc_code_found / mcc_code_from_naics","api":"/facts/business/:id/details","editable":True,"tags":["✏️ Editable","🤖 AI + Calculated","3 internal facts"],"sources":[("AI Enrichment (mcc_code_found)","pid=31","—","response.mcc_code directly from GPT-5-mini (preferred). Fires when all vendor NAICS are null."),("Calculated from NAICS (mcc_code_from_naics)","calculated","—","rel_naics_mcc lookup: winning naics_id → mcc_id. Dependency on naics_code fact."),("Combined (mcc_code)","combined","—","mcc_code = mcc_code_found?.value ?? mcc_code_from_naics?.value. AI-provided preferred.")],"rule":"mcc_code is NOT from a competitive vendor selection. It is: (1) AI-provided MCC if AI enrichment ran, OR (2) calculated from winning NAICS via rel_naics_mcc table. When AI returns 5614 (last resort), mcc_description = 'Fallback MCC per instructions...' — KNOWN BUG (Gap G5), editable=false so analyst cannot fix.","storage":["rds_warehouse_public.facts name='mcc_code'","rds_warehouse_public.facts name='mcc_code_found' (AI direct)","rds_warehouse_public.facts name='mcc_code_from_naics' (calculated)","rds_cases_public.data_businesses.mcc_id → core_mcc_code.id"],"null_cause":"Almost never null — rel_naics_mcc calculates MCC when NAICS exists. 5614 shown with 'Fallback MCC...' when AI had no evidence (Gap G5 — mcc_description is read-only).","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",440,469,"mcc_code + mcc_description fieldConfigs"),"sql":"SELECT name, json_extract_path_text(value::json, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('mcc_code','mcc_code_found','mcc_code_from_naics','mcc_description');","gpn_q":"MCC code is needed for UCM. Where does it come from?","gpn_a":"MCC comes from AI enrichment (NAICS→MCC map + AI-returned MCC). 5614 is the AI fallback when no industry evidence. 'Fallback MCC per instructions...' description is a known bug."},
-            "people.value[n].name, people.value[n].titles[n]": {"label":"Corporate Officers (Business Registration)","fact":"people.value[] filtered by sos.id","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","Per Filing Filtered","combineFacts"],"sources":[("Middesk","pid=16","w=2.0","registrations[n].officers — officers per state filing, matched to specific sos.id"),("OpenCorporates","pid=23","w=0.9","officers array from OC company record"),("Trulioo","pid=38","w=0.8","principals/directors from Trulioo KYB response")],"rule":"combineFacts() — all people from all sources merged. Business Registration tab shows: people.value.filter(person => person.source.some(src => src.id === sos.id)). Each SoS filing card shows ONLY officers linked to THAT specific filing's sos.id.","storage":["rds_warehouse_public.facts name='people' (array of {name, titles[], source[], jurisdictions[]})"],"null_cause":"N/A per filing when no officers linked to that sos.id. Common when state doesn't require officer disclosure. Entire people section empty if no SoS filing found.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/BusinessRegistrationTab/useBusinessRegistrationTabDetails.tsx",197,240,"Corporate Officers row — filtered by sos.id"),"sql":"SELECT json_extract_path_text(value::json, 'value') AS people FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='people';"},
+            "legal_name.value": {"label":"Legal Business Name (Business Registration card)","fact":"legal_name","api":"/facts/business/:id/kyb","editable":True,"tags":["✏️ Editable","🔍 Vendor-Discovered","NOT applicant-submitted"],"sources":[("Middesk","pid=16","w=2.0","businessEntityVerification.name — name found in SoS records via IRS TIN match"),("OpenCorporates","pid=23","w=0.9","firmographic.name — registered name in global OC registry"),("Trulioo","pid=38","w=0.8","clientData.businessName for UK/Canada")],"rule":"factWithHighestConfidence() — Middesk wins (w=2.0) for US. legal_name.value is the VERIFIED name from public records. IMPORTANT: NOT pre-filled by Worth — Global/UCM sends Legal Name + Tax ID. Worth compares submitted name against IRS via Middesk.","storage":["rds_warehouse_public.facts name='legal_name'"],"null_cause":"Empty when: (1) Middesk still processing integrations, (2) Middesk found no entity in SoS. NOT a failure — means entity lookup not yet complete.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/BusinessRegistrationTab/useBusinessRegistrationTabDetails.tsx",72,82,"taxDetails Business Name"),"sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS legal_name, JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS pid\nFROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='legal_name';","gpn_q":"Worth Discussion: We don't see company_name in KYB documentation. UCM found legal_name, but not company_name.value. What UCM rule is needed?","gpn_a":"Per Gavin, the field is legal_name. Per Ben, this is NOT pre-filled. Global sends Legal Name & Tax ID. Worth compares against IRS. Tax ID Verification & Legal Name use the SAME UCM Rule. No Action Needed."},
+            "dba_found.value[n]": {"label":"DBA Names (Contact Information)","fact":"dba_found (array)","api":"/facts/business/:id/kyb","editable":True,"tags":["✏️ Editable","Array of DBAs","combineFacts merges all"],"sources":[("Middesk","pid=16","w=2.0","names[] where submitted=false — trade names Middesk found in SoS"),("ZoomInfo","pid=24","w=0.8","zi_c_tradename field"),("OpenCorporates","pid=23","w=0.9","alternate_names from OC registry"),("SERP","pid=22","w=0.5","DBA extracted from web scraping"),("Applicant","pid=0","w=1.0","DBA submitted at onboarding")],"rule":"combineFacts() — merges DBA names from ALL sources into deduplicated array. Verification via name_match_boolean.value (TRUE=Verified, FALSE=Unverified). Name comparison uses name_match_boolean not dba_found directly.","storage":["rds_warehouse_public.facts name='dba_found' (array of discovered DBAs)","rds_warehouse_public.facts name='dba' (submitted DBA from applicant)"],"null_cause":"Empty array = business operates only under legal name. Very common — NOT an error. Section only renders when names_submitted.value.length > 0.","badges":[("✅ Verified","badge-verified","name_match_boolean=true: submitted name/DBA found in SoS/public records"),("❌ Failure","badge-missing","name_match_boolean=false: name not confirmed")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/BusinessNamesCard.tsx",1,30,"BusinessNamesCard"),"sql":"SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('dba','dba_found');\nSELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS name_match_boolean FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='name_match_boolean';","gpn_q":"How does dba_found.value[n] (array) transform to Verified/Unverified? DBA Verified: Rule passes. DBA Unverified: Rule fails.","gpn_a":"name_match_boolean.value governs DBA Names, alternate names. True=Verified, False=Unverified. Worth 360 Report shows Verified or Unverified. Logic uses data including confidence score."},
+            "google_profile.address": {"label":"Google Business Profile — Address","fact":"address_verification (Google component)","api":"/facts/business/:id/kyb + Google Places API","editable":False,"tags":["🔒 Read-Only","SERP→Google Places","Match/No Match"],"sources":[("SERP","pid=22","w=0.5","SERP scraper finds google_place_id → calls Google Places API → gets address"),("Google Places API","pid=29","w=0.6","address_match field from business listing")],"rule":"AddressesCard.tsx: googleProfileMatch = (googleProfileData.data.business_match.toLowerCase()==='match found') AND (googleProfileData.data.address_match.toLowerCase()==='match'). enrichAddressesWithStatusFor360ReportParity() applies to submitted AND reported addresses.","storage":["rds_warehouse_public.facts name='address_verification' {status,sublabel,message}","rds_warehouse_public.facts name='address_match_boolean' (boolean)","integration_data.request_response (pid=22 SERP, pid=29 Google)"],"null_cause":"Google Profile badge shows 'Unverified' when: (1) no Google Business Profile found, (2) SERP found no Place ID, (3) Google address doesn't match submitted. Many businesses have no Google listing — NOT an error.","badges":[("✅ Google Profile","badge-verified","googleProfileMatch=true: Google BProfile confirms same business name AND same address"),("⚠️ Google Profile","badge-unverified","googleProfileMatch=false: Google not found or shows different address/name")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/AddressesCard.tsx",218,228,"googleProfileMatch logic"),"sql":"SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('address_verification','address_match_boolean','google_place_id');","gpn_q":"What is the Google-Profile endpoint? What UCM rule is needed? Need to display on Worth 360 Report.","gpn_a":"Action Item: Gavin to provide Google Profile documentation. UCM Team can investigate Worth 360 mapping to find these details. Note: This info is on the Worth 360 Report."},
+            "google_profile.business_name": {"label":"Google Business Profile — Business Name","fact":"names_found + name_match_boolean","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","SERP→Google Places"],"sources":[("SERP+Google Places","pid=22,29","—","Google Business Profile name field. Compared against submitted name for Match/No Match.")],"rule":"names_found uses combineFacts (all sources merged). name_match_boolean governs Verified badge. Google name contributes to name match evaluation.","storage":["rds_warehouse_public.facts name='names_found' (array)","rds_warehouse_public.facts name='name_match_boolean' (boolean)"],"null_cause":"No Google Business Profile found — SERP could not find a Google Place ID for this business.","badges":[("✅ Verified","badge-verified","name_match_boolean=true: submitted business name matches public records including Google"),("❌ Failure","badge-missing","name_match_boolean=false: name not confirmed")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/BusinessNamesCard.tsx",1,30,"Business Names section"),"sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('names_found','name_match_boolean');"},
+            "mcc_code": {"label":"MCC Code (Background tab)","fact":"mcc_code / mcc_code_found / mcc_code_from_naics","api":"/facts/business/:id/details","editable":True,"tags":["✏️ Editable","🤖 AI + Calculated","3 internal facts"],"sources":[("AI Enrichment (mcc_code_found)","pid=31","—","response.mcc_code directly from GPT-5-mini (preferred). Fires when all vendor NAICS are null."),("Calculated from NAICS (mcc_code_from_naics)","calculated","—","rel_naics_mcc lookup: winning naics_id → mcc_id. Dependency on naics_code fact."),("Combined (mcc_code)","combined","—","mcc_code = mcc_code_found?.value ?? mcc_code_from_naics?.value. AI-provided preferred.")],"rule":"mcc_code is NOT from a competitive vendor selection. It is: (1) AI-provided MCC if AI enrichment ran, OR (2) calculated from winning NAICS via rel_naics_mcc table. When AI returns 5614 (last resort), mcc_description = 'Fallback MCC per instructions...' — KNOWN BUG (Gap G5), editable=false so analyst cannot fix.","storage":["rds_warehouse_public.facts name='mcc_code'","rds_warehouse_public.facts name='mcc_code_found' (AI direct)","rds_warehouse_public.facts name='mcc_code_from_naics' (calculated)","rds_cases_public.data_businesses.mcc_id → core_mcc_code.id"],"null_cause":"Almost never null — rel_naics_mcc calculates MCC when NAICS exists. 5614 shown with 'Fallback MCC...' when AI had no evidence (Gap G5 — mcc_description is read-only).","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/config/BackgroundTab/fieldConfigs.tsx",440,469,"mcc_code + mcc_description fieldConfigs"),"sql":"SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name IN ('mcc_code','mcc_code_found','mcc_code_from_naics','mcc_description');","gpn_q":"MCC code is needed for UCM. Where does it come from?","gpn_a":"MCC comes from AI enrichment (NAICS→MCC map + AI-returned MCC). 5614 is the AI fallback when no industry evidence. 'Fallback MCC per instructions...' description is a known bug."},
+            "people.value[n].name, people.value[n].titles[n]": {"label":"Corporate Officers (Business Registration)","fact":"people.value[] filtered by sos.id","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","Per Filing Filtered","combineFacts"],"sources":[("Middesk","pid=16","w=2.0","registrations[n].officers — officers per state filing, matched to specific sos.id"),("OpenCorporates","pid=23","w=0.9","officers array from OC company record"),("Trulioo","pid=38","w=0.8","principals/directors from Trulioo KYB response")],"rule":"combineFacts() — all people from all sources merged. Business Registration tab shows: people.value.filter(person => person.source.some(src => src.id === sos.id)). Each SoS filing card shows ONLY officers linked to THAT specific filing's sos.id.","storage":["rds_warehouse_public.facts name='people' (array of {name, titles[], source[], jurisdictions[]})"],"null_cause":"N/A per filing when no officers linked to that sos.id. Common when state doesn't require officer disclosure. Entire people section empty if no SoS filing found.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/BusinessRegistrationTab/useBusinessRegistrationTabDetails.tsx",197,240,"Corporate Officers row — filtered by sos.id"),"sql":"SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS people FROM rds_warehouse_public.facts WHERE business_id='YOUR-BUSINESS-UUID-HERE' AND name='people';"},
             "sos_active.value": {"label":"SoS Filing Status (Active/Inactive)","fact":"sos_filings[n].active / sos_active","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","Per Filing","Drives SoS badge"],"sources":[("Middesk","pid=16","w=2.0","registrations[n].status === 'active' → active=true. Middesk queries SoS databases by TIN+name."),("OpenCorporates","pid=23","w=0.9","current_status: 'Active'→true, 'Dissolved'→false")],"rule":"sos_active = any(sos_filings[n].active === true). SOSBadge.tsx: sosFiling.active=true→VERIFIED(info/blue,CheckBadgeIcon,tooltip='An active filing was found'). sosFiling.active=false→MISSING ACTIVE FILING(error/red). sos_active=null→N/A. SOSFilingCard title: US='Secretary of State Filings', non-US='Registration Filing'.","storage":["rds_warehouse_public.facts name='sos_filings' (array of filings, each with active: boolean)","rds_warehouse_public.facts name='sos_active' (boolean: any filing active?)","rds_warehouse_public.facts name='sos_match_boolean'"],"null_cause":"'No Registry Data to Display' = sos_filings.value=[] (empty array). Middesk searched all 50 US SoS databases by TIN+name and found ZERO registrations. NOT a confidence threshold — if Middesk finds nothing, nothing is shown.","badges":[("✅ Verified","badge-verified","sosFiling.active=true: active SoS filing found and in good standing"),("🔴 Missing Active Filing","badge-missing","sosFiling.active=false: filing found but inactive/dissolved"),("⚠️ Invalidated","badge-unverified","isInvalidated=true: filing marked invalid")],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/SOSBadge.tsx",12,60,"SOSBadge exact logic"),"sql":"-- Fetch raw value text and parse in Python (see Python snippet)\nSELECT name, value, received_at\nFROM rds_warehouse_public.facts\nWHERE business_id = 'YOUR-BUSINESS-UUID-HERE'\n  AND name = 'fact_name';"},
             "sos_filings.value[n].state": {"label":"SoS Filing State","fact":"sos_filings[n].state","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","Per Filing","2-letter code"],"sources":[("Middesk","pid=16","w=2.0","registrations[n].registration_state — 2-letter US state code"),("OpenCorporates","pid=23","w=0.9","jurisdiction_code split by '_' → second part uppercased: 'us_fl'→'FL'")],"rule":"Shown per filing card. Format: 2-letter state code. EntityJurisdictionCell.tsx maps foreign_domestic to Domestic(Primary) or Foreign(Secondary) badge — 'Primary' is Worth's label, NOT Middesk's.","storage":["Within sos_filings array: state field"],"null_cause":"N/A if registration_state absent from SoS record (uncommon).","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/components/BusinessRegistrationTab/EntityJurisdictionCell.tsx",1,35,"Domestic/Foreign + Primary/Secondary badges"),"sql":"-- Fetch raw value text and parse in Python (see Python snippet)\nSELECT name, value, received_at\nFROM rds_warehouse_public.facts\nWHERE business_id = 'YOUR-BUSINESS-UUID-HERE'\n  AND name = 'fact_name';"},
             "sos_filings.value[n].filing_date": {"label":"SoS Registration Date","fact":"sos_filings[n].filing_date","api":"/facts/business/:id/kyb","editable":False,"tags":["🔒 Read-Only","ISO date → MM-DD-YYYY"],"sources":[("Middesk","pid=16","w=2.0","registrations[n].registration_date — ISO date string from SoS database"),("OpenCorporates","pid=23","w=0.9","incorporation_date from OC record")],"rule":"Formatted by convertToLocalDate(new Date(sos.filing_date), 'MM-DD-YYYY') in index.tsx L300. useBusinessRegistrationTabDetails.tsx: formatSourceDate() for display.","storage":["Within sos_filings array: filing_date field per filing"],"null_cause":"N/A if date absent from SoS registry record. Shows 'N/A' for that specific field.","badges":[],"react_src":("ADMIN_PORTAL","microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/hooks/BusinessRegistrationTab/useBusinessRegistrationTabDetails.tsx",163,175,"Registration Date row"),"sql":"-- Fetch raw value text and parse in Python (see Python snippet)\nSELECT name, value, received_at\nFROM rds_warehouse_public.facts\nWHERE business_id = 'YOUR-BUSINESS-UUID-HERE'\n  AND name = 'fact_name';"},
@@ -1668,20 +1670,20 @@ rs = psycopg2.connect(
         st.markdown("### ✅ Complete ready-to-run queries (using confirmed column names)")
 
         card("⚠️ <b>Confirmed working pattern:</b> The <code>value</code> column is stored as <code>character varying</code> (text JSON). "
-             "Use <code>SELECT name, value, received_at</code> to fetch the raw text, then parse with <code>json_extract_path_text(value::json, 'key')</code> or "
+             "Use <code>SELECT name, value, received_at</code> to fetch the raw text, then parse with <code>JSON_EXTRACT_PATH_TEXT(value, 'key')</code> or "
              "parse in Python with <code>json.loads(value_text)</code>. "
              "Never use <code>-&gt;&gt;</code> or <code>-&gt;</code> operators directly — they require native jsonb type.", "card-amber")
 
         st.markdown("#### Query 1 — Full KYB facts for one business (PostgreSQL — CONFIRMED WORKING)")
         st.code("""-- CONFIRMED WORKING — replace UUID with your business_id
--- value column is character varying (text JSON) — use json_extract_path_text()
+-- value column is varchar (Redshift) — use JSON_EXTRACT_PATH_TEXT(value, 'key') — NO cast
 
 SELECT
     name,
-    json_extract_path_text(value::json, 'value')                AS fact_value,
-    json_extract_path_text(value::json, 'source', 'platformId') AS winning_pid,
-    json_extract_path_text(value::json, 'source', 'confidence') AS confidence,
-    json_extract_path_text(value::json, 'override', 'value')    AS analyst_override,
+    JSON_EXTRACT_PATH_TEXT(value, 'value')                AS fact_value,
+    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS winning_pid,
+    JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') AS confidence,
+    JSON_EXTRACT_PATH_TEXT(value, 'override', 'value')    AS analyst_override,
     received_at
 FROM rds_warehouse_public.facts
 WHERE business_id = 'YOUR-BUSINESS-UUID-HERE'  -- replace
@@ -1842,10 +1844,10 @@ rs = psycopg2.connect(
 
 # 1. Winning NAICS from Pipeline A (PostgreSQL facts table)
 SQL_FACTS = (
-    "SELECT name, json_extract_path_text(value::json, 'value') AS value, "
-    "json_extract_path_text(value::json, 'source', 'platformId') AS winning_pid, "
-    "json_extract_path_text(value::json, 'source', 'confidence') AS confidence, "
-    "json_extract_path_text(value::json, 'override', 'value') AS analyst_override "
+    "SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') AS value, "
+    "JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS winning_pid, "
+    "JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') AS confidence, "
+    "JSON_EXTRACT_PATH_TEXT(value, 'override', 'value') AS analyst_override "
     "FROM rds_warehouse_public.facts "
     "WHERE business_id = %(bid)s "
     "AND name IN ('naics_code','mcc_code','mcc_description','industry','business_name','legal_name') "
@@ -2018,25 +2020,28 @@ CRITICAL FACTS from source code:
 RULES:
 1. ALWAYS cite [FILE: path L123-L145] for every claim.
 2. For screenshot analysis: identify every field, badge, card shown.
-3. ALWAYS provide SQL to verify data — use ONLY these confirmed-working patterns:
+3. ALWAYS provide SQL — use ONLY these CONFIRMED-WORKING patterns (tested on production):
 
-   CONFIRMED WORKING (tested on production RDS):
-   -- The value column is character varying (text), NOT native jsonb.
-   -- NEVER use -> or ->> operators directly — they fail with 'operator does not exist'.
-   -- USE json_extract_path_text() which works on varchar JSON columns.
+   THE DATABASE IS AMAZON REDSHIFT (not PostgreSQL).
+   ✅ WORKS: SELECT name, value, received_at FROM rds_warehouse_public.facts WHERE business_id='uuid' AND name='fact_name'
+   ✅ WORKS: JSON_EXTRACT_PATH_TEXT(value, 'key')  — Redshift built-in, works on varchar, NO cast needed
+   ✅ WORKS: JSON_EXTRACT_PATH_TEXT(value, 'key1', 'key2')  — nested extraction
+   ❌ FAILS: value::json  →  ERROR: type "json" does not exist
+   ❌ FAILS: value->>'key'  →  ERROR: operator does not exist: character varying ->>
+   ❌ FAILS: value->'key'  →  same error
 
    Pattern for any fact:
      SELECT name, received_at FROM rds_warehouse_public.facts
-     WHERE business_id = 'your-uuid-here' AND name = 'fact_name';
+     WHERE business_id = 'YOUR-BUSINESS-UUID-HERE' AND name = 'fact_name';
 
    Extract the value:
      SELECT name,
-            json_extract_path_text(value::json, 'value')                AS fact_value,
-            json_extract_path_text(value::json, 'source', 'platformId') AS winning_pid,
-            json_extract_path_text(value::json, 'source', 'confidence') AS confidence,
-            json_extract_path_text(value::json, 'override', 'value')    AS analyst_override
+            JSON_EXTRACT_PATH_TEXT(value, 'value')                AS fact_value,
+            JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS winning_pid,
+            JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') AS confidence,
+            JSON_EXTRACT_PATH_TEXT(value, 'override', 'value')    AS analyst_override
      FROM rds_warehouse_public.facts
-     WHERE business_id = 'your-uuid-here' AND name = 'fact_name';
+     WHERE business_id = 'YOUR-BUSINESS-UUID-HERE' AND name = 'fact_name';
 
    For array facts (sos_filings, addresses, people):
      SELECT name, value FROM rds_warehouse_public.facts
