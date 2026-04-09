@@ -1,0 +1,270 @@
+name: Sync Private Source Repos
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Every Monday 6am UTC
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why are you syncing? (optional)'
+        required: false
+        default: 'manual sync'
+
+jobs:
+  sync-sources:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Industry-Classification repo
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up SSH for all private repos
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          # Write each deploy key as a named file
+          echo "${{ secrets.INTEGRATION_SERVICE_DEPLOY_KEY }}"  > ~/.ssh/key_integration_service  && chmod 600 ~/.ssh/key_integration_service
+          echo "${{ secrets.MICROSITES_DEPLOY_KEY }}"           > ~/.ssh/key_microsites           && chmod 600 ~/.ssh/key_microsites
+          echo "${{ secrets.CASE_SERVICE_DEPLOY_KEY }}"         > ~/.ssh/key_case_service         && chmod 600 ~/.ssh/key_case_service
+          echo "${{ secrets.WAREHOUSE_SERVICE_DEPLOY_KEY }}"    > ~/.ssh/key_warehouse_service    && chmod 600 ~/.ssh/key_warehouse_service
+          echo "${{ secrets.MANUAL_SCORE_SERVICE_DEPLOY_KEY }}" > ~/.ssh/key_manual_score_service && chmod 600 ~/.ssh/key_manual_score_service
+          echo "${{ secrets.WORTHSCORE_MODEL_DEPLOY_KEY }}"     > ~/.ssh/key_worthscore_model     && chmod 600 ~/.ssh/key_worthscore_model
+
+          # SSH config: map each host alias to its key
+          cat >> ~/.ssh/config << 'EOF'
+          Host github-integration-service
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_integration_service
+            StrictHostKeyChecking no
+
+          Host github-microsites
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_microsites
+            StrictHostKeyChecking no
+
+          Host github-case-service
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_case_service
+            StrictHostKeyChecking no
+
+          Host github-warehouse-service
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_warehouse_service
+            StrictHostKeyChecking no
+
+          Host github-manual-score-service
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_manual_score_service
+            StrictHostKeyChecking no
+
+          Host github-worthscore-model
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/key_worthscore_model
+            StrictHostKeyChecking no
+          EOF
+
+      # ── integration-service ─────────────────────────────────────────────────
+      # Why: contains the Fact Engine (rules.ts, sources.ts, kyb/index.ts,
+      #      aiNaicsEnrichment.ts, businessDetails/index.ts) — the core logic
+      #      that determines what data is shown in every KYB field.
+      - name: Sync integration-service (Fact Engine + AI enrichment)
+        run: |
+          git clone --depth=1 \
+            git@github-integration-service:joinworth/integration-service.git \
+            /tmp/integration-service
+
+          # Fact Engine — rules, sources, field definitions, AI enrichment
+          mkdir -p Admin-Portal-KYB-App/integration-service-main/lib/facts
+          mkdir -p Admin-Portal-KYB-App/integration-service-main/lib/aiEnrichment
+          mkdir -p Admin-Portal-KYB-App/integration-service-main/src/messaging/kafka/consumers/handlers
+          mkdir -p Admin-Portal-KYB-App/integration-service-main/src/api/v1/modules/facts
+
+          rsync -av --delete /tmp/integration-service/lib/facts/ \
+            Admin-Portal-KYB-App/integration-service-main/lib/facts/
+
+          rsync -av --delete /tmp/integration-service/lib/aiEnrichment/ \
+            Admin-Portal-KYB-App/integration-service-main/lib/aiEnrichment/
+
+          # Worth 360 Report handler (proves which facts appear in the report)
+          rsync -av /tmp/integration-service/src/messaging/kafka/consumers/handlers/report.ts \
+            Admin-Portal-KYB-App/integration-service-main/src/messaging/kafka/consumers/handlers/
+
+          # Facts API controller (KYB endpoint builder)
+          rsync -av /tmp/integration-service/src/api/v1/modules/facts/ \
+            Admin-Portal-KYB-App/integration-service-main/src/api/v1/modules/facts/
+
+          echo "✅ integration-service synced"
+
+      # ── microsites ──────────────────────────────────────────────────────────
+      # Why: contains the admin portal React components — every card, badge,
+      #      field config, and tab that the user sees in admin.joinworth.com.
+      - name: Sync microsites (Admin Portal frontend components)
+        run: |
+          git clone --depth=1 \
+            git@github-microsites:joinworth/microsites.git \
+            /tmp/microsites
+
+          # The case package = admin portal KYB tab components
+          mkdir -p Admin-Portal-KYB-App/microsites-main/packages/case/src
+
+          rsync -av --delete \
+            /tmp/microsites/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/ \
+            Admin-Portal-KYB-App/microsites-main/packages/case/src/page/Cases/CaseDetails/Tabs/KYB/
+
+          rsync -av --delete \
+            /tmp/microsites/packages/case/src/constants/ \
+            Admin-Portal-KYB-App/microsites-main/packages/case/src/constants/
+
+          rsync -av --delete \
+            /tmp/microsites/packages/case/src/services/ \
+            Admin-Portal-KYB-App/microsites-main/packages/case/src/services/
+
+          rsync -av --delete \
+            /tmp/microsites/packages/case/src/types/ \
+            Admin-Portal-KYB-App/microsites-main/packages/case/src/types/ 2>/dev/null || true
+
+          echo "✅ microsites synced"
+
+      # ── case-service ────────────────────────────────────────────────────────
+      # Why: builds the KYB API response (getCaseByIDQuery), joins NAICS/MCC
+      #      lookup tables, defines case status transitions.
+      - name: Sync case-service (case management API + DB schema)
+        run: |
+          git clone --depth=1 \
+            git@github-case-service:joinworth/case-service.git \
+            /tmp/case-service
+
+          mkdir -p Admin-Portal-KYB-App/case-service-main/src/api/v1/modules
+
+          rsync -av --delete \
+            /tmp/case-service/src/api/v1/modules/case-management/ \
+            Admin-Portal-KYB-App/case-service-main/src/api/v1/modules/case-management/
+
+          rsync -av --delete \
+            /tmp/case-service/src/api/v1/modules/businesses/ \
+            Admin-Portal-KYB-App/case-service-main/src/api/v1/modules/businesses/
+
+          echo "✅ case-service synced"
+
+      # ── warehouse-service ───────────────────────────────────────────────────
+      # Why: contains Pipeline B SQL (customer_table.sql — the ZI vs EFX
+      #      winner-takes-all query) and the facts DB model.
+      - name: Sync warehouse-service (Pipeline B SQL + facts model)
+        run: |
+          git clone --depth=1 \
+            git@github-warehouse-service:joinworth/warehouse-service.git \
+            /tmp/warehouse-service
+
+          mkdir -p Admin-Portal-KYB-App/warehouse-service-main/datapooler/adapters/redshift/customer_file/tables
+          mkdir -p Admin-Portal-KYB-App/warehouse-service-main/datapooler/adapters/redshift/customer_file/views
+          mkdir -p Admin-Portal-KYB-App/warehouse-service-main/datapooler/adapters/db/models
+
+          rsync -av \
+            /tmp/warehouse-service/datapooler/adapters/redshift/customer_file/tables/ \
+            Admin-Portal-KYB-App/warehouse-service-main/datapooler/adapters/redshift/customer_file/tables/ 2>/dev/null || \
+          rsync -av \
+            /tmp/warehouse-service/datapooler/ \
+            Admin-Portal-KYB-App/warehouse-service-main/datapooler/
+
+          rsync -av \
+            /tmp/warehouse-service/datapooler/adapters/db/models/ \
+            Admin-Portal-KYB-App/warehouse-service-main/datapooler/adapters/db/models/ 2>/dev/null || true
+
+          echo "✅ warehouse-service synced"
+
+      # ── manual-score-service ────────────────────────────────────────────────
+      # Why: handles analyst manual overrides of score components — relevant
+      #      for understanding how analyst actions affect the Worth Score.
+      - name: Sync manual-score-service (analyst override logic)
+        run: |
+          git clone --depth=1 \
+            git@github-manual-score-service:joinworth/manual-score-service.git \
+            /tmp/manual-score-service
+
+          mkdir -p Admin-Portal-KYB-App/manual-score-service-main/src
+
+          rsync -av --delete /tmp/manual-score-service/src/ \
+            Admin-Portal-KYB-App/manual-score-service-main/src/
+
+          echo "✅ manual-score-service synced"
+
+      # ── worthscore-model ────────────────────────────────────────────────────
+      # Why: the ML model that computes the Worth Score (Base score + category
+      #      contributions shown in the waterfall chart). Understanding the
+      #      features helps explain why a business received a specific score.
+      - name: Sync worthscore-model (Worth Score ML model)
+        run: |
+          git clone --depth=1 \
+            git@github-worthscore-model:joinworth/worthscore-model.git \
+            /tmp/worthscore-model
+
+          mkdir -p Admin-Portal-KYB-App/worthscore-model-main
+
+          # Sync everything except large binary model files
+          rsync -av --delete \
+            --exclude='*.pkl' \
+            --exclude='*.joblib' \
+            --exclude='*.h5' \
+            --exclude='*.pt' \
+            --exclude='*.bin' \
+            --exclude='__pycache__/' \
+            --exclude='node_modules/' \
+            /tmp/worthscore-model/ \
+            Admin-Portal-KYB-App/worthscore-model-main/
+
+          echo "✅ worthscore-model synced"
+
+      # ── Rebuild RAG index ───────────────────────────────────────────────────
+      - name: Set up Python for RAG rebuild
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Rebuild RAG index from updated source files
+        run: |
+          cd Admin-Portal-KYB-App
+          # Update kyb_rag_builder.py to point at the synced local paths
+          python3 kyb_rag_builder.py
+          echo "✅ RAG index rebuilt"
+
+      # ── Commit and push ─────────────────────────────────────────────────────
+      - name: Check for changes
+        id: changes
+        run: |
+          git diff --quiet && echo "changed=false" >> $GITHUB_OUTPUT || echo "changed=true" >> $GITHUB_OUTPUT
+          echo "Changed files:"
+          git diff --name-only | head -30
+
+      - name: Commit and push updated sources + RAG index
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add Admin-Portal-KYB-App/
+          git commit -m "auto: sync private source repos $(date +%Y-%m-%d)
+
+          Repos synced:
+          - joinworth/integration-service  (Fact Engine, rules, AI enrichment)
+          - joinworth/microsites            (Admin Portal KYB React components)
+          - joinworth/case-service          (KYB API, case management)
+          - joinworth/warehouse-service     (Pipeline B SQL)
+          - joinworth/manual-score-service  (analyst score overrides)
+          - joinworth/worthscore-model      (Worth Score ML model)
+
+          Triggered by: ${{ github.event_name }}${{ github.event.inputs.reason && format(' — {0}', github.event.inputs.reason) || '' }}"
+          git push
+
+      - name: No changes detected
+        if: steps.changes.outputs.changed == 'false'
+        run: echo "✅ All source repos are already up to date — no changes needed"
