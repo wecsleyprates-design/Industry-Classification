@@ -128,9 +128,12 @@ def connect(host, port, dbname, user, password):
     try:
         import psycopg2
         conn = psycopg2.connect(
-            host=host, port=int(port), dbname=dbname,
-            user=user, password=password,
-            sslmode="require", connect_timeout=10,
+            dbname=dbname,
+            user=user,
+            password=password,
+            host=host,
+            port=int(port),
+            connect_timeout=10,
         )
         return conn
     except Exception as e:
@@ -354,38 +357,35 @@ def build_confirmed_fallback():
 
 def main():
     print("=" * 60)
-    print("Worth AI — Dynamic Redshift / PostgreSQL Schema Sync")
+    print("Worth AI — Dynamic Redshift Schema Sync")
     print("=" * 60)
 
-    env = os.environ
-    host    = env.get("REDSHIFT_HOST")
-    user    = env.get("REDSHIFT_USER")
-    password= env.get("REDSHIFT_PASSWORD")
-    dbname  = env.get("REDSHIFT_DBNAME")
+    # Credentials mirror establish_redshift_conn_psycopg2() exactly.
+    # Env vars override the defaults — useful for CI/CD where secrets are injected.
+    host     = os.getenv("REDSHIFT_HOST",
+                "worthai-services-redshift-endpoint-k9sdhv2ja6lgojidri87"
+                ".808338307022.us-east-1.redshift-serverless.amazonaws.com")
+    port     = os.getenv("REDSHIFT_PORT",     "5439")
+    dbname   = os.getenv("REDSHIFT_DB",       "dev")
+    user     = os.getenv("REDSHIFT_USER",     "readonly_all_access")
+    password = os.getenv("REDSHIFT_PASSWORD", "Y7&.D3!09WvT4/nSqXS2>qbO")
 
-    has_creds = all([host, user, password, dbname])
+    # Redshift Serverless exposes a single endpoint that serves every schema
+    # (datascience, zoominfo, warehouse, rds_warehouse_public, etc.) on port 5439.
+    # There is no separate PostgreSQL host — one connection covers everything.
+    print(f"\n🔌 Connecting to {host}:{port}/{dbname} as {user} ...")
+    conn = connect(host, port, dbname, user, password)
 
-    pg_conn = rs_conn = None
-    if has_creds:
-        pg_host = env.get("REDSHIFT_HOST_PG", host)
-        pg_port = env.get("REDSHIFT_PORT_PG", "5432")
-        rs_host = env.get("REDSHIFT_HOST_RS", host)
-        rs_port = env.get("REDSHIFT_PORT_RS", "5439")
-        print(f"\n🔌 Connecting to PostgreSQL {pg_host}:{pg_port}/{dbname} ...")
-        pg_conn = connect(pg_host, pg_port, dbname, user, password)
-        print(f"🔌 Connecting to Redshift   {rs_host}:{rs_port}/{dbname} ...")
-        rs_conn = connect(rs_host, rs_port, dbname, user, password)
+    # We reuse the same connection object for both "PG-style" and "RS-style"
+    # schema groups — the cluster honours information_schema for all of them.
+    pg_conn = rs_conn = conn
+    if conn:
+        print("   ✅ Connected")
     else:
-        missing = [k for k in ["REDSHIFT_HOST","REDSHIFT_USER","REDSHIFT_PASSWORD","REDSHIFT_DBNAME"]
-                   if not env.get(k)]
-        print(f"\n⚠️  Missing env vars: {', '.join(missing)}")
-        print("Falling back to confirmed schemas (no live connection).")
-        print("To enable live discovery, set:")
-        print("  export REDSHIFT_HOST='...'  REDSHIFT_USER='...'")
-        print("  export REDSHIFT_PASSWORD='...'  REDSHIFT_DBNAME='...'")
+        print("   ⚠️  Connection failed — falling back to confirmed schemas.")
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    source_label = "live information_schema.columns" if (pg_conn or rs_conn) else "confirmed schemas (no live connection)"
+    source_label = "live information_schema.columns" if conn else "confirmed schemas (no live connection)"
 
     lines = [
         f"# Worth AI — Redshift & PostgreSQL Schema Reference",
