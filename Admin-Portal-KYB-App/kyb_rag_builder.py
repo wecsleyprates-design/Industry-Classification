@@ -206,12 +206,83 @@ SOURCE_FILES = [
      "Status values: online(success), offline(error), unknown(secondary)."),
 ]
 
+# ── Local documentation files (auto-generated or static) ──────────────────────
+# These are always present in the repo and are always indexed.
+# Source: SELF = file lives directly in Admin-Portal-KYB-App/
+LOCAL_DOCS = [
+    ("api-docs/redshift-schema.md",
+     "SELF",
+     "Worth AI Redshift & PostgreSQL schema reference — ALL table column names, types, row counts. "
+     "rds_warehouse_public.facts: (id, business_id, name, value VARCHAR, received_at). "
+     "datascience.customer_files: primary_naics_code, mcc_code, zi_match_confidence, efx_match_confidence, worth_score. "
+     "zoominfo.comp_standard_global: zi_c_naics6, zi_c_employees, zi_c_revenue, zi_c_url, zi_c_name. "
+     "warehouse.equifax_us_latest: efx_primnaicscode, efx_corpempcnt, efx_mbe, efx_wbe, efx_vet. "
+     "Confirmed SQL pattern: SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value FROM rds_warehouse_public.facts WHERE business_id='uuid' AND name='naics_code'. "
+     "similarity_index 0-55; confidence = similarity_index / 55.0. "
+     "Auto-updated by: python3 sync_redshift_schema.py (run after schema changes)."),
+    ("api-docs/redshift-schema.md",
+     "SELF",
+     "Redshift JSON extraction — CONFIRMED patterns. "
+     "WORKS: JSON_EXTRACT_PATH_TEXT(value, 'key') — no cast needed, value is varchar. "
+     "FAILS: value::jsonb (Redshift varchar cannot be cast to jsonb). "
+     "FAILS: value->>'key' (operator ->> requires jsonb, not varchar). "
+     "WORKS in Python: json.loads(value_str).get('value') after fetching with psycopg2. "
+     "For nested keys: JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId'). "
+     "For arrays (alternatives[]): fetch raw value, parse in Python with json.loads(). "
+     "Platform IDs: 16=Middesk, 23=OC, 24=ZoomInfo, 17=Equifax, 38=Trulioo, 31=AI, 22=SERP, 40=Plaid."),
+]
+
 CHUNK_SIZE = 30
 CHUNK_OVERLAP = 5
+
+SELF_ROOT = os.path.dirname(__file__)
 
 
 def build_index():
     chunks = []
+
+    # Index local documentation files first (always available)
+    for rel_path, source_type, description in LOCAL_DOCS:
+        full_path = os.path.join(SELF_ROOT, rel_path)
+        if not os.path.exists(full_path):
+            print(f"  SKIP (not found): {rel_path}")
+            continue
+        try:
+            with open(full_path, encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+        except Exception as e:
+            print(f"  ERROR {rel_path}: {e}")
+            continue
+        total = len(lines)
+        step = CHUNK_SIZE - CHUNK_OVERLAP
+        for start in range(0, total, step):
+            end = min(start + CHUNK_SIZE, total)
+            text = "".join(lines[start:end]).strip()
+            if not text or len(text) < 20:
+                continue
+            split_words = re.findall(r"[a-zA-Z_][a-zA-Z0-9_]{2,}", text.lower())
+            compounds = re.findall(r"[a-z][a-zA-Z0-9]*(?:_[a-zA-Z0-9]+)+", text)
+            all_terms = split_words + [c.lower() for c in compounds]
+            tf = {}
+            for w in all_terms:
+                tf[w] = tf.get(w, 0) + 1
+            # Extra weight for compound terms (column names, fact names)
+            for c in compounds:
+                cl = c.lower()
+                tf[cl] = tf.get(cl, 0) + 5
+            chunks.append({
+                "id": len(chunks),
+                "source_type": source_type,
+                "path": rel_path,
+                "line_start": start + 1,
+                "line_end": end,
+                "description": description,
+                "text": text[:3000],
+                "tf": tf,
+            })
+        print(f"  {rel_path}: {total} lines → {len([c for c in chunks if c['path']==rel_path])} chunks")
+
+    # Index remote source files (from cloned repos)
     for rel_path, source_type, description in SOURCE_FILES:
         if source_type == "ADMIN_PORTAL":
             full_path = os.path.join(ADMIN_PORTAL_ROOT, rel_path)

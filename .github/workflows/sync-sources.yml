@@ -231,10 +231,25 @@ jobs:
         with:
           python-version: '3.11'
 
+      # Sync Redshift schema from confirmed columns embedded in the script.
+      # When REDSHIFT_* secrets are set, it connects live and fetches real
+      # information_schema.columns data instead.
+      - name: Refresh Redshift schema document
+        env:
+          REDSHIFT_HOST:     ${{ secrets.REDSHIFT_HOST }}
+          REDSHIFT_DBNAME:   ${{ secrets.REDSHIFT_DBNAME }}
+          REDSHIFT_USER:     ${{ secrets.REDSHIFT_USER }}
+          REDSHIFT_PASSWORD: ${{ secrets.REDSHIFT_PASSWORD }}
+          REDSHIFT_PORT_RS:  ${{ secrets.REDSHIFT_PORT_RS }}
+        run: |
+          pip install psycopg2-binary --quiet
+          cd Admin-Portal-KYB-App
+          python3 sync_redshift_schema.py
+          echo "✅ Redshift schema document refreshed"
+
       - name: Rebuild RAG index from updated source files
         run: |
           cd Admin-Portal-KYB-App
-          # Update kyb_rag_builder.py to point at the synced local paths
           python3 kyb_rag_builder.py
           echo "✅ RAG index rebuilt"
 
