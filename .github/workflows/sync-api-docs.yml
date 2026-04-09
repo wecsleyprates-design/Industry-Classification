@@ -1,0 +1,60 @@
+name: Sync Worth AI API Docs
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Every Monday at 6am UTC — catches weekend releases
+  workflow_dispatch:        # Manual trigger button in GitHub Actions UI
+    inputs:
+      reason:
+        description: 'Why are you syncing? (optional)'
+        required: false
+        default: 'manual sync'
+
+jobs:
+  sync-api-docs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # needed to push the updated docs
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests --quiet
+
+      - name: Sync Worth AI API docs from docs.worthai.com
+        run: |
+          cd Admin-Portal-KYB-App
+          python3 sync_api_docs.py
+
+      - name: Check for changes
+        id: changes
+        run: |
+          git diff --quiet && echo "changed=false" >> $GITHUB_OUTPUT || echo "changed=true" >> $GITHUB_OUTPUT
+          echo "Files changed:"
+          git diff --name-only | head -20
+
+      - name: Commit and push if docs changed
+        if: steps.changes.outputs.changed == 'true'
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add Admin-Portal-KYB-App/api-docs/ Admin-Portal-KYB-App/kyb_rag_index.json
+          git commit -m "auto: sync Worth AI API docs $(date +%Y-%m-%d)
+
+          Source: https://docs.worthai.com/llms.txt
+          Pages synced: $(find Admin-Portal-KYB-App/api-docs -name '*.md' | wc -l)
+          Triggered by: ${{ github.event_name }}${{ github.event.inputs.reason && format(' — {0}', github.event.inputs.reason) || '' }}"
+          git push
+
+      - name: No changes detected
+        if: steps.changes.outputs.changed == 'false'
+        run: echo "✅ API docs are already up to date — no changes needed"

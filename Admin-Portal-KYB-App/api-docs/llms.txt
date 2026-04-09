@@ -1,0 +1,96 @@
+# Worth
+
+## Docs
+
+- [Add Business](https://docs.worthai.com/api-reference/add-or-update-business/add-business.md): Create a single business record based on the provided details.
+- [Update Business](https://docs.worthai.com/api-reference/add-or-update-business/update-business.md): Update an existing business record based on the provided details. One of businessID or external_id MUST be provided to identify a business to update.
+- [Create Customer User](https://docs.worthai.com/api-reference/auth/customers/create-customer-user.md): Allows Customer to create a new user under a specific customer.
+- [Customer User Resend Invitation](https://docs.worthai.com/api-reference/auth/customers/customer-user-resend-invitation.md): Allows customer with proper permissions to resend an invite to a specific user associated with a customer.
+- [Get Customer Subroles](https://docs.worthai.com/api-reference/auth/customers/get-customer-subroles.md): Fetches a list of subroles associated with a specific customer. Accessible by respective Customer.
+- [Get Customer User By ID](https://docs.worthai.com/api-reference/auth/customers/get-customer-user-by-id.md): Fetch details of a specific user associated with a customer.
+- [Get Customer Users](https://docs.worthai.com/api-reference/auth/customers/get-customer-users.md): Fetches a list of users associated with a specific customer. Accessible by respective Customer.
+- [Update Customer User By ID](https://docs.worthai.com/api-reference/auth/customers/update-customer-user-by-id.md): Update user details for a specific customer.
+- [Customer Logout](https://docs.worthai.com/api-reference/auth/sign-in/customer-logout.md): Logs out a customer user by invalidating their session or token.
+- [Customer Refresh Token](https://docs.worthai.com/api-reference/auth/sign-in/customer-refresh-token.md): Refreshes the customer's authentication token to maintain session validity.
+- [Customer Sign In](https://docs.worthai.com/api-reference/auth/sign-in/customer-sign-in.md): This endpoint allows customers to sign in with their email and password.
+- [Forgot Password Init](https://docs.worthai.com/api-reference/auth/sign-in/forgot-password-init.md): Allows an admin to request a password reset link via email.
+- [Reset Password](https://docs.worthai.com/api-reference/auth/sign-in/reset-password.md): Allows a user to reset their password using a valid reset token.
+- [Accept Invitation](https://docs.worthai.com/api-reference/auth/users/accept-invitation.md): Allows a user to accept an invitation using an invite token.
+- [Adding Custom Fields with POST Add Business and PATCH Update Business](https://docs.worthai.com/api-reference/case/businesses/add-update-business-custom-fields.md)
+- [Get Business Cases](https://docs.worthai.com/api-reference/case/businesses/get-business-cases.md): Retrieve details about cases associated with a particular customerID and businessID.
+- [Get Business By ID](https://docs.worthai.com/api-reference/case/businesses/get-business-details.md): Retrieve details for a particular business associated with the businessID provided
+- [Get Business Custom Fields](https://docs.worthai.com/api-reference/case/businesses/get-custom-fields.md): Retrieves custom fields associated with a specified business ID. Custom fields must be enabled to utilize this endpoint. To confirm if you have custom fields enabled, please reach out to your Customer Success representative.
+- [Get Customer Businesses](https://docs.worthai.com/api-reference/case/businesses/get-customer-businesses.md): Get all businesses associated with a particular customerID.
+- [Reverse NPI Lookup with POST Add Business](https://docs.worthai.com/api-reference/case/businesses/npi-reverse-lookup.md)
+- [Get Customer Case By ID](https://docs.worthai.com/api-reference/case/cases/get-customer-case-by-id.md): Retrieve details about a particular case associated with the given customerID and caseID.
+- [Get Customer Cases](https://docs.worthai.com/api-reference/case/cases/get-customer-cases.md): Retrieve all cases associated with a particular customerID.
+- [Send Business Invite](https://docs.worthai.com/api-reference/case/invites/send-business-invite.md): Send an invitation to onboard a business and its applicants. You can either create a new business with the invite or reference an existing business. At least one applicant must be provided via the `applicants` array. Applicant email addresses must not use disposable email domains.
+- [Get Related Businesses](https://docs.worthai.com/api-reference/case/related-businesses/get-related-businesses.md): Retrieves a list of businesses related to the one specified by the given businessID.
+- [Get Reports](https://docs.worthai.com/api-reference/integration/accounting/get-reports.md): Retrieve reports (balance sheet, income statement, or cash flow) associated with a particular business_id.
+- [Banking Information](https://docs.worthai.com/api-reference/integration/banking/banking-information.md): Retrieve banking information for a particular business.
+- [Bankruptcies Judgements & Liens (BJL)](https://docs.worthai.com/api-reference/integration/facts/bankruptcies-judgements-&-liens-bjl.md): Retrieve bankruptcies, judgements, and liens associated with a business
+- [KYB](https://docs.worthai.com/api-reference/integration/facts/kyb.md): Retrieves comprehensive 'Know Your Business' verification details for a given business identifier, including legal, formation, ownership, address, and match data from multiple sources.
+- [Reviews](https://docs.worthai.com/api-reference/integration/facts/reviews.md): Retrieves 'Business Reviews' for a given business identifier from multiple sources across several review platforms.
+- [Adverse Media](https://docs.worthai.com/api-reference/integration/public-records/adverse-media.md): Retrieve adverse media associated with a particular businessID
+- [Public Records](https://docs.worthai.com/api-reference/integration/public-records/public-records.md): Retrieve public records associated with a particular businessID
+- [Tax Filing](https://docs.worthai.com/api-reference/integration/taxation/tax-filing.md): Retrieve annualized tax data associated with a particular businessID
+- [Get Website Data](https://docs.worthai.com/api-reference/integration/verification/get-business-website-data.md): Fetch enriched business website data, including domain details, SSL status, and associated metadata.
+- [Get NPI Details](https://docs.worthai.com/api-reference/integration/verification/get-npi-details.md): Fetch NPI healthcare provider details associated with a business
+- [Get Verification Details](https://docs.worthai.com/api-reference/integration/verification/get-verification-details.md): Retrieves detailed verification results for a business, including submitted values, matched sources, and confidence levels.
+- [KYC Ownership Verification](https://docs.worthai.com/api-reference/integration/verification/kyc-ownership-verification.md): Know Your Customer: returns a list of individuals with ownership or control, including their submitted personal details and verification results.
+- [Get Business Score](https://docs.worthai.com/api-reference/score/score/get-business-score.md): Retrieve the Worth score and detailed score breakdown for the specified business entity.
+- [Check Worth 360 Report Generation Status](https://docs.worthai.com/api-reference/worth-360-report/check-worth-360-report-generation-status.md)
+- [Download Worth 360 Report](https://docs.worthai.com/api-reference/worth-360-report/download-worth-360-report.md)
+- [Generate Worth 360 Report Using Customer](https://docs.worthai.com/api-reference/worth-360-report/generate-worth-360-report-using-customer.md)
+- [Get Worth 360 Report Details](https://docs.worthai.com/api-reference/worth-360-report/get-worth-360-report-details.md): ### Get Report by ID
+- [Add Business](https://docs.worthai.com/getting-started/add-business.md): The following steps are intended to help you add a business to the customer portal.  This step is needed in order to generate a business ID. This business ID will be used to make other API calls such as KYB and KYC as it serves as the unique identifier of each business that is onboarded.
+- [Banking](https://docs.worthai.com/getting-started/banking.md): When the [GET Banking Info](https://docs.worthai.com/api-reference/integration/banking/banking-information) call is made, two background processes are triggered: **verification** and **authentication**. These work together to confirm that a bank account is real, active, and that the person or busine…
+- [KYB/KYC](https://docs.worthai.com/getting-started/kyb-kyc.md)
+- [Overview](https://docs.worthai.com/getting-started/overview.md): Hello and welcome to Worth API!  Here at Worth we want to ensure a seamless onboarding experience and have created this guide for you and your businesses.  This guide will show you how to get started using the Worth API documentation.  Should you have any questions please feel free to reach out to a…
+- [Introduction](https://docs.worthai.com/introduction.md): Welcome to the official API documentation for Worth! This documentation serves as a comprehensive guide to help you understand and integrate with our API effectively.
+- [Sample API Onboarding Flow Overview](https://docs.worthai.com/onboarding-sdk/api-overview.md): Complete guide to the business invitation and onboarding process
+- [API Reference](https://docs.worthai.com/onboarding-sdk/api-reference.md)
+- [Sample Implementation API - Detailed Sequence Diagram](https://docs.worthai.com/onboarding-sdk/api-sequence-diagram.md): Complete sequence diagram showing all API interactions in the onboarding flow
+- [Sample Implementation API - Step by step breakdown](https://docs.worthai.com/onboarding-sdk/api-step-by-step-breakdown.md): Detailed breakdown of each step in the API onboarding flow
+- [API Error Handling - Add Business Service](https://docs.worthai.com/onboarding-sdk/errors/add-business.md): Complete guide to handling errors for the POST /businesses/customers/:customerID endpoint
+- [API Error Handling - Sign In Service](https://docs.worthai.com/onboarding-sdk/errors/sign-in.md)
+- [Overview](https://docs.worthai.com/onboarding-sdk/overview.md)
+- [Instant onboarding](https://docs.worthai.com/use-cases/onboarding/instant-onboarding.md)
+- [Invite business](https://docs.worthai.com/use-cases/onboarding/invite-business.md)
+- [Overview](https://docs.worthai.com/use-cases/onboarding/overview.md)
+- [Overview](https://docs.worthai.com/use-cases/pre-filling-data/overview.md): To reduce manual data entry and speed up onboarding, clients can use our **KYB** (Know Your Business) and **KYC** (Know Your Customer) endpoints to pre-fill relevant business and ownership details directly into their form or platform. This helps streamline the review process, improves accuracy, and…
+- [Step 1 - Customer Sign In](https://docs.worthai.com/use-cases/pre-filling-data/step-1-customer-sign-in.md)
+- [Step 2 - Add Business](https://docs.worthai.com/use-cases/pre-filling-data/step-2-add-business.md)
+- [Step 3 - KYB](https://docs.worthai.com/use-cases/pre-filling-data/step-3-kyb.md)
+- [Step 4 - KYC](https://docs.worthai.com/use-cases/pre-filling-data/step-4-kyc.md)
+- [Notes](https://docs.worthai.com/use-cases/pre-filling-data/step-final-notes.md)
+- [Overview](https://docs.worthai.com/use-cases/worth-360-report/overview.md)
+- [Process diagrams](https://docs.worthai.com/use-cases/worth-360-report/process-diagrams.md)
+- [Applicant](https://docs.worthai.com/webhooks/applicant.md): Sample payloads for Applicant webhook events
+- [Business](https://docs.worthai.com/webhooks/business.md): Sample payloads for Business webhook events
+- [Case](https://docs.worthai.com/webhooks/case.md): Sample payloads for Case webhook events
+- [Integration](https://docs.worthai.com/webhooks/integration.md): Sample payloads for Integration webhook events
+- [Onboarding](https://docs.worthai.com/webhooks/onboarding.md): Sample payloads for Onboarding webhook events
+- [Payment Processor](https://docs.worthai.com/webhooks/payment-processor.md): Sample payloads for Payment Processor webhook events
+- [Risk](https://docs.worthai.com/webhooks/risk.md): Sample payloads for Risk webhook events
+- [Worth Score](https://docs.worthai.com/webhooks/score.md): Sample payloads for Worth Score webhook events
+- [About Webhooks](https://docs.worthai.com/webhooks/webhooks.md): Use webhooks to get notified about events related to the WorthAI flow such as Business, Applicant, and Worth Score.
+
+## OpenAPI Specs
+
+- [integration](https://docs.worthai.com/openapi/integration.json)
+- [business-details](https://docs.worthai.com/openapi/case-service/business-details.json)
+- [case](https://docs.worthai.com/openapi/case.json)
+- [get-patch-post-business](https://docs.worthai.com/openapi/case-service/get-patch-post-business.json)
+- [worth_360_report](https://docs.worthai.com/openapi/worth_360_report.json)
+- [get-kyb](https://docs.worthai.com/openapi/integration-service/get-kyb.json)
+- [send-business-invite](https://docs.worthai.com/openapi/case-service/send-business-invite.json)
+- [bulk](https://docs.worthai.com/openapi/bulk.json)
+- [personal_credit](https://docs.worthai.com/openapi/integration-service/personal_credit.json)
+- [auth](https://docs.worthai.com/openapi/auth.json)
+- [score](https://docs.worthai.com/openapi/score.json)
+- [manual-score](https://docs.worthai.com/openapi/manual-score.json)
+- [openapi](https://docs.worthai.com/api-reference/openapi.json)
+
+
+Built with [Mintlify](https://mintlify.com).

@@ -1,0 +1,19 @@
+<!-- Source: https://docs.worthai.com/use-cases/pre-filling-data/step-3-kyb.md -->
+# Step 3 - KYB
+
+> ## Documentation Index
+> Fetch the complete documentation index at: https://docs.worthai.com/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Step 3 - KYB
+
+### GET KYB – Business Verification Fields
+
+Once the Add Business route has been called, make the following **GET KYB** call to review business identity verification. This information can be used to enrich business data for pre-filling forms.
+
+```http  theme={null}
+GET /facts/business/{businessId}/kyb
+```
+
+
+Built with [Mintlify](https://mintlify.com).

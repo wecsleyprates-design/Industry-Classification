@@ -1,0 +1,316 @@
+{
+  "synced_at": "2026-04-09T18:24:45Z",
+  "source": "https://docs.worthai.com/llms.txt",
+  "total_pages": 73,
+  "total_specs": 13,
+  "synced_pages": 73,
+  "pages": [
+    {
+      "title": "Add Business",
+      "url": "https://docs.worthai.com/api-reference/add-or-update-business/add-business.md"
+    },
+    {
+      "title": "Update Business",
+      "url": "https://docs.worthai.com/api-reference/add-or-update-business/update-business.md"
+    },
+    {
+      "title": "Create Customer User",
+      "url": "https://docs.worthai.com/api-reference/auth/customers/create-customer-user.md"
+    },
+    {
+      "title": "Customer User Resend Invitation",
+      "url": "https://docs.worthai.com/api-reference/auth/customers/customer-user-resend-invitation.md"
+    },
+    {
+      "title": "Get Customer Subroles",
+      "url": "https://docs.worthai.com/api-reference/auth/customers/get-customer-subroles.md"
+    },
+    {
+      "title": "Get Customer User By ID",
+      "url": "https://docs.worthai.com/api-reference/auth/customers/get-customer-user-by-id.md"
+    },
+    {
+      "title": "Get Customer Users",
+      "url": "https://docs.worthai.com/api-reference/auth/customers/get-customer-users.md"
+    },
+    {
+      "title": "Update Customer User By ID",
+      "url": "https://docs.worthai.com/api-reference/auth/customers/update-customer-user-by-id.md"
+    },
+    {
+      "title": "Customer Logout",
+      "url": "https://docs.worthai.com/api-reference/auth/sign-in/customer-logout.md"
+    },
+    {
+      "title": "Customer Refresh Token",
+      "url": "https://docs.worthai.com/api-reference/auth/sign-in/customer-refresh-token.md"
+    },
+    {
+      "title": "Customer Sign In",
+      "url": "https://docs.worthai.com/api-reference/auth/sign-in/customer-sign-in.md"
+    },
+    {
+      "title": "Forgot Password Init",
+      "url": "https://docs.worthai.com/api-reference/auth/sign-in/forgot-password-init.md"
+    },
+    {
+      "title": "Reset Password",
+      "url": "https://docs.worthai.com/api-reference/auth/sign-in/reset-password.md"
+    },
+    {
+      "title": "Accept Invitation",
+      "url": "https://docs.worthai.com/api-reference/auth/users/accept-invitation.md"
+    },
+    {
+      "title": "Adding Custom Fields with POST Add Business and PATCH Update Business",
+      "url": "https://docs.worthai.com/api-reference/case/businesses/add-update-business-custom-fields.md"
+    },
+    {
+      "title": "Get Business Cases",
+      "url": "https://docs.worthai.com/api-reference/case/businesses/get-business-cases.md"
+    },
+    {
+      "title": "Get Business By ID",
+      "url": "https://docs.worthai.com/api-reference/case/businesses/get-business-details.md"
+    },
+    {
+      "title": "Get Business Custom Fields",
+      "url": "https://docs.worthai.com/api-reference/case/businesses/get-custom-fields.md"
+    },
+    {
+      "title": "Get Customer Businesses",
+      "url": "https://docs.worthai.com/api-reference/case/businesses/get-customer-businesses.md"
+    },
+    {
+      "title": "Reverse NPI Lookup with POST Add Business",
+      "url": "https://docs.worthai.com/api-reference/case/businesses/npi-reverse-lookup.md"
+    },
+    {
+      "title": "Get Customer Case By ID",
+      "url": "https://docs.worthai.com/api-reference/case/cases/get-customer-case-by-id.md"
+    },
+    {
+      "title": "Get Customer Cases",
+      "url": "https://docs.worthai.com/api-reference/case/cases/get-customer-cases.md"
+    },
+    {
+      "title": "Send Business Invite",
+      "url": "https://docs.worthai.com/api-reference/case/invites/send-business-invite.md"
+    },
+    {
+      "title": "Get Related Businesses",
+      "url": "https://docs.worthai.com/api-reference/case/related-businesses/get-related-businesses.md"
+    },
+    {
+      "title": "Get Reports",
+      "url": "https://docs.worthai.com/api-reference/integration/accounting/get-reports.md"
+    },
+    {
+      "title": "Banking Information",
+      "url": "https://docs.worthai.com/api-reference/integration/banking/banking-information.md"
+    },
+    {
+      "title": "Bankruptcies Judgements & Liens (BJL)",
+      "url": "https://docs.worthai.com/api-reference/integration/facts/bankruptcies-judgements-&-liens-bjl.md"
+    },
+    {
+      "title": "KYB",
+      "url": "https://docs.worthai.com/api-reference/integration/facts/kyb.md"
+    },
+    {
+      "title": "Reviews",
+      "url": "https://docs.worthai.com/api-reference/integration/facts/reviews.md"
+    },
+    {
+      "title": "Adverse Media",
+      "url": "https://docs.worthai.com/api-reference/integration/public-records/adverse-media.md"
+    },
+    {
+      "title": "Public Records",
+      "url": "https://docs.worthai.com/api-reference/integration/public-records/public-records.md"
+    },
+    {
+      "title": "Tax Filing",
+      "url": "https://docs.worthai.com/api-reference/integration/taxation/tax-filing.md"
+    },
+    {
+      "title": "Get Website Data",
+      "url": "https://docs.worthai.com/api-reference/integration/verification/get-business-website-data.md"
+    },
+    {
+      "title": "Get NPI Details",
+      "url": "https://docs.worthai.com/api-reference/integration/verification/get-npi-details.md"
+    },
+    {
+      "title": "Get Verification Details",
+      "url": "https://docs.worthai.com/api-reference/integration/verification/get-verification-details.md"
+    },
+    {
+      "title": "KYC Ownership Verification",
+      "url": "https://docs.worthai.com/api-reference/integration/verification/kyc-ownership-verification.md"
+    },
+    {
+      "title": "Get Business Score",
+      "url": "https://docs.worthai.com/api-reference/score/score/get-business-score.md"
+    },
+    {
+      "title": "Check Worth 360 Report Generation Status",
+      "url": "https://docs.worthai.com/api-reference/worth-360-report/check-worth-360-report-generation-status.md"
+    },
+    {
+      "title": "Download Worth 360 Report",
+      "url": "https://docs.worthai.com/api-reference/worth-360-report/download-worth-360-report.md"
+    },
+    {
+      "title": "Generate Worth 360 Report Using Customer",
+      "url": "https://docs.worthai.com/api-reference/worth-360-report/generate-worth-360-report-using-customer.md"
+    },
+    {
+      "title": "Get Worth 360 Report Details",
+      "url": "https://docs.worthai.com/api-reference/worth-360-report/get-worth-360-report-details.md"
+    },
+    {
+      "title": "Add Business",
+      "url": "https://docs.worthai.com/getting-started/add-business.md"
+    },
+    {
+      "title": "Banking",
+      "url": "https://docs.worthai.com/getting-started/banking.md"
+    },
+    {
+      "title": "KYB/KYC",
+      "url": "https://docs.worthai.com/getting-started/kyb-kyc.md"
+    },
+    {
+      "title": "Overview",
+      "url": "https://docs.worthai.com/getting-started/overview.md"
+    },
+    {
+      "title": "Introduction",
+      "url": "https://docs.worthai.com/introduction.md"
+    },
+    {
+      "title": "Sample API Onboarding Flow Overview",
+      "url": "https://docs.worthai.com/onboarding-sdk/api-overview.md"
+    },
+    {
+      "title": "API Reference",
+      "url": "https://docs.worthai.com/onboarding-sdk/api-reference.md"
+    },
+    {
+      "title": "Sample Implementation API - Detailed Sequence Diagram",
+      "url": "https://docs.worthai.com/onboarding-sdk/api-sequence-diagram.md"
+    },
+    {
+      "title": "Sample Implementation API - Step by step breakdown",
+      "url": "https://docs.worthai.com/onboarding-sdk/api-step-by-step-breakdown.md"
+    },
+    {
+      "title": "API Error Handling - Add Business Service",
+      "url": "https://docs.worthai.com/onboarding-sdk/errors/add-business.md"
+    },
+    {
+      "title": "API Error Handling - Sign In Service",
+      "url": "https://docs.worthai.com/onboarding-sdk/errors/sign-in.md"
+    },
+    {
+      "title": "Overview",
+      "url": "https://docs.worthai.com/onboarding-sdk/overview.md"
+    },
+    {
+      "title": "Instant onboarding",
+      "url": "https://docs.worthai.com/use-cases/onboarding/instant-onboarding.md"
+    },
+    {
+      "title": "Invite business",
+      "url": "https://docs.worthai.com/use-cases/onboarding/invite-business.md"
+    },
+    {
+      "title": "Overview",
+      "url": "https://docs.worthai.com/use-cases/onboarding/overview.md"
+    },
+    {
+      "title": "Overview",
+      "url": "https://docs.worthai.com/use-cases/pre-filling-data/overview.md"
+    },
+    {
+      "title": "Step 1 - Customer Sign In",
+      "url": "https://docs.worthai.com/use-cases/pre-filling-data/step-1-customer-sign-in.md"
+    },
+    {
+      "title": "Step 2 - Add Business",
+      "url": "https://docs.worthai.com/use-cases/pre-filling-data/step-2-add-business.md"
+    },
+    {
+      "title": "Step 3 - KYB",
+      "url": "https://docs.worthai.com/use-cases/pre-filling-data/step-3-kyb.md"
+    },
+    {
+      "title": "Step 4 - KYC",
+      "url": "https://docs.worthai.com/use-cases/pre-filling-data/step-4-kyc.md"
+    },
+    {
+      "title": "Notes",
+      "url": "https://docs.worthai.com/use-cases/pre-filling-data/step-final-notes.md"
+    },
+    {
+      "title": "Overview",
+      "url": "https://docs.worthai.com/use-cases/worth-360-report/overview.md"
+    },
+    {
+      "title": "Process diagrams",
+      "url": "https://docs.worthai.com/use-cases/worth-360-report/process-diagrams.md"
+    },
+    {
+      "title": "Applicant",
+      "url": "https://docs.worthai.com/webhooks/applicant.md"
+    },
+    {
+      "title": "Business",
+      "url": "https://docs.worthai.com/webhooks/business.md"
+    },
+    {
+      "title": "Case",
+      "url": "https://docs.worthai.com/webhooks/case.md"
+    },
+    {
+      "title": "Integration",
+      "url": "https://docs.worthai.com/webhooks/integration.md"
+    },
+    {
+      "title": "Onboarding",
+      "url": "https://docs.worthai.com/webhooks/onboarding.md"
+    },
+    {
+      "title": "Payment Processor",
+      "url": "https://docs.worthai.com/webhooks/payment-processor.md"
+    },
+    {
+      "title": "Risk",
+      "url": "https://docs.worthai.com/webhooks/risk.md"
+    },
+    {
+      "title": "Worth Score",
+      "url": "https://docs.worthai.com/webhooks/score.md"
+    },
+    {
+      "title": "About Webhooks",
+      "url": "https://docs.worthai.com/webhooks/webhooks.md"
+    }
+  ],
+  "openapi_specs": [
+    "https://docs.worthai.com/openapi/integration.json",
+    "https://docs.worthai.com/openapi/case-service/business-details.json",
+    "https://docs.worthai.com/openapi/case.json",
+    "https://docs.worthai.com/openapi/case-service/get-patch-post-business.json",
+    "https://docs.worthai.com/openapi/worth_360_report.json",
+    "https://docs.worthai.com/openapi/integration-service/get-kyb.json",
+    "https://docs.worthai.com/openapi/case-service/send-business-invite.json",
+    "https://docs.worthai.com/openapi/bulk.json",
+    "https://docs.worthai.com/openapi/integration-service/personal_credit.json",
+    "https://docs.worthai.com/openapi/auth.json",
+    "https://docs.worthai.com/openapi/score.json",
+    "https://docs.worthai.com/openapi/manual-score.json",
+    "https://docs.worthai.com/api-reference/openapi.json"
+  ]
+}

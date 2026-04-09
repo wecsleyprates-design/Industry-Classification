@@ -1,0 +1,494 @@
+<!-- Source: https://docs.worthai.com/api-reference/case/businesses/get-business-details.md -->
+# Get Business By ID
+
+> ## Documentation Index
+> Fetch the complete documentation index at: https://docs.worthai.com/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Get Business By ID
+
+> Retrieve details for a particular business associated with the businessID provided
+
+
+
+## OpenAPI
+
+````yaml get /businesses/{businessID}
+openapi: 3.1.0
+info:
+  title: Business Details
+  description: API definition to retrieve detailed information about a specific business.
+  version: '1.0'
+servers: []
+security: []
+paths:
+  /businesses/{businessID}:
+    get:
+      tags:
+        - Businesses
+      summary: Get Business by ID
+      description: >-
+        Retrieve details for a specific business, including addresses, industry
+        codes, and optionally owner information.
+      operationId: GetBusinessByID
+      parameters:
+        - name: businessID
+          in: path
+          description: >-
+            The unique identifier (UUID) representing the specific business to
+            retrieve.
+          required: true
+          style: simple
+          schema:
+            type: string
+            format: uuid
+            examples:
+              - 3fa85f64-5717-4562-b3fc-2c963f66afa6
+        - name: fetch_owner_details
+          in: query
+          description: >-
+            A flag indicating whether to include the detailed owner information
+            in the response payload. Defaults to false.
+          required: false
+          style: form
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Business details retrieved successfully.
+          headers:
+            Content-Type:
+              description: The mime type of this content
+              schema:
+                type: string
+                example: application/json; charset=utf-8
+          content:
+            application/json; charset=utf-8:
+              schema:
+                $ref: '#/components/schemas/GetBusinessResponse'
+              example:
+                status: success
+                message: Business details retrieved successfully.
+                data:
+                  id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                  name: Acme Corporation
+                  tin: '**-***6789'
+                  mobile: '+15550109999'
+                  official_website: https://www.acme.com
+                  public_website: https://acme.com
+                  social_account: '@acmecorp'
+                  address_apartment: Suite 400
+                  address_line_1: 123 Main St
+                  address_line_2: Floor 4
+                  address_city: New York
+                  address_state: NY
+                  address_postal_code: '10001'
+                  address_country: US
+                  created_at: '2024-01-01T08:00:00Z'
+                  created_by: user_123
+                  updated_at: '2024-03-12T10:30:00Z'
+                  updated_by: user_456
+                  status: VERIFIED
+                  industry:
+                    id: ind_99
+                    name: Hospitality
+                    code: HOSP
+                    sector_code: '72'
+                    created_at: '2024-01-01T08:00:00Z'
+                    updated_at: '2024-03-12T10:30:00Z'
+                  mcc_id: mcc_01
+                  naics_id: naics_01
+                  is_deleted: false
+                  naics_code: '722511'
+                  naics_title: Full-Service Restaurants
+                  mcc_code: '5812'
+                  mcc_title: Eating Places and Restaurants
+                  external_id: EXT-98765
+                  customer_id: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                  is_monitoring_enabled: true
+                  deleted_by: null
+                  deleted_at: null
+                  subscription:
+                    status: ACTIVE
+                    created_at: '2024-01-01T08:00:00Z'
+                    updated_at: '2024-03-12T10:30:00Z'
+                  owners:
+                    - id: owner_789
+                      title:
+                        id: title_01
+                        title: Owner
+                      first_name: John
+                      last_name: Doe
+                      ssn: '***-**-1234'
+                      email: john.doe@example.com
+                      mobile: '+15550101111'
+                      date_of_birth: '1980-01-01'
+                      apartment: Apt 2B
+                      line_1: 456 Owner Rd
+                      line_2: null
+                      city: Brooklyn
+                      state: NY
+                      postal_code: '11201'
+                      country: US
+                      created_at: '2024-01-01T08:00:00Z'
+                      created_by: user_123
+                      updated_at: '2024-03-12T10:30:00Z'
+                      updated_by: user_456
+                      ownership_percentage: 51
+                      owner_type: CONTROL
+                  business_names:
+                    - name: Acme Corp
+                      is_primary: true
+                  business_addresses:
+                    - line_1: 123 Main St
+                      apartment: Suite 400
+                      city: New York
+                      state: NY
+                      country: US
+                      postal_code: '10001'
+                      mobile: '+15550109999'
+                      is_primary: true
+        '400':
+          description: Bad Request. Indicates validation issues with parameters.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized. Missing or invalid authorization token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Not Found. The requested businessID does not exist.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+      security:
+        - bearer: []
+components:
+  schemas:
+    GetBusinessResponse:
+      title: GetBusinessResponse
+      type: object
+      description: Standard response wrapping the business details data.
+      properties:
+        status:
+          type: string
+          description: The operational status of the request (e.g., 'success', 'fail').
+          example: success
+        message:
+          type: string
+          description: A human-readable message describing the result of the operation.
+          example: Business details retrieved successfully.
+        data:
+          $ref: '#/components/schemas/BusinessDetails'
+    ErrorResponse:
+      title: ErrorResponse
+      type: object
+      description: Generic error response schema.
+      properties:
+        status:
+          type: string
+          example: fail
+        message:
+          type: string
+          example: Error message description.
+        errorCode:
+          type:
+            - string
+            - 'null'
+        data:
+          type: object
+          nullable: true
+    BusinessDetails:
+      title: BusinessDetails
+      type: object
+      description: >-
+        Comprehensive schema detailing a business's profile, including
+        compliance, location, and structural data.
+      properties:
+        id:
+          type: string
+          description: The unique UUID assigned to the business.
+        name:
+          type: string
+          description: The officially registered legal name of the business.
+        tin:
+          type: string
+          description: The Taxpayer Identification Number, optionally masked for security.
+        mobile:
+          type: string
+          description: Primary mobile contact number for the business.
+        official_website:
+          type: string
+          description: The official or registered website URL of the business.
+        public_website:
+          type: string
+          description: The public-facing or consumer website URL.
+        social_account:
+          type: string
+          description: Primary social media handle or link associated with the business.
+        address_apartment:
+          type:
+            - string
+            - 'null'
+          description: Apartment, suite, or unit number of the primary business address.
+        address_line_1:
+          type: string
+          description: Primary street address of the business.
+        address_line_2:
+          type:
+            - string
+            - 'null'
+          description: Secondary address details, if applicable.
+        address_city:
+          type: string
+          description: The city of the primary business address.
+        address_state:
+          type: string
+          description: The state or province code for the business address.
+        address_postal_code:
+          type: string
+          description: The postal or ZIP code of the business address.
+        address_country:
+          type: string
+          description: The country ISO code where the business is located.
+        created_at:
+          type: string
+          format: date-time
+          description: ISO 8601 timestamp denoting when the business record was created.
+        created_by:
+          type: string
+          description: The ID of the user or system that created the business record.
+        updated_at:
+          type: string
+          format: date-time
+          description: >-
+            ISO 8601 timestamp denoting when the business record was last
+            updated.
+        updated_by:
+          type: string
+          description: The ID of the user or system that last updated the business record.
+        status:
+          type: string
+          description: >-
+            The current verification or lifecycle status of the business (e.g.,
+            'VERIFIED').
+        industry:
+          type: object
+          description: The core industry classification object.
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+            code:
+              type: string
+            sector_code:
+              type: string
+            created_at:
+              type: string
+              format: date-time
+            updated_at:
+              type: string
+              format: date-time
+        mcc_id:
+          type: string
+          description: The internal reference ID for the Merchant Category Code.
+        naics_id:
+          type: string
+          description: The internal reference ID for the NAICS configuration.
+        is_deleted:
+          type: boolean
+          description: Flag indicating if the record is currently soft-deleted.
+        naics_code:
+          type: string
+          description: The assigned North American Industry Classification System code.
+        naics_title:
+          type: string
+          description: The human-readable title corresponding to the NAICS code.
+        mcc_code:
+          type: string
+          description: The assigned Merchant Category Code.
+        mcc_title:
+          type: string
+          description: The human-readable title corresponding to the MCC.
+        external_id:
+          type: string
+          description: An identifier for this record linking it to an external system.
+        customer_id:
+          type: string
+          description: The identifier of the customer to which this business belongs.
+        is_monitoring_enabled:
+          type: boolean
+          description: >-
+            Flag indicating whether continuous risk or compliance monitoring is
+            active.
+        deleted_by:
+          type:
+            - string
+            - 'null'
+          description: The ID of the user or system that soft-deleted the record.
+        deleted_at:
+          type:
+            - string
+            - 'null'
+          format: date-time
+          description: ISO 8601 timestamp of when the record was deleted, if applicable.
+        subscription:
+          type: object
+          description: Subscription metadata for services tied to this business.
+          properties:
+            status:
+              type: string
+              description: Current subscription status (e.g., 'ACTIVE').
+            created_at:
+              type: string
+              format: date-time
+            updated_at:
+              type: string
+              format: date-time
+        owners:
+          type: array
+          description: >-
+            A list of owners or controlling parties associated with the
+            business. Populated if 'fetch_owner_details' is true.
+          items:
+            $ref: '#/components/schemas/BusinessOwner'
+        business_names:
+          type: array
+          description: A list of alternate DBAs or trading names for the business.
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+                description: The trade or DBA name.
+              is_primary:
+                type: boolean
+                description: Whether this is the primary name used.
+        business_addresses:
+          type: array
+          description: A list of registered locations or addresses for the business.
+          items:
+            type: object
+            properties:
+              line_1:
+                type: string
+              apartment:
+                type:
+                  - string
+                  - 'null'
+              city:
+                type: string
+              state:
+                type: string
+              country:
+                type: string
+              postal_code:
+                type: string
+              mobile:
+                type:
+                  - string
+                  - 'null'
+              is_primary:
+                type: boolean
+                description: Whether this is the primary location.
+    BusinessOwner:
+      title: BusinessOwner
+      type: object
+      description: >-
+        Detailed schema outlining the individual owners or controlling parties
+        of the business.
+      properties:
+        id:
+          type: string
+          description: Unique identifier assigned to the owner profile.
+        title:
+          type: object
+          description: The designated title object of the owner.
+          properties:
+            id:
+              type: string
+            title:
+              type: string
+        first_name:
+          type: string
+          description: Legal first name of the owner.
+        last_name:
+          type: string
+          description: Legal last name of the owner.
+        ssn:
+          type: string
+          description: Social Security Number, heavily masked for security.
+        email:
+          type: string
+          description: Contact email address of the owner.
+        mobile:
+          type: string
+          description: Contact mobile phone number of the owner.
+        date_of_birth:
+          type: string
+          format: date
+          description: Date of birth formatted as YYYY-MM-DD.
+        apartment:
+          type:
+            - string
+            - 'null'
+          description: Apartment or suite number for the owner's residential address.
+        line_1:
+          type: string
+          description: Primary residential street address.
+        line_2:
+          type:
+            - string
+            - 'null'
+          description: Secondary residential address line.
+        city:
+          type: string
+          description: City of residence.
+        state:
+          type: string
+          description: State or province of residence.
+        postal_code:
+          type: string
+          description: Postal or ZIP code of residence.
+        country:
+          type: string
+          description: Country of residence.
+        created_at:
+          type: string
+          format: date-time
+          description: Timestamp indicating when the owner record was established.
+        created_by:
+          type: string
+          description: The ID of the user or system that created the owner record.
+        updated_at:
+          type: string
+          format: date-time
+          description: Timestamp indicating when the owner record was last modified.
+        updated_by:
+          type: string
+          description: The ID of the user or system that modified the owner record.
+        ownership_percentage:
+          type: number
+          description: >-
+            The numeric percentage equity or ownership stake held by the
+            individual.
+        owner_type:
+          type: string
+          description: >-
+            The nature of the individual's authority (e.g., 'CONTROL',
+            'BENEFICIARY').
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+
+````
+
+Built with [Mintlify](https://mintlify.com).

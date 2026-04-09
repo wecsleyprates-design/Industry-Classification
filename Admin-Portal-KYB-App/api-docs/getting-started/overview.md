@@ -1,0 +1,60 @@
+<!-- Source: https://docs.worthai.com/getting-started/overview.md -->
+# Overview
+
+> ## Documentation Index
+> Fetch the complete documentation index at: https://docs.worthai.com/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Overview
+
+> Hello and welcome to Worth API! 
+Here at Worth we want to ensure a seamless onboarding experience and have created this guide for you and your businesses. 
+This guide will show you how to get started using the Worth API documentation. 
+Should you have any questions please feel free to reach out to a Worth team member to better assist you. 
+Thanks!
+
+## Credentialing
+
+Please provide the following credentials to the Worth Team to create your admin account:
+
+* First Name
+* Last Name
+* Email
+
+These credentials will allow you to **send invites** to merchants and/or onboard businesses via single business onboard.
+
+> **Note:** Sending over a *service email* will also work to set up API credentialing access.
+
+## Email Access Link
+
+You should have received an email from [no-reply@worth.com](mailto:no-reply@worth.com) with this email body requesting you to log in.
+<br />**Note**: This link will expire within 7 days of receiving this email.
+
+## Create Login
+
+Upon clicking the link in the email, you will be prompted to **create a password**.\
+These credentials will allow you access to make API calls such as [Add Business](/api-reference/add-or-update-business/add-business) and get business information such as [KYB](/api-reference/integration/facts/kyb) and [KYC](/api-reference/integration/verification/kyc-ownership-verification).
+
+## Authentication
+
+Accessing the API relies on a username/password authentication flow. Using the [Customer Sign In](/api-reference/auth/sign-in/customer-sign-in) route, you’ll capture **3 key identifiers** that are specific to your team: the `id_token`, the `refresh_token`, and the `customerID`.
+
+* `id_token`: represents the authorization (Bearer) token for the authenticated user and their role within the Worth platform.\
+  *Note: for security purposes, this is a relatively short-lived token and must be refreshed programmatically.*
+* `refresh_token`: represents the token needed at [Customer Refresh Token](/api-reference/auth/sign-in/customer-refresh-token) when `id_token` is expired. Upon successful refresh, a new `id_token` and `refresh_token` will be returned in the response.
+* `customer_details.id`: represents the instance ID of the user's company where other API operations will take place. Some endpoints require this ID (referred to as `customerID`) for querying and submitting business data.
+
+## Add Business
+
+* Adding a Business is the next critical step in getting started with the Worth API docs.
+* The [Add Business](/api-reference/add-or-update-business/add-business) route creates a unique business ID. This ID is used to make many of the **GET** calls listed in the documentation.
+* While the Add Business route only requires **four** data fields to make a successful call, it is highly recommended to add as much business and owner information to this POST call to capture robust KYB and KYC information.
+* More information about required and recommended data fields can be found in the **API reference** tab.
+
+## Responses
+
+* **The FINAL STEP!** Once you have added a business, it’s time to pull back the data!
+* It’s important to note that **GET** responses associated with business information will require a `businessID` in the endpoint URL. This `businessID` is generated via the Add Business endpoint. Once this initial step is complete, you will be able to make several **GET** calls to retrieve cases, business details, and reports.
+
+
+Built with [Mintlify](https://mintlify.com).
