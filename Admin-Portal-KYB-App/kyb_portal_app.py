@@ -1080,16 +1080,7 @@ def render_field(f):
             # ── SQL + Python — generated per field using confirmed Redshift pattern ──
             field_label = f["label"]
 
-            st.markdown("**🔍 SQL — field-specific, Redshift confirmed:**")
-            card(
-                "⚠️ <b>DB = Amazon Redshift.</b> "
-                "✅ Works: <code>SELECT name, value, received_at</code> and <code>JSON_EXTRACT_PATH_TEXT(value, 'key')</code><br>"
-                "❌ Fails: <code>value::json</code> → 'type json does not exist' | "
-                "<code>value->>'key'</code> → 'operator does not exist'<br>"
-                "Replace <code>YOUR-BUSINESS-UUID-HERE</code> with your UUID "
-                "(admin portal URL or GET /cases/:id → business.id)",
-                "card-amber"
-            )
+            st.markdown("**🔍 SQL — field-specific (Redshift):**")
             st.code(generate_sql(f), language="sql")
 
             st.markdown(f"**🐍 Python — {field_label} (field-specific):**")
