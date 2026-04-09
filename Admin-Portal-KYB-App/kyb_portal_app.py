@@ -417,6 +417,220 @@ def enrich_badges(badges):
     return result
 
 
+RS_CONN = (
+    "import psycopg2, json\n\n"
+    "conn = psycopg2.connect(\n"
+    "    host='your-cluster.redshift.amazonaws.com',\n"
+    "    port=5439, dbname='dev',\n"
+    "    user='your_username', password='your_password',\n"
+    "    sslmode='require'\n"
+    ")\n"
+    "BID = 'YOUR-BUSINESS-UUID-HERE'  # replace with your business UUID\n"
+)
+
+def build_fact_specific_cols(f):
+    """Extra SQL block for fields that have special structure."""
+    fact = f.get("fact","").lower()
+    label = f.get("label","")
+    if "naics" in fact and "code" in fact:
+        return (
+            "\n-- All vendor NAICS alternatives (what every vendor returned before winner chosen):\n"
+            "-- Fetch raw value and parse in Python — see Python snippet below"
+        )
+    if "mcc" in fact:
+        return (
+            "\n-- mcc_code_found (AI direct) vs mcc_code_from_naics (calculated):\n"
+            "SELECT name, JSON_EXTRACT_PATH_TEXT(value, 'value') AS mcc\n"
+            "FROM rds_warehouse_public.facts\n"
+            "WHERE business_id = 'YOUR-BUSINESS-UUID-HERE'\n"
+            "  AND name IN ('mcc_code', 'mcc_code_found', 'mcc_code_from_naics', 'mcc_description');"
+        )
+    if "tin_match" in fact:
+        return (
+            "\n-- TIN match detail (status + message):\n"
+            "SELECT name,\n"
+            "       JSON_EXTRACT_PATH_TEXT(value, 'value', 'status')  AS tin_status,\n"
+            "       JSON_EXTRACT_PATH_TEXT(value, 'value', 'message') AS tin_message\n"
+            "FROM rds_warehouse_public.facts\n"
+            "WHERE business_id = 'YOUR-BUSINESS-UUID-HERE'\n"
+            "  AND name = 'tin_match';"
+        )
+    return ""
+
+
+def build_redshift_sql(f, BID):
+    """Build Redshift SQL for datascience.customer_files fields."""
+    label = f.get("label","")
+    if "naics" in label.lower():
+        return (
+            f"-- {label} — Pipeline B (Redshift winner-takes-all)\n"
+            f"SELECT business_id,\n"
+            f"       primary_naics_code,\n"
+            f"       zi_match_confidence,\n"
+            f"       efx_match_confidence,\n"
+            f"       CASE WHEN zi_match_confidence > efx_match_confidence\n"
+            f"            THEN 'ZoomInfo (pid=24)'\n"
+            f"            ELSE 'Equifax (pid=17)'\n"
+            f"       END AS pipeline_b_winner\n"
+            f"FROM datascience.customer_files\n"
+            f"WHERE business_id = {BID};"
+        )
+    return (
+        f"-- {label} — Redshift customer_files\n"
+        f"SELECT business_id, primary_naics_code, mcc_code, worth_score,\n"
+        f"       zi_match_confidence, efx_match_confidence,\n"
+        f"       employee_count, year_established\n"
+        f"FROM datascience.customer_files\n"
+        f"WHERE business_id = {BID};"
+    )
+
+
+def build_python_for_field(f, fact_names, is_array, is_redshift, bid_placeholder):
+    """Build field-specific Python that fetches and parses the right fact(s)."""
+    label  = f.get("label","this field")
+    fact   = f.get("fact","")
+    names_tuple = ", ".join(f"'{n}'" for n in fact_names[:3] if n)
+
+    conn_block = (
+        "conn = psycopg2.connect(\n"
+        "    host='your-cluster.redshift.amazonaws.com',\n"
+        "    port=5439, dbname='dev',\n"
+        "    user='your_username', password='your_password',\n"
+        "    sslmode='require'\n"
+        ")"
+    )
+
+    if is_redshift:
+        if "naics" in label.lower():
+            return (
+                RS_CONN + conn_block + "\n\n"
+                "cur = conn.cursor()\n"
+                f"cur.execute(\n"
+                f"    'SELECT business_id, primary_naics_code, mcc_code, '\n"
+                f"    'zi_match_confidence, efx_match_confidence, '\n"
+                f"    'CASE WHEN zi_match_confidence > efx_match_confidence '\n"
+                f"    'THEN \\'ZoomInfo\\' ELSE \\'Equifax\\' END AS winner '\n"
+                f"    'FROM datascience.customer_files WHERE business_id = %s',\n"
+                f"    (BID,)\n"
+                f")\n"
+                "row = cur.fetchone()\n"
+                "if row: print(dict(zip([d[0] for d in cur.description], row)))\n"
+                "cur.close(); conn.close()"
+            )
+        return (
+            RS_CONN + conn_block + "\n\n"
+            "import pandas as pd\n"
+            "df = pd.read_sql(\n"
+            "    'SELECT * FROM datascience.customer_files WHERE business_id = %s',\n"
+            "    conn, params=(BID,)\n"
+            ")\n"
+            "print(df.to_string())\n"
+            "conn.close()"
+        )
+
+    if is_array:
+        # Array fact — fetch raw, parse with json.loads
+        array_parse = {
+            "sos_filings": (
+                "filings = fact.get('value', [])\n"
+                "for f in filings:\n"
+                "    print(f'  State: {f.get(\"state\")}  Active: {f.get(\"active\")}'\n"
+                "          f'  Entity: {f.get(\"entity_type\")}  Date: {f.get(\"filing_date\")}')"
+            ),
+            "addresses": (
+                "addrs = fact.get('value', [])\n"
+                "for a in addrs:\n"
+                "    print(f'  {a}')"
+            ),
+            "people": (
+                "people = fact.get('value', [])\n"
+                "for p in people:\n"
+                "    print(f'  {p.get(\"name\")} — {p.get(\"titles\")}')"
+            ),
+            "watchlist": (
+                "hits = fact.get('value', {}).get('metadata', [])\n"
+                "print(f'Total hits: {len(hits)}')\n"
+                "for h in hits:\n"
+                "    print(f'  {h.get(\"entity_name\")} — {h.get(\"metadata\",{}).get(\"title\")}')"
+            ),
+            "names": (
+                "names = fact.get('value', [])\n"
+                "for n in names:\n"
+                "    print(f'  {n}')"
+            ),
+        }
+        parse_block = "# Parse the JSON array\nprint(fact)"
+        for key, block in array_parse.items():
+            if key in fact.lower():
+                parse_block = block
+                break
+
+        return (
+            RS_CONN + conn_block + "\n\n"
+            f"# Fetch: {label}\n"
+            f"cur = conn.cursor()\n"
+            f"cur.execute(\n"
+            f"    'SELECT name, value, received_at FROM rds_warehouse_public.facts '\n"
+            f"    'WHERE business_id = %s AND name IN ({names_tuple})',\n"
+            f"    (BID,)\n"
+            f")\n"
+            f"for row in cur.fetchall():\n"
+            f"    name, value_text, ts = row\n"
+            f"    fact = json.loads(value_text)\n"
+            f"    print(f'=== {{name}} (received {{ts}}) ===')\n"
+            f"    {parse_block.replace(chr(10), chr(10)+'    ')}\n"
+            f"cur.close(); conn.close()"
+        )
+    else:
+        # Scalar fact — JSON_EXTRACT_PATH_TEXT for SQL, json.loads for Python
+        # Special handling per fact type
+        extra_print = ""
+        if "naics" in fact.lower() and "code" in fact.lower():
+            extra_print = (
+                "    # Show all vendor alternatives (what every vendor returned):\n"
+                "    alts = fact.get('alternatives', [])\n"
+                "    print(f'  All vendor alternatives ({len(alts)} vendors):')\n"
+                "    for a in alts:\n"
+                "        pid_map = {'16':'Middesk','23':'OC','24':'ZoomInfo','17':'Equifax','38':'Trulioo','31':'AI','22':'SERP'}\n"
+                "        vendor = pid_map.get(str(a.get('platformId','')), f'pid={a.get(\"platformId\")}')\n"
+                "        print(f'    {vendor:12} conf={str(a.get(\"confidence\",\"N/A\")):6} naics={a.get(\"value\")}')\n"
+            )
+        elif "tin_match" in fact.lower():
+            extra_print = (
+                "    # TIN match has nested object in value field:\n"
+                "    tin_val = fact.get('value', {})\n"
+                "    if isinstance(tin_val, str): tin_val = json.loads(tin_val)\n"
+                "    print(f'  TIN status:  {tin_val.get(\"status\")}')\n"
+                "    print(f'  TIN message: {tin_val.get(\"message\")}')\n"
+            )
+        elif "watchlist_hits" in fact.lower():
+            extra_print = (
+                "    print(f'  Hit count: {fact.get(\"value\")}')\n"
+            )
+
+        return (
+            RS_CONN + conn_block + "\n\n"
+            f"# Fetch: {label}\n"
+            f"cur = conn.cursor()\n"
+            f"cur.execute(\n"
+            f"    'SELECT name, value, received_at FROM rds_warehouse_public.facts '\n"
+            f"    'WHERE business_id = %s AND name IN ({names_tuple})',\n"
+            f"    (BID,)\n"
+            f")\n"
+            f"for row in cur.fetchall():\n"
+            f"    name, value_text, ts = row\n"
+            f"    fact = json.loads(value_text)  # value is varchar — parse with json.loads()\n"
+            f"    print(f'=== {{name}} ===')\n"
+            f"    print(f'  Value:     {{fact.get(\"value\")}}')\n"
+            f"    print(f'  PID:       {{fact.get(\"source\",{{}}).get(\"platformId\")}}  (winning vendor)')\n"
+            f"    print(f'  Conf:      {{fact.get(\"source\",{{}}).get(\"confidence\")}}  (vendor confidence)')\n"
+            f"    print(f'  Override:  {{fact.get(\"override\")}}  (analyst manual edit if any)')\n"
+            f"    print(f'  Received:  {{ts}}')\n"
+            f"    {extra_print}"
+            f"cur.close(); conn.close()"
+        )
+
+
 def render_field(f):
     """Render a single field card with full deep lineage in an expander."""
     edit_icon = "✏️ Editable" if f.get("editable") else "🔒 Read-Only"
@@ -545,126 +759,75 @@ def render_field(f):
                 'use your Redshift endpoint with psycopg2 or AWS Data Wrangler.'
                 '</div>', unsafe_allow_html=True)
 
-            fact_name_raw = f["fact"].split("/")[0].strip().split(" ")[0].replace("[]","")
-            fact_name_clean = fact_name_raw.split("+")[0].strip().rstrip(".").split("(")[0]
+            # ── Per-field SQL + Python (field-specific, not generic) ─────────
+            # DB: Amazon Redshift. value column = varchar (text JSON).
+            # ✅ JSON_EXTRACT_PATH_TEXT(value, 'key')  — Redshift built-in, NO cast
+            # ❌ value::json / value->>'key'  — FAILS on Redshift
+            field_label = f["label"]
+            fact_names  = [n.strip().strip("'") for n in f["fact"].split("/")]
+            is_array    = any(k in f["fact"].lower() for k in ["array","[]","sos_filings","addresses","people","names","watchlist","alternatives"])
             is_redshift = "customer_files" in f.get("sql","") or "datascience." in f.get("sql","")
+            BID = "'YOUR-BUSINESS-UUID-HERE'"
 
-            # ── CONFIRMED WORKING SQL (tested on production Redshift) ─────────
-            # DB is Redshift. value column is varchar (text JSON).
-            # ✅ Works: SELECT name, value FROM facts WHERE ...
-            # ✅ Works: JSON_EXTRACT_PATH_TEXT(value, 'key') — Redshift built-in, NO cast
-            # ❌ Fails: value::json  →  ERROR: type "json" does not exist
-            # ❌ Fails: value->>'key'  →  ERROR: operator does not exist
-            st.markdown("**🔍 SQL — confirmed working on your Redshift:**")
-            bid_example = "'YOUR-BUSINESS-UUID-HERE'  -- replace with your business UUID"
-            fact_sql_name = fact_name_clean if fact_name_clean else "business_name"
-            # Build SQL using Redshift JSON_EXTRACT_PATH_TEXT() (varchar, no cast)
-            core_sql = (
-                f"-- Step 1: confirm row exists (ALWAYS works)\n"
-                f"SELECT name, received_at\n"
-                f"FROM rds_warehouse_public.facts\n"
-                f"WHERE business_id = {bid_example}\n"
-                f"  AND name = '{fact_sql_name}';\n\n"
-                f"-- Step 2: extract the fact value (works on varchar JSON column)\n"
-                f"SELECT\n"
-                f"    name,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(value, 'value')                AS fact_value,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS winning_pid,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') AS confidence,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(value, 'override', 'value')    AS analyst_override,\n"
-                f"    received_at\n"
-                f"FROM rds_warehouse_public.facts\n"
-                f"WHERE business_id = {bid_example}\n"
-                f"  AND name = '{fact_sql_name}';\n\n"
-                f"-- Step 3: see ALL vendor alternatives before winner was chosen\n"
-                f"SELECT\n"
-                f"    name,\n"
-                f"    value  -- read full JSON text, then inspect alternatives[] manually\n"
-                f"FROM rds_warehouse_public.facts\n"
-                f"WHERE business_id = {bid_example}\n"
-                f"  AND name = '{fact_sql_name}';"
-            )
-            # If field has its own specific SQL, show it alongside the generic
-            if f.get("sql") and not f["sql"].startswith("--"):
-                field_sql = (f["sql"]
-                    .replace("'YOUR-BUSINESS-UUID-HERE'", bid_example)
-                    .replace("'YOUR-BUSINESS-UUID-HERE'", bid_example)
+            st.markdown("**🔍 SQL — tailored for this field (Redshift confirmed):**")
+
+            # Build field-specific SQL
+            if is_redshift:
+                # Redshift: datascience.customer_files — plain column, no JSON
+                field_sql = build_redshift_sql(f, BID)
+                st.code(field_sql, language="sql")
+            elif is_array:
+                # Array facts: fetch raw value, parse in Python
+                names_in = ", ".join(f"'{n}'" for n in fact_names[:3] if n)
+                field_sql = (
+                    f"-- {field_label}: value is a JSON array — fetch raw text and parse in Python\n"
+                    f"SELECT name, value, received_at\n"
+                    f"FROM rds_warehouse_public.facts\n"
+                    f"WHERE business_id = {BID}\n"
+                    f"  AND name IN ({names_in});\n\n"
+                    f"-- Then use the Python snippet below to iterate the array items"
                 )
                 st.code(field_sql, language="sql")
-                st.markdown("**Generic template (works for any fact):**")
-            st.code(core_sql, language="sql")
+            else:
+                # Scalar facts: JSON_EXTRACT_PATH_TEXT (confirmed working)
+                names_in = ", ".join(f"'{n}'" for n in fact_names[:4] if n)
+                # Build SELECT columns specific to this fact
+                extra_cols = build_fact_specific_cols(f)
+                field_sql = (
+                    f"-- {field_label}\n"
+                    f"-- Step 1: confirm row exists\n"
+                    f"SELECT name, received_at\n"
+                    f"FROM rds_warehouse_public.facts\n"
+                    f"WHERE business_id = {BID}\n"
+                    f"  AND name IN ({names_in});\n\n"
+                    f"-- Step 2: extract fact value + source metadata\n"
+                    f"SELECT\n"
+                    f"    name,\n"
+                    f"    JSON_EXTRACT_PATH_TEXT(value, 'value')                AS fact_value,\n"
+                    f"    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS winning_vendor_pid,\n"
+                    f"    JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') AS vendor_confidence,\n"
+                    f"    JSON_EXTRACT_PATH_TEXT(value, 'override', 'value')    AS analyst_override,\n"
+                    f"    JSON_EXTRACT_PATH_TEXT(value, 'override', 'userId')   AS overridden_by_user,\n"
+                    f"    received_at\n"
+                    f"FROM rds_warehouse_public.facts\n"
+                    f"WHERE business_id = {BID}\n"
+                    f"  AND name IN ({names_in});"
+                    + (f"\n\n{extra_cols}" if extra_cols else "")
+                )
+                st.code(field_sql, language="sql")
+
             st.caption(
-                "✅ Confirmed: SELECT name, value FROM rds_warehouse_public.facts works directly. "
-                "JSON_EXTRACT_PATH_TEXT() is Redshift-native — works on varchar/text JSON, no cast needed. "
-                "Replace the business UUID with your actual value."
+                "✅ Confirmed working on Redshift: SELECT name, value + JSON_EXTRACT_PATH_TEXT(value, 'key'). "
+                "Replace YOUR-BUSINESS-UUID-HERE with your actual UUID "
+                "(find it in admin portal URL or via GET /cases/:id → business.id)."
             )
 
-            # ── CONFIRMED WORKING PYTHON ──────────────────────────────────
-            db_note = "Redshift" if is_redshift else "PostgreSQL (RDS)"
-            st.markdown(f"**🐍 Python — {db_note} (confirmed pattern):**")
-            if is_redshift:
-                st.code(
-                    "import psycopg2\n"
-                    "import pandas as pd\n\n"
-                    "conn = psycopg2.connect(\n"
-                    "    host='your-cluster.redshift.amazonaws.com',\n"
-                    "    port=5439, dbname='dev',\n"
-                    "    user='your_username', password='your_password',\n"
-                    "    sslmode='require'\n"
-                    ")\n\n"
-                    "BUSINESS_ID = 'YOUR-BUSINESS-UUID-HERE'  # replace\n\n"
-                    "df = pd.read_sql(\n"
-                    "    'SELECT business_id, primary_naics_code, mcc_code, '\n"
-                    "    'zi_match_confidence, efx_match_confidence, worth_score, employee_count '\n"
-                    "    'FROM datascience.customer_files WHERE business_id = %(bid)s',\n"
-                    "    conn, params={'bid': BUSINESS_ID}\n"
-                    ")\n"
-                    "print(df.to_string())\n"
-                    "conn.close()",
-                    language="python"
-                )
-            else:
-                st.code(
-                    "import psycopg2\n"
-                    "import json\n\n"
-                    "conn = psycopg2.connect(\n"
-                    "    host='your-rds-endpoint.rds.amazonaws.com',\n"
-                    "    port=5432, dbname='postgres',\n"
-                    "    user='your_username', password='your_password',\n"
-                    "    sslmode='require'\n"
-                    ")\n\n"
-                    "BUSINESS_ID = 'YOUR-BUSINESS-UUID-HERE'  # replace\n"
-                    f"FACT_NAME   = '{fact_sql_name}'\n\n"
-                    "# Step 1 — confirmed working: fetch the raw value text\n"
-                    "cur = conn.cursor()\n"
-                    "cur.execute(\n"
-                    "    'SELECT name, value, received_at FROM rds_warehouse_public.facts '\n"
-                    "    'WHERE business_id = %s AND name = %s',\n"
-                    "    (BUSINESS_ID, FACT_NAME)\n"
-                    ")\n"
-                    "row = cur.fetchone()\n\n"
-                    "if row:\n"
-                    "    name, value_text, received_at = row\n"
-                    "    # value column is varchar (Redshift) — JSON stored as text; parse with json.loads()\n"
-                    "    fact = json.loads(value_text)\n"
-                    "    print(f'Fact name:       {name}')\n"
-                    "    print(f'Value:           {fact.get(\"value\")}')\n"
-                    "    print(f'Winning PID:     {fact.get(\"source\", {}).get(\"platformId\")}')\n"
-                    "    print(f'Confidence:      {fact.get(\"source\", {}).get(\"confidence\")}')\n"
-                    "    print(f'Analyst override:{fact.get(\"override\")}')\n"
-                    "    print(f'Received at:     {received_at}')\n"
-                    "    alts = fact.get('alternatives', [])\n"
-                    "    print(f'Alternatives:    {len(alts)} vendor responses')\n"
-                    "    for alt in alts:\n"
-                    "        print(f'  PID {alt.get(\"platformId\"):>4}  '\n"
-                    "              f'confidence={str(alt.get(\"confidence\",\"N/A\")):>6}  '\n"
-                    "              f'value={alt.get(\"value\")}')\n"
-                    "else:\n"
-                    "    print(f'No fact found: {FACT_NAME} for business {BUSINESS_ID}')\n\n"
-                    "cur.close()\n"
-                    "conn.close()",
-                    language="python"
-                )
+            # ── Per-field Python ──────────────────────────────────────────────
+            db_note = "Redshift" if is_redshift else "Redshift (rds_warehouse_public)"
+            st.markdown(f"**🐍 Python — {db_note} — specific to {field_label}:**")
+            py_code = build_python_for_field(f, fact_names, is_array, is_redshift, BID.strip("'"))
+            st.code(py_code, language="python")
+
 
 
             if f.get("gpn_q"):
