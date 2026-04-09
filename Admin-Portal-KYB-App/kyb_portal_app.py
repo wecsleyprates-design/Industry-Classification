@@ -428,6 +428,308 @@ RS_CONN = (
     "BID = 'YOUR-BUSINESS-UUID-HERE'  # replace with your business UUID\n"
 )
 
+# ── Master SQL/Python generator — used by render_field() for EVERY field ──────
+ARRAY_FACTS = {
+    'sos_filings','addresses','addresses_deliverable','addresses_found',
+    'people','names_found','names_submitted','dba_found',
+    'watchlist','watchlist_raw','business_addresses_submitted_strings',
+    'classification_codes','owners',
+}
+SKIP_NAMES = {
+    'rds_warehouse_public','rds_cases_public','integration_data','datascience',
+    'data_cases','core_case_statuses','core_naics_code','core_mcc_code',
+    'core_business_industries','websiteData','customer_files','calculated',
+}
+PID_MAP_COMMENT = "-- winning_vendor: 16=Middesk 24=ZoomInfo 23=OC 17=Equifax 38=Trulioo 22=SERP 31=AI"
+
+# Extra SQL for facts with nested value objects
+NESTED_EXTRAS = {
+    'tin_match': (
+        "\n-- tin_match: value is a NESTED object {status, message, sublabel}\n"
+        "SELECT\n"
+        "    JSON_EXTRACT_PATH_TEXT(value,'value','status')   AS tin_status,\n"
+        "    JSON_EXTRACT_PATH_TEXT(value,'value','message')  AS tin_message,\n"
+        "    JSON_EXTRACT_PATH_TEXT(value,'value','sublabel') AS tin_sublabel\n"
+        "FROM rds_warehouse_public.facts\n"
+        "WHERE business_id = 'YOUR-BUSINESS-UUID-HERE' AND name = 'tin_match';\n\n"
+        "-- tin_match_boolean: true=Verified badge, false=Unverified badge\n"
+        "SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS tin_verified\n"
+        "FROM rds_warehouse_public.facts\n"
+        "WHERE business_id = 'YOUR-BUSINESS-UUID-HERE' AND name = 'tin_match_boolean';\n\n"
+        "-- tin: raw masked EIN submitted by applicant\n"
+        "SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS tin_masked\n"
+        "FROM rds_warehouse_public.facts\n"
+        "WHERE business_id = 'YOUR-BUSINESS-UUID-HERE' AND name = 'tin';"
+    ),
+    'naics_code': (
+        "\n-- naics_code: fetch value column to inspect all vendor alternatives[]\n"
+        "SELECT name, value FROM rds_warehouse_public.facts\n"
+        "WHERE business_id = 'YOUR-BUSINESS-UUID-HERE' AND name = 'naics_code';\n"
+        "-- In Python: fact=json.loads(value); alts=fact.get('alternatives',[])\n"
+        "-- Each alt has: platformId, value, confidence -> sorted desc = winner selection"
+    ),
+    'mcc_code': (
+        "\n-- All MCC facts: mcc_code = mcc_code_found ?? mcc_code_from_naics\n"
+        "SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS mcc_value\n"
+        "FROM rds_warehouse_public.facts\n"
+        "WHERE business_id = 'YOUR-BUSINESS-UUID-HERE'\n"
+        "  AND name IN ('mcc_code','mcc_code_found','mcc_code_from_naics','mcc_description');"
+    ),
+    'address_verification': (
+        "\n-- address_verification: value is a nested object {status, sublabel, message}\n"
+        "SELECT\n"
+        "    JSON_EXTRACT_PATH_TEXT(value,'value','status')   AS addr_status,\n"
+        "    JSON_EXTRACT_PATH_TEXT(value,'value','sublabel') AS addr_sublabel,\n"
+        "    JSON_EXTRACT_PATH_TEXT(value,'value','message')  AS addr_message\n"
+        "FROM rds_warehouse_public.facts\n"
+        "WHERE business_id = 'YOUR-BUSINESS-UUID-HERE' AND name = 'address_verification';"
+    ),
+    'name_match': (
+        "\n-- name_match: value is a nested object {status, message, sublabel}\n"
+        "SELECT\n"
+        "    JSON_EXTRACT_PATH_TEXT(value,'value','status')   AS name_status,\n"
+        "    JSON_EXTRACT_PATH_TEXT(value,'value','message')  AS name_message,\n"
+        "    JSON_EXTRACT_PATH_TEXT(value,'value','sublabel') AS name_sublabel\n"
+        "FROM rds_warehouse_public.facts\n"
+        "WHERE business_id = 'YOUR-BUSINESS-UUID-HERE' AND name = 'name_match';"
+    ),
+    'idv_status': (
+        "\n-- idv_status: value is a nested object {SUCCESS:N, FAILED:N, PENDING:N}\n"
+        "SELECT\n"
+        "    JSON_EXTRACT_PATH_TEXT(value,'value','SUCCESS') AS idv_success,\n"
+        "    JSON_EXTRACT_PATH_TEXT(value,'value','FAILED')  AS idv_failed,\n"
+        "    JSON_EXTRACT_PATH_TEXT(value,'value','PENDING') AS idv_pending\n"
+        "FROM rds_warehouse_public.facts\n"
+        "WHERE business_id = 'YOUR-BUSINESS-UUID-HERE' AND name = 'idv_status';"
+    ),
+}
+
+# Python array parsers per fact
+ARRAY_PARSERS = {
+    'sos_filings': (
+        "filings = fact.get('value', [])\n"
+        "    print(f'  {len(filings)} SoS filing(s):')\n"
+        "    for fil in filings:\n"
+        "        print(f'    State:{fil.get(\"state\")} Active:{fil.get(\"active\")} '\n"
+        "              f'Entity:{fil.get(\"entity_type\")} Date:{fil.get(\"filing_date\")} '\n"
+        "              f'Name:{fil.get(\"filing_name\")}')"
+    ),
+    'addresses': (
+        "addrs = fact.get('value', [])\n"
+        "    print(f'  {len(addrs)} address(es):')\n"
+        "    for a in addrs: print(f'    {a}')"
+    ),
+    'addresses_deliverable': (
+        "deliverable = fact.get('value', [])\n"
+        "    print(f'  Deliverable addresses: {deliverable}')"
+    ),
+    'people': (
+        "people = fact.get('value', [])\n"
+        "    print(f'  {len(people)} person(s):')\n"
+        "    for p in people:\n"
+        "        print(f'    {p.get(\"name\")} — titles:{p.get(\"titles\")}')"
+    ),
+    'watchlist': (
+        "hits = fact.get('value', {}).get('metadata', [])\n"
+        "    print(f'  Total watchlist hits: {len(hits)}')\n"
+        "    for h in hits:\n"
+        "        print(f'    {h.get(\"entity_name\")} — {h.get(\"metadata\",{}).get(\"title\")}')"
+    ),
+    'names_found': (
+        "names_list = fact.get('value', [])\n"
+        "    print(f'  Names found: {names_list}')"
+    ),
+    'dba_found': (
+        "dbas = fact.get('value', [])\n"
+        "    print(f'  DBA names: {dbas}')"
+    ),
+}
+
+# Python extra prints for nested scalar facts
+SCALAR_EXTRAS_PY = {
+    'tin_match': (
+        "    tin_val = fact.get('value', {})\n"
+        "    if isinstance(tin_val, str): tin_val = json.loads(tin_val)\n"
+        "    print(f'  tin_status:  {tin_val.get(\"status\")}  (success=Verified badge)')\n"
+        "    print(f'  tin_message: {tin_val.get(\"message\")}')"
+    ),
+    'naics_code': (
+        "    pid_map={'16':'Middesk','23':'OC','24':'ZoomInfo','17':'EFX','38':'Trulioo','22':'SERP','31':'AI'}\n"
+        "    alts=fact.get('alternatives',[])\n"
+        "    print(f'  ALL {len(alts)} vendor responses (sorted by confidence):')\n"
+        "    for a in sorted(alts, key=lambda x: float(x.get('confidence') or 0), reverse=True):\n"
+        "        v=pid_map.get(str(a.get('platformId','')),f'pid={a.get(\"platformId\")}')\n"
+        "        print(f'    {v:12} conf={str(a.get(\"confidence\",\"N/A\")):6} naics={a.get(\"value\")}')"
+    ),
+    'address_verification': (
+        "    av=fact.get('value',{})\n"
+        "    if isinstance(av,str): av=json.loads(av)\n"
+        "    print(f'  status:{av.get(\"status\")} sublabel:{av.get(\"sublabel\")}')"
+    ),
+    'idv_status': (
+        "    counts=fact.get('value',{})\n"
+        "    if isinstance(counts,str): counts=json.loads(counts)\n"
+        "    print(f'  SUCCESS:{counts.get(\"SUCCESS\")} FAILED:{counts.get(\"FAILED\")} PENDING:{counts.get(\"PENDING\")}')"
+    ),
+    'name_match': (
+        "    nm=fact.get('value',{})\n"
+        "    if isinstance(nm,str): nm=json.loads(nm)\n"
+        "    status=nm.get('status') if isinstance(nm,dict) else nm\n"
+        "    print(f'  name_match status:{status}')\n"
+        "    if isinstance(nm,dict): print(f'  message:{nm.get(\"message\")}')"
+    ),
+}
+
+
+import re as _re
+
+def _parse_fact_names(raw):
+    """Extract real Redshift fact names from the fact field string."""
+    tokens = _re.split(r'[/+,]', raw)
+    names = []
+    for t in tokens:
+        c = t.strip().split('[')[0].split('.')[0].split(' ')[0].strip("'\" ")
+        if c and _re.match(r'^[a-z_][a-z0-9_]*$', c) and c not in SKIP_NAMES:
+            if c not in names:
+                names.append(c)
+    return names
+
+
+def generate_sql(f):
+    """Generate the confirmed-working Redshift SQL for any field."""
+    label   = f.get("label", "")
+    raw     = f.get("fact", "")
+    names   = _parse_fact_names(raw)
+    BID     = "'YOUR-BUSINESS-UUID-HERE'"
+
+    if not names:
+        # Website/domain data — lives in /website-data endpoint, not facts table
+        return (
+            f"-- {label}\n"
+            "-- This field comes from GET /verification/businesses/:id/website-data\n"
+            "-- It is NOT stored in rds_warehouse_public.facts\n"
+            "-- No SQL query — fetch via the API endpoint or check integration_data.request_response:\n"
+            "SELECT response FROM integration_data.request_response\n"
+            f"WHERE business_id = {BID} AND platform_id = 22\n"
+            "ORDER BY requested_at DESC LIMIT 1;"
+        )
+
+    is_arr  = any(n in ARRAY_FACTS for n in names)
+    names_q = ', '.join(f"'{n}'" for n in names[:5])
+    extra   = next((NESTED_EXTRAS[n] for n in names if n in NESTED_EXTRAS), '')
+
+    if is_arr:
+        return (
+            f"-- {label} (JSON array stored in value column)\n"
+            f"-- Returns rows AND full JSON value — parse 'value' column with Python below\n"
+            f"SELECT name, value, received_at\n"
+            f"FROM rds_warehouse_public.facts\n"
+            f"WHERE business_id = {BID}\n"
+            f"  AND name IN ({names_q});\n"
+            f"-- Copy the 'value' text output and parse with: json.loads(value)"
+        )
+
+    return (
+        f"-- {label}\n"
+        f"{PID_MAP_COMMENT}\n"
+        f"SELECT\n"
+        f"    name,\n"
+        f"    JSON_EXTRACT_PATH_TEXT(value, 'value')                AS fact_value,\n"
+        f"    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS winning_vendor,\n"
+        f"    JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') AS vendor_conf,\n"
+        f"    JSON_EXTRACT_PATH_TEXT(value, 'override', 'value')    AS analyst_override,\n"
+        f"    JSON_EXTRACT_PATH_TEXT(value, 'override', 'userId')   AS overridden_by,\n"
+        f"    received_at\n"
+        f"FROM rds_warehouse_public.facts\n"
+        f"WHERE business_id = {BID}\n"
+        f"  AND name IN ({names_q});"
+        + extra
+    )
+
+
+def generate_python(f):
+    """Generate field-specific Python for any field."""
+    label  = f.get("label", "")
+    raw    = f.get("fact", "")
+    names  = _parse_fact_names(raw)
+    BID    = "'YOUR-BUSINESS-UUID-HERE'"
+
+    if not names:
+        return (
+            "import psycopg2, json\n\n"
+            "conn = psycopg2.connect(\n"
+            "    host='your-cluster.redshift.amazonaws.com', port=5439,\n"
+            "    dbname='dev', user='your_username', password='your_password', sslmode='require'\n"
+            ")\n"
+            f"# {label} — fetch from /website-data API endpoint\n"
+            "# or check raw SERP response:\n"
+            "cur = conn.cursor()\n"
+            f"cur.execute('SELECT response FROM integration_data.request_response '\n"
+            f"            'WHERE business_id = %s AND platform_id = 22 '\n"
+            f"            'ORDER BY requested_at DESC LIMIT 1', ({BID},))\n"
+            "row = cur.fetchone()\n"
+            "if row: print(json.loads(row[0]))\n"
+            "cur.close(); conn.close()"
+        )
+
+    is_arr  = any(n in ARRAY_FACTS for n in names)
+    names_q = ', '.join(f"'{n}'" for n in names[:5])
+
+    conn_block = (
+        "import psycopg2, json\n\n"
+        "conn = psycopg2.connect(\n"
+        "    host='your-cluster.redshift.amazonaws.com', port=5439,\n"
+        "    dbname='dev', user='your_username', password='your_password', sslmode='require'\n"
+        ")\n"
+        f"BID = {BID}  # replace\n"
+        "cur = conn.cursor()\n"
+    )
+
+    fetch = (
+        f"cur.execute(\n"
+        f"    'SELECT name, value, received_at FROM rds_warehouse_public.facts '\n"
+        f"    'WHERE business_id = %s AND name IN ({names_q})',\n"
+        f"    (BID,)\n"
+        f")\n"
+        f"rows = cur.fetchall()\n"
+        f"print(f'--- {label}: {{len(rows)}} row(s) found ---')\n"
+    )
+
+    if is_arr:
+        arr_name = next((n for n in names if n in ARRAY_PARSERS), None)
+        parse = ARRAY_PARSERS.get(arr_name, "print(fact.get('value'))")
+        return (
+            conn_block + fetch +
+            "for name, value_text, ts in rows:\n"
+            "    fact = json.loads(value_text)\n"
+            "    print(f'  === {name} (received {ts})')\n"
+            f"    {parse}\n"
+            "cur.close(); conn.close()"
+        )
+
+    extra_blocks = ''.join(
+        f"\n    # --- {n} nested fields ---\n{SCALAR_EXTRAS_PY[n]}"
+        for n in names if n in SCALAR_EXTRAS_PY
+    )
+    return (
+        conn_block + fetch +
+        "for name, value_text, ts in rows:\n"
+        "    fact = json.loads(value_text)  # value is varchar — always json.loads()\n"
+        "    val = fact.get('value')\n"
+        "    src = fact.get('source', {})\n"
+        "    pid_map = {'16':'Middesk','24':'ZoomInfo','23':'OC','17':'Equifax',\n"
+        "               '38':'Trulioo','22':'SERP','31':'AI'}\n"
+        "    vendor = pid_map.get(str(src.get('platformId','')), f'pid={src.get(\"platformId\")}')\n"
+        "    print(f'  {name}:')\n"
+        "    print(f'    fact_value    : {val}')\n"
+        "    print(f'    winning_vendor: {vendor}  (pid={src.get(\"platformId\")})')\n"
+        "    print(f'    confidence    : {src.get(\"confidence\")}')\n"
+        "    print(f'    override      : {fact.get(\"override\")}')\n"
+        "    print(f'    received_at   : {ts}')"
+        + extra_blocks + "\n"
+        "cur.close(); conn.close()"
+    )
+
 def build_fact_specific_cols(f):
     """Extra SQL block for fields that have special structure."""
     fact = f.get("fact","").lower()
@@ -775,100 +1077,23 @@ def render_field(f):
                 'use your Redshift endpoint with psycopg2 or AWS Data Wrangler.'
                 '</div>', unsafe_allow_html=True)
 
-            # ── Per-field SQL + Python (field-specific, not generic) ─────────
-            # DB: Amazon Redshift. value column = varchar (text JSON).
-            # ✅ JSON_EXTRACT_PATH_TEXT(value, 'key')  — Redshift built-in, NO cast
-            # ❌ value::json / value->>'key'  — FAILS on Redshift
+            # ── SQL + Python — generated per field using confirmed Redshift pattern ──
             field_label = f["label"]
 
-            # ── Parse REAL fact names from the fact string ─────────────────────
-            # The fact field contains things like:
-            #   "tin / tin_match / tin_match_boolean"
-            #   "naics_code"
-            #   "sos_filings[n].active / sos_active"
-            #   "mcc_code / mcc_code_found / mcc_code_from_naics"
-            # Split on / and + then clean each token to get bare fact names
-            import re as _re
-            _raw_fact = f.get("fact", "")
-            _tokens = _re.split(r"[/+,]", _raw_fact)
-            fact_names = []
-            for _t in _tokens:
-                # Take only the part before any bracket/dot/space
-                _clean = _t.strip().split("[")[0].split(".")[0].split(" ")[0].strip("'\" ")
-                # Keep only valid fact names (lowercase letters, digits, underscore)
-                if _clean and _re.match(r'^[a-z_][a-z0-9_]*$', _clean):
-                    # Skip table names that aren't fact names
-                    if _clean not in ('rds_warehouse_public', 'rds_cases_public',
-                                      'integration_data', 'datascience', 'data_cases',
-                                      'core_case_statuses', 'core_naics_code', 'core_mcc_code'):
-                        if _clean not in fact_names:
-                            fact_names.append(_clean)
-
-            is_array    = any(k in _raw_fact.lower() for k in ["array","[]","sos_filings","addresses","people","names","watchlist","alternatives"])
-            is_redshift = "customer_files" in f.get("sql","") or "datascience." in f.get("sql","")
-            BID = "'YOUR-BUSINESS-UUID-HERE'"
-
-            st.markdown("**🔍 SQL — tailored for this field (Redshift confirmed):**")
-
-            # Build field-specific SQL
-            if is_redshift:
-                # Redshift: datascience.customer_files — plain column, no JSON
-                field_sql = build_redshift_sql(f, BID)
-                st.code(field_sql, language="sql")
-            elif is_array:
-                # Array facts: fetch raw value + the value column, parse in Python
-                names_in = ", ".join(f"'{n}'" for n in fact_names[:3] if n)
-                field_sql = (
-                    f"-- {field_label}: stored as a JSON array in the value column\n"
-                    f"-- This query returns the rows AND the value (JSON text) — parse with Python below\n"
-                    f"SELECT name, value, received_at\n"
-                    f"FROM rds_warehouse_public.facts\n"
-                    f"WHERE business_id = {BID}\n"
-                    f"  AND name IN ({names_in});\n\n"
-                    f"-- The 'value' column contains the full JSON — copy it and parse in Python snippet below"
-                )
-                st.code(field_sql, language="sql")
-            else:
-                # Scalar facts — one query that shows BOTH existence AND values
-                names_in = ", ".join(f"'{n}'" for n in fact_names[:4] if n)
-                extra_cols = build_fact_specific_cols(f)
-
-                # Explain what each output column means for this field
-                pid_note = "16=Middesk, 24=ZoomInfo, 23=OpenCorporates, 17=Equifax, 38=Trulioo, 22=SERP, 31=AI"
-                field_sql = (
-                    f"-- {field_label}\n"
-                    f"-- Returns the rows AND their values in one query\n"
-                    f"-- fact_value     = the actual data shown in the admin portal\n"
-                    f"-- winning_vendor = which vendor provided the winning value ({pid_note})\n"
-                    f"-- vendor_conf    = vendor's match confidence (0.0-1.0)\n"
-                    f"-- analyst_override = non-null if an analyst manually changed this value\n"
-                    f"SELECT\n"
-                    f"    name,\n"
-                    f"    JSON_EXTRACT_PATH_TEXT(value, 'value')                AS fact_value,\n"
-                    f"    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS winning_vendor,\n"
-                    f"    JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') AS vendor_conf,\n"
-                    f"    JSON_EXTRACT_PATH_TEXT(value, 'override', 'value')    AS analyst_override,\n"
-                    f"    JSON_EXTRACT_PATH_TEXT(value, 'override', 'userId')   AS overridden_by,\n"
-                    f"    received_at\n"
-                    f"FROM rds_warehouse_public.facts\n"
-                    f"WHERE business_id = {BID}\n"
-                    f"  AND name IN ({names_in});\n"
-                )
-                if extra_cols:
-                    field_sql += f"\n{extra_cols}"
-                st.code(field_sql, language="sql")
-
-            st.caption(
-                "✅ Confirmed working on Redshift: SELECT name, value + JSON_EXTRACT_PATH_TEXT(value, 'key'). "
-                "Replace YOUR-BUSINESS-UUID-HERE with your actual UUID "
-                "(find it in admin portal URL or via GET /cases/:id → business.id)."
+            st.markdown("**🔍 SQL — field-specific, Redshift confirmed:**")
+            card(
+                "⚠️ <b>DB = Amazon Redshift.</b> "
+                "✅ Works: <code>SELECT name, value, received_at</code> and <code>JSON_EXTRACT_PATH_TEXT(value, 'key')</code><br>"
+                "❌ Fails: <code>value::json</code> → 'type json does not exist' | "
+                "<code>value->>'key'</code> → 'operator does not exist'<br>"
+                "Replace <code>YOUR-BUSINESS-UUID-HERE</code> with your UUID "
+                "(admin portal URL or GET /cases/:id → business.id)",
+                "card-amber"
             )
+            st.code(generate_sql(f), language="sql")
 
-            # ── Per-field Python ──────────────────────────────────────────────
-            db_note = "Redshift" if is_redshift else "Redshift (rds_warehouse_public)"
-            st.markdown(f"**🐍 Python — {db_note} — specific to {field_label}:**")
-            py_code = build_python_for_field(f, fact_names, is_array, is_redshift, BID.strip("'"))
-            st.code(py_code, language="python")
+            st.markdown(f"**🐍 Python — {field_label} (field-specific):**")
+            st.code(generate_python(f), language="python")
 
 
 
@@ -2225,50 +2450,60 @@ CRITICAL FACTS from source code:
 RULES:
 1. ALWAYS cite [FILE: path L123-L145] for every claim.
 2. For screenshot analysis: identify every field, badge, card shown.
-3. ALWAYS provide SQL — use ONLY these CONFIRMED-WORKING patterns (tested on production):
+3. ALWAYS provide SQL and Python — use ONLY these CONFIRMED-WORKING Redshift patterns:
 
-   THE DATABASE IS AMAZON REDSHIFT (not PostgreSQL).
-   ✅ WORKS: SELECT name, value, received_at FROM rds_warehouse_public.facts WHERE business_id='uuid' AND name='fact_name'
-   ✅ WORKS: JSON_EXTRACT_PATH_TEXT(value, 'key')  — Redshift built-in, works on varchar, NO cast needed
-   ✅ WORKS: JSON_EXTRACT_PATH_TEXT(value, 'key1', 'key2')  — nested extraction
-   ❌ FAILS: value::json  →  ERROR: type "json" does not exist
-   ❌ FAILS: value->>'key'  →  ERROR: operator does not exist: character varying ->>
-   ❌ FAILS: value->'key'  →  same error
+   DATABASE = AMAZON REDSHIFT. value column = varchar (text JSON). port=5439.
+   ✅ WORKS: SELECT name, value, received_at FROM rds_warehouse_public.facts WHERE business_id='uuid' AND name IN ('fact1','fact2')
+   ✅ WORKS: JSON_EXTRACT_PATH_TEXT(value, 'key')  — scalar extraction, NO cast
+   ✅ WORKS: JSON_EXTRACT_PATH_TEXT(value, 'key1', 'key2')  — nested extraction (e.g. source.platformId)
+   ❌ FAILS: value::json  →  type "json" does not exist
+   ❌ FAILS: value->>'key'  →  operator does not exist
+   ❌ FAILS: value->'key'  →  operator does not exist
+   ALWAYS use json.loads(value_text) in Python — never str.split() or regex on JSON
 
-   Pattern for any fact:
-     SELECT name, received_at FROM rds_warehouse_public.facts
-     WHERE business_id = 'YOUR-BUSINESS-UUID-HERE' AND name = 'fact_name';
-
-   Extract the value:
+   SCALAR FACT (single value like business_name, naics_code, tin_match_boolean):
      SELECT name,
             JSON_EXTRACT_PATH_TEXT(value, 'value')                AS fact_value,
-            JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS winning_pid,
-            JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') AS confidence,
-            JSON_EXTRACT_PATH_TEXT(value, 'override', 'value')    AS analyst_override
+            JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS winning_vendor,
+            JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') AS vendor_conf,
+            JSON_EXTRACT_PATH_TEXT(value, 'override', 'value')    AS analyst_override,
+            received_at
      FROM rds_warehouse_public.facts
-     WHERE business_id = 'YOUR-BUSINESS-UUID-HERE' AND name = 'fact_name';
+     WHERE business_id = 'YOUR-BUSINESS-UUID-HERE'
+       AND name IN ('fact_name');
+     -- winning_vendor: 16=Middesk 24=ZoomInfo 23=OC 17=Equifax 38=Trulioo 22=SERP 31=AI
 
-   For array facts (sos_filings, addresses, people):
-     SELECT name, value FROM rds_warehouse_public.facts
-     WHERE business_id = 'your-uuid-here' AND name = 'sos_filings';
-     -- Then parse the JSON array in Python: json.loads(value)
+   NESTED OBJECT FACTS (tin_match, address_verification, name_match, idv_status):
+     SELECT JSON_EXTRACT_PATH_TEXT(value, 'value', 'status') AS status,
+            JSON_EXTRACT_PATH_TEXT(value, 'value', 'message') AS message
+     FROM rds_warehouse_public.facts
+     WHERE business_id = 'YOUR-BUSINESS-UUID-HERE' AND name = 'tin_match';
 
-   Pipeline B (Redshift — standard SQL, no JSON):
-     SELECT business_id, primary_naics_code, mcc_code, zi_match_confidence, efx_match_confidence
-     FROM datascience.customer_files WHERE business_id = 'your-uuid-here';
+   ARRAY FACTS (sos_filings, addresses, people, watchlist, dba_found):
+     SELECT name, value, received_at FROM rds_warehouse_public.facts
+     WHERE business_id = 'YOUR-BUSINESS-UUID-HERE' AND name = 'sos_filings';
+     -- Then in Python: fact=json.loads(value); filings=fact.get('value',[])
 
-4. Provide Python code when asked — use this confirmed-working pattern:
+   PIPELINE B (datascience.customer_files — plain columns, no JSON):
+     SELECT primary_naics_code, mcc_code, zi_match_confidence, efx_match_confidence, worth_score
+     FROM datascience.customer_files WHERE business_id = 'YOUR-BUSINESS-UUID-HERE';
+
+4. PYTHON pattern — ALWAYS use this structure:
    import psycopg2, json
-   conn = psycopg2.connect(host='your-host', port=5432, dbname='postgres', user='u', password='pw', sslmode='require')
+   conn = psycopg2.connect(host='your-cluster.redshift.amazonaws.com', port=5439,
+       dbname='dev', user='u', password='pw', sslmode='require')
+   BID = 'YOUR-BUSINESS-UUID-HERE'
    cur = conn.cursor()
-   cur.execute('SELECT name, value, received_at FROM rds_warehouse_public.facts WHERE business_id = %s AND name = %s', ('your-uuid', 'fact_name'))
-   row = cur.fetchone()
-   if row:
-       name, value_text, ts = row
-       fact = json.loads(value_text)  # value is stored as text/varchar JSON
-       print('Value:', fact.get('value'))
-       print('PID:', fact.get('source', {}).get('platformId'))
-       print('Confidence:', fact.get('source', {}).get('confidence'))
+   cur.execute('SELECT name, value, received_at FROM rds_warehouse_public.facts '
+               'WHERE business_id = %s AND name IN (%s,%s)', (BID, 'fact1', 'fact2'))
+   for name, value_text, ts in cur.fetchall():
+       fact = json.loads(value_text)  # value is varchar — ALWAYS use json.loads()
+       val = fact.get('value')
+       src = fact.get('source', {})
+       pid_map = {'16':'Middesk','24':'ZoomInfo','23':'OC','17':'Equifax',
+                  '38':'Trulioo','22':'SERP','31':'AI'}
+       vendor = pid_map.get(str(src.get('platformId','')), str(src.get('platformId')))
+       print(f'{name}: value={val} | vendor={vendor} | conf={src.get("confidence")} | override={fact.get("override")}')
    cur.close(); conn.close()
 5. Structure answers: 📍WHERE → 📡WHICH API → 🔧WHICH FACT → 📦WHICH SOURCE → 🗄️STORAGE → ✅VERIFY SQL → 📝WHY BLANK
 6. Do NOT hallucinate. Only use provided code chunks.
