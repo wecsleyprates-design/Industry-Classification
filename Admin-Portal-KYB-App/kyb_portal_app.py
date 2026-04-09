@@ -764,8 +764,31 @@ def render_field(f):
             # ✅ JSON_EXTRACT_PATH_TEXT(value, 'key')  — Redshift built-in, NO cast
             # ❌ value::json / value->>'key'  — FAILS on Redshift
             field_label = f["label"]
-            fact_names  = [n.strip().strip("'") for n in f["fact"].split("/")]
-            is_array    = any(k in f["fact"].lower() for k in ["array","[]","sos_filings","addresses","people","names","watchlist","alternatives"])
+
+            # ── Parse REAL fact names from the fact string ─────────────────────
+            # The fact field contains things like:
+            #   "tin / tin_match / tin_match_boolean"
+            #   "naics_code"
+            #   "sos_filings[n].active / sos_active"
+            #   "mcc_code / mcc_code_found / mcc_code_from_naics"
+            # Split on / and + then clean each token to get bare fact names
+            import re as _re
+            _raw_fact = f.get("fact", "")
+            _tokens = _re.split(r"[/+,]", _raw_fact)
+            fact_names = []
+            for _t in _tokens:
+                # Take only the part before any bracket/dot/space
+                _clean = _t.strip().split("[")[0].split(".")[0].split(" ")[0].strip("'\" ")
+                # Keep only valid fact names (lowercase letters, digits, underscore)
+                if _clean and _re.match(r'^[a-z_][a-z0-9_]*$', _clean):
+                    # Skip table names that aren't fact names
+                    if _clean not in ('rds_warehouse_public', 'rds_cases_public',
+                                      'integration_data', 'datascience', 'data_cases',
+                                      'core_case_statuses', 'core_naics_code', 'core_mcc_code'):
+                        if _clean not in fact_names:
+                            fact_names.append(_clean)
+
+            is_array    = any(k in _raw_fact.lower() for k in ["array","[]","sos_filings","addresses","people","names","watchlist","alternatives"])
             is_redshift = "customer_files" in f.get("sql","") or "datascience." in f.get("sql","")
             BID = "'YOUR-BUSINESS-UUID-HERE'"
 
