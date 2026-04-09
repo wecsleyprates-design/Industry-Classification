@@ -447,13 +447,29 @@ def build_fact_specific_cols(f):
         )
     if "tin_match" in fact:
         return (
-            "\n-- TIN match detail (status + message):\n"
-            "SELECT name,\n"
-            "       JSON_EXTRACT_PATH_TEXT(value, 'value', 'status')  AS tin_status,\n"
-            "       JSON_EXTRACT_PATH_TEXT(value, 'value', 'message') AS tin_message\n"
+            "\n-- tin_match has a NESTED object as its value (not a simple string):\n"
+            "-- fact_value will show: {\"status\":\"success\",\"message\":\"...\",\"sublabel\":\"...\"}\n"
+            "-- Use this query to unpack the nested fields:\n"
+            "SELECT\n"
+            "    JSON_EXTRACT_PATH_TEXT(value, 'value', 'status')   AS tin_status,\n"
+            "    JSON_EXTRACT_PATH_TEXT(value, 'value', 'message')  AS tin_message,\n"
+            "    JSON_EXTRACT_PATH_TEXT(value, 'value', 'sublabel') AS tin_sublabel,\n"
+            "    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS source_pid\n"
             "FROM rds_warehouse_public.facts\n"
             "WHERE business_id = 'YOUR-BUSINESS-UUID-HERE'\n"
-            "  AND name = 'tin_match';"
+            "  AND name = 'tin_match';\n\n"
+            "-- tin_match_boolean = simpler: just true or false\n"
+            "-- true  → admin portal shows ✅ Verified badge\n"
+            "-- false → admin portal shows ⚠️ Unverified badge\n"
+            "SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS tin_verified\n"
+            "FROM rds_warehouse_public.facts\n"
+            "WHERE business_id = 'YOUR-BUSINESS-UUID-HERE'\n"
+            "  AND name = 'tin_match_boolean';\n\n"
+            "-- tin = the raw masked EIN submitted by the applicant\n"
+            "SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS tin_masked\n"
+            "FROM rds_warehouse_public.facts\n"
+            "WHERE business_id = 'YOUR-BUSINESS-UUID-HERE'\n"
+            "  AND name = 'tin';"
         )
     return ""
 
@@ -800,43 +816,46 @@ def render_field(f):
                 field_sql = build_redshift_sql(f, BID)
                 st.code(field_sql, language="sql")
             elif is_array:
-                # Array facts: fetch raw value, parse in Python
+                # Array facts: fetch raw value + the value column, parse in Python
                 names_in = ", ".join(f"'{n}'" for n in fact_names[:3] if n)
                 field_sql = (
-                    f"-- {field_label}: value is a JSON array — fetch raw text and parse in Python\n"
+                    f"-- {field_label}: stored as a JSON array in the value column\n"
+                    f"-- This query returns the rows AND the value (JSON text) — parse with Python below\n"
                     f"SELECT name, value, received_at\n"
                     f"FROM rds_warehouse_public.facts\n"
                     f"WHERE business_id = {BID}\n"
                     f"  AND name IN ({names_in});\n\n"
-                    f"-- Then use the Python snippet below to iterate the array items"
+                    f"-- The 'value' column contains the full JSON — copy it and parse in Python snippet below"
                 )
                 st.code(field_sql, language="sql")
             else:
-                # Scalar facts: JSON_EXTRACT_PATH_TEXT (confirmed working)
+                # Scalar facts — one query that shows BOTH existence AND values
                 names_in = ", ".join(f"'{n}'" for n in fact_names[:4] if n)
-                # Build SELECT columns specific to this fact
                 extra_cols = build_fact_specific_cols(f)
+
+                # Explain what each output column means for this field
+                pid_note = "16=Middesk, 24=ZoomInfo, 23=OpenCorporates, 17=Equifax, 38=Trulioo, 22=SERP, 31=AI"
                 field_sql = (
                     f"-- {field_label}\n"
-                    f"-- Step 1: confirm row exists\n"
-                    f"SELECT name, received_at\n"
-                    f"FROM rds_warehouse_public.facts\n"
-                    f"WHERE business_id = {BID}\n"
-                    f"  AND name IN ({names_in});\n\n"
-                    f"-- Step 2: extract fact value + source metadata\n"
+                    f"-- Returns the rows AND their values in one query\n"
+                    f"-- fact_value     = the actual data shown in the admin portal\n"
+                    f"-- winning_vendor = which vendor provided the winning value ({pid_note})\n"
+                    f"-- vendor_conf    = vendor's match confidence (0.0-1.0)\n"
+                    f"-- analyst_override = non-null if an analyst manually changed this value\n"
                     f"SELECT\n"
                     f"    name,\n"
                     f"    JSON_EXTRACT_PATH_TEXT(value, 'value')                AS fact_value,\n"
-                    f"    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS winning_vendor_pid,\n"
-                    f"    JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') AS vendor_confidence,\n"
+                    f"    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS winning_vendor,\n"
+                    f"    JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') AS vendor_conf,\n"
                     f"    JSON_EXTRACT_PATH_TEXT(value, 'override', 'value')    AS analyst_override,\n"
-                    f"    JSON_EXTRACT_PATH_TEXT(value, 'override', 'userId')   AS overridden_by_user,\n"
+                    f"    JSON_EXTRACT_PATH_TEXT(value, 'override', 'userId')   AS overridden_by,\n"
                     f"    received_at\n"
                     f"FROM rds_warehouse_public.facts\n"
                     f"WHERE business_id = {BID}\n"
-                    f"  AND name IN ({names_in});"
-                    + (f"\n\n{extra_cols}" if extra_cols else "")
+                    f"  AND name IN ({names_in});\n"
                 )
+                if extra_cols:
+                    field_sql += f"\n{extra_cols}"
                 st.code(field_sql, language="sql")
 
             st.caption(
