@@ -1669,8 +1669,9 @@ elif section == "🏭 Classification":
         flag(f"{fallbacks/total*100:.1f}% NAICS fallback rate > 10%. "
              "Root cause: entity matching failed → AI fires with name+address only → 561499.", "red")
 
-    tab_dist, tab_src, tab_fb, tab_cross, tab_dq = st.tabs([
-        "📊 Code Distribution","📡 Source Analysis","⚠️ 561499 Root Cause","🔗 Cross-Analysis","🔬 Quality"
+    tab_dist, tab_src, tab_fb, tab_cross, tab_consist, tab_dq = st.tabs([
+        "📊 Code Distribution","📡 Source Analysis","⚠️ 561499 Root Cause",
+        "🔗 Cross-Analysis","🔍 Consistency Checks","🔬 Quality"
     ])
 
     with tab_dist:
@@ -1791,6 +1792,280 @@ elif section == "🏭 Classification":
             "AI winning source > 10% indicates vendor entity matching is failing broadly. "
             "Check ZI/EFX/OC bulk data freshness in Redshift.",
         ])
+
+    with tab_consist:
+        st.markdown("#### 🔍 Classification Consistency & Anomaly Detection")
+        st.markdown(
+            "Checks whether NAICS/MCC codes are internally consistent and concordant "
+            "with other available signals (website, description, MCC, sector). "
+            "Inconsistencies may indicate mis-classification, AI hallucination, or data gaps."
+        )
+
+        # ── Pull enriching facts for cross-check ─────────────────────────────
+        with st.spinner("Loading website, MCC and description facts for consistency analysis…"):
+            consist_facts = query_facts_safe([
+                'naics_code','mcc_code','naics_description','mcc_description',
+                'industry','website','website_found',
+            ], record_limit)
+
+        if consist_facts is None or consist_facts.empty:
+            st.warning("Consistency analysis requires naics_code, mcc_code and website facts.")
+        else:
+            consist_facts["fact_val"] = consist_facts["value"].apply(
+                lambda v: str(_parse_fact(v).get("value","")) if v else "")
+            pivot_c = consist_facts.pivot_table(
+                index="business_id", columns="name", values="fact_val", aggfunc="last"
+            ).reset_index()
+            pivot_c.columns.name = None
+
+            # ── 1. NAICS ↔ MCC Concordance ────────────────────────────────────
+            st.markdown("---")
+            st.markdown("##### 1. NAICS ↔ MCC Code Concordance")
+            st.markdown(
+                "Each NAICS 6-digit code maps to a specific set of MCC codes via `rel_naics_mcc`. "
+                "If `naics_code` and `mcc_code` are from different industry families, "
+                "this is a classification conflict — one or both codes may be wrong."
+            )
+
+            # Known high-level NAICS→MCC sector concordance (2-digit prefix → MCC range)
+            NAICS_SECTOR_MCC = {
+                "11": ("Agriculture","0742,1711,5261"),
+                "21": ("Mining","5172,5983"),
+                "22": ("Utilities","4900,4911,4931"),
+                "23": ("Construction","1520,1731,1740,1761,1771"),
+                "31": ("Manufacturing","5065,5085,5169"),
+                "32": ("Manufacturing","5045,5047,5065"),
+                "33": ("Manufacturing","5040,5045,5065,5085"),
+                "42": ("Wholesale","5040,5045,5065,5085,5169"),
+                "44": ("Retail","5300,5310,5411,5511,5651,5661,5712,5812"),
+                "45": ("Retail","5300,5411,5945,5999"),
+                "48": ("Transportation","4111,4121,4131,4215,7512"),
+                "49": ("Warehousing","4215,4225"),
+                "51": ("Information","4814,5045,5734,7372"),
+                "52": ("Finance","6011,6012,6051,6211,6300"),
+                "53": ("Real Estate","6512,6552,7349"),
+                "54": ("Professional Svcs","7372,7374,7389,8000"),
+                "56": ("Admin/Support","7389,7392,8742"),
+                "61": ("Education","8220,8249,8299"),
+                "62": ("Healthcare","8011,8021,8049,8099"),
+                "71": ("Arts/Entertainment","7011,7922,7991,7993,7996"),
+                "72": ("Accommodation/Food","5812,5813,7011,7012"),
+                "81": ("Other Services","7210,7230,7251,7261,7299"),
+                "92": ("Government","9211,9222,9399"),
+            }
+
+            if "naics_code" in pivot_c.columns and "mcc_code" in pivot_c.columns:
+                def naics_sector(n):
+                    try: return str(n)[:2]
+                    except: return ""
+
+                def check_concordance(row):
+                    n = str(row.get("naics_code","") or "")
+                    m = str(row.get("mcc_code","")   or "")
+                    if not n or not m or n=="561499": return "N/A"
+                    sector = n[:2]
+                    sector_info = NAICS_SECTOR_MCC.get(sector)
+                    if sector_info is None: return "Unknown sector"
+                    allowed_mccs = sector_info[1].split(",")
+                    # Check if first 2 chars of MCC are in range
+                    mcc_prefix = m[:2]
+                    if any(mcc_prefix == a[:2] for a in allowed_mccs):
+                        return "✅ Concordant"
+                    return "⚠️ Potential mismatch"
+
+                pivot_c["concordance"] = pivot_c.apply(check_concordance, axis=1)
+                concordance_counts = pivot_c["concordance"].value_counts().reset_index()
+                concordance_counts.columns = ["Status","Count"]
+                concordance_counts["% of Total"] = (concordance_counts["Count"]/len(pivot_c)*100).round(1).astype(str)+"%"
+
+                col_l, col_r = st.columns(2)
+                with col_l:
+                    fig = px.pie(concordance_counts, names="Status", values="Count",
+                                 color="Status",
+                                 color_discrete_map={"✅ Concordant":"#22c55e",
+                                                      "⚠️ Potential mismatch":"#ef4444",
+                                                      "N/A":"#64748b","Unknown sector":"#f59e0b"},
+                                 hole=0.45, title="NAICS ↔ MCC Concordance")
+                    st.plotly_chart(dark_chart_layout(fig), use_container_width=True)
+                with col_r:
+                    styled_table(concordance_counts, color_col="Status",
+                                 palette={"✅ concordant":"#22c55e",
+                                          "⚠️ potential mismatch":"#ef4444",
+                                          "n/a":"#64748b"})
+                    mismatch_n = int((pivot_c["concordance"]=="⚠️ Potential mismatch").sum())
+                    if mismatch_n>0:
+                        flag(f"{mismatch_n:,} businesses have NAICS and MCC from different industry sectors. "
+                             "This may indicate: (1) AI chose NAICS from one industry but MCC from another, "
+                             "(2) a new business with ambiguous classification, or "
+                             "(3) a legitimate multi-industry business (e.g. restaurant + catering).", "amber")
+                    else:
+                        flag("All NAICS and MCC codes appear concordant.", "green")
+
+                # Sample mismatches
+                mismatches = pivot_c[pivot_c["concordance"]=="⚠️ Potential mismatch"][
+                    ["business_id","naics_code","mcc_code","concordance"]].head(20)
+                if not mismatches.empty:
+                    st.markdown("##### Sample NAICS↔MCC mismatches:")
+                    styled_table(mismatches)
+
+            # ── 2. NAICS ↔ Description Concordance ───────────────────────────
+            st.markdown("---")
+            st.markdown("##### 2. NAICS Code ↔ Description Concordance")
+            st.markdown(
+                "The `naics_description` fact should describe the same industry as `naics_code`. "
+                "If the description is null/missing while the code is present, the label pipeline failed. "
+                "If the description is the generic fallback text, the AI couldn't classify."
+            )
+
+            if "naics_code" in pivot_c.columns and "naics_description" in pivot_c.columns:
+                FALLBACK_DESC_MARKERS = [
+                    "all other", "not elsewhere classified", "miscellaneous",
+                    "other services", "business support", "fallback", ""
+                ]
+                def check_desc(row):
+                    code = str(row.get("naics_code","") or "")
+                    desc = str(row.get("naics_description","") or "").lower().strip()
+                    if not code: return "No code"
+                    if not desc: return "⚠️ Missing description"
+                    if any(m in desc for m in FALLBACK_DESC_MARKERS) and code != "561499":
+                        return "⚠️ Generic/fallback description"
+                    return "✅ Has description"
+
+                pivot_c["desc_check"] = pivot_c.apply(check_desc, axis=1)
+                desc_counts = pivot_c["desc_check"].value_counts().reset_index()
+                desc_counts.columns = ["Status","Count"]
+
+                col_l, col_r = st.columns(2)
+                with col_l:
+                    fig2 = px.bar(desc_counts, x="Status", y="Count", color="Status",
+                                  color_discrete_map={"✅ Has description":"#22c55e",
+                                                       "⚠️ Missing description":"#ef4444",
+                                                       "⚠️ Generic/fallback description":"#f59e0b",
+                                                       "No code":"#64748b"},
+                                  title="NAICS Description Quality")
+                    fig2.update_layout(showlegend=False)
+                    st.plotly_chart(dark_chart_layout(fig2), use_container_width=True)
+                with col_r:
+                    styled_table(desc_counts)
+                    missing_desc = int((pivot_c["desc_check"]=="⚠️ Missing description").sum())
+                    generic_desc = int((pivot_c["desc_check"]=="⚠️ Generic/fallback description").sum())
+                    if missing_desc>0:
+                        flag(f"{missing_desc:,} businesses have a NAICS code but no description. "
+                             "naics_description fact missing — check if label lookup (core_naics_code) is working.", "red")
+                    if generic_desc>0:
+                        flag(f"{generic_desc:,} businesses have a generic/fallback description despite a specific code. "
+                             "The description pipeline may not be reading the AI enrichment correctly.", "amber")
+
+            # ── 3. Website ↔ NAICS Semantic Check ────────────────────────────
+            st.markdown("---")
+            st.markdown("##### 3. Website ↔ NAICS Classification Consistency")
+            st.markdown(
+                "If a business has a website URL but still received NAICS 561499 (fallback), "
+                "this is a gap: the AI should have used the website to determine the industry "
+                "but didn't. Conversely, if a business has no website and a specific NAICS code, "
+                "the code likely came from a vendor match (good — no gap)."
+            )
+
+            if "naics_code" in pivot_c.columns:
+                has_website = pivot_c.get("website", pd.Series([None]*len(pivot_c), index=pivot_c.index))
+                if isinstance(has_website, pd.Series):
+                    has_website_flag = has_website.apply(lambda v: bool(v and str(v).strip() not in ("","None","nan")))
+                else:
+                    has_website_flag = pd.Series([False]*len(pivot_c))
+
+                is_fallback_c = pivot_c.get("naics_code","").apply(lambda v: str(v)=="561499")
+
+                combo = pd.DataFrame({
+                    "Has Website":   has_website_flag,
+                    "Is Fallback":   is_fallback_c,
+                }).value_counts().reset_index()
+                combo.columns = ["Has Website","Is Fallback","Count"]
+                combo["Scenario"] = combo.apply(lambda r:
+                    "✅ Has website + real NAICS"   if r["Has Website"] and not r["Is Fallback"]
+                    else "🚨 Has website + 561499 fallback"  if r["Has Website"] and r["Is Fallback"]
+                    else "⚠️ No website + 561499 fallback"   if not r["Has Website"] and r["Is Fallback"]
+                    else "✅ No website + real NAICS (vendor)", axis=1)
+
+                col_l, col_r = st.columns(2)
+                with col_l:
+                    c_map2 = {
+                        "✅ Has website + real NAICS":"#22c55e",
+                        "🚨 Has website + 561499 fallback":"#ef4444",
+                        "⚠️ No website + 561499 fallback":"#f59e0b",
+                        "✅ No website + real NAICS (vendor)":"#3B82F6",
+                    }
+                    fig3 = px.pie(combo, names="Scenario", values="Count",
+                                  color="Scenario", color_discrete_map=c_map2,
+                                  hole=0.45, title="Website ↔ NAICS Consistency")
+                    st.plotly_chart(dark_chart_layout(fig3), use_container_width=True)
+                with col_r:
+                    display_combo = combo[["Scenario","Count"]].copy()
+                    display_combo["% of Total"] = (display_combo["Count"]/len(pivot_c)*100).round(1).astype(str)+"%"
+                    styled_table(display_combo, color_col="Scenario",
+                                 palette={k.lower():v for k,v in c_map2.items()})
+
+                # Highlight the worst case
+                worst = combo[combo["Scenario"]=="🚨 Has website + 561499 fallback"]["Count"].sum()
+                if worst>0:
+                    flag(f"🚨 {int(worst):,} businesses have a website URL but still received "
+                         "NAICS 561499. This is Gap G2 in action: the AI enrichment did NOT use "
+                         "the website to classify. Fix: enable web_search in aiNaicsEnrichment.ts "
+                         "when params.website is set.", "red")
+                else:
+                    flag("All businesses with websites received real NAICS codes.", "green")
+
+            # ── 4. MCC Description Anomaly Check ─────────────────────────────
+            st.markdown("---")
+            st.markdown("##### 4. MCC Description — Customer-Visible Fallback Text Detection")
+            st.markdown(
+                "When AI returns MCC 5614 (fallback), it also writes a fallback description: "
+                "`'Fallback MCC per instructions (no industry evidence to determine canonical MCC description)'`. "
+                "This internal debug text is **visible to customers in the Admin Portal**. "
+                "Detect how many businesses have this description exposed."
+            )
+
+            FALLBACK_MCC_MARKER = "fallback mcc per instructions"
+            mcc_desc_sql = f"""
+                SELECT business_id,
+                       JSON_EXTRACT_PATH_TEXT(value,'value') AS mcc_description
+                FROM rds_warehouse_public.facts
+                WHERE name = 'mcc_description'
+                  AND LOWER(JSON_EXTRACT_PATH_TEXT(value,'value')) LIKE '%fallback%'
+                ORDER BY received_at DESC{_limit_clause(record_limit)}
+            """
+            fallback_mcc_df = run_query(mcc_desc_sql)
+            if fallback_mcc_df is not None and not fallback_mcc_df.empty:
+                n_fb_desc = len(fallback_mcc_df)
+                flag(f"🚨 {n_fb_desc:,} businesses have the internal fallback MCC description "
+                     "exposed in the Admin Portal KYB tab. "
+                     "This is Gap G5 — fix the AI system prompt to provide a clean 'Industry not determined' message.", "red")
+                styled_table(fallback_mcc_df.head(20))
+            else:
+                flag("No fallback MCC descriptions detected — or mcc_description fact not accessible.", "green")
+
+            analyst_card("Classification Consistency Insights", [
+                "NAICS↔MCC mismatch: the Fact Engine selects naics_code and mcc_code independently. "
+                "If different vendors win each fact, their codes may come from different industries. "
+                "Always verify: mcc_code should be derivable from naics_code via rel_naics_mcc.",
+                "Missing description with present code: the label lookup (core_naics_code JOIN) "
+                "failed or was skipped. Check case-service getCaseByIDQuery L1555.",
+                "Website+561499 combination is the clearest evidence of Gap G2. "
+                "The website URL exists but aiNaicsEnrichment.ts did not run web_search.",
+                "Fallback MCC description in customer UI (Gap G5): fix by changing the AI prompt "
+                "to output 'Industry classification pending' instead of the internal debug message.",
+            ])
+
+            cross_box("Anomalous Relationship Patterns to Investigate", [
+                "naics_code=722511 (Full-Service Restaurants) but mcc_code=7372 (Computer Programming): "
+                "likely wrong NAICS from AI vs correct MCC from Trulioo. Check source.platformId on each.",
+                "naics_description contains 'All Other' but naics_code is specific (e.g. 541512): "
+                "the description is from the parent category, not the 6-digit code.",
+                "NAICS code from equifax (weight=0.7) but very high confidence (0.95): "
+                "investigate — EFX confidence formula caps at index/55, 0.95 would require index=52/55.",
+                "business has website_found=true but naics_source='ai': "
+                "web scraping found the site but SERP classification lost to AI enrichment — "
+                "check SERP weight (0.3) vs AI weight (0.1); SERP should always beat AI.",
+            ])
 
     with tab_dq:
         st.markdown("#### 🔬 NAICS / MCC Quality Checks")
@@ -2189,39 +2464,51 @@ GROUP BY verification_status ORDER BY accounts DESC;""", language="sql")
 # SECTION 6 — BUSINESS LOOKUP
 # ═══════════════════════════════════════════════════════════════════════════════
 elif section == "🔎 Business Lookup":
-    sh("Business ID Lookup — Full Data Quality Report",
-       "Enter a business UUID to get a complete automated analysis: red flags, "
-       "vendor match rates, data lineage, all facts", "🔎")
+    sh("KYB Business Investigation",
+       "Full per-business analysis mirroring the Admin Portal KYB tabs — "
+       "Background · Registry · Identity · Classification · Risk · Consistency checks", "🔎")
 
-    flag("Replaces manual per-business analysis. Automated detection of data quality issues, "
-         "inconsistencies, and underwriting red flags.", "blue")
+    flag("Systematic replacement of manual KYB analysis. "
+         "Checks every field for data quality, consistency, and anomalous relationships.", "blue")
 
     business_id = st.text_input(
-        "Enter Business UUID",
+        "Business UUID",
         placeholder="e.g. a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-        help="The business_id UUID from rds_cases_public.data_businesses"
+        help="The business_id from rds_cases_public.data_businesses"
     )
 
     if not business_id or len(business_id) < 10:
-        st.info("Enter a business UUID above to begin analysis.")
-        for item in [
-            "✅ SOS filing status — active/inactive, Middesk vs OC match",
-            "✅ TIN verification — success/failure/pending + Middesk task result",
-            "✅ Vendor confidence scores — Middesk, OC, ZI, EFX, Trulioo",
-            "✅ NAICS/MCC classification — code, source, confidence",
-            "✅ Watchlist hits — sanctions, PEP, adverse media counts",
-            "✅ IDV status — Plaid identity verification result",
-            "✅ Inactive + Perpetual detection — underwriting red flag",
-            "✅ TIN boolean vs status consistency check",
-            "✅ Worth Score — if available from rds_manual_score_public",
-            "✅ All facts — complete fact table with values, vendors, confidence",
-        ]:
-            st.markdown(f"- {item}")
+        st.info("Enter a business UUID to begin the full KYB investigation.")
+        st.markdown("**This tool performs the following checks automatically:**")
+        categories = {
+            "🏢 Background": ["Business name vs legal name match", "DBA consistency",
+                              "NAICS/MCC consistency check", "Industry vs classification concordance",
+                              "Revenue/employee data presence"],
+            "🏛️ Business Registration": ["SOS active status", "Domestic vs foreign filing check",
+                                          "Middesk vs OC concordance", "Perpetual+inactive detection",
+                                          "TIN verification (all 3 facts consistency)"],
+            "🪪 Identity (KYC)": ["IDV pass/fail reason", "Name match status",
+                                   "Address match status", "TIN consistency across facts",
+                                   "IDV vs TIN cross-check"],
+            "🏭 Classification": ["NAICS ↔ MCC concordance", "Website ↔ NAICS consistency",
+                                   "Description vs code check", "Source conflict detection",
+                                   "AI vs vendor NAICS comparison"],
+            "⚠️ Risk & Watchlist": ["Sanctions/PEP/adverse media", "Bankruptcy age and count",
+                                     "Judgment and lien status", "Vendor confidence aggregate risk score"],
+            "🔗 Cross-Field Anomalies": ["Entity type vs NAICS sector (e.g. sole prop + manufacturing)",
+                                          "State of formation vs operating jurisdiction",
+                                          "Website found but NAICS 561499",
+                                          "SOS active but TIN failed",
+                                          "High vendor conf but no NAICS"],
+        }
+        for cat, checks in categories.items():
+            with st.expander(cat):
+                for c in checks:
+                    st.markdown(f"  - {c}")
     else:
         bid = business_id.strip()
-        st.markdown(f"### 🔍 Analysis for `{bid}`")
 
-        with st.spinner("Loading all facts…"):
+        with st.spinner(f"Loading all KYB data for {bid}…"):
             facts_sql = f"""
                 SELECT name, value, received_at
                 FROM rds_warehouse_public.facts
@@ -2231,98 +2518,507 @@ elif section == "🔎 Business Lookup":
             facts_df = run_query(facts_sql)
 
         if facts_df is None or facts_df.empty:
-            st.error(f"No facts found for `{bid}`. Check the UUID is correct.")
+            st.error(f"No facts found for business_id = `{bid}`. Check UUID and connection.")
             st.stop()
 
-        # Parse all facts
+        # ── Parse all facts into structured dict ─────────────────────────────
         latest = {}
-        for _,row in facts_df.iterrows():
+        for _, row in facts_df.iterrows():
             if row["name"] not in latest:
                 latest[row["name"]] = _parse_fact(row["value"])
 
-        def gv(name): return latest.get(name,{}).get("value")
+        def gv(name, *path):
+            """Get the inner value from a fact, optionally traversing sub-keys."""
+            fact = latest.get(name, {})
+            v = fact.get("value")
+            if path and isinstance(v, dict):
+                for k in path:
+                    v = v.get(k) if isinstance(v, dict) else None
+            return v
+
         def gc(name): return float(_safe_get(latest.get(name,{}),"source","confidence",default=0) or 0)
-        def gp(name): return str(_safe_get(latest.get(name,{}),"source","platformId",default=""))
+        def gp(name): return pid_name(str(_safe_get(latest.get(name,{}),"source","platformId",default="")))
+        def gts(name): return str(facts_df[facts_df["name"]==name]["received_at"].iloc[0])[:16] if name in facts_df["name"].values else "N/A"
 
-        # ── Red Flags ────────────────────────────────────────────────────────────
-        st.markdown("#### 🚨 Automated Red Flag Detection")
-        red=[];warn=[];ok=[]
+        def fact_row(name, label=None):
+            """Build a display row for a single fact."""
+            v = gv(name)
+            if isinstance(v,(dict,list)): display = json.dumps(v)[:120]
+            else: display = str(v)[:120] if v is not None else "(not stored)"
+            conf = gc(name)
+            return {"Field": label or name, "Value": display,
+                    "Source": gp(name), "Confidence": f"{conf:.3f}" if conf>0 else "—",
+                    "Updated": gts(name)}
 
-        sos_act   = gv("sos_active")
-        sos_match = gv("sos_match_boolean")
-        tin_bool  = gv("tin_match_boolean")
-        tin_match = latest.get("tin_match",{}).get("value")
-        tin_status= (json.loads(json.dumps(tin_match)).get("status","") if isinstance(tin_match,dict) else str(tin_match or "")).lower()
+        # ── Summary header ────────────────────────────────────────────────────
+        biz_name  = str(gv("business_name")  or gv("legal_name") or "Unknown")
+        naics_val = str(gv("naics_code")     or "")
+        mcc_val   = str(gv("mcc_code")       or "")
+        sos_act   = str(gv("sos_active")     or "").lower()
+        tin_bool  = str(gv("tin_match_boolean") or "").lower()
         wl_hits   = int(float(gv("watchlist_hits") or 0))
-        naics_val = gv("naics_code")
-        idv_val   = gv("idv_passed_boolean")
-        mdsk_conf = gc("sos_match")
+        idv_val   = str(gv("idv_passed_boolean") or "").lower()
 
-        def _flag_check(cond, msg, r_list, w_list, o_list, red_msg, ok_msg):
-            if cond: r_list.append(red_msg)
-            else: o_list.append(ok_msg)
+        st.markdown(f"### 🔍 KYB Investigation — `{biz_name}` (`{bid}`)")
+        c1,c2,c3,c4,c5 = st.columns(5)
+        with c1: kpi("SOS",
+                     "✅ Active" if sos_act=="true" else ("🚨 Inactive" if sos_act=="false" else "⚠️ Unknown"),
+                     "registry","#22c55e" if sos_act=="true" else "#ef4444")
+        with c2: kpi("TIN",
+                     "✅ Verified" if tin_bool=="true" else "❌ Not verified",
+                     "IRS EIN match","#22c55e" if tin_bool=="true" else "#ef4444")
+        with c3: kpi("NAICS",
+                     f"{'⚠️ ' if naics_val=='561499' else ''}{naics_val or 'N/A'}",
+                     "561499=fallback" if naics_val=="561499" else "classification",
+                     "#f59e0b" if naics_val=="561499" else "#22c55e")
+        with c4: kpi("Watchlist",
+                     f"🚨 {wl_hits} hit(s)" if wl_hits>0 else "✅ Clean",
+                     "","#ef4444" if wl_hits>0 else "#22c55e")
+        with c5: kpi("IDV",
+                     "✅ Passed" if idv_val=="true" else ("❌ Not passed" if idv_val=="false" else "⚠️ Unknown"),
+                     "Plaid","#22c55e" if idv_val=="true" else "#f59e0b")
 
-        if str(sos_act).lower()=="false": red.append("🚨 SOS INACTIVE — entity cannot legally operate")
-        elif str(sos_act).lower()=="true": ok.append("✅ SOS Active — entity in good standing")
-        else: warn.append("⚠️ SOS active status not found")
+        # ── Tab structure mirroring Admin Portal ─────────────────────────────
+        tab_bg, tab_reg, tab_ident, tab_class, tab_risk, tab_anomaly, tab_all = st.tabs([
+            "🏢 Background","🏛️ Registry","🪪 Identity","🏭 Classification",
+            "⚠️ Risk","🔗 Cross-Field Anomalies","📋 All Facts"
+        ])
 
-        if str(sos_match).lower()=="true": ok.append(f"✅ SOS name matched (vendor: {pid_name(gp('sos_match_boolean'))})")
-        elif sos_match is not None: red.append("🚨 SOS name NOT matched — submitted name ≠ registry")
-        else: warn.append("⚠️ No SOS match result found")
+        # ──────────────────────────────────────────────────────────────────────
+        with tab_bg:
+            st.markdown("#### 🏢 Background — Firmographic Data")
+            bg_facts = [
+                fact_row("business_name",   "Business Name"),
+                fact_row("legal_name",       "Legal Name"),
+                fact_row("dba_found",        "DBA Found"),
+                fact_row("corporation",      "Entity Type"),
+                fact_row("formation_date",   "Formation Date"),
+                fact_row("year_established", "Year Established"),
+                fact_row("primary_address",  "Primary Address"),
+                fact_row("business_phone",   "Business Phone"),
+                fact_row("email",            "Email"),
+                fact_row("website",          "Website URL"),
+                fact_row("website_found",    "Website Found"),
+                fact_row("num_employees",    "Employees"),
+                fact_row("revenue",          "Revenue"),
+                fact_row("naics_code",       "NAICS Code"),
+                fact_row("naics_description","NAICS Description"),
+                fact_row("mcc_code",         "MCC Code"),
+                fact_row("mcc_description",  "MCC Description"),
+                fact_row("industry",         "Industry Sector"),
+            ]
+            styled_table(pd.DataFrame(bg_facts), color_col="Value")
 
-        if str(tin_bool).lower()=="true": ok.append("✅ TIN Verified — EIN matches legal name per IRS")
-        elif tin_status=="failure": red.append(f"🚨 TIN FAILED — EIN does not match legal name. Status: failure")
-        elif tin_status=="pending": warn.append("⚠️ TIN Pending — IRS response not yet received")
-        else: warn.append("⚠️ TIN not verified")
+            # Consistency: business_name vs legal_name
+            bname = str(gv("business_name") or "").lower().strip()
+            lname = str(gv("legal_name")    or "").lower().strip()
+            if bname and lname:
+                if bname == lname:
+                    flag("Business name and legal name are identical — expected for most entities.", "green")
+                elif bname in lname or lname in bname:
+                    flag("Business name is a subset of legal name (or vice versa). "
+                         "This is normal for DBAs — verify it matches what was submitted.", "blue")
+                else:
+                    flag(f"Business name ('{str(gv('business_name',''))[:40]}') differs significantly from "
+                         f"legal name ('{str(gv('legal_name',''))[:40]}'). "
+                         "Could be a DBA or a name discrepancy. TIN is verified against legal name.", "amber")
 
-        if str(tin_bool).lower()=="true" and tin_status not in ("success",""):
-            red.append(f"🚨 DATA INTEGRITY: tin_match_boolean=true but status='{tin_status}' — inconsistency detected")
+            # Formation date sanity
+            fd = gv("formation_date")
+            ye = gv("year_established")
+            if fd and ye:
+                try:
+                    fd_year = int(str(fd)[:4])
+                    ye_year = int(str(ye)[:4])
+                    if abs(fd_year - ye_year) > 2:
+                        flag(f"Formation date year ({fd_year}) differs from year_established ({ye_year}) by >2 years. "
+                             "These should be the same year. May indicate different sources reporting differently.", "amber")
+                    else:
+                        flag(f"Formation date ({fd}) and year established ({ye}) are consistent.", "green")
+                except Exception:
+                    pass
 
-        if naics_val=="561499": warn.append(f"⚠️ NAICS 561499 fallback — industry unclassified (source: {pid_name(gp('naics_code'))})")
-        elif naics_val: ok.append(f"✅ NAICS {naics_val} (source: {pid_name(gp('naics_code'))}, conf: {gc('naics_code'):.3f})")
+        # ──────────────────────────────────────────────────────────────────────
+        with tab_reg:
+            st.markdown("#### 🏛️ Business Registration")
+            reg_facts = [
+                fact_row("sos_active",           "SOS Active"),
+                fact_row("sos_match",            "SOS Name Match"),
+                fact_row("sos_match_boolean",    "SOS Match (boolean)"),
+                fact_row("formation_state",      "Formation State"),
+                fact_row("tin",                  "TIN (EIN)"),
+                fact_row("tin_submitted",        "TIN Submitted"),
+                fact_row("tin_match",            "TIN Match (full object)"),
+                fact_row("tin_match_boolean",    "TIN Match (boolean)"),
+                fact_row("middesk_confidence",   "Middesk Confidence"),
+                fact_row("address_registered_agent","Registered Agent Address"),
+            ]
+            styled_table(pd.DataFrame(reg_facts))
 
-        if wl_hits>0: red.append(f"🚨 WATCHLIST: {wl_hits} hit(s) — check for sanctions/PEP")
-        else: ok.append("✅ No watchlist hits")
+            st.markdown("##### SOS Analysis")
+            mdsk_conf = gc("sos_match")
+            oc_conf   = gc("sos_match_boolean") if gp("sos_match_boolean")=="OC" else 0.0
+            sos_source = gp("sos_match")
 
-        if str(idv_val).lower()=="true": ok.append("✅ IDV Passed (Plaid)")
-        elif idv_val is not None: warn.append("⚠️ IDV Not Passed")
+            if sos_act=="false":
+                flag("🚨 SOS INACTIVE. Entity cannot legally conduct business. "
+                     "Check if this is a grace period or formal dissolution. "
+                     "This is the #1 underwriting red flag — do NOT auto-approve.", "red")
+            elif sos_act=="true":
+                flag(f"✅ SOS Active. Winning vendor: {sos_source} (confidence: {mdsk_conf:.3f}).", "green")
 
-        if mdsk_conf>0.70: ok.append(f"✅ Middesk confidence {mdsk_conf:.3f} — strong match")
-        elif mdsk_conf>0.40: warn.append(f"⚠️ Middesk confidence {mdsk_conf:.3f} — moderate")
-        elif mdsk_conf>0: red.append(f"🚨 Middesk confidence {mdsk_conf:.3f} — weak match, entity may be unconfirmed")
-        else: warn.append("⚠️ No Middesk confidence score found")
+            # TIN consistency
+            st.markdown("##### TIN Consistency Check")
+            tin_submitted_val = str(gv("tin_submitted") or "").lower()
+            tin_match_obj = latest.get("tin_match",{}).get("value")
+            tin_status_actual = ""
+            tin_message = ""
+            if isinstance(tin_match_obj, dict):
+                tin_status_actual = tin_match_obj.get("status","").lower()
+                tin_message       = tin_match_obj.get("message","")
+            elif tin_match_obj:
+                try:
+                    obj = json.loads(str(tin_match_obj))
+                    tin_status_actual = obj.get("status","").lower()
+                    tin_message       = obj.get("message","")
+                except Exception:
+                    pass
 
-        col_l,col_m,col_r = st.columns(3)
-        with col_l:
-            kpi("🚨 Red Flags",str(len(red)),"require action","#ef4444" if red else "#22c55e")
-        with col_m:
-            kpi("⚠️ Warnings",str(len(warn)),"review recommended","#f59e0b" if warn else "#22c55e")
-        with col_r:
-            kpi("✅ Passed",str(len(ok)),"checks","#22c55e")
+            tin_consistency_checks = [
+                ("TIN submitted",         tin_submitted_val not in ("","none","false","0"),
+                 tin_submitted_val, "TIN field must be filled"),
+                ("tin_match.status",      tin_status_actual in ("success","failure","pending"),
+                 tin_status_actual or "(not set)", "Status must be one of success/failure/pending"),
+                ("tin_match_boolean",     tin_bool in ("true","false"),
+                 tin_bool, "Must be true or false"),
+                ("Boolean matches status",tin_bool=="true" == (tin_status_actual=="success"),
+                 f"bool={tin_bool}, status={tin_status_actual}",
+                 "boolean=true ONLY when status=success (kyb/index.ts L488–490)"),
+            ]
+            rows_t = [{"Check":l,"Result":v,"Status":"✅ OK" if ok else "❌ ISSUE","Detail":d}
+                      for l,ok,v,d in tin_consistency_checks]
+            styled_table(pd.DataFrame(rows_t), color_col="Status",
+                         palette={"✅ ok":"#22c55e","❌ issue":"#ef4444"})
 
-        for r in red:   flag(r,"red")
-        for w in warn:  flag(w,"amber")
-        for o in ok:    flag(o,"green")
+            if tin_message:
+                st.markdown(f"**Middesk TIN message:** `{tin_message}`")
+                if "does not have a record" in tin_message.lower():
+                    flag("TIN failure reason: IRS has no record for this EIN + name combination. "
+                         "Could be wrong EIN, very new business, or name mismatch.", "amber")
+                elif "associated with a different" in tin_message.lower():
+                    flag("🚨 TIN failure reason: EIN is associated with a DIFFERENT business name. "
+                         "High risk — possible fraud or EIN reuse.", "red")
 
-        # ── Facts Table ─────────────────────────────────────────────────────────
-        st.markdown("---")
-        st.markdown("#### 📋 All Stored Facts")
-        rows=[]
-        for _,row in facts_df.drop_duplicates("name").iterrows():
-            f = _parse_fact(row["value"])
-            v = f.get("value")
-            if isinstance(v,(dict,list)): dv = f"[{type(v).__name__} — expand below]"
-            else: dv = str(v)[:80] if v is not None else "(null)"
-            rows.append({"Fact":row["name"],"Value":dv,
-                          "Vendor":pid_name(str(_safe_get(f,"source","platformId",default=""))),
-                          "Confidence":f"{float(_safe_get(f,'source','confidence',default=0) or 0):.3f}",
-                          "Updated":str(row["received_at"])[:16]})
-        styled_table(pd.DataFrame(rows))
+        # ──────────────────────────────────────────────────────────────────────
+        with tab_ident:
+            st.markdown("#### 🪪 Identity (KYC / IDV)")
+            ident_facts = [
+                fact_row("idv_status",           "IDV Status (Plaid)"),
+                fact_row("idv_passed",           "IDV Passed Count"),
+                fact_row("idv_passed_boolean",   "IDV Passed (boolean)"),
+                fact_row("name_match",           "Name Match (full)"),
+                fact_row("name_match_boolean",   "Name Match (boolean)"),
+                fact_row("address_match",        "Address Match (full)"),
+                fact_row("address_match_boolean","Address Match (boolean)"),
+                fact_row("address_verification", "Address Verification"),
+                fact_row("address_verification_boolean","Address Verified (boolean)"),
+                fact_row("addresses_deliverable","Address Deliverable"),
+                fact_row("is_sole_prop",         "Is Sole Proprietor"),
+                fact_row("verification_status",  "Verification Status (Trulioo)"),
+            ]
+            styled_table(pd.DataFrame(ident_facts))
 
-        # ── SQL panel ────────────────────────────────────────────────────────────
-        st.markdown("---")
-        st.markdown("#### 🔍 SQL for deeper investigation")
-        st.code(f"""-- All facts:
+            st.markdown("##### IDV Status Explanation")
+            idv_status_raw = gv("idv_status")
+            if isinstance(idv_status_raw, dict):
+                for status_key, count in idv_status_raw.items():
+                    meaning = IDV_STATUS_MEANINGS.get(status_key.upper(), ("❓","?","Unknown",""))
+                    color = "#22c55e" if status_key.upper()=="SUCCESS" else ("#ef4444" if status_key.upper()=="FAILED" else "#f59e0b")
+                    st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
+                        border-radius:8px;padding:8px 14px;margin:3px 0;display:flex;gap:12px">
+                      <span style="color:{color};font-weight:700">{meaning[0]} {status_key}: {count}</span>
+                      <span style="color:#94A3B8;font-size:.78rem">{meaning[2]}</span>
+                    </div>""", unsafe_allow_html=True)
+
+            # Address consistency
+            st.markdown("##### Address Consistency")
+            addr_match  = str(gv("address_match_boolean") or "").lower()
+            addr_verif  = str(gv("address_verification_boolean") or "").lower()
+            addr_deliv  = str(gv("addresses_deliverable") or "").lower()
+            addr_checks = [
+                ("address_match_boolean",       addr_match=="true",   addr_match,  "Business name matches at this address"),
+                ("address_verification_boolean",addr_verif=="true",   addr_verif,  "Address formally verified"),
+                ("addresses_deliverable",        addr_deliv not in ("","none","false","0"), addr_deliv,
+                 "Address is physically deliverable (USPS/postal check)"),
+            ]
+            rows_a = [{"Check":l,"Result":v,"Status":"✅ OK" if ok else "⚠️ Check","Detail":d}
+                      for l,ok,v,d in addr_checks]
+            styled_table(pd.DataFrame(rows_a), color_col="Status",
+                         palette={"✅ ok":"#22c55e","⚠️ check":"#f59e0b"})
+
+            if addr_match=="false" and tin_bool=="true":
+                flag("⚠️ Interesting combination: TIN verified (name matches IRS) but address does NOT match "
+                     "the registry at that address. Could indicate a business operating at a different location "
+                     "than the registered address.", "amber")
+
+        # ──────────────────────────────────────────────────────────────────────
+        with tab_class:
+            st.markdown("#### 🏭 Industry Classification")
+            class_facts = [
+                fact_row("naics_code",       "NAICS Code"),
+                fact_row("naics_description","NAICS Description"),
+                fact_row("industry",         "Industry Sector"),
+                fact_row("mcc_code",         "MCC Code"),
+                fact_row("mcc_description",  "MCC Description"),
+                fact_row("website",          "Website URL"),
+                fact_row("website_found",    "Website Found"),
+                fact_row("serp_id",          "SERP ID (Google)"),
+            ]
+            styled_table(pd.DataFrame(class_facts))
+
+            # NAICS source analysis
+            naics_src = gp("naics_code")
+            naics_conf= gc("naics_code")
+            mcc_src   = gp("mcc_code")
+            mcc_desc  = str(gv("mcc_description") or "")
+            website   = str(gv("website") or "")
+            web_found = str(gv("website_found") or "").lower()
+
+            c1,c2,c3 = st.columns(3)
+            with c1: kpi("NAICS Source", naics_src, "winning vendor",
+                         "#22c55e" if naics_src in ("Middesk","OC","ZoomInfo","Equifax") else "#f59e0b")
+            with c2: kpi("NAICS Confidence", f"{naics_conf:.3f}",
+                         "0–1 scale","#22c55e" if naics_conf>0.70 else ("#f59e0b" if naics_conf>0.40 else "#ef4444"))
+            with c3: kpi("MCC Source", mcc_src, "winning vendor","#3B82F6")
+
+            # Consistency checks
+            st.markdown("##### Classification Consistency Checks")
+            consist = []
+
+            if naics_val=="561499":
+                consist.append(("NAICS is fallback (561499)",False,naics_val,
+                                 "Entity not classified — check vendor match rates and website availability"))
+            else:
+                consist.append(("NAICS is real code",True,naics_val,"Classification succeeded"))
+
+            if naics_src=="AI" and naics_val!="561499":
+                consist.append(("AI won for real NAICS code",False,f"AI source, code={naics_val}",
+                                 "AI weight=0.1 — should only win when all vendors failed. Verify code is correct"))
+            elif naics_src in ("Middesk","OC","ZoomInfo","Equifax","Trulioo"):
+                consist.append(("NAICS from trusted vendor",True,naics_src,"Strong source"))
+
+            if website and naics_val=="561499":
+                consist.append(("Website exists but NAICS is fallback",False,
+                                 f"website={website[:40]}, naics=561499",
+                                 "Gap G2: AI did not use web_search despite website being available"))
+            elif website and naics_val!="561499":
+                consist.append(("Website consistent with real NAICS",True,website[:40],"Good"))
+
+            if "fallback" in mcc_desc.lower():
+                consist.append(("MCC description is internal fallback text",False,mcc_desc[:60],
+                                 "Gap G5: customer-visible internal debug text. Fix AI system prompt"))
+            elif mcc_desc:
+                consist.append(("MCC description present",True,mcc_desc[:60],"Good"))
+
+            # NAICS ↔ MCC sector concordance for this business
+            if naics_val and mcc_val and naics_val!="561499":
+                sector = naics_val[:2]
+                # Reuse the same concordance map defined in the Classification section
+                _NSM = {"11":("Agriculture","0742,1711,5261"),"21":("Mining","5172,5983"),
+                        "22":("Utilities","4900,4911,4931"),"23":("Construction","1520,1731,1740"),
+                        "31":("Manufacturing","5065,5085,5169"),"32":("Manufacturing","5045,5065"),
+                        "33":("Manufacturing","5040,5045,5065"),"42":("Wholesale","5040,5045,5085"),
+                        "44":("Retail","5300,5411,5511,5651,5812"),"45":("Retail","5300,5411,5945"),
+                        "48":("Transportation","4111,4121,4215,7512"),"49":("Warehousing","4215,4225"),
+                        "51":("Information","4814,5045,5734,7372"),"52":("Finance","6011,6051,6211,6300"),
+                        "53":("Real Estate","6512,6552,7349"),"54":("Professional","7372,7374,7389"),
+                        "56":("Admin/Support","7389,7392,8742"),"61":("Education","8220,8249,8299"),
+                        "62":("Healthcare","8011,8021,8049,8099"),"71":("Arts","7011,7922,7991"),
+                        "72":("Food/Lodging","5812,5813,7011,7012"),"81":("Other Svcs","7210,7230,7261"),
+                        "92":("Government","9211,9222,9399")}
+                sector_info = _NSM.get(sector)
+                if sector_info:
+                    allowed = sector_info[1].split(",")
+                    concordant = any(mcc_val[:2]==a[:2] for a in allowed)
+                    consist.append((f"NAICS {naics_val} ↔ MCC {mcc_val} concordance",
+                                    concordant,
+                                    f"NAICS sector {sector} ({sector_info[0]}) vs MCC {mcc_val}",
+                                    f"Expected MCC families: {sector_info[1]}" if not concordant else "Codes are concordant"))
+
+            rows_c = [{"Check":l,"Result":v,"Status":"✅ OK" if ok else "⚠️ Issue","Detail":d}
+                      for l,ok,v,d in consist]
+            styled_table(pd.DataFrame(rows_c), color_col="Status",
+                         palette={"✅ ok":"#22c55e","⚠️ issue":"#ef4444"})
+
+        # ──────────────────────────────────────────────────────────────────────
+        with tab_risk:
+            st.markdown("#### ⚠️ Risk & Due Diligence")
+            risk_facts = [
+                fact_row("watchlist_hits",     "Watchlist Hits"),
+                fact_row("watchlist",          "Watchlist (consolidated)"),
+                fact_row("adverse_media_hits", "Adverse Media Hits"),
+                fact_row("num_bankruptcies",   "# Bankruptcies"),
+                fact_row("num_judgements",     "# Judgments"),
+                fact_row("num_liens",          "# Liens"),
+                fact_row("bankruptcies",       "Bankruptcies (detail)"),
+            ]
+            styled_table(pd.DataFrame(risk_facts))
+
+            # Risk scorecard
+            wl_hits_n  = int(float(gv("watchlist_hits") or 0))
+            am_hits_n  = int(float(gv("adverse_media_hits") or 0))
+            bk_n       = int(float(gv("num_bankruptcies") or 0))
+            judg_n     = int(float(gv("num_judgements") or 0))
+            lien_n     = int(float(gv("num_liens") or 0))
+
+            c1,c2,c3,c4,c5 = st.columns(5)
+            with c1: kpi("Watchlist",str(wl_hits_n),"hits","#ef4444" if wl_hits_n>0 else "#22c55e")
+            with c2: kpi("Adverse Media",str(am_hits_n),"hits","#f59e0b" if am_hits_n>0 else "#22c55e")
+            with c3: kpi("Bankruptcies",str(bk_n),"count","#8B5CF6" if bk_n>0 else "#22c55e")
+            with c4: kpi("Judgments",str(judg_n),"count","#8B5CF6" if judg_n>0 else "#22c55e")
+            with c5: kpi("Liens",str(lien_n),"count","#8B5CF6" if lien_n>0 else "#22c55e")
+
+            risk_checks = []
+            if wl_hits_n>0: risk_checks.append(f"🚨 {wl_hits_n} watchlist hit(s) — mandatory compliance review")
+            else:            risk_checks.append("✅ No watchlist hits")
+            if bk_n>0 and judg_n>0 and lien_n>0:
+                risk_checks.append("🚨 All three public record types present (BK+Judgment+Lien) — worst financial profile")
+            if bk_n>1:
+                risk_checks.append(f"⚠️ Multiple bankruptcies ({bk_n}) — serial filing pattern")
+            if bk_n==0 and judg_n==0 and lien_n==0 and wl_hits_n==0:
+                risk_checks.append("✅ No public records or watchlist hits")
+            for r in risk_checks:
+                level = "red" if r.startswith("🚨") else ("amber" if r.startswith("⚠️") else "green")
+                flag(r, level)
+
+        # ──────────────────────────────────────────────────────────────────────
+        with tab_anomaly:
+            st.markdown("#### 🔗 Cross-Field Anomaly Detection")
+            st.markdown(
+                "Checks for unusual *relationships between fields* — individually acceptable values "
+                "that are suspicious in combination. These patterns require human investigation."
+            )
+
+            anomalies = []
+
+            # 1. SOS active vs TIN failed
+            if sos_act=="true" and tin_status_actual=="failure":
+                anomalies.append(("🟡 MEDIUM","SOS Active + TIN Failed",
+                    "Entity is registered and active but EIN does not match legal name. "
+                    "Most common cause: business submitted DBA name instead of legal name for TIN. "
+                    "Action: ask applicant to resubmit with the exact legal name matching their EIN.",
+                    "sos_active=true, tin_match.status=failure"))
+
+            # 2. SOS inactive vs TIN verified
+            if sos_act=="false" and tin_bool=="true":
+                anomalies.append(("🔴 HIGH","SOS Inactive + TIN Verified",
+                    "Entity cannot legally operate (inactive) but EIN matches IRS records. "
+                    "This means the legal entity exists but is NOT in good standing. "
+                    "Cause: unpaid taxes or missed annual report. "
+                    "Action: route to manual underwriting — entity needs reinstatement.",
+                    "sos_active=false, tin_match_boolean=true"))
+
+            # 3. Website URL but NAICS fallback
+            if website and naics_val=="561499":
+                anomalies.append(("🔴 HIGH","Website exists but NAICS is 561499",
+                    f"Business has a website ({website[:40]}) but received the 561499 fallback code. "
+                    "The AI enrichment should have used this website to classify the business. "
+                    "This is Gap G2 in the pipeline (web_search not enabled for this record). "
+                    "Action: investigate aiNaicsEnrichment.ts — check if params.website was passed.",
+                    f"website={website[:40]}, naics_code=561499"))
+
+            # 4. High vendor confidence but NAICS is AI-sourced
+            if naics_src=="AI" and naics_conf<0.20 and naics_val!="561499":
+                anomalies.append(("🟡 MEDIUM","AI won with very low confidence for non-fallback code",
+                    f"AI selected NAICS {naics_val} with confidence {naics_conf:.3f}. "
+                    "AI weight=0.1 and confidence should be LOW when it's the only source. "
+                    "This code may be an AI hallucination — verify against business description.",
+                    f"naics_source=AI, naics_confidence={naics_conf:.3f}"))
+
+            # 5. No website but website_found=true
+            if not website and web_found=="true":
+                anomalies.append(("🟡 MEDIUM","website_found=true but no website URL stored",
+                    "SERP found a website for this business but the URL was not stored as a fact. "
+                    "Possible pipeline failure in the website fact storage. "
+                    "This means website-based NAICS classification may have been missed.",
+                    "website=(empty), website_found=true"))
+
+            # 6. IDV passed but name match failed
+            name_match_b = str(gv("name_match_boolean") or "").lower()
+            if idv_val=="true" and name_match_b=="false":
+                anomalies.append(("🟡 MEDIUM","IDV Passed but Name Match Failed",
+                    "Identity verification confirmed the person but the BUSINESS name does not match the registry. "
+                    "This is expected if the applicant is a sole proprietor (personal name verified, "
+                    "but business name is a DBA that doesn't appear in SOS). "
+                    "Action: confirm whether this is a sole prop operating under a trade name.",
+                    "idv_passed_boolean=true, name_match_boolean=false"))
+
+            # 7. TIN bool/status inconsistency
+            if tin_bool=="true" and tin_status_actual not in ("success",""):
+                anomalies.append(("🔴 HIGH","tin_match_boolean=true but status≠success",
+                    f"DATA INTEGRITY BUG: the boolean is true but the underlying status is '{tin_status_actual}'. "
+                    "The boolean MUST be derived only from status==='success' (kyb/index.ts L488–490). "
+                    "Action: this is a code defect — file a bug report for integration-service.",
+                    f"tin_match_boolean=true, tin_match.status={tin_status_actual}"))
+
+            # 8. Fallback NAICS but not a new business
+            form_date = str(gv("formation_date") or "")
+            if naics_val=="561499" and form_date:
+                try:
+                    form_year = int(form_date[:4])
+                    current_year = datetime.now(timezone.utc).year
+                    age_years = current_year - form_year
+                    if age_years > 3:
+                        anomalies.append(("🟡 MEDIUM",f"Established business ({age_years}y old) with NAICS fallback",
+                            f"Business formed in {form_year} ({age_years} years ago) still has NAICS 561499. "
+                            "A fallback for an old, established business suggests vendor data is stale "
+                            "or the entity-matching model failed to find this business in ZI/EFX/OC databases. "
+                            "Action: manually verify the industry and update NAICS via analyst override.",
+                            f"formation_date={form_date}, naics_code=561499, age={age_years}y"))
+                except Exception:
+                    pass
+
+            # 9. MCC 5614 fallback description visible
+            if "fallback" in mcc_desc.lower():
+                anomalies.append(("🟠 NOTICE","Fallback MCC description visible to customer",
+                    f"mcc_description='{mcc_desc[:80]}' contains internal debug text. "
+                    "This text is visible in the Admin Portal KYB → Background tab. "
+                    "Action: fix the AI system prompt (aiNaicsEnrichment.ts) to output "
+                    "'Industry classification pending' instead.",
+                    "Gap G5 from 561499 diagnostic"))
+
+            if not anomalies:
+                flag("✅ No cross-field anomalies detected for this business.", "green")
+            else:
+                priority_order = {"🔴 HIGH":0,"🟡 MEDIUM":1,"🟠 NOTICE":2}
+                anomalies.sort(key=lambda x: priority_order.get(x[0],3))
+                for severity,title,explanation,fields in anomalies:
+                    color = {"🔴 HIGH":"#ef4444","🟡 MEDIUM":"#f59e0b","🟠 NOTICE":"#f97316"}.get(severity,"#64748b")
+                    st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
+                        border-radius:8px;padding:12px 16px;margin:8px 0">
+                      <div style="color:{color};font-weight:700;font-size:.85rem">{severity} — {title}</div>
+                      <div style="color:#CBD5E1;font-size:.80rem;margin-top:6px">{explanation}</div>
+                      <div style="color:#475569;font-size:.73rem;margin-top:4px">Fields: <code>{fields}</code></div>
+                    </div>""", unsafe_allow_html=True)
+
+        # ──────────────────────────────────────────────────────────────────────
+        with tab_all:
+            st.markdown("#### 📋 All Stored Facts")
+            rows = []
+            for _, row in facts_df.drop_duplicates("name").sort_values("name").iterrows():
+                f  = _parse_fact(row["value"])
+                v  = f.get("value")
+                if isinstance(v,(dict,list)): dv = f"[{type(v).__name__}, {len(v) if isinstance(v,list) else len(v)} items]"
+                else: dv = str(v)[:100] if v is not None else "(null)"
+                rows.append({"Fact": row["name"], "Value": dv,
+                              "Source": pid_name(str(_safe_get(f,"source","platformId",default=""))),
+                              "Confidence": f"{float(_safe_get(f,'source','confidence',default=0) or 0):.3f}",
+                              "Updated": str(row["received_at"])[:16]})
+            styled_table(pd.DataFrame(rows))
+
+            st.markdown("---")
+            st.markdown("#### 🔍 SQL for deeper investigation")
+            st.code(f"""-- All facts for this business:
 SELECT name, value, received_at
 FROM rds_warehouse_public.facts
 WHERE business_id = '{bid}'
