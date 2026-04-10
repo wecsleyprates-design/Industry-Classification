@@ -469,25 +469,40 @@ def live_naics(limit):
     return raw
 
 
+def _discover_fact_names(pattern_list):
+    """Query distinct fact names matching any of the given LIKE patterns."""
+    likes = " OR ".join(f"name LIKE '{p}'" for p in pattern_list)
+    sql = f"""
+        SELECT DISTINCT name, COUNT(*) AS rows
+        FROM rds_warehouse_public.facts
+        WHERE {likes}
+        GROUP BY name ORDER BY rows DESC LIMIT 50
+    """
+    df = run_query(sql)
+    if df is not None and not df.empty:
+        return df["name"].tolist()
+    return []
+
+
 def live_banking(limit):
-    # Query a wide set of possible GIACT fact name variants.
-    # The exact names depend on how integration-service writes them.
+    # First discover which banking-related fact names actually exist.
+    known_names = _discover_fact_names([
+        '%giact%', '%gverify%', '%gauthenticate%',
+        '%bank%account%', '%account%status%', '%verify%response%'
+    ])
+
+    if not known_names:
+        return None   # no banking facts at all in this database
+
+    names_sql = ", ".join(f"'{n}'" for n in known_names)
     sql = f"""
         SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
-        WHERE name IN (
-            'giact_verify_response_code', 'giact_auth_response_code',
-            'giact_account_status',       'giact_account_name',
-            'giact_contact_verification', 'giact_account_response_code',
-            'giact_response_code',        'account_status',
-            'bank_account_status',        'giact_status'
-        )
+        WHERE name IN ({names_sql})
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
     raw = run_query(sql)
     if raw is None or raw.empty:
-        # Return a minimal empty DataFrame that won't crash downstream
-        # get_section_data will show the diagnostic SQL to the user
         return None
 
     raw["fact_value"] = raw["value"].apply(
@@ -687,41 +702,28 @@ def get_section_data(section_key, limit):
         st.code(err, language=None)
         # Show what fact names actually exist so the user can diagnose
         st.markdown("**Fact names available in your database for this section:**")
-        fact_names = {
-            "sos":     "('sos_active','sos_match_boolean','sos_match')",
-            "tin":     "('tin_match','tin_match_boolean','tin_submitted')",
-            "naics":   "('naics_code',)",
-            "banking": "('giact_verify_response_code','giact_auth_response_code','giact_account_status','giact_account_name','giact_contact_verification')",
-            "worth":   "('worth_score',)",
-            "kyc":     "('idv_status','idv_passed_boolean','compliance_status','name_match_boolean','address_match_boolean')",
-            "dd":      "('watchlist_hits','adverse_media_hits','sanctions_hits','pep_hits')",
-        }
-        st.code(f"""-- Run this to check which fact names exist in your database:
+        keyword = section_key.split('_')[0]
+        st.code(f"""-- Find all fact names stored for this topic:
 SELECT DISTINCT name, COUNT(*) as rows
 FROM rds_warehouse_public.facts
-WHERE name IN {fact_names.get(section_key, '(?)')}
-GROUP BY name ORDER BY rows DESC;""", language="sql")
+WHERE name LIKE '%{keyword}%'
+GROUP BY name ORDER BY rows DESC LIMIT 30;
+
+-- Also check what facts you DO have (top 50 by volume):
+SELECT DISTINCT name, COUNT(*) as rows
+FROM rds_warehouse_public.facts
+GROUP BY name ORDER BY rows DESC LIMIT 50;""", language="sql")
         st.stop()
 
     if df.empty:
         st.warning(f"⚠️ Query for **{section_key}** returned 0 rows — "
                    "these fact names may not exist in your database yet.")
-        fact_sql = {
-            "banking": "giact_verify_response_code, giact_auth_response_code, giact_account_status",
-            "sos":     "sos_active, sos_match_boolean, sos_match",
-            "tin":     "tin_match, tin_match_boolean, tin_submitted",
-            "worth":   "worth_score",
-            "kyc":     "idv_status, idv_passed_boolean, compliance_status",
-            "dd":      "watchlist_hits, sanctions_hits, pep_hits, adverse_media_hits",
-            "naics":   "naics_code",
-        }
-        st.code(f"""-- Check what fact names exist in your database:
-SELECT DISTINCT name, COUNT(*) as rows
+        st.markdown("**Run this to find what facts ARE stored for this topic:**")
+        keyword = section_key.split('_')[0]
+        st.code(f"""SELECT DISTINCT name, COUNT(*) as rows
 FROM rds_warehouse_public.facts
-WHERE name LIKE '%{section_key.split('_')[0]}%'
-   OR name IN ({', '.join("'" + n + "'" for n in fact_sql.get(section_key,'?').split(', '))})
-GROUP BY name ORDER BY rows DESC
-LIMIT 20;""", language="sql")
+WHERE name LIKE '%{keyword}%'
+GROUP BY name ORDER BY rows DESC LIMIT 20;""", language="sql")
         st.stop()
 
     return df
