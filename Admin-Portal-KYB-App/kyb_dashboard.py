@@ -641,21 +641,22 @@ def live_banking(limit):
 
 def live_worth(limit):
     """
-    Worth Score lives in rds_manual_score_public.business_scores (RDS PostgreSQL),
-    accessed via Redshift federated query.
+    Worth Score sources (confirmed from schema inspection):
 
-    Key fields:
-      weighted_score_850 — primary Worth Score (300–850 scale)
-      weighted_score_100 — alternative (0–100 scale)
-      risk_level         — HIGH / MEDIUM / LOW
-      score_decision     — APPROVE / FURTHER_REVIEW_NEEDED / DECLINE
-      score_status       — PROCESSING / SUCCESS / FAILED
+    1. rds_manual_score_public.business_scores
+       Confirmed fields: weighted_score_850, weighted_score_100, risk_level,
+                         score_decision, created_at
+       NOTE: score_status column does NOT exist — removed from all queries.
 
-    Source: manual-score-service
-      db/migrations/sqls/20240109130303-initial-tables-up.sql
-      db/migrations/sqls/20240806061904-restructure-score-db-up.sql
+    2. rds_manual_score_public.data_current_scores
+       Latest score per business — join on score_id = business_scores.id
+
+    3. warehouse.worth_score_input_audit (Redshift native table)
+       Audit fill rates by date — confirmed working with real data.
+       Fields: score_date, rows_per_day, fill_state, fill_naics6, fill_revenue, etc.
     """
-    # Primary query: join business_scores → data_current_scores for latest per business
+    # Primary: latest score per business via data_current_scores
+    # No score_status filter — column does not exist in this schema version
     sql_primary = f"""
         SELECT
             cs.business_id,
@@ -663,35 +664,57 @@ def live_worth(limit):
             bs.weighted_score_100  AS worth_score_100,
             bs.risk_level,
             bs.score_decision,
-            bs.score_status,
             bs.created_at          AS scored_at
         FROM rds_manual_score_public.data_current_scores cs
         JOIN rds_manual_score_public.business_scores bs
           ON bs.id = cs.score_id
-        WHERE bs.score_status = 'SUCCESS'
-          AND bs.weighted_score_850 IS NOT NULL
+        WHERE bs.weighted_score_850 IS NOT NULL
         ORDER BY bs.created_at DESC{_limit_clause(limit)}
     """
     raw = run_query(sql_primary)
 
-    # Fallback: query business_scores directly (no current_scores join)
+    # Fallback 1: business_scores directly (no business_id join)
     if raw is None or raw.empty:
         sql_fallback = f"""
             SELECT
-                id            AS score_id,
-                NULL          AS business_id,
-                weighted_score_850  AS worth_score_850,
-                weighted_score_100  AS worth_score_100,
+                id               AS score_id,
+                weighted_score_850,
+                weighted_score_100,
                 risk_level,
                 score_decision,
-                score_status,
-                created_at    AS scored_at
+                created_at       AS scored_at
             FROM rds_manual_score_public.business_scores
-            WHERE score_status = 'SUCCESS'
-              AND weighted_score_850 IS NOT NULL
+            WHERE weighted_score_850 IS NOT NULL
             ORDER BY created_at DESC{_limit_clause(limit)}
         """
         raw = run_query(sql_fallback)
+        if raw is not None and not raw.empty:
+            raw["business_id"] = raw.get("score_id", raw.index).astype(str)
+
+    # Fallback 2: use warehouse.worth_score_input_audit aggregate data
+    if raw is None or raw.empty:
+        sql_audit = f"""
+            SELECT
+                score_date,
+                rows_per_day,
+                fill_state,
+                fill_naics6,
+                fill_revenue,
+                fill_age_bankruptcy,
+                fill_age_judgment,
+                fill_age_lien,
+                fill_count_employees,
+                fill_count_reviews,
+                fill_score_reviews
+            FROM warehouse.worth_score_input_audit
+            ORDER BY score_date DESC{_limit_clause(limit)}
+        """
+        audit = run_query(sql_audit)
+        if audit is not None and not audit.empty:
+            # Return audit data tagged so the section knows to show audit view
+            audit["_source"] = "audit"
+            return audit
+        return None
 
     if raw is None or raw.empty:
         return None
@@ -2256,31 +2279,133 @@ elif section == "5️⃣  Worth Score":
 
     df = get_section_data("worth", record_limit)
     if df is None:
-        st.markdown("**Expected tables in rds_manual_score_public:**")
-        st.code("""-- Check Worth Score tables directly:
+        st.markdown("**Confirmed working queries (score_status column does NOT exist):**")
+        st.code("""-- business_scores without score_status filter:
 SELECT COUNT(*), AVG(weighted_score_850), MIN(weighted_score_850), MAX(weighted_score_850)
 FROM rds_manual_score_public.business_scores
-WHERE score_status = 'SUCCESS';
+WHERE weighted_score_850 IS NOT NULL;
 
 -- Latest score per business:
 SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, cs.business_id
 FROM rds_manual_score_public.data_current_scores cs
 JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
-WHERE bs.score_status = 'SUCCESS'
+WHERE bs.weighted_score_850 IS NOT NULL
 LIMIT 10;
 
--- Score audit fill rates (Redshift):
-SELECT * FROM warehouse.worth_score_input_audit
+-- Score audit fill rates (Redshift — confirmed working):
+SELECT score_date, rows_per_day, fill_state, fill_naics6, fill_revenue
+FROM warehouse.worth_score_input_audit
 ORDER BY score_date DESC LIMIT 5;""", language="sql")
         st.stop()
+
+    # Check if we got audit data instead of individual score data
+    is_audit_only = "_source" in df.columns and (df["_source"] == "audit").all()
+
+    if is_audit_only:
+        # ── Audit-only view (warehouse.worth_score_input_audit) ──────────────
+        flag("Individual business scores not accessible via federation. "
+             "Showing aggregate audit data from warehouse.worth_score_input_audit "
+             "— confirmed working with real data.", "amber")
+
+        st.markdown("#### 📊 Worth Score Input Data Fill Rates (warehouse.worth_score_input_audit)")
+        st.markdown("*Tracks what % of input features are populated per scoring day. "
+                    "100% = all businesses had this feature. 0% = feature missing for all.*")
+
+        c1,c2,c3 = st.columns(3)
+        with c1: kpi("Days of Audit Data",f"{len(df):,}","scoring days recorded","#3B82F6")
+        with c2: kpi("Avg Businesses/Day",f"{df['rows_per_day'].mean():.0f}","scored per day","#22c55e")
+        with c3: kpi("Latest Score Date",str(df["score_date"].max()),"","#8B5CF6")
+
+        # Key fill rates chart
+        fill_cols = [c for c in df.columns if c.startswith("fill_")]
+        latest_row = df.iloc[0]
+
+        fill_data = []
+        for col in fill_cols:
+            try:
+                val = float(latest_row[col])
+                fill_data.append({"Feature": col.replace("fill_",""), "Fill %": val})
+            except Exception:
+                pass
+        fill_df = pd.DataFrame(fill_data).sort_values("Fill %", ascending=True)
+
+        # Colour by fill rate
+        fill_df["Status"] = fill_df["Fill %"].apply(
+            lambda v: "Good (>80%)" if v>=80 else ("Medium (30–80%)" if v>=30 else "Low (<30%)"))
+
+        col_l, col_r = st.columns([2,1])
+        with col_l:
+            fig = px.bar(fill_df.tail(30), x="Fill %", y="Feature",
+                         orientation="h", color="Status",
+                         color_discrete_map={"Good (>80%)":"#22c55e",
+                                              "Medium (30–80%)":"#f59e0b",
+                                              "Low (<30%)":"#ef4444"},
+                         title=f"Top 30 Feature Fill Rates (latest: {latest_row['score_date']})")
+            fig.update_layout(height=600)
+            st.plotly_chart(dark_chart_layout(fig), use_container_width=True)
+
+        with col_r:
+            zero_fill  = (fill_df["Fill %"]==0).sum()
+            full_fill  = (fill_df["Fill %"]==100).sum()
+            med_fill   = ((fill_df["Fill %"]>0)&(fill_df["Fill %"]<100)).sum()
+            kpi("Features at 100%", f"{full_fill}", "fully populated","#22c55e")
+            st.markdown("")
+            kpi("Features at 0%",   f"{zero_fill}", "not populated at all","#ef4444")
+            st.markdown("")
+            kpi("Partial features", f"{med_fill}", "partially filled","#f59e0b")
+
+        # Fill rates over time for key features
+        st.markdown("#### Fill Rate Trends Over Time (key features)")
+        key_features = ["fill_state","fill_naics6","fill_revenue","fill_age_bankruptcy",
+                        "fill_count_employees","fill_count_reviews"]
+        avail = [f for f in key_features if f in df.columns]
+        if avail:
+            trend_df = df[["score_date"]+avail].copy()
+            trend_df["score_date"] = pd.to_datetime(trend_df["score_date"])
+            trend_melt = trend_df.melt(id_vars="score_date",var_name="Feature",value_name="Fill %")
+            trend_melt["Feature"] = trend_melt["Feature"].str.replace("fill_","")
+            fig2 = px.line(trend_melt,x="score_date",y="Fill %",color="Feature",
+                           title="Key Feature Fill Rate Trends")
+            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+
+        st.markdown("#### Zero-fill features (need investigation)")
+        zero_features = fill_df[fill_df["Fill %"]==0]["Feature"].tolist()
+        if zero_features:
+            st.markdown(", ".join(f"`{f}`" for f in zero_features))
+            flag(f"{len(zero_features)} features have 0% fill rate on the latest scoring day. "
+                 "These features are not reaching the model — check the data pipeline.", "red")
+
+        st.code("""-- Confirmed working query (warehouse.worth_score_input_audit):
+SELECT score_date, rows_per_day,
+       fill_state, fill_naics6, fill_revenue, fill_age_bankruptcy,
+       fill_count_employees, fill_count_reviews, fill_score_reviews
+FROM warehouse.worth_score_input_audit
+ORDER BY score_date DESC
+LIMIT 10;
+
+-- business_scores (score_status column does NOT exist — remove that filter):
+SELECT COUNT(*), AVG(weighted_score_850), MIN(weighted_score_850), MAX(weighted_score_850)
+FROM rds_manual_score_public.business_scores
+WHERE weighted_score_850 IS NOT NULL;
+
+-- Latest score per business (no score_status filter):
+SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, cs.business_id
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+WHERE bs.weighted_score_850 IS NOT NULL
+LIMIT 10;""", language="sql")
+
+        st.stop()  # Don't render the score distribution tabs below
+
+    # ── Individual score data available ───────────────────────────────────────
     total = len(df)
     avg_s = df["worth_score_850"].mean(); med_s = df["worth_score_850"].median()
     high  = (df["risk_level"]=="HIGH").sum()
     mod   = (df["risk_level"]=="MODERATE").sum()
     low   = (df["risk_level"]=="LOW").sum()
-    approved   = (df.get("score_decision","")=="APPROVE").sum() if "score_decision" in df.columns else 0
-    review     = (df.get("score_decision","")=="FURTHER_REVIEW_NEEDED").sum() if "score_decision" in df.columns else 0
-    declined   = (df.get("score_decision","")=="DECLINE").sum() if "score_decision" in df.columns else 0
+    approved = int((df["score_decision"]=="APPROVE").sum()) if "score_decision" in df.columns else 0
+    review   = int((df["score_decision"]=="FURTHER_REVIEW_NEEDED").sum()) if "score_decision" in df.columns else 0
+    declined = int((df["score_decision"]=="DECLINE").sum()) if "score_decision" in df.columns else 0
 
     c1,c2,c3,c4 = st.columns(4)
     with c1: kpi("Avg Score",f"{avg_s:.0f}","300–850 · rds_manual_score_public","#3B82F6")
