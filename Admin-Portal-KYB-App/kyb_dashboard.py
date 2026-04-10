@@ -399,6 +399,397 @@ def sanity_metrics(checks):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# LIVE DATA LOADERS — parse real Redshift facts into section-ready DataFrames
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=120, show_spinner="Loading SOS data from Redshift…")
+def live_sos(limit):
+    """
+    Pull sos_filings fact and parse the JSON value array into one row per filing.
+    Returns columns: business_id, filing_type, active, jurisdiction,
+                     middesk_conf, oc_conf, zi_conf, efx_conf, trulioo_conf,
+                     entity_type, registration_date
+    """
+    sql = f"""
+        SELECT
+            f.business_id,
+            JSON_EXTRACT_PATH_TEXT(f.value,'value')                AS sos_raw,
+            JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')  AS platform_id,
+            CAST(JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence') AS FLOAT) AS conf,
+            f.received_at
+        FROM rds_warehouse_public.facts f
+        WHERE f.name = 'sos_filings'
+        ORDER BY f.received_at DESC{_limit_clause(limit)}
+    """
+    raw = run_query(sql)
+    if raw is None or raw.empty:
+        return None
+
+    rows = []
+    pid_conf_col = {
+        "16": "middesk_conf", "23": "oc_conf",
+        "24": "zi_conf",      "17": "efx_conf", "38": "trulioo_conf",
+    }
+    for _, r in raw.iterrows():
+        try:
+            filings = json.loads(r["sos_raw"] or "[]")
+            if isinstance(filings, dict):
+                filings = [filings]
+        except Exception:
+            filings = []
+        pid  = str(r.get("platform_id","") or "")
+        conf = float(r.get("conf") or 0)
+        conf_vals = {k: 0.0 for k in pid_conf_col.values()}
+        if pid in pid_conf_col:
+            conf_vals[pid_conf_col[pid]] = conf
+
+        for f in filings:
+            rows.append({
+                "business_id":       r["business_id"],
+                "filing_type":       str(f.get("foreign_domestic","")).lower() or "unknown",
+                "active":            bool(f.get("active", False)),
+                "jurisdiction":      str(f.get("jurisdiction","")).lower(),
+                "entity_type":       str(f.get("company_type","") or f.get("entity_type","") or "Unknown"),
+                "registration_date": str(f.get("registration_date","") or f.get("incorporationDate","")),
+                **conf_vals,
+            })
+        # If no parsed filings, still keep the business row
+        if not filings:
+            rows.append({
+                "business_id": r["business_id"],
+                "filing_type": "unknown", "active": False, "jurisdiction": "",
+                "entity_type": "Unknown", "registration_date": "",
+                **conf_vals,
+            })
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)
+    # Aggregate per-vendor confidence per business (max)
+    for col in ["middesk_conf","oc_conf","zi_conf","efx_conf","trulioo_conf"]:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+    return df
+
+
+@st.cache_data(ttl=120, show_spinner="Loading TIN data from Redshift…")
+def live_tin(limit):
+    sql = f"""
+        SELECT
+            business_id,
+            name,
+            JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,
+            JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS platform_id,
+            received_at
+        FROM rds_warehouse_public.facts
+        WHERE name IN ('tin_match','tin_match_boolean','tin_submitted')
+        ORDER BY received_at DESC{_limit_clause(limit)}
+    """
+    raw = run_query(sql)
+    if raw is None or raw.empty:
+        return None
+
+    # Pivot: one row per business_id
+    pivoted = raw.pivot_table(
+        index="business_id", columns="name", values="fact_value", aggfunc="last"
+    ).reset_index()
+    pivoted.columns.name = None
+
+    # Normalise columns
+    if "tin_match" not in pivoted.columns:        pivoted["tin_match"] = None
+    if "tin_match_boolean" not in pivoted.columns: pivoted["tin_match_boolean"] = None
+    if "tin_submitted" not in pivoted.columns:    pivoted["tin_submitted"] = None
+
+    def parse_tin_match(v):
+        if v is None: return ""
+        try:
+            obj = json.loads(v)
+            return obj.get("status", str(obj)) if isinstance(obj, dict) else str(v)
+        except Exception:
+            return str(v)
+
+    pivoted["tin_match_status"]  = pivoted["tin_match"].apply(parse_tin_match)
+    pivoted["tin_match_boolean"] = pivoted["tin_match_boolean"].apply(
+        lambda v: str(v).lower() in ("true","1") if v is not None else False)
+    pivoted["tin_submitted"]     = pivoted["tin_submitted"].apply(
+        lambda v: str(v).lower() not in ("","none","null","false","0") if v is not None else False)
+
+    # Middesk TIN task — pulled from platform_id of tin_match fact
+    mid = raw[(raw["name"]=="tin_match") & (raw["platform_id"]=="16")][["business_id","fact_value"]]
+    if not mid.empty:
+        mid = mid.copy()
+        mid["middesk_tin_task"] = mid["fact_value"].apply(parse_tin_match)
+        pivoted = pivoted.merge(mid[["business_id","middesk_tin_task"]], on="business_id", how="left")
+    if "middesk_tin_task" not in pivoted.columns:
+        pivoted["middesk_tin_task"] = "none"
+    pivoted["middesk_tin_task"] = pivoted["middesk_tin_task"].fillna("none")
+
+    pivoted["has_middesk"] = pivoted["middesk_tin_task"] != "none"
+    pivoted["has_trulioo"] = raw[raw["platform_id"]=="38"]["business_id"].isin(pivoted["business_id"]).values[:len(pivoted)] if not raw.empty else False
+    pivoted["entity_type"] = "Unknown"
+    pivoted["state"]       = "Unknown"
+    return pivoted
+
+
+@st.cache_data(ttl=120, show_spinner="Loading NAICS data from Redshift…")
+def live_naics(limit):
+    sql = f"""
+        SELECT
+            business_id,
+            JSON_EXTRACT_PATH_TEXT(value,'value')                AS naics_code,
+            JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS platform_id,
+            CAST(JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS FLOAT) AS naics_confidence,
+            received_at
+        FROM rds_warehouse_public.facts
+        WHERE name = 'naics_code'
+          AND JSON_EXTRACT_PATH_TEXT(value,'value') IS NOT NULL
+        ORDER BY received_at DESC{_limit_clause(limit)}
+    """
+    raw = run_query(sql)
+    if raw is None or raw.empty:
+        return None
+
+    pid_to_src = {"16":"middesk","23":"opencorporates","24":"zoominfo",
+                  "17":"equifax","38":"trulioo","31":"ai","22":"serp"}
+    raw["naics_source"]     = raw["platform_id"].map(pid_to_src).fillna("other")
+    raw["is_fallback"]      = raw["naics_code"] == "561499"
+    raw["naics_confidence"] = pd.to_numeric(raw["naics_confidence"], errors="coerce").fillna(0.0)
+    raw["naics_label"]      = raw["naics_code"].apply(lambda c: "Fallback (Other Business Support)" if c=="561499" else c)
+
+    # Pull MCC separately
+    mcc_sql = f"""
+        SELECT business_id, JSON_EXTRACT_PATH_TEXT(value,'value') AS mcc_code
+        FROM rds_warehouse_public.facts
+        WHERE name = 'mcc_code'{_limit_clause(limit)}
+    """
+    mcc = run_query(mcc_sql)
+    if mcc is not None and not mcc.empty:
+        raw = raw.merge(mcc, on="business_id", how="left")
+    else:
+        raw["mcc_code"] = None
+
+    raw["entity_type"] = "Unknown"
+    raw["state"]       = "Unknown"
+    return raw
+
+
+@st.cache_data(ttl=120, show_spinner="Loading GIACT data from Redshift…")
+def live_banking(limit):
+    sql = f"""
+        SELECT
+            business_id,
+            name,
+            JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,
+            received_at
+        FROM rds_warehouse_public.facts
+        WHERE name IN ('giact_verify_response_code','giact_auth_response_code',
+                       'giact_account_status','giact_account_name','giact_contact_verification')
+        ORDER BY received_at DESC{_limit_clause(limit)}
+    """
+    raw = run_query(sql)
+    if raw is None or raw.empty:
+        return None
+
+    pivoted = raw.pivot_table(
+        index="business_id", columns="name", values="fact_value", aggfunc="last"
+    ).reset_index()
+    pivoted.columns.name = None
+
+    def safe_int(v, default=None):
+        try: return int(float(v))
+        except Exception: return default
+
+    if "giact_verify_response_code" in pivoted.columns:
+        pivoted["verify_response_code"] = pivoted["giact_verify_response_code"].apply(safe_int)
+        pivoted["account_status"] = pivoted["verify_response_code"].apply(
+            lambda c: GIACT_ACCOUNT_STATUS.get(c, ("missing",""))[0] if c is not None else "missing")
+    else:
+        pivoted["verify_response_code"] = None
+        pivoted["account_status"] = pivoted.get("giact_account_status","missing")
+
+    if "giact_auth_response_code" in pivoted.columns:
+        pivoted["auth_response_code"] = pivoted["giact_auth_response_code"].apply(safe_int)
+        pivoted["account_name_status"] = pivoted["auth_response_code"].apply(
+            lambda c: GIACT_ACCOUNT_NAME.get(c, ("missing",""))[0] if c is not None else "missing")
+        pivoted["contact_verification"] = pivoted["auth_response_code"].apply(
+            lambda c: GIACT_CONTACT_VERIFICATION.get(c, ("missing",""))[0] if c is not None else "missing")
+    else:
+        pivoted["auth_response_code"]  = None
+        pivoted["account_name_status"] = pivoted.get("giact_account_name","missing")
+        pivoted["contact_verification"]= pivoted.get("giact_contact_verification","missing")
+
+    pivoted["has_bank_account"] = pivoted["account_status"] != "missing"
+    pivoted["state"]            = "Unknown"
+    return pivoted
+
+
+@st.cache_data(ttl=120, show_spinner="Loading Worth Score data from Redshift…")
+def live_worth(limit):
+    sql = f"""
+        SELECT
+            business_id,
+            CAST(JSON_EXTRACT_PATH_TEXT(value,'value') AS FLOAT) AS worth_score_850,
+            received_at
+        FROM rds_warehouse_public.facts
+        WHERE name = 'worth_score'
+          AND JSON_EXTRACT_PATH_TEXT(value,'value') IS NOT NULL
+        ORDER BY received_at DESC{_limit_clause(limit)}
+    """
+    raw = run_query(sql)
+    if raw is None or raw.empty:
+        return None
+    raw["worth_score_850"] = pd.to_numeric(raw["worth_score_850"], errors="coerce")
+    raw = raw.dropna(subset=["worth_score_850"])
+    raw["risk_level"] = raw["worth_score_850"].apply(
+        lambda s: "HIGH" if s<500 else ("MODERATE" if s<650 else "LOW"))
+    # SHAP columns not available directly — default to 0 (real SHAP requires model output)
+    for c in ["shap_public_records","shap_company_profile","shap_financials","shap_banking"]:
+        raw[c] = 0.0
+    raw["count_bk"] = 0; raw["count_judgment"] = 0; raw["count_lien"] = 0
+    raw["state"]    = "Unknown"
+    return raw
+
+
+@st.cache_data(ttl=120, show_spinner="Loading KYC data from Redshift…")
+def live_kyc(limit):
+    sql = f"""
+        SELECT
+            business_id,
+            name,
+            JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,
+            received_at
+        FROM rds_warehouse_public.facts
+        WHERE name IN ('idv_status','idv_passed_boolean','compliance_status',
+                       'name_match_boolean','address_match_boolean','tin_match_boolean',
+                       'risk_score')
+        ORDER BY received_at DESC{_limit_clause(limit)}
+    """
+    raw = run_query(sql)
+    if raw is None or raw.empty:
+        return None
+
+    pivoted = raw.pivot_table(
+        index="business_id", columns="name", values="fact_value", aggfunc="last"
+    ).reset_index()
+    pivoted.columns.name = None
+
+    def parse_bool_fact(v):
+        if v is None: return None
+        try:
+            obj = json.loads(v)
+            if isinstance(obj, dict): return str(obj.get("status",""))
+            return str(v).lower()
+        except Exception:
+            return str(v).lower()
+
+    # IDV status — stored as dict {SUCCESS:N,...}
+    def parse_idv(v):
+        if v is None: return "UNKNOWN"
+        try:
+            obj = json.loads(v)
+            if isinstance(obj, dict):
+                # Return the status with the highest count
+                return max(obj, key=obj.get, default="UNKNOWN")
+            return str(v).upper()
+        except Exception:
+            return str(v).upper()
+
+    pivoted["idv_status"]  = pivoted.get("idv_status", pd.Series(["UNKNOWN"]*len(pivoted), index=pivoted.index)).apply(parse_idv)
+    pivoted["idv_passed"]  = pivoted["idv_status"] == "SUCCESS"
+
+    def parse_compliance(v):
+        if v is None: return "unknown"
+        s = str(v).lower()
+        if "high" in s: return "high_risk"
+        if "medium" in s or "med" in s: return "medium_risk"
+        if "low" in s: return "low_risk"
+        return "unknown"
+
+    pivoted["risk_level"]  = pivoted.get("compliance_status", pd.Series([None]*len(pivoted), index=pivoted.index)).apply(parse_compliance)
+
+    def bool_to_match(v):
+        s = str(v).lower() if v is not None else ""
+        if s in ("true","success","1"): return "success"
+        if s in ("false","failure","0"): return "failure"
+        return "none"
+
+    pivoted["name_match"]    = pivoted.get("name_match_boolean",    pd.Series([None]*len(pivoted), index=pivoted.index)).apply(bool_to_match)
+    pivoted["address_match"] = pivoted.get("address_match_boolean", pd.Series([None]*len(pivoted), index=pivoted.index)).apply(bool_to_match)
+    pivoted["dob_match"]     = "none"
+    pivoted["ssn_match"]     = "none"
+    pivoted["phone_match"]   = "none"
+    pivoted["synthetic_score"] = 0.0
+    pivoted["stolen_score"]    = 0.0
+    pivoted["entity_type"]     = "Unknown"
+    pivoted["state"]           = "Unknown"
+    return pivoted
+
+
+@st.cache_data(ttl=120, show_spinner="Loading Due Diligence data from Redshift…")
+def live_dd(limit):
+    sql = f"""
+        SELECT
+            business_id,
+            name,
+            JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,
+            received_at
+        FROM rds_warehouse_public.facts
+        WHERE name IN ('watchlist_hits','adverse_media_hits','sanctions_hits','pep_hits')
+        ORDER BY received_at DESC{_limit_clause(limit)}
+    """
+    raw = run_query(sql)
+    if raw is None or raw.empty:
+        return None
+
+    def safe_int(v):
+        try: return int(float(v or 0))
+        except Exception: return 0
+
+    pivoted = raw.pivot_table(
+        index="business_id", columns="name", values="fact_value", aggfunc="last"
+    ).reset_index()
+    pivoted.columns.name = None
+
+    for col, default in [("watchlist_hits","0"),("adverse_media_hits","0"),
+                          ("sanctions_hits","0"),("pep_hits","0")]:
+        pivoted[col] = pivoted.get(col, pd.Series([default]*len(pivoted),index=pivoted.index)).apply(safe_int)
+
+    pivoted["bk_hits"]       = 0
+    pivoted["judgment_hits"] = 0
+    pivoted["lien_hits"]     = 0
+    pivoted["bk_age_months"] = None
+    pivoted["state"]         = "Unknown"
+    pivoted["entity_type"]   = "Unknown"
+    return pivoted
+
+
+def get_section_data(section_key, limit):
+    """
+    Returns real Redshift data when connected, synthetic demo data otherwise.
+    section_key: 'sos' | 'tin' | 'naics' | 'banking' | 'worth' | 'kyc' | 'dd'
+    """
+    loaders = {
+        "sos":     (live_sos,     _synth_sos),
+        "tin":     (live_tin,     _synth_tin),
+        "naics":   (live_naics,   _synth_naics),
+        "banking": (live_banking, _synth_banking),
+        "worth":   (live_worth,   _synth_worth),
+        "kyc":     (live_kyc,     _synth_kyc),
+        "dd":      (live_dd,      _synth_dd),
+    }
+    live_fn, synth_fn = loaders[section_key]
+
+    if live:
+        with st.spinner(f"Loading live {section_key} data…"):
+            df = live_fn(limit)
+        if df is not None and not df.empty:
+            return df, True   # (dataframe, is_live)
+
+    # Fallback
+    return synth_fn(_synth_n(limit)), False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ═══════════════════════════════════════════════════════════════════════════════
 _, live = get_conn()
@@ -406,7 +797,10 @@ _, live = get_conn()
 with st.sidebar:
     st.markdown("## 🏦 KYB Dashboard")
     st.markdown("---")
-    st.success("🟢 Connected to Redshift") if live else st.warning("🟡 Demo mode — synthetic data")
+    if live:
+        st.success("🟢 Connected to Redshift")
+    else:
+        st.warning("🟡 Demo mode — synthetic data")
 
     section = st.radio("Navigation", [
         "📋 Overview",
@@ -440,9 +834,14 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════════════════════
 if section == "📋 Overview":
     st.markdown("# 🏦 Admin Portal — KYB Tracking Dashboard")
-    n = _synth_n(record_limit)
-    sos = _synth_sos(n); tin = _synth_tin(n); naics = _synth_naics(n)
-    bank = _synth_banking(n); kyc = _synth_kyc(n); dd = _synth_dd(n)
+    sos,  sos_live  = get_section_data("sos",     record_limit)
+    tin,  tin_live  = get_section_data("tin",     record_limit)
+    naics,_         = get_section_data("naics",   record_limit)
+    bank, _         = get_section_data("banking", record_limit)
+    kyc,  _         = get_section_data("kyc",     record_limit)
+    dd,   _         = get_section_data("dd",      record_limit)
+    if not sos_live:
+        flag("Using synthetic demo data — connect to Redshift via VPN to see real business IDs and real results.", "amber")
 
     biz = tin["business_id"].nunique()
     sos_act = sos[sos["active"]]["business_id"].nunique()
@@ -529,7 +928,8 @@ elif section == "1️⃣  KYB — SOS & Vendors":
     sh("KYB — SOS Filings & Vendor Confidence",
        "sos_filings.foreign_domestic · active status · jurisdiction (Region) · vendor confidence gaps", "🏛️")
 
-    df = _synth_sos(_synth_n(record_limit))
+    df, _is_live = get_section_data("sos", record_limit)
+    if not _is_live: flag("Demo data — connect to Redshift via VPN for real business IDs and results.", "amber")
     dom = df[df["filing_type"]=="domestic"]
     frn = df[df["filing_type"]=="foreign"]
     biz_total = df["business_id"].nunique()
@@ -932,7 +1332,8 @@ ORDER BY received_at DESC;""", language="sql")
 elif section == "2️⃣  TIN Verification":
     sh("TIN Verification","tin_match · tin_match_boolean · Middesk TIN task · inconsistency analysis","🔐")
 
-    df = _synth_tin(_synth_n(record_limit))
+    df, _is_live = get_section_data("tin", record_limit)
+    if not _is_live: flag("Demo data — connect to Redshift via VPN for real business IDs and results.", "amber")
     total = len(df)
     verified   = df["tin_match_boolean"].sum()
     unverified = (df["tin_match_status"]=="failure").sum()
@@ -1173,7 +1574,8 @@ elif section == "3️⃣  NAICS / MCC":
     sh("NAICS / MCC Classification",
        "naics_code · mcc_code · fallback 561499 analysis · vendor source breakdown · consistency","🏭")
 
-    df = _synth_naics(_synth_n(record_limit))
+    df, _is_live = get_section_data("naics", record_limit)
+    if not _is_live: flag("Demo data — connect to Redshift via VPN for real business IDs and results.", "amber")
     total = len(df); fallbacks = df["is_fallback"].sum(); real = total-fallbacks
     avg_conf = df[~df["is_fallback"]]["naics_confidence"].mean()
     top_src  = df.groupby("naics_source").size().idxmax()
@@ -1426,7 +1828,8 @@ elif section == "4️⃣  Banking (GIACT)":
     sh("Banking — GIACT gVerify & gAuthenticate",
        "Account Status (verify_response_code 0–22) · Account Name · Contact Verification","🏦")
 
-    df = _synth_banking(_synth_n(record_limit))
+    df, _is_live = get_section_data("banking", record_limit)
+    if not _is_live: flag("Demo data — connect to Redshift via VPN for real business IDs and results.", "amber")
     total = len(df)
     passed  = (df["account_status"]=="passed").sum()
     failed  = (df["account_status"]=="failed").sum()
@@ -1677,7 +2080,8 @@ WHERE business_id = 'YOUR-UUID'
 elif section == "5️⃣  Worth Score":
     sh("Worth Score","300–850 scale · risk level · SHAP contributions · public records impact","💰")
 
-    df = _synth_worth(_synth_n(record_limit))
+    df, _is_live = get_section_data("worth", record_limit)
+    if not _is_live: flag("Demo data — connect to Redshift via VPN for real business IDs and results.", "amber")
     total = len(df)
     avg_s = df["worth_score_850"].mean(); med_s = df["worth_score_850"].median()
     high  = (df["risk_level"]=="HIGH").sum()
@@ -1917,7 +2321,8 @@ elif section == "6️⃣  KYC — Identity":
     sh("KYC — Identity Verification",
        "IDV (Plaid) · name/DOB/SSN/address/phone match · synthetic + stolen identity risk","🪪")
 
-    df = _synth_kyc(_synth_n(record_limit))
+    df, _is_live = get_section_data("kyc", record_limit)
+    if not _is_live: flag("Demo data — connect to Redshift via VPN for real business IDs and results.", "amber")
     total = len(df)
     passed   = df["idv_passed"].sum()
     high_r   = (df["risk_level"]=="high_risk").sum()
@@ -2229,7 +2634,8 @@ elif section == "7️⃣  Due Diligence":
     sh("Due Diligence — Watchlist, Sanctions, PEP, Adverse Media, Public Records",
        "watchlist_hits · sanctions · PEP · adverse_media · BK · Judgments · Liens","🔍")
 
-    df = _synth_dd(_synth_n(record_limit))
+    df, _is_live = get_section_data("dd", record_limit)
+    if not _is_live: flag("Demo data — connect to Redshift via VPN for real business IDs and results.", "amber")
     total = len(df)
     any_wl   = (df["watchlist_hits"]>0).sum()
     any_sanc = (df["sanctions_hits"]>0).sum()
