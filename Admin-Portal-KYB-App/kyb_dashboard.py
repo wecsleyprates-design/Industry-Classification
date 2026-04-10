@@ -542,10 +542,12 @@ def live_banking(limit):
 
 
 def live_worth(limit):
+    # worth_score not confirmed in top-50 — try both possible names
     sql = f"""
-        SELECT business_id, value, received_at
+        SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
-        WHERE name = 'worth_score'
+        WHERE name IN ('worth_score', 'worthscore', 'score', 'ai_score',
+                       'worth_score_850', 'risk_score')
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
     raw = run_query(sql)
@@ -554,10 +556,16 @@ def live_worth(limit):
     raw["worth_score_850"] = raw["value"].apply(
         lambda v: _parse_fact(v).get("value") if v else None)
     raw["worth_score_850"] = pd.to_numeric(raw["worth_score_850"], errors="coerce")
+    # Scale: if score looks like 0-1 probability, convert to 300-850 scale
+    mask_small = raw["worth_score_850"] <= 1.0
+    raw.loc[mask_small, "worth_score_850"] = raw.loc[mask_small, "worth_score_850"] * 550 + 300
     raw = raw.dropna(subset=["worth_score_850"])
+    if raw.empty:
+        return None
+    # Keep one row per business (latest score)
+    raw = raw.sort_values("received_at", ascending=False).drop_duplicates("business_id")
     raw["risk_level"] = raw["worth_score_850"].apply(
         lambda s: "HIGH" if s<500 else ("MODERATE" if s<650 else "LOW"))
-    # SHAP columns not available directly — default to 0 (real SHAP requires model output)
     for c in ["shap_public_records","shap_company_profile","shap_financials","shap_banking"]:
         raw[c] = 0.0
     raw["count_bk"] = 0; raw["count_judgment"] = 0; raw["count_lien"] = 0
@@ -566,12 +574,19 @@ def live_worth(limit):
 
 
 def live_kyc(limit):
+    # CONFIRMED fact names from rds_warehouse_public.facts (73K rows each):
+    # name_match_boolean, address_match_boolean, tin_match_boolean ✅
+    # idv_status, idv_passed_boolean, compliance_status — NOT in this DB
+    # Trulioo risk facts (risk_score, compliance_status) — query but handle gracefully
     sql = f"""
         SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
-        WHERE name IN ('idv_status','idv_passed_boolean','compliance_status',
-                       'name_match_boolean','address_match_boolean','tin_match_boolean',
-                       'risk_score')
+        WHERE name IN (
+            'name_match_boolean', 'address_match_boolean', 'tin_match_boolean',
+            'name_match', 'address_match', 'address_verification_boolean',
+            'idv_status', 'idv_passed_boolean', 'compliance_status',
+            'risk_score', 'verification_status'
+        )
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
     raw = run_query(sql)
@@ -586,48 +601,45 @@ def live_kyc(limit):
     ).reset_index()
     pivoted.columns.name = None
 
-    # IDV status — stored as dict {SUCCESS:N,...}
-    def parse_idv(v):
-        if v is None: return "UNKNOWN"
-        try:
-            obj = json.loads(v)
-            if isinstance(obj, dict):
-                # Return the status with the highest count
-                return max(obj, key=obj.get, default="UNKNOWN")
-            return str(v).upper()
-        except Exception:
-            return str(v).upper()
-
-    if "idv_status" in pivoted.columns:
-        pivoted["idv_status"] = pivoted["idv_status"].apply(parse_idv)
-    else:
-        pivoted["idv_status"] = "UNKNOWN"
-    pivoted["idv_passed"] = pivoted["idv_status"] == "SUCCESS"
-
-    def parse_compliance(v):
-        if v is None: return "unknown"
-        s = str(v).lower()
-        if "high" in s: return "high_risk"
-        if "medium" in s or "med" in s: return "medium_risk"
-        if "low" in s: return "low_risk"
-        return "unknown"
-
-    if "compliance_status" in pivoted.columns:
-        pivoted["risk_level"] = pivoted["compliance_status"].apply(parse_compliance)
-    else:
-        pivoted["risk_level"] = "unknown"
-
     def bool_to_match(v):
         s = str(v).lower() if v is not None else ""
         if s in ("true","success","1"): return "success"
         if s in ("false","failure","0"): return "failure"
         return "none"
 
+    # Use confirmed facts — default gracefully when optional IDV facts absent
     pivoted["name_match"]    = pivoted["name_match_boolean"].apply(bool_to_match) if "name_match_boolean" in pivoted.columns else "none"
     pivoted["address_match"] = pivoted["address_match_boolean"].apply(bool_to_match) if "address_match_boolean" in pivoted.columns else "none"
-    pivoted["dob_match"]     = "none"
-    pivoted["ssn_match"]     = "none"
-    pivoted["phone_match"]   = "none"
+    pivoted["tin_match_ok"]  = pivoted["tin_match_boolean"].apply(bool_to_match) if "tin_match_boolean" in pivoted.columns else "none"
+
+    # IDV — optional, may not exist
+    def parse_idv(v):
+        if not v: return "UNKNOWN"
+        try:
+            obj = json.loads(v)
+            if isinstance(obj, dict):
+                return max(obj, key=obj.get, default="UNKNOWN")
+            return str(v).upper()
+        except Exception:
+            return str(v).upper()
+
+    pivoted["idv_status"] = pivoted["idv_status"].apply(parse_idv) if "idv_status" in pivoted.columns else "UNKNOWN"
+    pivoted["idv_passed"] = pivoted["idv_status"] == "SUCCESS"
+
+    def parse_compliance(v):
+        if not v: return "unknown"
+        s = str(v).lower()
+        if "high" in s: return "high_risk"
+        if "medium" in s or "med" in s: return "medium_risk"
+        if "low" in s: return "low_risk"
+        return "unknown"
+
+    pivoted["risk_level"] = pivoted["compliance_status"].apply(parse_compliance) if "compliance_status" in pivoted.columns else "unknown"
+
+    # Fields not in this DB — set neutral defaults
+    pivoted["dob_match"]       = "none"
+    pivoted["ssn_match"]       = "none"
+    pivoted["phone_match"]     = "none"
     pivoted["synthetic_score"] = 0.0
     pivoted["stolen_score"]    = 0.0
     pivoted["entity_type"]     = "Unknown"
@@ -636,10 +648,20 @@ def live_kyc(limit):
 
 
 def live_dd(limit):
+    # CONFIRMED fact names from rds_warehouse_public.facts:
+    #   watchlist_hits ✅ 73K rows
+    #   bankruptcies   ✅ 61K rows  (full object)
+    #   num_bankruptcies ✅ 64K rows (numeric count)
+    # Not confirmed: adverse_media_hits, sanctions_hits, pep_hits — query but handle gracefully
     sql = f"""
         SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
-        WHERE name IN ('watchlist_hits','adverse_media_hits','sanctions_hits','pep_hits')
+        WHERE name IN (
+            'watchlist_hits', 'watchlist', 'adverse_media_hits',
+            'sanctions_hits', 'pep_hits',
+            'num_bankruptcies', 'bankruptcies',
+            'judgements', 'liens'
+        )
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
     raw = run_query(sql)
@@ -664,6 +686,16 @@ def live_dd(limit):
         else:
             pivoted[col] = 0
 
+    # Map confirmed bankruptcy fact to expected column
+    if "num_bankruptcies" in pivoted.columns:
+        pivoted["bk_hits"] = pivoted["num_bankruptcies"].apply(safe_int)
+    else:
+        pivoted["bk_hits"] = 0
+
+    for col in ["judgements","liens"]:
+        if col in pivoted.columns:
+            pivoted[col.rstrip("s") + "_hits"] = pivoted[col].apply(safe_int)
+
     pivoted["bk_hits"]       = 0
     pivoted["judgment_hits"] = 0
     pivoted["lien_hits"]     = 0
@@ -673,10 +705,14 @@ def live_dd(limit):
     return pivoted
 
 
+# Sections that are optional — if their facts don't exist, show info instead of error
+OPTIONAL_SECTIONS = {"banking", "kyc", "worth"}
+
 def get_section_data(section_key, limit):
     """
-    Load real data from Redshift. No synthetic fallback — errors are shown explicitly.
-    section_key: 'sos' | 'tin' | 'naics' | 'banking' | 'worth' | 'kyc' | 'dd'
+    Load real data from Redshift.
+    - Required sections (sos, tin, naics, worth, dd): error + stop if no data
+    - Optional sections (banking, kyc): info message + return None if no data
     """
     loaders = {
         "sos":     live_sos,
@@ -688,6 +724,7 @@ def get_section_data(section_key, limit):
         "dd":      live_dd,
     }
     live_fn = loaders[section_key]
+    is_optional = section_key in OPTIONAL_SECTIONS
 
     if not live:
         st.error("🔴 Not connected to Redshift. Connect VPN and click **Retry connection** in the sidebar.")
@@ -696,35 +733,35 @@ def get_section_data(section_key, limit):
     with st.spinner(f"Loading {section_key} data from Redshift…"):
         df = live_fn(limit)
 
-    if df is None:
-        err = st.session_state.get("_last_db_error", "Query returned no results")
-        st.error(f"❌ Failed to load **{section_key}** data from Redshift.")
-        st.code(err, language=None)
-        # Show what fact names actually exist so the user can diagnose
-        st.markdown("**Fact names available in your database for this section:**")
+    if df is None or (hasattr(df, 'empty') and df.empty):
+        err = st.session_state.get("_last_db_error", "")
         keyword = section_key.split('_')[0]
-        st.code(f"""-- Find all fact names stored for this topic:
-SELECT DISTINCT name, COUNT(*) as rows
+        discovery_sql = f"""-- Find all fact names stored for this topic:
+SELECT DISTINCT name, COUNT(*) AS rows
 FROM rds_warehouse_public.facts
 WHERE name LIKE '%{keyword}%'
 GROUP BY name ORDER BY rows DESC LIMIT 30;
 
--- Also check what facts you DO have (top 50 by volume):
-SELECT DISTINCT name, COUNT(*) as rows
+-- Top 50 fact names by volume (to see everything available):
+SELECT DISTINCT name, COUNT(*) AS rows
 FROM rds_warehouse_public.facts
-GROUP BY name ORDER BY rows DESC LIMIT 50;""", language="sql")
-        st.stop()
+GROUP BY name ORDER BY rows DESC LIMIT 50;"""
 
-    if df.empty:
-        st.warning(f"⚠️ Query for **{section_key}** returned 0 rows — "
-                   "these fact names may not exist in your database yet.")
-        st.markdown("**Run this to find what facts ARE stored for this topic:**")
-        keyword = section_key.split('_')[0]
-        st.code(f"""SELECT DISTINCT name, COUNT(*) as rows
-FROM rds_warehouse_public.facts
-WHERE name LIKE '%{keyword}%'
-GROUP BY name ORDER BY rows DESC LIMIT 20;""", language="sql")
-        st.stop()
+        if is_optional:
+            st.info(f"ℹ️ No **{section_key}** facts found in `rds_warehouse_public.facts`. "
+                    "This is expected if this integration is not yet active in your environment.")
+            with st.expander("🔍 Run this SQL to check what facts are available"):
+                st.code(discovery_sql, language="sql")
+            return None   # caller must handle None for optional sections
+        else:
+            if err:
+                st.error(f"❌ Failed to load **{section_key}** data.")
+                st.code(err, language=None)
+            else:
+                st.warning(f"⚠️ No **{section_key}** data found in your database.")
+            with st.expander("🔍 Run this SQL to check what facts are available"):
+                st.code(discovery_sql, language="sql")
+            st.stop()
 
     return df
 
@@ -781,32 +818,41 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════════════════════
 if section == "📋 Overview":
     st.markdown("# 🏦 Admin Portal — KYB Tracking Dashboard")
-    sos   = get_section_data("sos",     record_limit)
-    tin   = get_section_data("tin",     record_limit)
+    # Load required sections — these will st.stop() if data missing
+    sos   = get_section_data("sos",  record_limit)
+    tin   = get_section_data("tin",  record_limit)
+    dd    = get_section_data("dd",   record_limit)
+    # Optional sections — return None if facts don't exist yet
     naics = get_section_data("naics",   record_limit)
     bank  = get_section_data("banking", record_limit)
     kyc   = get_section_data("kyc",     record_limit)
-    dd    = get_section_data("dd",      record_limit)
+    worth = get_section_data("worth",   record_limit)
 
-    biz = tin["business_id"].nunique()
+    biz     = tin["business_id"].nunique()
     sos_act = sos[sos["active"]]["business_id"].nunique()
-    tin_ok = tin["tin_match_boolean"].mean()*100
-    naics_fb = naics["is_fallback"].mean()*100
-    idv_ok = kyc["idv_passed"].mean()*100
-    wl_hit = (dd["watchlist_hits"]>0).mean()*100
-    bank_ok = (bank["account_status"]=="passed").mean()*100
-    high_risk= (kyc["risk_level"]=="high_risk").mean()*100
+    tin_ok  = tin["tin_match_boolean"].mean()*100 if "tin_match_boolean" in tin.columns else 0.0
+    naics_fb= naics["is_fallback"].mean()*100 if naics is not None and "is_fallback" in naics.columns else None
+    idv_ok  = kyc["idv_passed"].mean()*100 if kyc is not None and "idv_passed" in kyc.columns else None
+    wl_hit  = (dd["watchlist_hits"]>0).mean()*100 if "watchlist_hits" in dd.columns else 0.0
+    bank_ok = (bank["account_status"]=="passed").mean()*100 if bank is not None and "account_status" in bank.columns else None
+    high_risk= (kyc["risk_level"]=="high_risk").mean()*100 if kyc is not None and "risk_level" in kyc.columns else None
 
     c1,c2,c3,c4 = st.columns(4)
     with c1: kpi("Total Businesses",f"{biz:,}","in scope","#3B82F6")
-    with c2: kpi("SOS Active",f"{sos_act/biz*100:.0f}%","have active filing","#22c55e")
+    with c2: kpi("SOS Active",f"{sos_act/max(biz,1)*100:.0f}%","have active filing","#22c55e")
     with c3: kpi("TIN Verified",f"{tin_ok:.0f}%","tin_match_boolean=true","#22c55e")
-    with c4: kpi("NAICS Fallback 561499",f"{naics_fb:.0f}%","need review","#ef4444")
+    with c4: kpi("NAICS Fallback 561499",f"{naics_fb:.0f}%" if naics_fb is not None else "N/A",
+                 "need review" if naics_fb is not None else "not in this DB","#ef4444")
 
     c5,c6,c7,c8 = st.columns(4)
-    with c5: kpi("IDV Passed",f"{idv_ok:.0f}%","identity verified","#22c55e")
-    with c6: kpi("High Risk (KYC)",f"{high_risk:.0f}%","Trulioo compliance","#ef4444")
-    with c7: kpi("Banking Passed",f"{bank_ok:.0f}%","gVerify account OK","#22c55e")
+    with c5: kpi("IDV Passed",f"{idv_ok:.0f}%" if idv_ok is not None else "N/A",
+                 "identity verified" if idv_ok is not None else "not in this DB","#22c55e")
+    with c6: kpi("High Risk (KYC)",
+                 f"{high_risk:.0f}%" if high_risk is not None else "N/A",
+                 "Trulioo compliance" if high_risk is not None else "not in this DB","#ef4444")
+    with c7: kpi("Banking Passed",
+                 f"{bank_ok:.0f}%" if bank_ok is not None else "N/A",
+                 "gVerify account OK" if bank_ok is not None else "no GIACT facts","#22c55e")
     with c8: kpi("Watchlist Hits",f"{wl_hit:.0f}%","≥1 hit","#a855f7")
 
     st.markdown("---")
@@ -815,13 +861,13 @@ if section == "📋 Overview":
         ("red",  "Middesk data gap",
          f"Businesses with OC confidence >0.7 should also have a Middesk record. "
          f"Check integration_data.request_response WHERE platform_id=16."),
-        ("red",  f"NAICS 561499 fallback: {naics_fb:.0f}% of businesses",
+        ("red",  f"NAICS 561499 fallback: {naics_fb:.0f}% of businesses" if naics_fb is not None else "NAICS facts not in this DB yet",
          "99% of fallbacks have zero vendor NAICS signals. AI fires with name+address only."),
         ("amber","Multi-domestic SOS filings detected",
          "A business should have exactly ONE domestic filing. Multiple = data quality issue."),
         ("amber","TIN boolean vs status mismatch possible",
          "tin_match_boolean=true but tin_match.status≠'success' — check Rule: status==='success' only."),
-        ("amber",f"High-risk KYC: {high_risk:.0f}% of businesses flagged high_risk by Trulioo",
+        ("amber",f"High-risk KYC: {high_risk:.0f}% of businesses flagged high_risk by Trulioo" if high_risk is not None else "KYC compliance_status not in this DB yet",
          "Cross-check: do these businesses also have watchlist hits or failed IDV?"),
         ("blue", "GIACT coverage gaps: codes 11,16,17,18 = 'Not yet available'",
          "These are GIACT coverage gaps, not application errors. Flag for manual review."),
@@ -1729,6 +1775,9 @@ elif section == "4️⃣  Banking (GIACT)":
        "Account Status (verify_response_code 0–22) · Account Name · Contact Verification","🏦")
 
     df = get_section_data("banking", record_limit)
+    if df is None:
+        # Optional section — info already shown by get_section_data, nothing more to do
+        st.stop()
     total = len(df)
     passed  = (df["account_status"]=="passed").sum()
     failed  = (df["account_status"]=="failed").sum()
@@ -1980,6 +2029,8 @@ elif section == "5️⃣  Worth Score":
     sh("Worth Score","300–850 scale · risk level · SHAP contributions · public records impact","💰")
 
     df = get_section_data("worth", record_limit)
+    if df is None:
+        st.stop()
     total = len(df)
     avg_s = df["worth_score_850"].mean(); med_s = df["worth_score_850"].median()
     high  = (df["risk_level"]=="HIGH").sum()
@@ -2220,6 +2271,8 @@ elif section == "6️⃣  KYC — Identity":
        "IDV (Plaid) · name/DOB/SSN/address/phone match · synthetic + stolen identity risk","🪪")
 
     df = get_section_data("kyc", record_limit)
+    if df is None:
+        st.stop()
     total = len(df)
     passed   = df["idv_passed"].sum()
     high_r   = (df["risk_level"]=="high_risk").sum()
