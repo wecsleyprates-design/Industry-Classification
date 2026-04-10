@@ -269,10 +269,26 @@ def _parse_fact(value_str):
         return {}
     try:
         result = json.loads(value_str)
-        # json.loads("null") returns None — guard against it
         return result if isinstance(result, dict) else {}
     except Exception:
         return {}
+
+
+def _safe_get(d, *keys, default=""):
+    """
+    Safe chained dict lookup that handles None at every level.
+    Replaces d.get("a", {}).get("b", "") patterns where intermediate
+    values can be JSON null (Python None).
+    Example: _safe_get(fact, "source", "platformId") never raises AttributeError.
+    """
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(k)
+        if cur is None:
+            return default
+    return cur if cur is not None else default
 
 
 def live_sos(limit):
@@ -309,8 +325,8 @@ def live_sos(limit):
         bid  = r["business_id"]
         fact = _parse_fact(r["value"])
         val  = fact.get("value")
-        pid  = str(fact.get("source", {}).get("platformId", "") or "")
-        conf = float(fact.get("source", {}).get("confidence", 0) or 0)
+        pid  = str(_safe_get(fact, "source", "platformId", default=""))
+        conf = float(_safe_get(fact, "source", "confidence", default=0) or 0)
 
         if bid not in rows:
             rows[bid] = {
@@ -357,7 +373,7 @@ def live_tin(limit):
 
     def extract_platform_id(row):
         fact = _parse_fact(row["value"])
-        return str(fact.get("source", {}).get("platformId",""))
+        return str(_safe_get(fact, "source", "platformId", default=""))
 
     raw["fact_value"]  = raw.apply(extract_fact_value, axis=1)
     raw["platform_id"] = raw.apply(extract_platform_id, axis=1)
@@ -420,8 +436,8 @@ def live_naics(limit):
         fact = _parse_fact(row["value"])
         return pd.Series({
             "naics_code":       str(fact.get("value","") or ""),
-            "platform_id":      str(fact.get("source",{}).get("platformId","") or ""),
-            "naics_confidence": float(fact.get("source",{}).get("confidence",0) or 0),
+            "platform_id":      str(_safe_get(fact, "source", "platformId", default="")),
+            "naics_confidence": float(_safe_get(fact, "source", "confidence", default=0) or 0),
         })
 
     parsed = raw.apply(parse_row, axis=1)
