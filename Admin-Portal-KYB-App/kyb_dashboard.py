@@ -1128,6 +1128,29 @@ if section == "📋 Overview":
         styled_table(pd.DataFrame(rows), color_col="Status",
                      palette={"✅ pass":"#22c55e","❌ fail":"#ef4444"})
 
+    with st.expander("ℹ️ How to read the Data Quality Scorecard — what PASS/FAIL means"):
+        st.markdown("""
+**What this scorecard measures:** Each row is an industry-standard threshold for a healthy KYB data pipeline.
+`✅ PASS` means your data meets the target. `❌ FAIL` means it falls short — see below for root causes.
+
+| Check | Target | What FAIL means | Root cause to investigate |
+|---|---|---|---|
+| **SOS Active > 95%** | >95% of businesses have an active SOS filing | Too many inactive entities applying | Dissolved/suspended businesses, admin dissolution, state compliance failure |
+| **SOS Match > 90%** | >90% name-matched in registry | Submitted name ≠ registry legal name | DBA vs legal name confusion, name format differences |
+| **TIN Submission > 90%** | >90% submitted an EIN | EIN field not required or skipped | Onboarding form not collecting EIN properly |
+| **TIN Verified > 70%** | >70% of submitted EINs match IRS records | Wrong EIN, name mismatch, or fraud | DBA name submitted instead of legal name; check failure reasons |
+| **TIN Failure < 20%** | <20% explicit failure from IRS | High rate of IRS rejections | Name change not reflected, SSN submitted as EIN for sole props |
+| **NAICS Fallback < 10%** | <10% receive NAICS 561499 | Entity matching failing broadly | Check vendor data freshness; ZI/EFX/OC bulk data may be stale |
+| **Middesk Match > 60%** | >60% match in US SOS via Middesk | Middesk not finding entities | New businesses, name normalization issues, Middesk API failures |
+| **OC Match > 50%** | >50% match in global registry via OC | OC not finding entities | Coverage gaps, foreign entities without US presence |
+| **Watchlist Hits < 10%** | <10% have any watchlist hit | Abnormally high hit rate | Check for false positive match logic (name collision) |
+| **IDV Passed > 65%** | >65% pass Plaid identity verification | Low identity confirmation rate | User abandonment, expired documents, unsupported ID types |
+
+**N/A** means the fact data was not available in the current query.
+        """)
+
+    st.markdown("---")
+
     # ── System Red Flags ───────────────────────────────────────────────────────
     st.markdown("### 🚨 Active Red Flags")
     flags_found = 0
@@ -1159,7 +1182,6 @@ if section == "📋 Overview":
     st.markdown("### 🔗 Key Relationship Analysis")
     col_l, col_r = st.columns(2)
     with col_l:
-        # Vendor agreement matrix
         middesk_h = (sos["middesk_conf"]>0.50)
         oc_h      = (sos["oc_conf"]>0.50)
         agree_df = pd.DataFrame({
@@ -1174,8 +1196,21 @@ if section == "📋 Overview":
                      hole=0.45,title="Middesk vs OC Agreement")
         st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
         styled_table(agree_df)
+
+        st.markdown("""
+**What each scenario means:**
+
+| Scenario | Meaning | Action |
+|---|---|---|
+| **Both matched** | Middesk (US SOS) AND OpenCorporates both confirmed this entity. Strongest possible confirmation. | No action needed |
+| **Middesk only** | US SOS confirmed but OC did not. Typically means the business just incorporated (OC updates lag 2–4 weeks). | Acceptable if business is < 60 days old |
+| **OC only** | OpenCorporates global registry confirmed but Middesk (US SOS live query) did not. This is the **Middesk data gap** — a known system issue. | Check `integration_data.request_response WHERE platform_id=16` for errors |
+| **Neither** | NO vendor confirmed this entity exists. The highest-risk segment — entity existence is completely unverified. | **Do not auto-approve.** Route to manual underwriting. |
+
+*Confidence threshold used: >0.50 = "matched". Source: `sos_active`, `sos_match`, `middesk_confidence` facts.*
+        """)
+
     with col_r:
-        # TIN outcome breakdown
         tin_outcomes = pd.DataFrame({
             "Outcome":["✅ Verified","❌ Failed","⏳ Pending/Other","📭 Not submitted"],
             "Count":[
@@ -1189,6 +1224,19 @@ if section == "📋 Overview":
                          color_discrete_sequence=["#22c55e","#ef4444","#f59e0b","#64748b"],
                          title="TIN Verification Funnel")
         st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+
+        st.markdown("""
+**What each TIN outcome means:**
+
+| Outcome | What happened | Root cause | Action |
+|---|---|---|---|
+| **✅ Verified** | IRS confirmed the EIN matches the submitted legal business name. | EIN and name are correct. | No action needed |
+| **❌ Failed** | IRS has no record of this EIN + legal name combination. | Wrong EIN; name mismatch (DBA vs legal); recent name change not yet in IRS system; sole prop submitted SSN. | Ask applicant to resubmit with exact legal name matching their EIN. |
+| **⏳ Pending/Other** | The TIN match request was sent to Middesk but IRS has not responded yet. Includes empty status records. | Normal for same-day or next-day submissions. Also includes businesses where Middesk did not run the TIN task. | Wait 24–48h and recheck. If still pending after 72h, investigate Middesk API. |
+| **📭 Not submitted** | The applicant did not provide an EIN at all. | EIN field was skipped on the onboarding form. | Require EIN resubmission before approval. |
+
+*Source: `tin_match_boolean`, `tin_match.status`, `tin_submitted` facts from `rds_warehouse_public.facts`.*
+        """)
 
     # ── Anomaly Leaderboard ────────────────────────────────────────────────────
     st.markdown("### ⚡ Anomaly Leaderboard — Top Issues to Investigate")
@@ -1214,6 +1262,20 @@ if section == "📋 Overview":
     ]
     styled_table(pd.DataFrame(anomalies), color_col="Priority",
                  palette={"🔴 p1":"#ef4444","🟡 p2":"#f59e0b"})
+
+    with st.expander("ℹ️ How to investigate each anomaly — step-by-step guide"):
+        st.markdown("""
+**Priority levels:** 🔴 P1 = immediate action required · 🟡 P2 = investigate within 1 week
+
+| Anomaly | How to check | Expected finding | Escalation |
+|---|---|---|---|
+| **Entity unconfirmed (no vendor match)** | `SELECT * FROM rds_warehouse_public.facts WHERE business_id='UUID' AND name IN ('sos_active','sos_match_boolean','middesk_confidence')` — look for confidence=0 on both | Entity may be unregistered, very new (<1 week), or using a different legal name | Route 100% to manual underwriting |
+| **Sanctions hit** | `SELECT * FROM rds_warehouse_public.facts WHERE business_id='UUID' AND name='watchlist_hits'` then check watchlist metadata for listType='SANCTIONS' | OFAC/UN/EU match on business name or owner | Hard stop — legal/compliance team required before any approval |
+| **TIN boolean/status inconsistency** | `SELECT name, value FROM rds_warehouse_public.facts WHERE business_id='UUID' AND name IN ('tin_match','tin_match_boolean')` — compare status in tin_match.value.status vs tin_match_boolean.value | They should always agree. Any disagreement is a code bug. | File bug report for integration-service kyb/index.ts L488–490 |
+| **OC match, no Middesk** | `SELECT * FROM integration_data.request_response WHERE business_id='UUID' AND platform_id=16` — check if Middesk was even called | If no row: Middesk was never called for this business. If row exists: check response for error. | Investigate Middesk integration or re-trigger Middesk lookup |
+| **SOS inactive** | Use Business Lookup tab → enter UUID → Registry tab → check sos_active value and source_pid | pid=-1 means no vendor provided the status (default inactive). Real inactive has a specific vendor. | Check state SOS portal; request reinstatement documentation from applicant |
+| **TIN failed** | `SELECT JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='UUID' AND name='tin_match'` — read the message field | Common messages: 'does not have a record' (wrong EIN), 'associated with different name' (fraud risk) | Ask for corrected EIN + legal name documentation |
+        """)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1282,6 +1344,17 @@ elif section == "🏛️ Identity & Registry":
                          color_discrete_map={"Active":"#22c55e","Inactive":"#ef4444"},
                          hole=0.5,title="SOS Active Status")
             st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+            st.markdown("""
+**Active** (green) = `sos_active=true` — the entity is legally registered and in good standing.
+This means the state has NOT revoked the entity's right to conduct business.
+
+**Inactive** (red) = `sos_active=false` — the entity exists in the registry but is NOT in good standing.
+Common causes: (1) failed to file annual report, (2) unpaid state franchise tax,
+(3) administrative dissolution. The entity **cannot legally conduct business** in this state.
+
+⚠️ **Important distinction:** "Inactive" ≠ "dissolved". A dissolved entity has been formally ended.
+An inactive entity still legally exists but has lost its right to operate — it can be reinstated.
+            """)
         with col_r:
             fig2 = px.histogram(sos,x="middesk_conf",nbins=20,
                                 color_discrete_sequence=["#f59e0b"],
@@ -1289,6 +1362,24 @@ elif section == "🏛️ Identity & Registry":
             fig2.add_vline(x=0.70,line_dash="dash",line_color="#22c55e",annotation_text="Target 0.70")
             fig2.add_vline(x=0.40,line_dash="dash",line_color="#ef4444",annotation_text="Low 0.40")
             st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+            st.markdown("""
+**What Middesk confidence measures:** How certain Middesk is that the business name and address
+submitted by the applicant matches a real Secretary of State (SOS) registry record.
+
+**Scale: 0.0 → 1.0**
+- Formula: **0.15 base** + **0.20 per successful review task** (up to 4 tasks: name, TIN, address, SOS match)
+- Maximum possible score: 0.15 + (4 × 0.20) = **0.95**
+
+**Threshold interpretation:**
+- 🟢 **> 0.70** (green line): Strong match — at least 3 review tasks confirmed
+- 🟡 **0.40 – 0.70**: Partial match — 1–2 tasks confirmed; review before approval
+- 🔴 **< 0.40** (red line): Weak/no match — Middesk could not verify this entity
+
+**The spike at 0 vs spike at ~1:** A bimodal distribution (spikes at both ends)
+means you have two distinct populations: businesses Middesk clearly confirmed (high conf)
+and businesses Middesk couldn't find at all (conf=0). This is the expected pattern.
+A spread in the middle indicates partial matches needing manual review.
+            """)
 
         st.markdown("#### 📋 SOS Status Summary")
         sos_tbl = pd.DataFrame({
@@ -1311,6 +1402,19 @@ elif section == "🏛️ Identity & Registry":
                      palette={"✅ good":"#22c55e","✅ none":"#22c55e","⚠️ review":"#f59e0b",
                                "⚠️ investigate":"#f59e0b","⚠️ below target":"#f59e0b",
                                "🚨 high risk":"#ef4444","❌ below target":"#ef4444"})
+
+        with st.expander("ℹ️ What each SOS Status Summary row means"):
+            st.markdown("""
+| Metric | What it measures | Status colour meaning |
+|---|---|---|
+| **Active SOS** | Businesses where `sos_active=true` — the entity is legally registered and in good standing with the state | ✅ Good > 95% · ❌ Below target if ≤ 95% |
+| **Inactive SOS** | Businesses where `sos_active=false` — entity exists but is NOT in good standing | ⚠️ Review — any count needs investigation |
+| **SOS name matched** | Businesses where `sos_match_boolean=true` — the submitted business name matched the name in the state registry | ✅ Good > 90% · ⚠️ Below target if ≤ 90% |
+| **Avg Middesk confidence** | Average confidence score from Middesk (platform_id=16). Scale 0–1. Formula: 0.15 base + 0.20 per successful review task (max 4 tasks) | >0.70 = strong match · 0.40–0.70 = partial · <0.40 = weak/no match |
+| **Avg OC confidence** | Average confidence score from OpenCorporates (platform_id=23). Scale 0–1. Formula: match.index ÷ 55 | >0.70 = strong · <0.30 = poor coverage |
+| **Middesk gap** | Businesses where OC confidence >0.70 but Middesk confidence <0.40. OC found the entity globally but Middesk couldn't confirm in US SOS | ⚠️ Investigate — check Middesk API call logs |
+| **Neither vendor matched** | Businesses where BOTH Middesk and OC returned confidence=0. Entity existence is completely unverified. | 🚨 High risk — manual underwriting required |
+            """)
 
         # Inactive+perpetual analysis via scalar facts
         st.markdown("#### ⚠️ Inactive + Perpetual Expiration — Live Analysis")
@@ -1338,6 +1442,32 @@ elif section == "🏛️ Identity & Registry":
             with col_b:
                 st.markdown("##### Sample inactive businesses:")
                 styled_table(inactive_df[["business_id","is_active","source_pid","received_at"]].head(15))
+                st.markdown("""
+**Column meanings:**
+
+| Column | What it is |
+|---|---|
+| `business_id` | The UUID of the business in the Worth AI system |
+| `is_active` | The value of the `sos_active` fact — `false` means the entity is NOT in good standing with the state |
+| `source_pid` | The platform ID of the vendor that provided this status. `pid=16` = Middesk · `pid=23` = OpenCorporates · `pid=-1` = no vendor (default value) |
+| `received_at` | When this fact was last written — shows data freshness |
+
+**What `source_pid=-1` means:** No vendor returned an `sos_active` status for this business.
+The value is the system default (false/inactive). This may mean the vendor never matched this entity,
+not that the entity is truly inactive. Always cross-check against `sos_match_boolean`.
+                """)
+
+        st.markdown("##### What the 'Inactive SOS by Source Vendor' chart shows:")
+        st.markdown("""
+The bar chart shows **which vendor determined the entity is inactive**. This matters because:
+- **Middesk (pid=16)** inactive = US SOS live query confirmed the entity is not in good standing. Most reliable.
+- **OC (pid=23)** inactive = OpenCorporates global registry shows the entity as dissolved/inactive. May lag real state status by weeks.
+- **pid=-1 (no vendor)** = The system defaulted to inactive because no vendor returned any active status. This is different from a vendor *confirming* the entity is inactive — it's a data absence, not a confirmed status.
+
+**Causal analysis:** A high count under pid=-1 indicates that entity matching is failing for these businesses.
+The entity may actually be active, but because no vendor matched it, the system can't confirm active status.
+Cross-reference with the "Neither matched" count — they should be similar populations.
+        """)
 
         analyst_card("SOS Registry Analysis", [
             f"Active rate {sos_active_rate:.1f}%: {'✅ healthy' if sos_active_rate>95 else '❌ below 95% — investigate inactive entities'}.",
@@ -1460,6 +1590,20 @@ elif section == "🏛️ Identity & Registry":
             with col_r:
                 styled_table(idv_status_counts, color_col="Status",
                              palette={k.lower():v for k,v in c_map.items()})
+                st.markdown("""
+**What each IDV status means — and why it happens:**
+
+| Status | What it means | Most common cause | Action |
+|---|---|---|---|
+| **SUCCESS** | Owner scanned a government ID, took a selfie, and Plaid's AI confirmed they match. Identity confirmed. | Correct document used correctly | None — approved |
+| **PENDING** | The IDV session link was sent but the owner hasn't completed it yet. | Owner hasn't opened the link, or started but didn't finish | Send reminder after 24h; if still pending at 72h, re-trigger IDV |
+| **FAILED** | Owner completed the flow but Plaid rejected the verification | (1) Expired ID · (2) Selfie doesn't match ID photo · (3) Liveness check failed (possible deepfake) · (4) ID type not supported in the country | Ask owner to retry with a valid, unexpired government-issued ID |
+| **CANCELED** | Owner opened the session but actively chose to exit | User experience friction, distrust of the process, or deliberate avoidance | Follow up by phone; high cancel rate = UX or trust issue |
+| **EXPIRED** | The session link expired before the owner used it | Link validity window passed (typically 15–30 min) | Re-issue a new IDV session link |
+| **UNKNOWN** | Status could not be determined | Fact not stored or IDV session record missing | Check `idv_status` fact in rds_warehouse_public.facts |
+
+*Source: `idv_status` fact (dict of status counts) from Plaid IDV via integration-service.*
+                """)
 
             # Match results
             st.markdown("#### Identity Match Results")
@@ -1475,12 +1619,28 @@ elif section == "🏛️ Identity & Registry":
                                     "⚫ Missing":f"{vc.get('none',0):,} ({vc.get('none',0)/n*100:.0f}%)"})
             if results:
                 styled_table(pd.DataFrame(results))
+                st.markdown("""
+**What each match field checks:**
+- **Name**: Does the business name submitted match what appears in the SOS registry? (Middesk/OC/Trulioo)
+- **Address**: Does the address submitted match what's on file with the registry or Google? (Middesk/SERP)
+- **TIN**: Does the EIN submitted match IRS records for this legal name? (Middesk TIN review task)
 
-            analyst_card("IDV Analysis", [
+**⚫ Missing** means the fact is simply not stored — either the vendor didn't return a result or the field wasn't evaluated.
+High missing rates indicate an integration gap, not a failure.
+                """)
+
+            analyst_card("IDV Causal Analysis", [
                 f"Pass rate: {int(kyc['idv_passed'].sum())/max(idv_total,1)*100:.1f}%. Target >65%.",
-                "FAILED IDV: most common causes are expired document, selfie mismatch, or unsupported ID type.",
-                "PENDING > 48h: follow up — session likely abandoned. Trigger reminder email.",
-                "CANCELED/EXPIRED combined > 15%: user experience issue in the IDV flow.",
+                "Low pass rate → look at FAILED first. If FAILED is high: document type/quality issue. "
+                "If PENDING+EXPIRED is high: UX issue or link delivery problem.",
+                "FAILED IDV + low name match: consistent — person failed IDV because "
+                "submitted name doesn't match the ID document.",
+                "FAILED IDV + high vendor confidence: entity registry is confirmed but owner identity failed. "
+                "Possible fraud — someone submitting on behalf of a real business.",
+                "PENDING > 48h: session likely abandoned. High PENDING rate = email deliverability issue "
+                "or applicants distrust the biometric step.",
+                "CANCELED/EXPIRED > 15%: the IDV link UX needs improvement. Consider adding instructions "
+                "and extending the session window.",
             ])
 
     # ── Cross-Analysis ─────────────────────────────────────────────────────────
@@ -1514,11 +1674,28 @@ elif section == "🏛️ Identity & Registry":
         except Exception:
             active_verified=active_unverif=inactive_verif=inactive_unverif=0
 
+        st.markdown("""
+**How to read this heatmap:** Each cell shows the number of businesses in that combination.
+The X-axis is TIN status (Verified / Not Verified) and Y-axis is SOS status (Active / Inactive).
+Darker = more businesses in that cell.
+        """)
+
         c1,c2,c3,c4 = st.columns(4)
         with c1: kpi("✅ Active + TIN Verified",f"{active_verified:,}","Cleanest profile","#22c55e")
         with c2: kpi("⚠️ Active + TIN Unverified",f"{active_unverif:,}","Registry OK, TIN gap","#f59e0b")
         with c3: kpi("⚠️ Inactive + TIN Verified",f"{inactive_verif:,}","Inactive entity risk","#f97316")
         with c4: kpi("🚨 Inactive + TIN Unverified",f"{inactive_unverif:,}","Highest risk combination","#ef4444")
+
+        st.markdown("""
+**Risk Quadrant Guide:**
+
+| Combination | Risk | What it means | Recommended action |
+|---|---|---|---|
+| ✅ **Active + TIN Verified** | Low | Entity is registered and active; EIN matches IRS records. Clean profile. | Standard approval flow |
+| ⚠️ **Active + TIN Unverified** | Medium | Registry confirms entity exists and is active, but EIN doesn't match. | Ask applicant to re-submit with correct EIN or legal name. Common: DBA submitted instead of legal name |
+| ⚠️ **Inactive + TIN Verified** | Medium-High | EIN is valid but entity cannot legally operate. | Require reinstatement documentation. Check if state shows a grace period. |
+| 🚨 **Inactive + TIN Unverified** | Critical | Entity cannot operate AND EIN is wrong. Both identity pillars fail. | **Do not approve.** Route to manual underwriting. This combination represents the highest risk. |
+        """)
 
         cross_box("SOS × TIN Cross-Analysis Insights", [
             f"Inactive + TIN Unverified ({inactive_unverif:,}): entity cannot legally operate AND has no IRS match. "
@@ -1573,6 +1750,28 @@ elif section == "🏛️ Identity & Registry":
             styled_table(sdf,color_col="Status",
                          palette={"✅ ok":"#22c55e","⚠️ watch":"#f59e0b","❌ low":"#ef4444"})
 
+            st.markdown("""
+**How to read the vendor table:**
+
+| Column | What it means |
+|---|---|
+| **Match Rate %** | % of businesses where this vendor's confidence exceeded the threshold (0.50 for most, 0.40 for Trulioo). A "match" means the vendor found and confirmed this entity. |
+| **Avg Conf** | Average confidence score across ALL businesses (0–1 scale). Includes businesses with zero confidence (no match). |
+| **Zero (no match) %** | % of businesses where the vendor returned confidence=0 — meaning the vendor could not find this entity at all. |
+| **P75 Conf** | 75th percentile confidence score. Half the "matched" businesses have confidence above this value. |
+| **Status** | ✅ OK = match rate > 60% · ⚠️ Watch = 40–60% · ❌ Low = < 40% |
+
+**Why each vendor has a different threshold:**
+- Middesk, OC, ZI, EFX: threshold 0.50 because their confidence formula is linear (match.index / 55)
+- Trulioo: threshold 0.40 because Trulioo uses status-based confidence (success=0.70, pending=0.40) — a lower threshold captures "in progress" matches
+
+**Causal analysis for low match rates:**
+- 📉 **ZoomInfo or Equifax drops suddenly** → check when the Redshift bulk data was last refreshed. These use pre-loaded snapshots, not live queries.
+- 📉 **Middesk drops** → check API key expiry, rate limits, or network connectivity in integration-service logs.
+- 📉 **OC drops** → OpenCorporates may have changed their API schema or rate limits.
+- 📉 **All vendors drop together** → entity-matching model (XGBoost) may have degraded. Check model version.
+            """)
+
             col_l,col_r = st.columns(2)
             with col_l:
                 mr_df = pd.DataFrame([{"Vendor":r["Vendor"],
@@ -1592,6 +1791,18 @@ elif section == "🏛️ Identity & Registry":
                                               fillcolor="rgba(0,0,0,0)"))
                 st.plotly_chart(dark_chart_layout(fig2,"Vendor Confidence Distribution"),
                                 use_container_width=True)
+                st.markdown("""
+**Reading the box plots:** Each box shows the spread of confidence scores for that vendor across all businesses.
+- **Box bottom**: 25th percentile (Q1)
+- **Box middle line**: Median (50th percentile)
+- **Box top**: 75th percentile (Q3)
+- **Whiskers**: Range excluding outliers
+- **Dots**: Outlier businesses with unusually high or low confidence
+
+A wide box = high variability (some matches very confident, some marginal).
+A narrow box near 0 = vendor mostly returns no match.
+A bimodal pattern (spikes at 0 and 1) = vendor is binary — it either matches confidently or not at all.
+                """)
 
     # ── Data Quality Checks ────────────────────────────────────────────────────
     with tab_dq:
@@ -1640,6 +1851,24 @@ elif section == "🏛️ Identity & Registry":
         flag(f"{pass_n}/{len(checks)} identity & registry checks passing. "
              f"{'✅ All clear' if pass_n==len(checks) else f'❌ {len(checks)-pass_n} checks failed — see actions above.'}",
              "green" if pass_n==len(checks) else "red")
+
+        analyst_card("Quality Checks — What They Mean and Why They Matter", [
+            "Each check is a threshold derived from industry benchmarks for a healthy SMB KYB pipeline. "
+            "FAIL does not mean an error — it means the metric is outside the expected range and needs investigation.",
+            "SOS Active < 95%: a healthy portfolio should have almost all entities in good standing. "
+            "Rates below 95% suggest administrative issues at the state level or a customer segment "
+            "with high compliance problems.",
+            "TIN success < 70%: the IRS EIN match rate depends on applicants submitting their exact legal name. "
+            "Even a punctuation difference ('LLC' vs 'L.L.C.') can cause a mismatch. "
+            "Work with the product team to standardize name collection.",
+            "TIN boolean/status inconsistency > 0: this is always a code bug. "
+            "The `tin_match_boolean` fact is derived strictly from `tin_match.status === 'success'`. "
+            "Any divergence means the derivation logic changed or broke.",
+            "Zero vendor confirmation > 0: these businesses should never auto-approve. "
+            "Consider adding an automatic hold/review flag when both Middesk and OC return confidence=0.",
+            "Middesk gap > 5%: 5% is the expected threshold for new incorporations with OC lag. "
+            "Above 5% suggests a systemic Middesk connectivity or name-matching issue.",
+        ])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
