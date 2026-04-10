@@ -285,7 +285,13 @@ def anomaly_flags(df, checks):
     """Run a list of (condition_series, message, level) anomaly checks."""
     found = False
     for cond, msg, lvl in checks:
-        n = int(cond.sum()) if hasattr(cond,'sum') else int(cond)
+        try:
+            if hasattr(cond, 'sum'):
+                n = int(cond.astype(bool).sum())
+            else:
+                n = int(bool(cond))
+        except Exception:
+            n = 0
         if n > 0:
             flag(f"{msg} ({n:,} records)", lvl)
             found = True
@@ -418,7 +424,13 @@ def live_tin(limit):
 
     def extract_fact_value(row):
         fact = _parse_fact(row["value"])
-        return str(fact.get("value","")) if fact.get("value") is not None else ""
+        v = fact.get("value")
+        if v is None:
+            return ""
+        # Serialise dict/list as proper JSON (not Python repr)
+        if isinstance(v, (dict, list)):
+            return json.dumps(v)
+        return str(v)
 
     def extract_platform_id(row):
         fact = _parse_fact(row["value"])
@@ -437,26 +449,43 @@ def live_tin(limit):
             pivoted[col] = None
 
     def parse_tin_match(v):
-        if v is None or v == "": return ""
+        """Extract status string from tin_match value.
+        Handles: JSON string, plain string like 'success', and dict."""
+        if v is None or v == "" or str(v).lower() in ("nan","none"):
+            return ""
+        if isinstance(v, dict):
+            return v.get("status", "")
+        s = str(v)
         try:
-            obj = json.loads(v)
-            return obj.get("status", str(obj)) if isinstance(obj, dict) else str(v)
+            obj = json.loads(s)
+            if isinstance(obj, dict):
+                return obj.get("status", "")
+            return str(obj)
         except Exception:
-            return str(v)
+            # If it's a plain word like "success" or "failure", return as-is
+            return s.strip()
 
-    pivoted["tin_match_status"]  = pivoted["tin_match"].apply(parse_tin_match)
+    # tin_match column holds the JSON-serialised value dict
+    # parse_tin_match extracts the 'status' string from it
+    pivoted["tin_match_status"] = pivoted["tin_match"].apply(parse_tin_match).fillna("").astype(str)
+
+    # tin_match_boolean is stored as scalar "true"/"false" in the facts table
     pivoted["tin_match_boolean"] = pivoted["tin_match_boolean"].apply(
-        lambda v: str(v).lower() in ("true","1") if v else False)
-    pivoted["tin_submitted"]     = pivoted["tin_submitted"].apply(
-        lambda v: str(v).lower() not in ("","none","null","false","0") if v else False)
+        lambda v: str(v).lower() in ("true","1","success") if v else False
+    ).astype(bool)
 
+    pivoted["tin_submitted"] = pivoted["tin_submitted"].apply(
+        lambda v: str(v).lower() not in ("","none","null","false","0") if v else False
+    ).astype(bool)
+
+    # Middesk TIN task status — from tin_match where platform_id=16
     mid = raw[(raw["name"]=="tin_match") & (raw["platform_id"]=="16")][["business_id","fact_value"]].copy()
     if not mid.empty:
-        mid["middesk_tin_task"] = mid["fact_value"].apply(parse_tin_match)
+        mid["middesk_tin_task"] = mid["fact_value"].apply(parse_tin_match).astype(str)
         pivoted = pivoted.merge(mid[["business_id","middesk_tin_task"]], on="business_id", how="left")
     if "middesk_tin_task" not in pivoted.columns:
         pivoted["middesk_tin_task"] = "none"
-    pivoted["middesk_tin_task"] = pivoted["middesk_tin_task"].fillna("none")
+    pivoted["middesk_tin_task"] = pivoted["middesk_tin_task"].fillna("none").astype(str)
 
     pivoted["has_middesk"] = pivoted["middesk_tin_task"] != "none"
     trulioo_biz = set(raw.loc[raw["platform_id"]=="38", "business_id"])
@@ -1339,17 +1368,66 @@ ORDER BY received_at DESC;""", language="sql")
              "jurisdiction data is not available from scalar facts. "
              "To get jurisdiction breakdown, query the source PostgreSQL RDS directly.", "amber")
 
-        st.markdown("##### SQL to get jurisdiction breakdown (run on PostgreSQL RDS, not Redshift):")
-        st.code("""-- Run on PostgreSQL RDS (port 5432), NOT on Redshift federation
--- The sos_filings value column is native JSONB on PostgreSQL and has no size limit.
+        st.markdown("##### How to get jurisdiction breakdown")
+        st.info("The `->` / `->>` JSONB operators do not work in Redshift federated queries "
+                "(value column is VARCHAR, not JSONB). "
+                "Connect to PostgreSQL RDS directly (port 5432) where the column is native JSONB.", icon="ℹ️")
+
+        st.code("""-- ✅ Run on PostgreSQL RDS directly (port 5432) — native JSONB, no size limit:
 SELECT
     business_id,
-    (value->'value'->0->>'jurisdiction') AS jurisdiction,
-    (value->'value'->0->>'foreign_domestic') AS filing_type,
-    (value->'value'->0->>'active')::boolean AS active
+    jsonb_array_elements(value->'value') AS filing
 FROM rds_warehouse_public.facts
 WHERE name = 'sos_filings'
-LIMIT 1000;""", language="sql")
+LIMIT 1000;
+-- Then in Python: filing['jurisdiction'], filing['foreign_domestic'], filing['active']
+
+-- ✅ Alternative: extract first filing only (PostgreSQL):
+SELECT
+    business_id,
+    value->'value'->0->>'jurisdiction'    AS jurisdiction,
+    value->'value'->0->>'foreign_domestic' AS filing_type,
+    (value->'value'->0->>'active')::bool  AS active
+FROM rds_warehouse_public.facts
+WHERE name = 'sos_filings'
+LIMIT 1000;
+
+-- ❌ Does NOT work on Redshift (federation endpoint):
+-- JSON_EXTRACT_PATH_TEXT also fails on 97KB+ rows due to VARCHAR(65535) limit.
+-- Must connect to PostgreSQL RDS (port 5432) directly.""", language="sql")
+
+        st.markdown("##### Python — connect to PostgreSQL RDS directly:")
+        st.code("""import psycopg2, json
+
+# Connect to PostgreSQL RDS (port 5432), NOT Redshift (port 5439)
+conn = psycopg2.connect(
+    host=os.getenv('REDSHIFT_HOST'),  # same host, different port
+    port=5432,
+    dbname='your_pg_dbname',
+    user='your_pg_user',
+    password='your_pg_password',
+    sslmode='require'
+)
+cur = conn.cursor()
+cur.execute(\"\"\"
+    SELECT business_id, value
+    FROM rds_warehouse_public.facts
+    WHERE name = 'sos_filings'
+    LIMIT 1000
+\"\"\")
+rows = []
+for business_id, value_str in cur.fetchall():
+    fact = json.loads(value_str)
+    for filing in (fact.get('value') or []):
+        rows.append({
+            'business_id':    business_id,
+            'jurisdiction':   filing.get('jurisdiction'),
+            'filing_type':    filing.get('foreign_domestic'),
+            'active':         filing.get('active'),
+        })
+import pandas as pd
+df = pd.DataFrame(rows)
+print(df.groupby(['filing_type', 'active']).size())""", language="python")
 
         analyst_card("Jurisdiction / Region Insights", [
             "sos_filings stores an array of SOS registrations — each has jurisdiction, active, foreign_domestic.",
@@ -1369,14 +1447,20 @@ elif section == "2️⃣  TIN Verification":
 
     df = get_section_data("tin", record_limit)
     total = len(df)
-    verified   = df["tin_match_boolean"].sum()
-    unverified = (df["tin_match_status"]=="failure").sum()
-    pending    = (df["tin_match_status"]=="pending").sum()
-    no_tin     = (~df["tin_submitted"]).sum()
-    inconsistent = ((df["tin_match_boolean"]) & (df["tin_match_status"]!="success")).sum()
-    middesk_none = (df["middesk_tin_task"]=="none").sum()
-    middesk_ok   = (df["middesk_tin_task"]=="success").sum()
-    both_fail    = ((df["middesk_tin_task"]=="failure") & (df["tin_match_status"]=="failure")).sum()
+    # Ensure correct dtypes before arithmetic
+    df["tin_match_boolean"] = df["tin_match_boolean"].astype(bool)
+    df["tin_submitted"]     = df["tin_submitted"].astype(bool)
+    df["tin_match_status"]  = df["tin_match_status"].astype(str).fillna("")
+    df["middesk_tin_task"]  = df["middesk_tin_task"].astype(str).fillna("none")
+
+    verified   = int(df["tin_match_boolean"].sum())
+    unverified = int((df["tin_match_status"]=="failure").sum())
+    pending    = int((df["tin_match_status"]=="pending").sum())
+    no_tin     = int((~df["tin_submitted"]).sum())
+    inconsistent = int((df["tin_match_boolean"] & (df["tin_match_status"]!="success")).sum())
+    middesk_none = int((df["middesk_tin_task"]=="none").sum())
+    middesk_ok   = int((df["middesk_tin_task"]=="success").sum())
+    both_fail    = int(((df["middesk_tin_task"]=="failure") & (df["tin_match_status"]=="failure")).sum())
 
     c1,c2,c3,c4,c5 = st.columns(5)
     with c1: kpi("✅ TIN Verified",    f"{verified:,}",    f"{verified/total*100:.0f}%","#22c55e")
