@@ -574,29 +574,101 @@ def live_banking(limit):
 
 
 def live_worth(limit):
-    # worth_score not in top-100 fact names — not in this DB yet.
-    # risk_score is also not confirmed. Return None so section shows info gracefully.
-    raw = query_facts_safe(
-        ['worth_score', 'worthscore', 'score', 'worth_score_850'], limit)
+    """
+    Worth Score lives in rds_manual_score_public.business_scores (RDS PostgreSQL),
+    accessed via Redshift federated query.
+
+    Key fields:
+      weighted_score_850 — primary Worth Score (300–850 scale)
+      weighted_score_100 — alternative (0–100 scale)
+      risk_level         — HIGH / MEDIUM / LOW
+      score_decision     — APPROVE / FURTHER_REVIEW_NEEDED / DECLINE
+      score_status       — PROCESSING / SUCCESS / FAILED
+
+    Source: manual-score-service
+      db/migrations/sqls/20240109130303-initial-tables-up.sql
+      db/migrations/sqls/20240806061904-restructure-score-db-up.sql
+    """
+    # Primary query: join business_scores → data_current_scores for latest per business
+    sql_primary = f"""
+        SELECT
+            cs.business_id,
+            bs.weighted_score_850  AS worth_score_850,
+            bs.weighted_score_100  AS worth_score_100,
+            bs.risk_level,
+            bs.score_decision,
+            bs.score_status,
+            bs.created_at          AS scored_at
+        FROM rds_manual_score_public.data_current_scores cs
+        JOIN rds_manual_score_public.business_scores bs
+          ON bs.id = cs.score_id
+        WHERE bs.score_status = 'SUCCESS'
+          AND bs.weighted_score_850 IS NOT NULL
+        ORDER BY bs.created_at DESC{_limit_clause(limit)}
+    """
+    raw = run_query(sql_primary)
+
+    # Fallback: query business_scores directly (no current_scores join)
+    if raw is None or raw.empty:
+        sql_fallback = f"""
+            SELECT
+                id            AS score_id,
+                NULL          AS business_id,
+                weighted_score_850  AS worth_score_850,
+                weighted_score_100  AS worth_score_100,
+                risk_level,
+                score_decision,
+                score_status,
+                created_at    AS scored_at
+            FROM rds_manual_score_public.business_scores
+            WHERE score_status = 'SUCCESS'
+              AND weighted_score_850 IS NOT NULL
+            ORDER BY created_at DESC{_limit_clause(limit)}
+        """
+        raw = run_query(sql_fallback)
+
     if raw is None or raw.empty:
         return None
-    raw["worth_score_850"] = raw["value"].apply(
-        lambda v: _parse_fact(v).get("value") if v else None)
+
     raw["worth_score_850"] = pd.to_numeric(raw["worth_score_850"], errors="coerce")
-    # Scale: if score looks like 0-1 probability, convert to 300-850 scale
-    mask_small = raw["worth_score_850"] <= 1.0
-    raw.loc[mask_small, "worth_score_850"] = raw.loc[mask_small, "worth_score_850"] * 550 + 300
     raw = raw.dropna(subset=["worth_score_850"])
     if raw.empty:
         return None
-    # Keep one row per business (latest score)
-    raw = raw.sort_values("received_at", ascending=False).drop_duplicates("business_id")
-    raw["risk_level"] = raw["worth_score_850"].apply(
-        lambda s: "HIGH" if s<500 else ("MODERATE" if s<650 else "LOW"))
+
+    # Normalise risk_level to match the rest of the dashboard
+    def normalise_risk(v):
+        s = str(v or "").upper()
+        if s in ("HIGH",):        return "HIGH"
+        if s in ("MEDIUM","MOD","MODERATE"): return "MODERATE"
+        if s in ("LOW",):         return "LOW"
+        # Derive from score if not set
+        return ""
+
+    if "risk_level" in raw.columns:
+        raw["risk_level"] = raw["risk_level"].apply(normalise_risk)
+        # Fill blanks from score thresholds
+        mask = raw["risk_level"] == ""
+        raw.loc[mask, "risk_level"] = raw.loc[mask, "worth_score_850"].apply(
+            lambda s: "HIGH" if s<500 else ("MODERATE" if s<650 else "LOW"))
+    else:
+        raw["risk_level"] = raw["worth_score_850"].apply(
+            lambda s: "HIGH" if s<500 else ("MODERATE" if s<650 else "LOW"))
+
+    # score_decision may not exist in older schema versions
+    if "score_decision" not in raw.columns:
+        raw["score_decision"] = "UNKNOWN"
+
+    # SHAP data lives in rds_manual_score_public.business_score_factors —
+    # default to 0 here; a separate query would be needed for factor breakdown
     for c in ["shap_public_records","shap_company_profile","shap_financials","shap_banking"]:
         raw[c] = 0.0
     raw["count_bk"] = 0; raw["count_judgment"] = 0; raw["count_lien"] = 0
     raw["state"]    = "Unknown"
+
+    # Ensure business_id column exists
+    if "business_id" not in raw.columns or raw["business_id"].isna().all():
+        raw["business_id"] = raw.get("score_id", raw.index).astype(str)
+
     return raw
 
 
@@ -720,6 +792,8 @@ def live_dd(limit):
 
 # Sections that are optional — if their facts don't exist, show info instead of error
 OPTIONAL_SECTIONS = {"banking", "kyc", "worth"}
+# Note: worth is still optional because rds_manual_score_public may return no rows
+# if no scores have been computed yet, or if the federated schema isn't accessible.
 
 def get_section_data(section_key, limit):
     """
@@ -2039,27 +2113,51 @@ WHERE business_id = 'YOUR-UUID'
 # 5 — WORTH SCORE
 # ═══════════════════════════════════════════════════════════════════════════════
 elif section == "5️⃣  Worth Score":
-    sh("Worth Score","300–850 scale · risk level · SHAP contributions · public records impact","💰")
+    sh("Worth Score",
+       "Source: rds_manual_score_public.business_scores · 300–850 scale · risk_level · score_decision","💰")
+
+    flag("Data source: rds_manual_score_public.business_scores (RDS PostgreSQL via Redshift federation). "
+         "Joined through data_current_scores for latest score per business. "
+         "NOT stored in rds_warehouse_public.facts.", "blue")
 
     df = get_section_data("worth", record_limit)
     if df is None:
+        st.markdown("**Expected tables in rds_manual_score_public:**")
+        st.code("""-- Check Worth Score tables directly:
+SELECT COUNT(*), AVG(weighted_score_850), MIN(weighted_score_850), MAX(weighted_score_850)
+FROM rds_manual_score_public.business_scores
+WHERE score_status = 'SUCCESS';
+
+-- Latest score per business:
+SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, cs.business_id
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+WHERE bs.score_status = 'SUCCESS'
+LIMIT 10;
+
+-- Score audit fill rates (Redshift):
+SELECT * FROM warehouse.worth_score_input_audit
+ORDER BY score_date DESC LIMIT 5;""", language="sql")
         st.stop()
     total = len(df)
     avg_s = df["worth_score_850"].mean(); med_s = df["worth_score_850"].median()
     high  = (df["risk_level"]=="HIGH").sum()
     mod   = (df["risk_level"]=="MODERATE").sum()
     low   = (df["risk_level"]=="LOW").sum()
-    with_bk   = (df["count_bk"]>0).sum()
-    with_judg = (df["count_judgment"]>0).sum()
-    with_lien = (df["count_lien"]>0).sum()
-    multi_pr  = ((df["count_bk"]>0)&(df["count_judgment"]>0)&(df["count_lien"]>0)).sum()
+    approved   = (df.get("score_decision","")=="APPROVE").sum() if "score_decision" in df.columns else 0
+    review     = (df.get("score_decision","")=="FURTHER_REVIEW_NEEDED").sum() if "score_decision" in df.columns else 0
+    declined   = (df.get("score_decision","")=="DECLINE").sum() if "score_decision" in df.columns else 0
 
-    c1,c2,c3,c4,c5 = st.columns(5)
-    with c1: kpi("Avg Score",f"{avg_s:.0f}","300–850","#3B82F6")
-    with c2: kpi("🔴 HIGH Risk",f"{high:,}",f"{high/total*100:.0f}% (<500)","#ef4444")
-    with c3: kpi("🟡 MODERATE",f"{mod:,}",f"{mod/total*100:.0f}% (500–650)","#f59e0b")
-    with c4: kpi("🟢 LOW Risk",f"{low:,}",f"{low/total*100:.0f}% (>650)","#22c55e")
-    with c5: kpi("BK+Judg+Lien",f"{multi_pr:,}",f"{multi_pr/total*100:.0f}% all 3","#8B5CF6")
+    c1,c2,c3,c4 = st.columns(4)
+    with c1: kpi("Avg Score",f"{avg_s:.0f}","300–850 · rds_manual_score_public","#3B82F6")
+    with c2: kpi("🔴 HIGH Risk",f"{high:,}",f"{high/max(total,1)*100:.0f}% (<500)","#ef4444")
+    with c3: kpi("🟡 MODERATE",f"{mod:,}",f"{mod/max(total,1)*100:.0f}% (500–650)","#f59e0b")
+    with c4: kpi("🟢 LOW Risk",f"{low:,}",f"{low/max(total,1)*100:.0f}% (>650)","#22c55e")
+
+    c5,c6,c7 = st.columns(3)
+    with c5: kpi("✅ APPROVE",f"{approved:,}",f"{approved/max(total,1)*100:.0f}%","#22c55e")
+    with c6: kpi("🔍 FURTHER REVIEW",f"{review:,}",f"{review/max(total,1)*100:.0f}%","#f59e0b")
+    with c7: kpi("❌ DECLINE",f"{declined:,}",f"{declined/max(total,1)*100:.0f}%","#ef4444")
 
     tab_dist, tab_shap, tab_pr, tab_cross, tab_model = st.tabs([
         "📊 Score Distribution","🧠 SHAP","📜 Public Records","🔗 Cross-Analysis","⚙️ Model"
