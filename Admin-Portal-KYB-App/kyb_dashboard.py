@@ -262,57 +262,63 @@ def sanity_metrics(checks):
 # LIVE DATA LOADERS — parse real Redshift facts into section-ready DataFrames
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _parse_fact(value_str):
+    """Parse the raw VARCHAR JSON from rds_warehouse_public.facts.value column."""
+    if not value_str:
+        return {}
+    try:
+        return json.loads(value_str)
+    except Exception:
+        return {}
+
+
 def live_sos(limit):
     """
-    Pull sos_filings fact and parse the JSON value array into one row per filing.
-    Returns columns: business_id, filing_type, active, jurisdiction,
-                     middesk_conf, oc_conf, zi_conf, efx_conf, trulioo_conf,
-                     entity_type, registration_date
+    Fetch raw value column and parse all JSON in Python.
+    Avoids Redshift VARCHAR 65535-byte limit on JSON_EXTRACT_PATH_TEXT()
+    for large fact arrays like sos_filings.
     """
+    # Fetch raw value — no JSON extraction in SQL
     sql = f"""
-        SELECT
-            f.business_id,
-            JSON_EXTRACT_PATH_TEXT(f.value,'value')                AS sos_raw,
-            JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')  AS platform_id,
-            CAST(JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence') AS FLOAT) AS conf,
-            f.received_at
-        FROM rds_warehouse_public.facts f
-        WHERE f.name = 'sos_filings'
-        ORDER BY f.received_at DESC{_limit_clause(limit)}
+        SELECT business_id, value, received_at
+        FROM rds_warehouse_public.facts
+        WHERE name = 'sos_filings'
+        ORDER BY received_at DESC{_limit_clause(limit)}
     """
     raw = run_query(sql)
     if raw is None or raw.empty:
         return None
 
-    rows = []
     pid_conf_col = {
         "16": "middesk_conf", "23": "oc_conf",
         "24": "zi_conf",      "17": "efx_conf", "38": "trulioo_conf",
     }
+    rows = []
     for _, r in raw.iterrows():
-        try:
-            filings = json.loads(r["sos_raw"] or "[]")
-            if isinstance(filings, dict):
-                filings = [filings]
-        except Exception:
-            filings = []
-        pid  = str(r.get("platform_id","") or "")
-        conf = float(r.get("conf") or 0)
+        fact    = _parse_fact(r["value"])
+        pid     = str(fact.get("source", {}).get("platformId", "") or "")
+        conf    = float(fact.get("source", {}).get("confidence", 0) or 0)
         conf_vals = {k: 0.0 for k in pid_conf_col.values()}
         if pid in pid_conf_col:
             conf_vals[pid_conf_col[pid]] = conf
 
-        for f in filings:
+        # The filings array is inside fact["value"]
+        filings = fact.get("value", [])
+        if isinstance(filings, dict):
+            filings = [filings]
+        elif not isinstance(filings, list):
+            filings = []
+
+        for filing in filings:
             rows.append({
                 "business_id":       r["business_id"],
-                "filing_type":       str(f.get("foreign_domestic","")).lower() or "unknown",
-                "active":            bool(f.get("active", False)),
-                "jurisdiction":      str(f.get("jurisdiction","")).lower(),
-                "entity_type":       str(f.get("company_type","") or f.get("entity_type","") or "Unknown"),
-                "registration_date": str(f.get("registration_date","") or f.get("incorporationDate","")),
+                "filing_type":       str(filing.get("foreign_domestic","")).lower() or "unknown",
+                "active":            bool(filing.get("active", False)),
+                "jurisdiction":      str(filing.get("jurisdiction","")).lower(),
+                "entity_type":       str(filing.get("company_type","") or filing.get("entity_type","") or "Unknown"),
+                "registration_date": str(filing.get("registration_date","") or filing.get("incorporationDate","")),
                 **conf_vals,
             })
-        # If no parsed filings, still keep the business row
         if not filings:
             rows.append({
                 "business_id": r["business_id"],
@@ -320,10 +326,10 @@ def live_sos(limit):
                 "entity_type": "Unknown", "registration_date": "",
                 **conf_vals,
             })
+
     if not rows:
         return None
     df = pd.DataFrame(rows)
-    # Aggregate per-vendor confidence per business (max)
     for col in ["middesk_conf","oc_conf","zi_conf","efx_conf","trulioo_conf"]:
         if col not in df.columns:
             df[col] = 0.0
@@ -333,12 +339,7 @@ def live_sos(limit):
 
 def live_tin(limit):
     sql = f"""
-        SELECT
-            business_id,
-            name,
-            JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,
-            JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS platform_id,
-            received_at
+        SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
         WHERE name IN ('tin_match','tin_match_boolean','tin_submitted')
         ORDER BY received_at DESC{_limit_clause(limit)}
@@ -347,19 +348,30 @@ def live_tin(limit):
     if raw is None or raw.empty:
         return None
 
+    # Parse each row's JSON in Python
+    def extract_fact_value(row):
+        fact = _parse_fact(row["value"])
+        return str(fact.get("value","")) if fact.get("value") is not None else ""
+
+    def extract_platform_id(row):
+        fact = _parse_fact(row["value"])
+        return str(fact.get("source", {}).get("platformId",""))
+
+    raw["fact_value"]  = raw.apply(extract_fact_value, axis=1)
+    raw["platform_id"] = raw.apply(extract_platform_id, axis=1)
+
     # Pivot: one row per business_id
     pivoted = raw.pivot_table(
         index="business_id", columns="name", values="fact_value", aggfunc="last"
     ).reset_index()
     pivoted.columns.name = None
 
-    # Normalise columns
-    if "tin_match" not in pivoted.columns:        pivoted["tin_match"] = None
-    if "tin_match_boolean" not in pivoted.columns: pivoted["tin_match_boolean"] = None
-    if "tin_submitted" not in pivoted.columns:    pivoted["tin_submitted"] = None
+    for col in ("tin_match","tin_match_boolean","tin_submitted"):
+        if col not in pivoted.columns:
+            pivoted[col] = None
 
     def parse_tin_match(v):
-        if v is None: return ""
+        if v is None or v == "": return ""
         try:
             obj = json.loads(v)
             return obj.get("status", str(obj)) if isinstance(obj, dict) else str(v)
@@ -368,14 +380,12 @@ def live_tin(limit):
 
     pivoted["tin_match_status"]  = pivoted["tin_match"].apply(parse_tin_match)
     pivoted["tin_match_boolean"] = pivoted["tin_match_boolean"].apply(
-        lambda v: str(v).lower() in ("true","1") if v is not None else False)
+        lambda v: str(v).lower() in ("true","1") if v else False)
     pivoted["tin_submitted"]     = pivoted["tin_submitted"].apply(
-        lambda v: str(v).lower() not in ("","none","null","false","0") if v is not None else False)
+        lambda v: str(v).lower() not in ("","none","null","false","0") if v else False)
 
-    # Middesk TIN task — pulled from platform_id of tin_match fact
-    mid = raw[(raw["name"]=="tin_match") & (raw["platform_id"]=="16")][["business_id","fact_value"]]
+    mid = raw[(raw["name"]=="tin_match") & (raw["platform_id"]=="16")][["business_id","fact_value"]].copy()
     if not mid.empty:
-        mid = mid.copy()
         mid["middesk_tin_task"] = mid["fact_value"].apply(parse_tin_match)
         pivoted = pivoted.merge(mid[["business_id","middesk_tin_task"]], on="business_id", how="left")
     if "middesk_tin_task" not in pivoted.columns:
@@ -392,15 +402,9 @@ def live_tin(limit):
 
 def live_naics(limit):
     sql = f"""
-        SELECT
-            business_id,
-            JSON_EXTRACT_PATH_TEXT(value,'value')                AS naics_code,
-            JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS platform_id,
-            CAST(JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS FLOAT) AS naics_confidence,
-            received_at
+        SELECT business_id, value, received_at
         FROM rds_warehouse_public.facts
         WHERE name = 'naics_code'
-          AND JSON_EXTRACT_PATH_TEXT(value,'value') IS NOT NULL
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
     raw = run_query(sql)
@@ -409,20 +413,36 @@ def live_naics(limit):
 
     pid_to_src = {"16":"middesk","23":"opencorporates","24":"zoominfo",
                   "17":"equifax","38":"trulioo","31":"ai","22":"serp"}
-    raw["naics_source"]     = raw["platform_id"].map(pid_to_src).fillna("other")
-    raw["is_fallback"]      = raw["naics_code"] == "561499"
-    raw["naics_confidence"] = pd.to_numeric(raw["naics_confidence"], errors="coerce").fillna(0.0)
-    raw["naics_label"]      = raw["naics_code"].apply(lambda c: "Fallback (Other Business Support)" if c=="561499" else c)
 
-    # Pull MCC separately
+    def parse_row(row):
+        fact = _parse_fact(row["value"])
+        return pd.Series({
+            "naics_code":       str(fact.get("value","") or ""),
+            "platform_id":      str(fact.get("source",{}).get("platformId","") or ""),
+            "naics_confidence": float(fact.get("source",{}).get("confidence",0) or 0),
+        })
+
+    parsed = raw.apply(parse_row, axis=1)
+    raw["naics_code"]       = parsed["naics_code"]
+    raw["platform_id"]      = parsed["platform_id"]
+    raw["naics_confidence"] = parsed["naics_confidence"]
+    raw = raw[raw["naics_code"] != ""]
+
+    raw["naics_source"]  = raw["platform_id"].map(pid_to_src).fillna("other")
+    raw["is_fallback"]   = raw["naics_code"] == "561499"
+    raw["naics_label"]   = raw["naics_code"].apply(
+        lambda c: "Fallback (Other Business Support)" if c=="561499" else c)
+
     mcc_sql = f"""
-        SELECT business_id, JSON_EXTRACT_PATH_TEXT(value,'value') AS mcc_code
+        SELECT business_id, value AS mcc_raw
         FROM rds_warehouse_public.facts
         WHERE name = 'mcc_code'{_limit_clause(limit)}
     """
     mcc = run_query(mcc_sql)
     if mcc is not None and not mcc.empty:
-        raw = raw.merge(mcc, on="business_id", how="left")
+        mcc["mcc_code"] = mcc["mcc_raw"].apply(
+            lambda v: str(_parse_fact(v).get("value","")) if v else "")
+        raw = raw.merge(mcc[["business_id","mcc_code"]], on="business_id", how="left")
     else:
         raw["mcc_code"] = None
 
@@ -433,11 +453,7 @@ def live_naics(limit):
 
 def live_banking(limit):
     sql = f"""
-        SELECT
-            business_id,
-            name,
-            JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,
-            received_at
+        SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
         WHERE name IN ('giact_verify_response_code','giact_auth_response_code',
                        'giact_account_status','giact_account_name','giact_contact_verification')
@@ -446,6 +462,9 @@ def live_banking(limit):
     raw = run_query(sql)
     if raw is None or raw.empty:
         return None
+
+    raw["fact_value"] = raw["value"].apply(
+        lambda v: str(_parse_fact(v).get("value","")) if v else "")
 
     pivoted = raw.pivot_table(
         index="business_id", columns="name", values="fact_value", aggfunc="last"
@@ -482,18 +501,16 @@ def live_banking(limit):
 
 def live_worth(limit):
     sql = f"""
-        SELECT
-            business_id,
-            CAST(JSON_EXTRACT_PATH_TEXT(value,'value') AS FLOAT) AS worth_score_850,
-            received_at
+        SELECT business_id, value, received_at
         FROM rds_warehouse_public.facts
         WHERE name = 'worth_score'
-          AND JSON_EXTRACT_PATH_TEXT(value,'value') IS NOT NULL
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
     raw = run_query(sql)
     if raw is None or raw.empty:
         return None
+    raw["worth_score_850"] = raw["value"].apply(
+        lambda v: _parse_fact(v).get("value") if v else None)
     raw["worth_score_850"] = pd.to_numeric(raw["worth_score_850"], errors="coerce")
     raw = raw.dropna(subset=["worth_score_850"])
     raw["risk_level"] = raw["worth_score_850"].apply(
@@ -508,11 +525,7 @@ def live_worth(limit):
 
 def live_kyc(limit):
     sql = f"""
-        SELECT
-            business_id,
-            name,
-            JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,
-            received_at
+        SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
         WHERE name IN ('idv_status','idv_passed_boolean','compliance_status',
                        'name_match_boolean','address_match_boolean','tin_match_boolean',
@@ -523,19 +536,13 @@ def live_kyc(limit):
     if raw is None or raw.empty:
         return None
 
+    raw["fact_value"] = raw["value"].apply(
+        lambda v: str(_parse_fact(v).get("value","")) if v else "")
+
     pivoted = raw.pivot_table(
         index="business_id", columns="name", values="fact_value", aggfunc="last"
     ).reset_index()
     pivoted.columns.name = None
-
-    def parse_bool_fact(v):
-        if v is None: return None
-        try:
-            obj = json.loads(v)
-            if isinstance(obj, dict): return str(obj.get("status",""))
-            return str(v).lower()
-        except Exception:
-            return str(v).lower()
 
     # IDV status — stored as dict {SUCCESS:N,...}
     def parse_idv(v):
@@ -588,11 +595,7 @@ def live_kyc(limit):
 
 def live_dd(limit):
     sql = f"""
-        SELECT
-            business_id,
-            name,
-            JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,
-            received_at
+        SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
         WHERE name IN ('watchlist_hits','adverse_media_hits','sanctions_hits','pep_hits')
         ORDER BY received_at DESC{_limit_clause(limit)}
@@ -604,6 +607,9 @@ def live_dd(limit):
     def safe_int(v):
         try: return int(float(v or 0))
         except Exception: return 0
+
+    raw["fact_value"] = raw["value"].apply(
+        lambda v: str(_parse_fact(v).get("value","")) if v else "0")
 
     pivoted = raw.pivot_table(
         index="business_id", columns="name", values="fact_value", aggfunc="last"
