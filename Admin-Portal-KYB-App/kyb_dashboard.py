@@ -305,10 +305,11 @@ def live_sos(limit):
     These are always small scalar values and never hit the 65535 limit.
     We derive per-vendor confidence from source.platformId in these facts.
     """
+    # Also fetch middesk_confidence (49K rows confirmed) — direct Middesk match score
     sql = f"""
         SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
-        WHERE name IN ('sos_active', 'sos_match_boolean', 'sos_match')
+        WHERE name IN ('sos_active', 'sos_match_boolean', 'sos_match', 'middesk_confidence')
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
     raw = run_query(sql)
@@ -343,6 +344,12 @@ def live_sos(limit):
             rows[bid]["active"] = str(val).lower() in ("true","1")
         elif r["name"] == "sos_match_boolean":
             rows[bid]["sos_matched"] = str(val).lower() in ("true","1")
+        elif r["name"] == "middesk_confidence":
+            # middesk_confidence fact stores the direct Middesk match score
+            try:
+                rows[bid]["middesk_conf"] = max(rows[bid]["middesk_conf"], float(val or 0))
+            except Exception:
+                pass
 
         if pid in pid_conf_col:
             rows[bid][pid_conf_col[pid]] = max(rows[bid][pid_conf_col[pid]], conf)
@@ -419,8 +426,10 @@ def live_tin(limit):
 
 
 def live_naics(limit):
+    # CONFIRMED from top-100: naics_code ✅ 69,949 · mcc_code ✅ 69,681
+    # naics_description ✅ 69,681 · mcc_description ✅ 69,681 · industry ✅ 69,681
     sql = f"""
-        SELECT business_id, value, received_at
+        SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
         WHERE name = 'naics_code'
         ORDER BY received_at DESC{_limit_clause(limit)}
@@ -428,6 +437,9 @@ def live_naics(limit):
     raw = run_query(sql)
     if raw is None or raw.empty:
         return None
+    # Add name column for compatibility with parse_row
+    if "name" not in raw.columns:
+        raw["name"] = "naics_code"
 
     pid_to_src = {"16":"middesk","23":"opencorporates","24":"zoominfo",
                   "17":"equifax","38":"trulioo","31":"ai","22":"serp"}
@@ -542,12 +554,12 @@ def live_banking(limit):
 
 
 def live_worth(limit):
-    # worth_score not confirmed in top-50 — try both possible names
+    # worth_score not in top-100 fact names — not in this DB yet.
+    # risk_score is also not confirmed. Return None so section shows info gracefully.
     sql = f"""
         SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
-        WHERE name IN ('worth_score', 'worthscore', 'score', 'ai_score',
-                       'worth_score_850', 'risk_score')
+        WHERE name IN ('worth_score', 'worthscore', 'score', 'worth_score_850')
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
     raw = run_query(sql)
@@ -574,18 +586,24 @@ def live_worth(limit):
 
 
 def live_kyc(limit):
-    # CONFIRMED fact names from rds_warehouse_public.facts (73K rows each):
-    # name_match_boolean, address_match_boolean, tin_match_boolean ✅
-    # idv_status, idv_passed_boolean, compliance_status — NOT in this DB
-    # Trulioo risk facts (risk_score, compliance_status) — query but handle gracefully
+    # CONFIRMED fact names from top-100 query:
+    #   name_match_boolean       ✅ 73K
+    #   address_match_boolean    ✅ 73K
+    #   tin_match_boolean        ✅ 73K
+    #   address_verification_boolean ✅ 73K
+    #   idv_status               ✅ 65K
+    #   idv_passed_boolean       ✅ 65K
+    #   idv_passed               ✅ 65K
+    # compliance_status, risk_score — not in DB yet
     sql = f"""
         SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
         WHERE name IN (
-            'name_match_boolean', 'address_match_boolean', 'tin_match_boolean',
-            'name_match', 'address_match', 'address_verification_boolean',
-            'idv_status', 'idv_passed_boolean', 'compliance_status',
-            'risk_score', 'verification_status'
+            'name_match_boolean', 'address_match_boolean',
+            'tin_match_boolean', 'address_verification_boolean',
+            'idv_status', 'idv_passed_boolean', 'idv_passed',
+            'is_sole_prop', 'verification_status',
+            'compliance_status', 'risk_score'
         )
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
@@ -648,19 +666,25 @@ def live_kyc(limit):
 
 
 def live_dd(limit):
-    # CONFIRMED fact names from rds_warehouse_public.facts:
-    #   watchlist_hits ✅ 73K rows
-    #   bankruptcies   ✅ 61K rows  (full object)
-    #   num_bankruptcies ✅ 64K rows (numeric count)
-    # Not confirmed: adverse_media_hits, sanctions_hits, pep_hits — query but handle gracefully
+    # CONFIRMED scalar facts (safe — small values, no federation VARCHAR limit):
+    #   watchlist_hits   ✅ 73K rows — numeric count
+    #   num_bankruptcies ✅ 64K rows — numeric count
+    #   num_judgements   ✅ 64K rows — numeric count
+    #   num_liens        ✅ 64K rows — numeric count
+    # SKIP large JSON arrays (exceed 65535-byte federation limit):
+    #   watchlist   ❌ 71KB — large array, same error as sos_filings
+    #   bankruptcies/judgements/liens ❌ likely large arrays — use num_* instead
     sql = f"""
         SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
         WHERE name IN (
-            'watchlist_hits', 'watchlist', 'adverse_media_hits',
-            'sanctions_hits', 'pep_hits',
-            'num_bankruptcies', 'bankruptcies',
-            'judgements', 'liens'
+            'watchlist_hits',
+            'num_bankruptcies',
+            'num_judgements',
+            'num_liens',
+            'adverse_media_hits',
+            'sanctions_hits',
+            'pep_hits'
         )
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
@@ -681,20 +705,12 @@ def live_dd(limit):
     pivoted.columns.name = None
 
     for col in ["watchlist_hits","adverse_media_hits","sanctions_hits","pep_hits"]:
-        if col in pivoted.columns:
-            pivoted[col] = pivoted[col].apply(safe_int)
-        else:
-            pivoted[col] = 0
+        pivoted[col] = pivoted[col].apply(safe_int) if col in pivoted.columns else 0
 
-    # Map confirmed bankruptcy fact to expected column
-    if "num_bankruptcies" in pivoted.columns:
-        pivoted["bk_hits"] = pivoted["num_bankruptcies"].apply(safe_int)
-    else:
-        pivoted["bk_hits"] = 0
-
-    for col in ["judgements","liens"]:
-        if col in pivoted.columns:
-            pivoted[col.rstrip("s") + "_hits"] = pivoted[col].apply(safe_int)
+    # Confirmed scalar count facts
+    pivoted["bk_hits"]       = pivoted["num_bankruptcies"].apply(safe_int) if "num_bankruptcies" in pivoted.columns else 0
+    pivoted["judgment_hits"] = pivoted["num_judgements"].apply(safe_int)   if "num_judgements"   in pivoted.columns else 0
+    pivoted["lien_hits"]     = pivoted["num_liens"].apply(safe_int)        if "num_liens"        in pivoted.columns else 0
 
     pivoted["bk_hits"]       = 0
     pivoted["judgment_hits"] = 0
