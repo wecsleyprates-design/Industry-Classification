@@ -125,9 +125,7 @@ def _make_conn():
 def run_query(sql):
     """
     Open a fresh connection per query, run SQL, close immediately.
-    Fresh connection per query is the only reliable way to avoid:
-      - 'current transaction is aborted' (broken cached connection)
-      - Stale SSL sessions after VPN reconnect
+    Returns None on any error (including federation VARCHAR limit errors).
     """
     try:
         conn = _make_conn()
@@ -139,6 +137,54 @@ def run_query(sql):
     except Exception as e:
         st.session_state["_last_db_error"] = str(e)
         return None
+
+
+def query_fact(fact_name, limit, extra_cols=""):
+    """
+    Query a SINGLE fact name.  If the value column exceeds the Redshift
+    federation VARCHAR(65535) limit for ANY row, the whole query fails.
+    By querying one fact at a time we can skip the offending ones and
+    still return data for the others.
+    extra_cols: additional SQL expressions to add to the SELECT list.
+    """
+    cols = f"business_id, '{fact_name}' AS name, value, received_at"
+    if extra_cols:
+        cols += f", {extra_cols}"
+    sql = f"""
+        SELECT {cols}
+        FROM rds_warehouse_public.facts
+        WHERE name = '{fact_name}'
+        ORDER BY received_at DESC{_limit_clause(limit)}
+    """
+    return run_query(sql)
+
+
+def query_facts_safe(fact_names, limit):
+    """
+    Query multiple fact names one at a time.
+    Silently skips any fact whose value column exceeds the 65535-byte
+    Redshift federation VARCHAR limit.
+    Returns a combined DataFrame of all facts that succeeded, or None.
+    """
+    frames = []
+    skipped = []
+    for name in fact_names:
+        df = query_fact(name, limit)
+        if df is not None and not df.empty:
+            frames.append(df)
+        else:
+            err = st.session_state.get("_last_db_error", "")
+            if "VARCHAR" in err and "too long" in err:
+                skipped.append(name)
+                st.session_state["_last_db_error"] = ""  # reset so next fact tries fresh
+
+    if skipped:
+        # Store for display but don't crash
+        st.session_state["_skipped_large_facts"] = skipped
+
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True)
 
 def test_connection():
     """Return (is_live, error_message). Fresh connection every call."""
@@ -305,14 +351,9 @@ def live_sos(limit):
     These are always small scalar values and never hit the 65535 limit.
     We derive per-vendor confidence from source.platformId in these facts.
     """
-    # Also fetch middesk_confidence (49K rows confirmed) — direct Middesk match score
-    sql = f"""
-        SELECT business_id, name, value, received_at
-        FROM rds_warehouse_public.facts
-        WHERE name IN ('sos_active', 'sos_match_boolean', 'sos_match', 'middesk_confidence')
-        ORDER BY received_at DESC{_limit_clause(limit)}
-    """
-    raw = run_query(sql)
+    raw = query_facts_safe(
+        ['sos_active', 'sos_match_boolean', 'sos_match', 'middesk_confidence'],
+        limit)
     if raw is None or raw.empty:
         return None
 
@@ -369,11 +410,12 @@ def live_tin(limit):
         WHERE name IN ('tin_match','tin_match_boolean','tin_submitted')
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
-    raw = run_query(sql)
+    raw = query_facts_safe(
+        ['tin_match', 'tin_match_boolean', 'tin_submitted'],
+        limit)
     if raw is None or raw.empty:
         return None
 
-    # Parse each row's JSON in Python
     def extract_fact_value(row):
         fact = _parse_fact(row["value"])
         return str(fact.get("value","")) if fact.get("value") is not None else ""
@@ -385,7 +427,6 @@ def live_tin(limit):
     raw["fact_value"]  = raw.apply(extract_fact_value, axis=1)
     raw["platform_id"] = raw.apply(extract_platform_id, axis=1)
 
-    # Pivot: one row per business_id
     pivoted = raw.pivot_table(
         index="business_id", columns="name", values="fact_value", aggfunc="last"
     ).reset_index()
@@ -428,18 +469,9 @@ def live_tin(limit):
 def live_naics(limit):
     # CONFIRMED from top-100: naics_code ✅ 69,949 · mcc_code ✅ 69,681
     # naics_description ✅ 69,681 · mcc_description ✅ 69,681 · industry ✅ 69,681
-    sql = f"""
-        SELECT business_id, name, value, received_at
-        FROM rds_warehouse_public.facts
-        WHERE name = 'naics_code'
-        ORDER BY received_at DESC{_limit_clause(limit)}
-    """
-    raw = run_query(sql)
+    raw = query_fact("naics_code", limit)
     if raw is None or raw.empty:
         return None
-    # Add name column for compatibility with parse_row
-    if "name" not in raw.columns:
-        raw["name"] = "naics_code"
 
     pid_to_src = {"16":"middesk","23":"opencorporates","24":"zoominfo",
                   "17":"equifax","38":"trulioo","31":"ai","22":"serp"}
@@ -463,14 +495,9 @@ def live_naics(limit):
     raw["naics_label"]   = raw["naics_code"].apply(
         lambda c: "Fallback (Other Business Support)" if c=="561499" else c)
 
-    mcc_sql = f"""
-        SELECT business_id, value AS mcc_raw
-        FROM rds_warehouse_public.facts
-        WHERE name = 'mcc_code'{_limit_clause(limit)}
-    """
-    mcc = run_query(mcc_sql)
+    mcc = query_fact("mcc_code", limit)
     if mcc is not None and not mcc.empty:
-        mcc["mcc_code"] = mcc["mcc_raw"].apply(
+        mcc["mcc_code"] = mcc["value"].apply(
             lambda v: str(_parse_fact(v).get("value","")) if v else "")
         raw = raw.merge(mcc[["business_id","mcc_code"]], on="business_id", how="left")
     else:
@@ -506,14 +533,7 @@ def live_banking(limit):
     if not known_names:
         return None   # no banking facts at all in this database
 
-    names_sql = ", ".join(f"'{n}'" for n in known_names)
-    sql = f"""
-        SELECT business_id, name, value, received_at
-        FROM rds_warehouse_public.facts
-        WHERE name IN ({names_sql})
-        ORDER BY received_at DESC{_limit_clause(limit)}
-    """
-    raw = run_query(sql)
+    raw = query_facts_safe(known_names, limit)
     if raw is None or raw.empty:
         return None
 
@@ -556,13 +576,8 @@ def live_banking(limit):
 def live_worth(limit):
     # worth_score not in top-100 fact names — not in this DB yet.
     # risk_score is also not confirmed. Return None so section shows info gracefully.
-    sql = f"""
-        SELECT business_id, name, value, received_at
-        FROM rds_warehouse_public.facts
-        WHERE name IN ('worth_score', 'worthscore', 'score', 'worth_score_850')
-        ORDER BY received_at DESC{_limit_clause(limit)}
-    """
-    raw = run_query(sql)
+    raw = query_facts_safe(
+        ['worth_score', 'worthscore', 'score', 'worth_score_850'], limit)
     if raw is None or raw.empty:
         return None
     raw["worth_score_850"] = raw["value"].apply(
@@ -595,19 +610,13 @@ def live_kyc(limit):
     #   idv_passed_boolean       ✅ 65K
     #   idv_passed               ✅ 65K
     # compliance_status, risk_score — not in DB yet
-    sql = f"""
-        SELECT business_id, name, value, received_at
-        FROM rds_warehouse_public.facts
-        WHERE name IN (
-            'name_match_boolean', 'address_match_boolean',
-            'tin_match_boolean', 'address_verification_boolean',
-            'idv_status', 'idv_passed_boolean', 'idv_passed',
-            'is_sole_prop', 'verification_status',
-            'compliance_status', 'risk_score'
-        )
-        ORDER BY received_at DESC{_limit_clause(limit)}
-    """
-    raw = run_query(sql)
+    raw = query_facts_safe([
+        'name_match_boolean', 'address_match_boolean',
+        'tin_match_boolean', 'address_verification_boolean',
+        'idv_status', 'idv_passed_boolean', 'idv_passed',
+        'is_sole_prop', 'verification_status',
+        'compliance_status', 'risk_score',
+    ], limit)
     if raw is None or raw.empty:
         return None
 
@@ -666,29 +675,17 @@ def live_kyc(limit):
 
 
 def live_dd(limit):
-    # CONFIRMED scalar facts (safe — small values, no federation VARCHAR limit):
-    #   watchlist_hits   ✅ 73K rows — numeric count
-    #   num_bankruptcies ✅ 64K rows — numeric count
-    #   num_judgements   ✅ 64K rows — numeric count
-    #   num_liens        ✅ 64K rows — numeric count
-    # SKIP large JSON arrays (exceed 65535-byte federation limit):
-    #   watchlist   ❌ 71KB — large array, same error as sos_filings
-    #   bankruptcies/judgements/liens ❌ likely large arrays — use num_* instead
-    sql = f"""
-        SELECT business_id, name, value, received_at
-        FROM rds_warehouse_public.facts
-        WHERE name IN (
-            'watchlist_hits',
-            'num_bankruptcies',
-            'num_judgements',
-            'num_liens',
-            'adverse_media_hits',
-            'sanctions_hits',
-            'pep_hits'
-        )
-        ORDER BY received_at DESC{_limit_clause(limit)}
-    """
-    raw = run_query(sql)
+    # Query each fact individually — skip any that exceed the 65535-byte
+    # Redshift federation VARCHAR limit (watchlist has 71KB value rows).
+    raw = query_facts_safe([
+        'watchlist_hits',
+        'num_bankruptcies',
+        'num_judgements',
+        'num_liens',
+        'adverse_media_hits',
+        'sanctions_hits',
+        'pep_hits',
+    ], limit)
     if raw is None or raw.empty:
         return None
 
