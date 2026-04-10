@@ -552,50 +552,108 @@ def _discover_fact_names(pattern_list):
     return []
 
 
+def _discover_banking_tables():
+    """
+    Discover which banking-related schemas and tables are accessible.
+    Returns a dict with keys 'verifications', 'accounts', 'balances',
+    each mapping to the actual schema.table string or None.
+    """
+    # Step 1: find accessible schemas that contain banking tables
+    schema_sql = """
+        SELECT table_schema, table_name
+        FROM information_schema.tables
+        WHERE (
+            table_schema LIKE '%integration%'
+            OR table_schema LIKE '%banking%'
+            OR table_schema LIKE '%plaid%'
+            OR table_schema LIKE '%rds%'
+        )
+        AND (
+            table_name LIKE '%bank%'
+            OR table_name LIKE '%verif%'
+            OR table_name LIKE '%balance%'
+            OR table_name LIKE '%account%'
+        )
+        ORDER BY table_schema, table_name
+        LIMIT 50
+    """
+    tables_df = run_query(schema_sql)
+
+    found = {"verifications": None, "accounts": None, "balances": None,
+             "all_tables": []}
+
+    if tables_df is not None and not tables_df.empty:
+        for _, row in tables_df.iterrows():
+            full = f"{row['table_schema']}.{row['table_name']}"
+            found["all_tables"].append(full)
+            name = row["table_name"].lower()
+            if "verif" in name and found["verifications"] is None:
+                found["verifications"] = full
+            elif "account" in name and "balance" not in name and found["accounts"] is None:
+                found["accounts"] = full
+            elif "balance" in name and found["balances"] is None:
+                found["balances"] = full
+
+    # Store discovery results for the UI to show
+    st.session_state["_banking_discovery"] = found
+    return found
+
+
 def live_banking(limit):
     """
     Banking data lives in rds_integration_data (Redshift Spectrum over RDS).
     Source: Plaid API → integration-service → RDS → Redshift Spectrum
 
-    Tables:
+    Confirmed tables (from banking.ts source):
       rds_integration_data.rel_banking_verifications — GIACT verification results
-      rds_integration_data.bank_accounts             — account metadata (type, mask)
+      rds_integration_data.bank_accounts             — account metadata
       rds_integration_data.banking_balances          — monthly balance aggregates
-
-    GIACT note: does not have complete coverage across the US — many accounts
-    will have verification_status='unverified'. This is expected and must be tracked.
+      rds_integration_data.banking_balances_daily    — daily snapshots
+      rds_integration_data.data_processing_history   — manual processing volumes
     """
-    # Primary: GIACT verification results
+    # Auto-discover accessible tables first
+    discovered = _discover_banking_tables()
+
+    verif_table = discovered.get("verifications") or "rds_integration_data.rel_banking_verifications"
+    acct_table  = discovered.get("accounts")      or "rds_integration_data.bank_accounts"
+
+    # Try verification table
     sql_verif = f"""
-        SELECT
-            bv.business_id,
-            bv.account_id,
-            bv.verification_status,
-            bv.verification_type,
-            bv.verify_response_code,
-            bv.auth_response_code,
-            bv.created_at
-        FROM rds_integration_data.rel_banking_verifications bv
-        ORDER BY bv.created_at DESC{_limit_clause(limit)}
+        SELECT *
+        FROM {verif_table}
+        ORDER BY created_at DESC{_limit_clause(limit)}
     """
     verif = run_query(sql_verif)
+    if verif is not None and not verif.empty:
+        # Normalise to expected column names if different
+        verif = verif.rename(columns=str.lower)
 
-    # Secondary: bank account metadata
+    # Try accounts table
     sql_acct = f"""
-        SELECT
-            ba.business_id,
-            ba.id           AS account_id,
-            ba.account_type,
-            ba.account_subtype,
-            ba.mask,
-            ba.institution_name,
-            ba.created_at
-        FROM rds_integration_data.bank_accounts ba
-        ORDER BY ba.created_at DESC{_limit_clause(limit)}
+        SELECT *
+        FROM {acct_table}
+        ORDER BY created_at DESC{_limit_clause(limit)}
     """
     accts = run_query(sql_acct)
+    if accts is not None and not accts.empty:
+        accts = accts.rename(columns=str.lower)
+
+    # Try processing history for transaction volumes
+    sql_proc = f"""
+        SELECT
+            business_id,
+            JSON_EXTRACT_PATH_TEXT(general_data, 'monthly_volume')  AS monthly_volume,
+            JSON_EXTRACT_PATH_TEXT(general_data, 'annual_volume')   AS annual_volume,
+            created_at
+        FROM rds_integration_data.data_processing_history
+        ORDER BY created_at DESC{_limit_clause(limit)}
+    """
+    proc = run_query(sql_proc)
 
     if (verif is None or verif.empty) and (accts is None or accts.empty):
+        # Store specific error for the UI
+        err = st.session_state.get("_last_db_error","")
+        st.session_state["_banking_error"] = err
         return None
 
     # Merge verification + account data
@@ -924,11 +982,16 @@ FROM rds_warehouse_public.facts
 GROUP BY name ORDER BY rows DESC LIMIT 50;"""
 
         if is_optional:
-            st.info(f"ℹ️ No **{section_key}** facts found in `rds_warehouse_public.facts`. "
-                    "This is expected if this integration is not yet active in your environment.")
-            with st.expander("🔍 Run this SQL to check what facts are available"):
+            # Banking uses rds_integration_data, not rds_warehouse_public.facts
+            if section_key == "banking":
+                st.info("ℹ️ Banking data could not be loaded from `rds_integration_data`. "
+                        "The Banking section will show detailed diagnostics.")
+            else:
+                st.info(f"ℹ️ No **{section_key}** data found. "
+                        "This is expected if this integration is not yet active.")
+            with st.expander("🔍 Discovery SQL"):
                 st.code(discovery_sql, language="sql")
-            return None   # caller must handle None for optional sections
+            return None   # caller handles None for optional sections
         else:
             if err:
                 st.error(f"❌ Failed to load **{section_key}** data.")
@@ -2015,12 +2078,86 @@ WHERE business_id = 'YOUR-UUID'
 # 4 — BANKING (GIACT)
 # ═══════════════════════════════════════════════════════════════════════════════
 elif section == "4️⃣  Banking (Plaid/GIACT)":
-    sh("Banking — GIACT gVerify & gAuthenticate",
-       "Account Status (verify_response_code 0–22) · Account Name · Contact Verification","🏦")
+    sh("Banking — Plaid / GIACT",
+       "Source: rds_integration_data.* · Plaid bank accounts · GIACT verification · "
+       "processing volumes","🏦")
+
+    flag("Banking data is NOT stored in rds_warehouse_public.facts. "
+         "It is stored in dedicated RDS tables accessed via Redshift Spectrum: "
+         "rds_integration_data.rel_banking_verifications, bank_accounts, banking_balances. "
+         "Source: Plaid API → integration-service → RDS → Redshift Spectrum.", "blue")
 
     df = get_section_data("banking", record_limit)
     if df is None:
-        # Optional section — info already shown by get_section_data, nothing more to do
+        # Show what was discovered and what failed
+        discovery = st.session_state.get("_banking_discovery", {})
+        banking_err = st.session_state.get("_banking_error", "")
+        db_err = st.session_state.get("_last_db_error","")
+
+        if discovery.get("all_tables"):
+            st.success(f"✅ Found {len(discovery['all_tables'])} banking-related tables in the database:")
+            for t in discovery["all_tables"]:
+                st.code(t)
+        else:
+            st.error("❌ No banking tables found via information_schema discovery.")
+            if banking_err or db_err:
+                with st.expander("Show database error"):
+                    st.code(banking_err or db_err, language=None)
+
+        st.markdown("#### Expected tables and confirmed SQL patterns:")
+        st.code("""-- Check what banking schemas are accessible:
+SELECT table_schema, table_name
+FROM information_schema.tables
+WHERE table_schema LIKE '%integration%'
+   OR table_schema LIKE '%banking%'
+ORDER BY table_schema, table_name;
+
+-- GIACT verification results:
+SELECT * FROM rds_integration_data.rel_banking_verifications LIMIT 5;
+
+-- Bank account metadata:
+SELECT * FROM rds_integration_data.bank_accounts LIMIT 5;
+
+-- Monthly balance aggregates:
+SELECT * FROM rds_integration_data.banking_balances LIMIT 5;
+
+-- Processing history volumes:
+SELECT business_id,
+       JSON_EXTRACT_PATH_TEXT(general_data, 'monthly_volume') AS monthly_volume,
+       JSON_EXTRACT_PATH_TEXT(general_data, 'annual_volume')  AS annual_volume
+FROM rds_integration_data.data_processing_history
+LIMIT 5;
+
+-- Average transaction size per business:
+SELECT dbit.business_id, AVG(bat.amount) AS avg_transaction_size
+FROM rds_integration_data.bank_account_transactions bat
+JOIN rds_integration_integrations.data_business_integrations_tasks dbit
+  ON bat.business_integration_task_id = dbit.id
+GROUP BY dbit.business_id
+LIMIT 10;""", language="sql")
+
+        st.markdown("#### Data flow:")
+        st.markdown("""
+```
+Plaid API
+  → integration-service/src/api/v1/modules/banking/banking.ts
+  → RDS (PostgreSQL):
+      integration_data.bank_accounts
+      integration_data.bank_account_transactions
+      integration_data.banking_balances
+      integration_data.rel_banking_verifications
+  → Redshift Spectrum (rds_integration_data schema)
+  → warehouse.worth_score_input_audit (cash flow for scoring)
+  → S3: businesses/{id}/banking/PLAID/asset_report.json
+```
+""")
+        analyst_card("Why GIACT coverage matters", [
+            "GIACT does NOT have complete coverage across America. "
+            "Many checking accounts (especially credit unions and community banks) cannot be verified.",
+            "Unverified accounts are tracked to set underwriter expectations — NOT a fraud signal.",
+            "GIACT response codes 11, 16, 17, 18 = 'Not yet available' = coverage gap.",
+            "When GIACT cannot verify, route to: Plaid balance verification or manual bank statement review.",
+        ])
         st.stop()
     total = len(df)
     passed  = (df["account_status"]=="passed").sum()
