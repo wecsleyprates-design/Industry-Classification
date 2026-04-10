@@ -552,109 +552,98 @@ def _discover_fact_names(pattern_list):
     return []
 
 
-def _discover_banking_tables():
-    """
-    Discover which banking-related schemas and tables are accessible.
-    Returns a dict with keys 'verifications', 'accounts', 'balances',
-    each mapping to the actual schema.table string or None.
-    """
-    # Step 1: find accessible schemas that contain banking tables
-    schema_sql = """
-        SELECT table_schema, table_name
-        FROM information_schema.tables
-        WHERE (
-            table_schema LIKE '%integration%'
-            OR table_schema LIKE '%banking%'
-            OR table_schema LIKE '%plaid%'
-            OR table_schema LIKE '%rds%'
-        )
-        AND (
-            table_name LIKE '%bank%'
-            OR table_name LIKE '%verif%'
-            OR table_name LIKE '%balance%'
-            OR table_name LIKE '%account%'
-        )
-        ORDER BY table_schema, table_name
-        LIMIT 50
-    """
-    tables_df = run_query(schema_sql)
-
-    found = {"verifications": None, "accounts": None, "balances": None,
-             "all_tables": []}
-
-    if tables_df is not None and not tables_df.empty:
-        for _, row in tables_df.iterrows():
-            full = f"{row['table_schema']}.{row['table_name']}"
-            found["all_tables"].append(full)
-            name = row["table_name"].lower()
-            if "verif" in name and found["verifications"] is None:
-                found["verifications"] = full
-            elif "account" in name and "balance" not in name and found["accounts"] is None:
-                found["accounts"] = full
-            elif "balance" in name and found["balances"] is None:
-                found["balances"] = full
-
-    # Store discovery results for the UI to show
-    st.session_state["_banking_discovery"] = found
-    return found
-
-
 def live_banking(limit):
     """
-    Banking data lives in rds_integration_data (Redshift Spectrum over RDS).
-    Source: Plaid API → integration-service → RDS → Redshift Spectrum
+    Banking data lives in rds_integration_data (Redshift federated external schema).
 
-    Confirmed tables (from banking.ts source):
-      rds_integration_data.rel_banking_verifications — GIACT verification results
-      rds_integration_data.bank_accounts             — account metadata
-      rds_integration_data.banking_balances          — monthly balance aggregates
-      rds_integration_data.banking_balances_daily    — daily snapshots
-      rds_integration_data.data_processing_history   — manual processing volumes
+    CONFIRMED from live queries:
+      rds_integration_data.rel_banking_verifications EXISTS
+        - verification_status: 'SUCCESS' (99.94%), 'ERRORED' (0.06%)
+        - NOTE: column is verification_status, NOT account_status
+        - NOTE: account_id column does NOT exist in this table
+
+      rds_integration_data.bank_accounts EXISTS (from banking.ts source)
+
+    NOTE: Federated external schemas (rds_*) do NOT appear in
+    information_schema.tables on Redshift Serverless — skip discovery entirely
+    and query the confirmed table names directly.
     """
-    # Auto-discover accessible tables first
-    discovered = _discover_banking_tables()
-
-    verif_table = discovered.get("verifications") or "rds_integration_data.rel_banking_verifications"
-    acct_table  = discovered.get("accounts")      or "rds_integration_data.bank_accounts"
-
-    # Try verification table
+    # Step 1: verification status summary (confirmed working)
     sql_verif = f"""
-        SELECT *
-        FROM {verif_table}
-        ORDER BY created_at DESC{_limit_clause(limit)}
-    """
-    verif = run_query(sql_verif)
-    if verif is not None and not verif.empty:
-        # Normalise to expected column names if different
-        verif = verif.rename(columns=str.lower)
-
-    # Try accounts table
-    sql_acct = f"""
-        SELECT *
-        FROM {acct_table}
-        ORDER BY created_at DESC{_limit_clause(limit)}
-    """
-    accts = run_query(sql_acct)
-    if accts is not None and not accts.empty:
-        accts = accts.rename(columns=str.lower)
-
-    # Try processing history for transaction volumes
-    sql_proc = f"""
         SELECT
-            business_id,
-            JSON_EXTRACT_PATH_TEXT(general_data, 'monthly_volume')  AS monthly_volume,
-            JSON_EXTRACT_PATH_TEXT(general_data, 'annual_volume')   AS annual_volume,
-            created_at
-        FROM rds_integration_data.data_processing_history
-        ORDER BY created_at DESC{_limit_clause(limit)}
+            verification_status,
+            COUNT(*) AS accounts
+        FROM rds_integration_data.rel_banking_verifications
+        GROUP BY verification_status
+        ORDER BY accounts DESC{_limit_clause(limit)}
     """
-    proc = run_query(sql_proc)
+    verif_summary = run_query(sql_verif)
 
-    if (verif is None or verif.empty) and (accts is None or accts.empty):
-        # Store specific error for the UI
-        err = st.session_state.get("_last_db_error","")
-        st.session_state["_banking_error"] = err
+    # Step 2: full verification records — discover actual columns first via LIMIT 1
+    sql_verif_cols = """
+        SELECT * FROM rds_integration_data.rel_banking_verifications LIMIT 1
+    """
+    verif_sample = run_query(sql_verif_cols)
+
+    # Step 3: bank_accounts — discover columns
+    sql_acct_cols = """
+        SELECT * FROM rds_integration_data.bank_accounts LIMIT 1
+    """
+    acct_sample = run_query(sql_acct_cols)
+
+    # Build verification records with available columns
+    if verif_sample is not None and not verif_sample.empty:
+        cols = list(verif_sample.columns)
+        # Find business_id column
+        biz_col = next((c for c in cols if "business" in c.lower()), None)
+        status_col = next((c for c in cols if "status" in c.lower()), "verification_status")
+        ts_col = next((c for c in cols if "creat" in c.lower() or "update" in c.lower()), None)
+
+        select_cols = [c for c in [biz_col, status_col, ts_col] if c]
+        select_expr = ", ".join(select_cols) if select_cols else "*"
+
+        order_clause = f"ORDER BY {ts_col} DESC" if ts_col else ""
+        sql_verif_full = f"""
+            SELECT {select_expr}
+            FROM rds_integration_data.rel_banking_verifications
+            {order_clause}{_limit_clause(limit)}
+        """
+        verif = run_query(sql_verif_full)
+    else:
+        verif = None
+
+    # Store what we found for the UI
+    st.session_state["_banking_verif_summary"] = verif_summary
+    st.session_state["_banking_verif_cols"]    = list(verif_sample.columns) if verif_sample is not None and not verif_sample.empty else []
+    st.session_state["_banking_acct_cols"]     = list(acct_sample.columns)  if acct_sample  is not None and not acct_sample.empty  else []
+
+    if verif_summary is None or verif_summary.empty:
+        st.session_state["_banking_error"] = st.session_state.get("_last_db_error","")
         return None
+
+    # Build a per-business DataFrame from the summary + full records
+    if verif is not None and not verif.empty:
+        df = verif.copy()
+    else:
+        # Fallback: expand summary into rows (no business_id granularity)
+        df = verif_summary.copy()
+        df["business_id"] = "aggregated"
+
+    # Normalise status column name
+    if "verification_status" in df.columns:
+        df["account_status"] = df["verification_status"].apply(
+            lambda s: "passed" if str(s).upper()=="SUCCESS"
+                      else ("failed" if str(s).upper()=="ERRORED" else "missing"))
+    elif "account_status" not in df.columns:
+        df["account_status"] = "missing"
+
+    # These don't come from rel_banking_verifications — default gracefully
+    df["account_name_status"]  = "missing"
+    df["contact_verification"] = "missing"
+    df["verify_response_code"] = None
+    df["has_bank_account"]     = True
+    df["state"]                = "Unknown"
+    return df
 
     # Merge verification + account data
     if verif is not None and not verif.empty and accts is not None and not accts.empty:
@@ -2094,32 +2083,44 @@ elif section == "4️⃣  Banking (Plaid/GIACT)":
         banking_err = st.session_state.get("_banking_error", "")
         db_err = st.session_state.get("_last_db_error","")
 
-        if discovery.get("all_tables"):
-            st.success(f"✅ Found {len(discovery['all_tables'])} banking-related tables in the database:")
-            for t in discovery["all_tables"]:
-                st.code(t)
-        else:
-            st.error("❌ No banking tables found via information_schema discovery.")
-            if banking_err or db_err:
-                with st.expander("Show database error"):
-                    st.code(banking_err or db_err, language=None)
+        banking_err = st.session_state.get("_banking_error", "")
+        db_err      = st.session_state.get("_last_db_error","")
 
-        st.markdown("#### Expected tables and confirmed SQL patterns:")
-        st.code("""-- Check what banking schemas are accessible:
-SELECT table_schema, table_name
-FROM information_schema.tables
-WHERE table_schema LIKE '%integration%'
-   OR table_schema LIKE '%banking%'
-ORDER BY table_schema, table_name;
+        st.error("❌ `rds_integration_data.rel_banking_verifications` is not accessible from this connection.")
+        flag("NOTE: Federated external schemas (rds_*) do NOT appear in "
+             "information_schema.tables on Redshift Serverless. "
+             "They must be queried directly by their known name.", "amber")
+        if banking_err or db_err:
+            with st.expander("Show database error"):
+                st.code(banking_err or db_err, language=None)
 
--- GIACT verification results:
-SELECT * FROM rds_integration_data.rel_banking_verifications LIMIT 5;
+        # Show what columns were actually discovered
+        verif_cols = st.session_state.get("_banking_verif_cols", [])
+        acct_cols  = st.session_state.get("_banking_acct_cols",  [])
+        if verif_cols:
+            st.success(f"✅ rel_banking_verifications columns: {', '.join(verif_cols)}")
+        if acct_cols:
+            st.success(f"✅ bank_accounts columns: {', '.join(acct_cols)}")
 
--- Bank account metadata:
-SELECT * FROM rds_integration_data.bank_accounts LIMIT 5;
+        st.markdown("#### Confirmed working SQL (from your live queries):")
+        st.code("""-- ✅ CONFIRMED WORKING — verification status summary:
+SELECT
+    verification_status,
+    COUNT(*) AS accounts,
+    ROUND(COUNT(*)*100.0/SUM(COUNT(*)) OVER(), 2) AS pct
+FROM rds_integration_data.rel_banking_verifications
+GROUP BY verification_status
+ORDER BY accounts DESC;
+-- Result: SUCCESS=23351 (99.94%), ERRORED=13 (0.06%)
 
--- Monthly balance aggregates:
-SELECT * FROM rds_integration_data.banking_balances LIMIT 5;
+-- ✅ Discover actual columns in each table (run these first):
+SELECT * FROM rds_integration_data.rel_banking_verifications LIMIT 1;
+SELECT * FROM rds_integration_data.bank_accounts LIMIT 1;
+
+-- ⚠️ account_id column does NOT exist in rel_banking_verifications
+-- To join, first check what the FK column is actually called:
+SELECT * FROM rds_integration_data.rel_banking_verifications LIMIT 1;
+-- Then use the correct FK column name in your join
 
 -- Processing history volumes:
 SELECT business_id,
@@ -3743,50 +3744,89 @@ ORDER BY received_at DESC LIMIT 100;""", language="sql")
              "Many checking accounts cannot be verified — this is expected behavior. "
              "The dashboard tracks unverified accounts to manage underwriter expectations.", "amber")
 
-        if bank_df is None:
-            st.info("Banking data not available. Requires rds_integration_data.rel_banking_verifications table.")
-            st.code("""-- Check banking verification coverage:
-SELECT
-    verification_status,
-    COUNT(*) AS accounts,
-    ROUND(COUNT(*)*100.0/SUM(COUNT(*)) OVER(), 2) AS pct
-FROM rds_integration_data.rel_banking_verifications
-GROUP BY verification_status
-ORDER BY accounts DESC;
+        # Always query the confirmed live table directly (regardless of bank_df)
+        verif_summary = run_query("""
+            SELECT verification_status, COUNT(*) AS accounts,
+                   ROUND(COUNT(*)*100.0/SUM(COUNT(*)) OVER(), 2) AS pct
+            FROM rds_integration_data.rel_banking_verifications
+            GROUP BY verification_status ORDER BY accounts DESC
+        """)
 
--- GIACT coverage by account type:
+        if verif_summary is not None and not verif_summary.empty:
+            # Real data available — confirmed 23,364 total accounts
+            total_accts  = int(verif_summary["accounts"].sum())
+            success_rows = verif_summary[verif_summary["verification_status"]=="SUCCESS"]
+            errored_rows = verif_summary[verif_summary["verification_status"]=="ERRORED"]
+            success_n    = int(success_rows["accounts"].sum()) if not success_rows.empty else 0
+            errored_n    = int(errored_rows["accounts"].sum()) if not errored_rows.empty else 0
+
+            flag("✅ rds_integration_data.rel_banking_verifications confirmed accessible. "
+                 "Showing live data.", "green")
+
+            c1,c2,c3,c4 = st.columns(4)
+            with c1: kpi("Total Accounts",f"{total_accts:,}","all verification records","#3B82F6")
+            with c2: kpi("✅ SUCCESS",f"{success_n:,}",
+                         f"{success_n/max(total_accts,1)*100:.2f}%","#22c55e")
+            with c3: kpi("❌ ERRORED",f"{errored_n:,}",
+                         f"{errored_n/max(total_accts,1)*100:.2f}%","#ef4444")
+            with c4: kpi("Coverage Gap",f"{errored_n:,}",
+                         "ERRORED = GIACT could not verify","#f59e0b")
+
+            col_l, col_r = st.columns(2)
+            with col_l:
+                fig = px.pie(verif_summary, names="verification_status", values="accounts",
+                             color="verification_status",
+                             color_discrete_map={"SUCCESS":"#22c55e","ERRORED":"#ef4444"},
+                             hole=0.5, title="GIACT Verification Status Distribution")
+                st.plotly_chart(dark_chart_layout(fig), use_container_width=True)
+            with col_r:
+                st.markdown("#### 📋 Verification Status Table")
+                styled_table(verif_summary.rename(columns={
+                    "verification_status":"Status","accounts":"# Accounts","pct":"% of Total"}))
+                st.markdown("""
+**Status Meanings:**
+- `SUCCESS` — GIACT completed verification (account exists and was checkable)
+- `ERRORED` — GIACT could not verify (coverage gap, invalid routing, or API error)
+
+**Note:** `SUCCESS` from GIACT ≠ account is valid for the business.
+For business-level pass/fail, check `verify_response_code` within SUCCESS records.
+                """)
+
+            st.markdown("#### Discover actual table columns (run to fix join):")
+            st.code("""-- Step 1: See all columns in rel_banking_verifications:
+SELECT * FROM rds_integration_data.rel_banking_verifications LIMIT 1;
+
+-- Step 2: See all columns in bank_accounts:
+SELECT * FROM rds_integration_data.bank_accounts LIMIT 1;
+
+-- Step 3: Use the correct FK column (NOT account_id — that doesn't exist):
+-- The join column may be 'id', 'bank_account_id', or similar.
+-- Once you know it from Step 1+2, use:
 SELECT
     ba.account_type,
     bv.verification_status,
     COUNT(*) AS count
 FROM rds_integration_data.rel_banking_verifications bv
-JOIN rds_integration_data.bank_accounts ba ON ba.id = bv.account_id
+JOIN rds_integration_data.bank_accounts ba
+  ON ba.id = bv.<CORRECT_FK_COLUMN>   -- replace with actual column name
 GROUP BY ba.account_type, bv.verification_status
-ORDER BY count DESC;""", language="sql")
+ORDER BY count DESC;
+
+-- Processing volumes per business:
+SELECT business_id,
+       JSON_EXTRACT_PATH_TEXT(general_data, 'monthly_volume') AS monthly_volume,
+       JSON_EXTRACT_PATH_TEXT(general_data, 'annual_volume')  AS annual_volume
+FROM rds_integration_data.data_processing_history
+LIMIT 10;""", language="sql")
         else:
-            total_accts = len(bank_df)
-            if "verification_status" in bank_df.columns:
-                verified_b   = (bank_df["verification_status"]=="verified").sum()
-                unverified_b = (bank_df["verification_status"]=="unverified").sum()
-            elif "account_status" in bank_df.columns:
-                verified_b   = (bank_df["account_status"]=="passed").sum()
-                unverified_b = (bank_df["account_status"]=="missing").sum()
-            else:
-                verified_b = unverified_b = 0
-
-            c1,c2,c3 = st.columns(3)
-            with c1: kpi("Total Accounts",f"{total_accts:,}","with Plaid data","#3B82F6")
-            with c2: kpi("✅ GIACT Verified",f"{verified_b:,}",
-                         f"{verified_b/max(total_accts,1)*100:.0f}%","#22c55e")
-            with c3: kpi("❌ Unverified (coverage gap)",f"{unverified_b:,}",
-                         f"{unverified_b/max(total_accts,1)*100:.0f}% — expected","#f59e0b")
-
-            if "verification_status" in bank_df.columns:
-                vc = bank_df["verification_status"].value_counts().reset_index()
-                vc.columns = ["Status","Count"]
-                fig = px.pie(vc,names="Status",values="Count",hole=0.45,
-                             title="Banking Verification Status Distribution")
-                st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+            st.info("Banking verification data not accessible. "
+                    "Table rds_integration_data.rel_banking_verifications may require "
+                    "a different connection or permissions.")
+            st.code("""-- Confirmed working query (run in your Redshift console):
+SELECT verification_status, COUNT(*) AS accounts,
+       ROUND(COUNT(*)*100.0/SUM(COUNT(*)) OVER(), 2) AS pct
+FROM rds_integration_data.rel_banking_verifications
+GROUP BY verification_status ORDER BY accounts DESC;""", language="sql")
 
         analyst_card("GIACT Coverage Gap Expectations", [
             "GIACT gVerify covers ~85% of US bank accounts. The remaining 15% are: "
@@ -3928,29 +3968,94 @@ ORDER BY count DESC;""", language="sql")
                  "Above 5% is a concern — review whether these businesses have been "
                  "administratively dissolved but are still applying.", "red")
 
-        st.markdown("#### SQL to find inactive businesses (run on PostgreSQL RDS directly):")
-        st.code("""-- Find inactive businesses with perpetual (no expiration) entities
--- Run on PostgreSQL RDS (port 5432) — sos_filings is native JSONB there
+        st.markdown("#### SQL to find inactive businesses")
+        flag("rds_warehouse_public is a Redshift FEDERATED external schema — "
+             "the `->` and `->>` JSONB operators do NOT work here (value is VARCHAR). "
+             "sos_filings must be queried from PostgreSQL RDS directly (port 5432) "
+             "where value is native JSONB, OR use the scalar `sos_active` fact on Redshift.", "amber")
 
+        tab_rs, tab_pg = st.tabs(["✅ Redshift (scalar facts)", "✅ PostgreSQL RDS (port 5432)"])
+        with tab_rs:
+            st.markdown("**Use scalar facts on Redshift (works now):**")
+            st.code("""-- ✅ Works on Redshift Serverless — uses scalar sos_active fact
+-- Finds all businesses where sos_active = false
+SELECT
+    business_id,
+    JSON_EXTRACT_PATH_TEXT(value, 'value')                 AS is_active,
+    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId')  AS source_vendor,
+    received_at
+FROM rds_warehouse_public.facts
+WHERE name = 'sos_active'
+  AND JSON_EXTRACT_PATH_TEXT(value, 'value') = 'false'
+ORDER BY received_at DESC
+LIMIT 500;
+
+-- Count inactive vs active:
+SELECT
+    JSON_EXTRACT_PATH_TEXT(value, 'value') AS is_active,
+    COUNT(*) AS businesses
+FROM rds_warehouse_public.facts
+WHERE name = 'sos_active'
+GROUP BY JSON_EXTRACT_PATH_TEXT(value, 'value');""", language="sql")
+
+        with tab_pg:
+            st.markdown("**Full sos_filings analysis on PostgreSQL RDS (port 5432 — native JSONB):**")
+            st.code("""-- ✅ Connect to PostgreSQL RDS at port 5432 (NOT Redshift port 5439)
+-- value column is native JSONB here — -> and ->> operators work
+
+-- Find inactive businesses with perpetual (no expiration) entities:
 SELECT
     f.business_id,
-    filing->>'active'           AS is_active,
-    filing->>'status'           AS filing_status,
-    filing->>'jurisdiction'     AS jurisdiction,
-    filing->>'expiration_date'  AS expiration_date,
-    filing->>'foreign_domestic' AS entity_type,
+    filing->>'active'            AS is_active,
+    filing->>'status'            AS filing_status,
+    filing->>'jurisdiction'      AS jurisdiction,
+    filing->>'expiration_date'   AS expiration_date,
+    filing->>'foreign_domestic'  AS entity_type,
     f.received_at
 FROM rds_warehouse_public.facts f
 CROSS JOIN jsonb_array_elements(f.value->'value') AS filing
 WHERE f.name = 'sos_filings'
   AND (filing->>'active')::boolean = false
   AND (
-    filing->>'expiration_date' IS NULL          -- perpetual: no expiration
-    OR filing->>'expiration_date' = 'perpetual'  -- explicit perpetual marker
-    OR filing->>'expiration_date' = ''
+      filing->>'expiration_date' IS NULL
+      OR filing->>'expiration_date' = 'perpetual'
+      OR filing->>'expiration_date' = ''
   )
 ORDER BY f.received_at DESC
-LIMIT 500;""", language="sql")
+LIMIT 500;
+
+-- Summary: count inactive by jurisdiction
+SELECT
+    filing->>'jurisdiction'   AS jurisdiction,
+    COUNT(*)                  AS inactive_count
+FROM rds_warehouse_public.facts f
+CROSS JOIN jsonb_array_elements(f.value->'value') AS filing
+WHERE f.name = 'sos_filings'
+  AND (filing->>'active')::boolean = false
+GROUP BY filing->>'jurisdiction'
+ORDER BY inactive_count DESC;""", language="sql")
+
+        # Also run the Redshift-safe query live and show results
+        inactive_sql = """
+            SELECT
+                business_id,
+                JSON_EXTRACT_PATH_TEXT(value,'value')                AS is_active,
+                JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS source_pid,
+                received_at
+            FROM rds_warehouse_public.facts
+            WHERE name = 'sos_active'
+              AND JSON_EXTRACT_PATH_TEXT(value,'value') = 'false'
+            ORDER BY received_at DESC
+            LIMIT 100
+        """
+        inactive_df = run_query(inactive_sql)
+        if inactive_df is not None and not inactive_df.empty:
+            flag(f"✅ Live query found {len(inactive_df):,} businesses with sos_active=false. "
+                 "These are the candidates for inactive+perpetual review.", "amber")
+            st.markdown("##### Sample of inactive businesses (live from Redshift):")
+            styled_table(inactive_df.head(15))
+        else:
+            st.info("Live query for inactive businesses returned no results via Redshift scalar facts.")
 
         analyst_card("Inactive + Perpetual — Underwriting Impact", [
             "This combination is the strongest early risk signal available in the KYB data. "
