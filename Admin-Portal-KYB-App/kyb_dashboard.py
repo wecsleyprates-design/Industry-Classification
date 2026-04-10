@@ -302,10 +302,22 @@ def _synth_dd(n=200):
     return pd.DataFrame(rows)
 
 
+# ── Query helper — appends LIMIT only when limit is not None ─────────────────
+def _limit_clause(limit):
+    """Return ' LIMIT N' string, or empty string when limit is None (load all)."""
+    return f" LIMIT {limit}" if limit is not None else ""
+
+def _synth_n(limit):
+    """Convert a record limit to a sensible synthetic data size."""
+    if limit is None:
+        return 2000   # demo cap — real data comes from Redshift
+    return min(limit, 2000)
+
+
 # ── Live data loaders ─────────────────────────────────────────────────────────
 @st.cache_data(ttl=120)
-def load_sos_data(limit=500):
-    sql = """
+def load_sos_data(limit=5000):
+    sql = f"""
         SELECT
             f.business_id,
             JSON_EXTRACT_PATH_TEXT(f.value, 'value')                                AS sos_raw,
@@ -314,16 +326,14 @@ def load_sos_data(limit=500):
             f.received_at
         FROM rds_warehouse_public.facts f
         WHERE f.name = 'sos_filings'
-        ORDER BY f.received_at DESC
-        LIMIT %s
+        ORDER BY f.received_at DESC{_limit_clause(limit)}
     """
-    df = run_query(sql, (limit,))
-    return df
+    return run_query(sql)
 
 @st.cache_data(ttl=120)
-def load_vendor_confidence(limit=500):
+def load_vendor_confidence(limit=5000):
     """Pull the winning source confidence per fact for middesk/oc/zi/efx/trulioo."""
-    sql = """
+    sql = f"""
         SELECT
             business_id,
             name AS fact_name,
@@ -332,14 +342,13 @@ def load_vendor_confidence(limit=500):
             received_at
         FROM rds_warehouse_public.facts
         WHERE name IN ('sos_filings','sos_match','sos_active','sos_match_boolean')
-        ORDER BY received_at DESC
-        LIMIT %s
+        ORDER BY received_at DESC{_limit_clause(limit)}
     """
-    return run_query(sql, (limit,))
+    return run_query(sql)
 
 @st.cache_data(ttl=120)
-def load_tin_data(limit=500):
-    sql = """
+def load_tin_data(limit=5000):
+    sql = f"""
         SELECT
             business_id,
             name,
@@ -349,14 +358,13 @@ def load_tin_data(limit=500):
             received_at
         FROM rds_warehouse_public.facts
         WHERE name IN ('tin_match','tin_match_boolean','tin_submitted','tin')
-        ORDER BY received_at DESC
-        LIMIT %s
+        ORDER BY received_at DESC{_limit_clause(limit)}
     """
-    return run_query(sql, (limit,))
+    return run_query(sql)
 
 @st.cache_data(ttl=120)
-def load_naics_data(limit=500):
-    sql = """
+def load_naics_data(limit=5000):
+    sql = f"""
         SELECT
             business_id,
             name,
@@ -366,14 +374,13 @@ def load_naics_data(limit=500):
             received_at
         FROM rds_warehouse_public.facts
         WHERE name IN ('naics_code','mcc_code','naics_description','mcc_description','industry')
-        ORDER BY received_at DESC
-        LIMIT %s
+        ORDER BY received_at DESC{_limit_clause(limit)}
     """
-    return run_query(sql, (limit,))
+    return run_query(sql)
 
 @st.cache_data(ttl=120)
-def load_banking_data(limit=500):
-    sql = """
+def load_banking_data(limit=5000):
+    sql = f"""
         SELECT
             business_id,
             name,
@@ -387,14 +394,13 @@ def load_banking_data(limit=500):
             'giact_contact_verification','giact_verify_response_code',
             'giact_auth_response_code'
         )
-        ORDER BY received_at DESC
-        LIMIT %s
+        ORDER BY received_at DESC{_limit_clause(limit)}
     """
-    return run_query(sql, (limit,))
+    return run_query(sql)
 
 @st.cache_data(ttl=120)
-def load_worth_score_data(limit=500):
-    sql = """
+def load_worth_score_data(limit=5000):
+    sql = f"""
         SELECT
             business_id,
             CAST(JSON_EXTRACT_PATH_TEXT(value,'value') AS FLOAT) AS worth_score,
@@ -402,14 +408,13 @@ def load_worth_score_data(limit=500):
         FROM rds_warehouse_public.facts
         WHERE name = 'worth_score'
           AND JSON_EXTRACT_PATH_TEXT(value,'value') IS NOT NULL
-        ORDER BY received_at DESC
-        LIMIT %s
+        ORDER BY received_at DESC{_limit_clause(limit)}
     """
-    return run_query(sql, (limit,))
+    return run_query(sql)
 
 @st.cache_data(ttl=120)
-def load_kyc_data(limit=500):
-    sql = """
+def load_kyc_data(limit=5000):
+    sql = f"""
         SELECT
             business_id,
             name,
@@ -423,14 +428,13 @@ def load_kyc_data(limit=500):
             'synthetic_identity_risk_score','stolen_identity_risk_score',
             'risk_score','compliance_status'
         )
-        ORDER BY received_at DESC
-        LIMIT %s
+        ORDER BY received_at DESC{_limit_clause(limit)}
     """
-    return run_query(sql, (limit,))
+    return run_query(sql)
 
 @st.cache_data(ttl=120)
-def load_dd_data(limit=500):
-    sql = """
+def load_dd_data(limit=5000):
+    sql = f"""
         SELECT
             business_id,
             name,
@@ -442,10 +446,9 @@ def load_dd_data(limit=500):
             'watchlist_hits','watchlist','adverse_media_hits',
             'pep_hits','sanctions_hits','watchlist_raw'
         )
-        ORDER BY received_at DESC
-        LIMIT %s
+        ORDER BY received_at DESC{_limit_clause(limit)}
     """
-    return run_query(sql, (limit,))
+    return run_query(sql)
 
 
 # ── Helper widgets ────────────────────────────────────────────────────────────
@@ -525,7 +528,17 @@ with st.sidebar:
         "🔍 Data Lineage",
     ])
     st.markdown("---")
-    record_limit = st.slider("Records to load", 100, 2000, 500, 100)
+    load_all = st.checkbox("Load ALL records (no limit)", value=False)
+    if load_all:
+        record_limit = None
+        st.caption("⚠️ Loading all records — may take 30–60s on large tables")
+    else:
+        record_limit = st.select_slider(
+            "Records to load",
+            options=[500, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000],
+            value=5_000,
+        )
+        st.caption(f"Showing up to {record_limit:,} records")
     st.caption("All data from `rds_warehouse_public.facts`")
     st.caption("Fact value stored as VARCHAR JSON")
     st.caption("`JSON_EXTRACT_PATH_TEXT(value,'key')`")
@@ -543,12 +556,13 @@ if section == "📋 Overview":
     )
 
     # Top-level KPIs with synthetic totals
-    sos_df  = _synth_sos(record_limit)
-    tin_df  = _synth_tin(record_limit)
-    naics_df= _synth_naics(record_limit)
-    bank_df = _synth_banking(record_limit)
-    kyc_df  = _synth_kyc(record_limit)
-    dd_df   = _synth_dd(record_limit)
+    n = _synth_n(record_limit)
+    sos_df  = _synth_sos(n)
+    tin_df  = _synth_tin(n)
+    naics_df= _synth_naics(n)
+    bank_df = _synth_banking(n)
+    kyc_df  = _synth_kyc(n)
+    dd_df   = _synth_dd(n)
 
     n_biz = tin_df["business_id"].nunique()
     sos_active_pct = sos_df[sos_df["active"]]["business_id"].nunique() / n_biz * 100
@@ -647,7 +661,7 @@ elif section == "1️⃣  KYB — SOS & Vendors":
         "Tracks sos_filings.foreign_domestic, active status, jurisdiction, and vendor confidence scores",
         "🏛️")
 
-    df = _synth_sos(record_limit)
+    df = _synth_sos(_synth_n(record_limit))
 
     # ── KPIs
     dom = df[df["filing_type"] == "domestic"]
@@ -896,7 +910,7 @@ elif section == "2️⃣  TIN Verification":
         "tin_match · tin_match_boolean · tin_submitted · Middesk TIN task results",
         "🔐")
 
-    df = _synth_tin(record_limit)
+    df = _synth_tin(_synth_n(record_limit))
     verified   = df["tin_match_boolean"].sum()
     unverified = (df["tin_match_status"] == "failure").sum()
     pending    = (df["tin_match_status"] == "pending").sum()
@@ -1047,7 +1061,7 @@ elif section == "3️⃣  NAICS / MCC":
         "naics_code · mcc_code · industry · fallback 561499 analysis · source breakdown",
         "🏭")
 
-    df = _synth_naics(record_limit)
+    df = _synth_naics(_synth_n(record_limit))
     total = len(df)
     fallbacks = df["is_fallback"].sum()
     real = total - fallbacks
@@ -1228,7 +1242,7 @@ elif section == "4️⃣  Banking (GIACT)":
         "Account Status (verify_response_code) · Account Name · Contact Verification",
         "🏦")
 
-    df = _synth_banking(record_limit)
+    df = _synth_banking(_synth_n(record_limit))
 
     passed_acct  = (df["account_status"] == "passed").sum()
     failed_acct  = (df["account_status"] == "failed").sum()
@@ -1359,7 +1373,7 @@ elif section == "5️⃣  Worth Score":
         "Score distribution (300–850) · risk level breakdown · SHAP category contributions",
         "💰")
 
-    df = _synth_worth(record_limit)
+    df = _synth_worth(_synth_n(record_limit))
     avg_score  = df["worth_score_850"].mean()
     med_score  = df["worth_score_850"].median()
     high_risk  = (df["risk_level"] == "HIGH").sum()
@@ -1476,7 +1490,7 @@ elif section == "6️⃣  KYC — Identity":
         "IDV (Plaid) · name/DOB/SSN/address/phone match · synthetic + stolen identity risk",
         "🪪")
 
-    df = _synth_kyc(record_limit)
+    df = _synth_kyc(_synth_n(record_limit))
     passed   = df["idv_passed"].sum()
     high_syn = (df["synthetic_score"] > 0.70).sum()
     high_sto = (df["stolen_score"] > 0.70).sum()
@@ -1644,7 +1658,7 @@ elif section == "7️⃣  Due Diligence":
         "watchlist_hits · sanctions_hits · pep_hits · adverse_media · BK · Judgments · Liens",
         "🔍")
 
-    df = _synth_dd(record_limit)
+    df = _synth_dd(_synth_n(record_limit))
     any_wl   = (df["watchlist_hits"] > 0).sum()
     any_sanc = (df["sanctions_hits"] > 0).sum()
     any_pep  = (df["pep_hits"] > 0).sum()
