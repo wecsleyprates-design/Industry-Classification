@@ -995,16 +995,27 @@ if section == "📋 Overview":
     col_l, col_r = st.columns(2)
     with col_l:
         st.markdown("### 📊 Health Summary by Section")
+        def _fmt(v, suffix="%"):
+            return f"{v:.0f}{suffix}" if v is not None else "N/A"
+
         health_data = {
             "Section":["SOS Filings","TIN Verification","NAICS/MCC","Banking","KYC Identity","Due Diligence"],
-            "Health":["⚠️ Gap","✅ OK","🚨 Issue","✅ OK","⚠️ Risk","✅ OK"],
-            "Key Metric":[f"{sos_act/biz*100:.0f}% active",
+            "Health":["⚠️ Gap","✅ OK",
+                      "🚨 Issue" if naics_fb is not None else "ℹ️ N/A",
+                      "✅ OK" if bank_ok is not None else "ℹ️ N/A",
+                      "⚠️ Risk" if high_risk is not None else "ℹ️ N/A",
+                      "✅ OK"],
+            "Key Metric":[f"{sos_act/max(biz,1)*100:.0f}% active",
                           f"{tin_ok:.0f}% verified",
-                          f"{naics_fb:.0f}% fallback",
-                          f"{bank_ok:.0f}% passed",
-                          f"{high_risk:.0f}% high risk",
+                          _fmt(naics_fb) + " fallback",
+                          _fmt(bank_ok) + " passed",
+                          _fmt(high_risk) + " high risk",
                           f"{wl_hit:.0f}% hits"],
-            "Priority":["Medium","Low","High","Low","Medium","Low"],
+            "Priority":["Medium","Low",
+                        "High" if naics_fb is not None else "N/A",
+                        "Low" if bank_ok is not None else "N/A",
+                        "Medium" if high_risk is not None else "N/A",
+                        "Low"],
         }
         styled_table(pd.DataFrame(health_data), color_col="Health",
                      palette={"⚠️ gap":"#f59e0b","✅ ok":"#22c55e","🚨 issue":"#ef4444"})
