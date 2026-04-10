@@ -1,0 +1,3 @@
+setup:
+  project: microsites-dashboard
+  config: local

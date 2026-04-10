@@ -1,0 +1,338 @@
+@startuml
+title Worth - Workflow Engine Data Model (v1)
+
+' Style adjustments
+skinparam linetype ortho
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam handwritten false
+skinparam roundcorner 5
+
+' External reference: auth.data_users
+entity data_users <<external>> {
+  * id : UUID <<PK>>
+  --
+  <<other attributes>>
+}
+
+' External reference: auth.data_customers
+entity data_customers <<external>> {
+  * id : UUID <<PK>>
+  --
+  name : VARCHAR
+  <<other attributes>>
+}
+
+' External reference: case.data_cases
+entity data_cases <<external>> {
+  * id : UUID <<PK>>
+  --
+  case_type : VARCHAR
+  status : VARCHAR
+  <<other attributes>>
+}
+
+' Workflow main table
+entity data_workflows {
+  * id : UUID <<PK>>
+  --
+  customer_id : UUID <<FK>> -- → data_customers
+  name : VARCHAR
+  description : TEXT
+  active : BOOLEAN  -- active=true => eligible for evaluation
+  priority : INT    -- CHECK: priority > 0 → higher precedence across workflows
+  created_by : UUID <<FK>> -- → data_users
+  created_at : TIMESTAMP
+  updated_by : UUID <<FK>> -- → data_users
+  updated_at : TIMESTAMP
+}
+
+' Triggers
+entity data_workflow_triggers {
+  * id : UUID <<PK>>
+  --
+  name : VARCHAR  -- e.g., "On Boarding"
+  customer_id : UUID <<FK>> → data_customers.id
+  conditions : JSONB
+  created_by : UUID <<FK>> → data_users.id
+  created_at : TIMESTAMP
+  updated_by : UUID <<FK>> → data_users.id
+  updated_at : TIMESTAMP
+}
+
+' Versioning
+entity data_workflow_versions {
+  * id : UUID <<PK>>
+  --
+  workflow_id : UUID <<FK>>
+  trigger_id : UUID <<FK>> -- → data_workflow_triggers.id (MVP default = ONBOARDING status)
+  version_number : INT DEFAULT 1 -- CHECK: > 0 (unique per workflow)
+  status : VARCHAR  -- CHECK: draft | published
+  snapshot : JSONB
+  published_at : TIMESTAMP
+  default_action : JSONB
+  is_current : BOOLEAN -- only one current published per workflow
+  created_by : UUID <<FK>> -- → data_users
+  created_at : TIMESTAMP
+  updated_by : UUID <<FK>> -- → data_users
+  updated_at : TIMESTAMP
+}
+
+' Logical branches of the workflow
+entity data_workflow_rules {
+  * id : UUID <<PK>>
+  --
+  workflow_version_id : UUID <<FK>>
+  name : VARCHAR
+  priority : INT -- CHECK: > 0, ascending traversal
+  conditions : JSONB
+  actions : JSONB
+  created_by : UUID <<FK>> -- → data_users
+  created_at : TIMESTAMP
+  updated_by : UUID <<FK>> -- → data_users
+  updated_at : TIMESTAMP
+}
+
+' Execution of workflows against cases
+entity data_workflow_executions {
+  * id : UUID <<PK>>
+  --
+  case_id : UUID <<FK>> -- → data_cases
+  workflow_version_id : UUID <<FK>>
+  workflow_id : UUID <<FK>>
+  customer_id : UUID <<FK>>
+  matched_rule_id : UUID <<FK>> -- null (helps for metrics)
+  executed_at : TIMESTAMP
+  input_attr : JSONB -- snapshot of complete input payload at execution time (case, facts, custom_fields)
+  evaluation_log : JSONB  -- detailed trace (conditions, expected vs actual)
+  action_applied : JSONB
+  latency_ms : INT  -- starting from workflow trigger evaluation and finishing when outcome is set
+  annotations : JSONB -- source events and their annotations
+}
+
+' Catalog of available attributes
+entity core_attribute_catalog {
+  * id : UUID <<PK>>
+  --
+  context : VARCHAR         -- application | kyb | kyc | financials | public_records | adverse_media | custom
+  path : VARCHAR       			-- e.g., "application.mcc"
+  label : VARCHAR						-- human-friendly name
+  data_type : VARCHAR       -- CHECK: string | number | boolean | date | enum
+  description : TEXT
+  active : BOOLEAN
+  validation_regex : TEXT
+  source : VARCHAR
+}
+
+' Change log per workflow/version
+entity data_workflow_change_log {
+  * id : UUID <<PK>>
+  --
+  workflow_version_id : UUID <<FK>> -- → data_workflow_versions
+  workflow_id : UUID <<FK>> -- → data_workflows
+  customer_id : UUID <<FK>>
+  field_path : TEXT
+  old_value : TEXT
+  new_value : TEXT
+  change_type : VARCHAR
+  // note : TEXT -- Confirmation (implies asking for details in the edit action)
+  changed_by : UUID <<FK>> -- → data_users
+  changed_at : TIMESTAMP
+}
+
+' Relationships
+data_workflows }o--|| data_customers : belongs_to
+data_workflows }o--|| data_users : created_by
+data_workflows }o--|| data_users : updated_by
+data_workflow_versions }o--|| data_workflow_triggers : has
+data_workflow_triggers }o--|| data_users : created_by
+data_workflow_triggers }o--|| data_users : updated_by
+data_workflow_versions }o--|| data_workflows : version_of
+data_workflow_versions }o--|| data_users : created_by
+data_workflow_versions }o--|| data_users : updated_by
+data_workflow_rules }o--|| data_workflow_versions : has
+data_workflow_rules }o--|| data_users : created_by
+data_workflow_rules }o--|| data_users : updated_by
+data_workflow_executions }o--|| data_workflow_versions : executed_with
+data_workflow_executions }o--|| data_cases : for_case
+data_workflow_executions }o--|| data_workflow_rules : matched
+data_workflow_change_log }o--|| data_workflows : of_workflow
+data_workflow_change_log }o--|| data_workflow_versions : of_version
+data_workflow_change_log }o--|| data_users : by_user
+
+note left of data_workflow_versions
+  Semantics:
+  - active=true means the workflow is eligible for evaluation.
+  - priority controls cross-workflow ordering (lowest first), tie-breaker created_at.
+  - default_action if no rule matches.
+    Structure similar to 'data_workflow_rules::actions':
+    [
+      {"type": "set_field", "parameters": {"field": "case.status", "value": "AUTO_APPROVED"}},
+      {"type": "set_field", "parameters": {"field": "case.status", "value": "AUTO_REJECT"}},
+      {"type": "set_field", "parameters": {"field": "case.status", "value": "UNDER_MANUAL_REVIEW"}}
+    ]
+end note
+
+note right of data_workflow_versions
+  Draft lifecycle:
+  - Only DRAFT versions can be deleted (hard-delete).
+  - Publish creates an immutable version; sets is_current=true and retires previous.
+  Constraint examples:
+  - UNIQUE(workflow_id, version_number)
+  - UNIQUE(workflow_id) WHERE status='published' AND is_current=true
+end note
+
+note right of data_workflow_rules::conditions
+  JSONB logical structure (AND/OR):
+  {
+    "operator": "AND",
+    "conditions": [
+      { "field": "application.mcc", "operator": "IN", "value": ["5967","5812"] },
+      { "field": "financials.judgments_total", "operator": "GT", "value": 50000 },
+      {
+        "operator": "OR",
+        "conditions": [
+          { "field": "financials.judgments", "operator": ">", "value": 50000 },
+          { "field": "adverse_media.bankruptcies", "operator": "=", "value": true }
+        ]
+      }
+    ]
+  }
+  Design-time validator checks: unknown fields, type/operator mismatch,
+  arity, unreachable branches.
+end note
+
+note right of data_workflow_rules::actions
+  JSONB: list of actions if the rule becomes active.
+  [
+    {"type": "set_field", "parameters": {"field": "case.status", "value": "AUTO_APPROVED"}},
+    {"type": "set_field", "parameters": {"field": "case.status", "value": "AUTO_REJECT"}},
+    {"type": "set_field", "parameters": {"field": "case.status", "value": "UNDER_MANUAL_REVIEW"}}
+  ]
+end note
+
+
+note left of data_workflow_triggers::conditions
+  JSONB: logical conditions to activate workflow(s).
+  e.g.:
+  {
+    "operator": "AND",
+    "conditions": [
+      { "field": "cases.status", "operator": "=", "value": "onboarding" }
+    ]
+  }
+end note
+
+
+note left of data_workflow_executions::evaluation_log
+  Complete log of all workflow evaluation logic.
+  e.g.:
+  [
+    {
+      "rule_id": "rule-001",
+      "result": false,
+      "conditions": [
+        {
+          "field": "application.mcc",
+          "operator": "=",
+          "expected": "5967",
+          "actual": "7399",
+          "match": false
+        }
+      ]
+    },
+    {
+      "rule_id": "rule-002",
+      "result": true,
+      "conditions": [
+        {
+          "field": "financials.judgments",
+          "operator": ">",
+          "expected": 50000,
+          "actual": 60000,
+          "match": true
+        },
+        {
+          "field": "application.country",
+          "operator": "=",
+          "expected": "CO",
+          "actual": "CO",
+          "match": true
+        }
+      ]
+    }
+  ]
+end note
+
+note top of data_workflow_change_log
+  Stores atomic changes between workflow versions.
+  Used for audit trails and CSV export.
+  Examples of change log entries:
+
+  Rename workflow
+  {
+    "field_path": "name",
+    "old_value": "High Risk",
+    "new_value": "High Risk - International",
+    "change_type": "rename"
+  }
+
+  Change trigger
+  {
+    "field_path": "trigger_id",
+    "old_value": "trigger-001",
+    "new_value": "trigger-002",
+    "change_type": "trigger_changed"
+  }
+
+  Change priority
+  {
+    "field_path": "priority",
+    "old_value": "3",
+    "new_value": "2",
+    "change_type": "priority_changed"
+  }
+
+  Add rule
+  {
+    "field_path": "rules[2]",
+    "old_value": null,
+    "new_value": "{...rule JSON...}",
+    "change_type": "rule_added"
+  }
+
+  Remove rule
+  {
+    "field_path": "rules[1]",
+    "old_value": "{...rule JSON...}",
+    "new_value": null,
+    "change_type": "rule_removed"
+  }
+
+  Modify condition in rule
+  {
+    "field_path": "rules[0].conditions[1].value",
+    "old_value": "50000",
+    "new_value": "75000",
+    "change_type": "rule_modified"
+  }
+end note
+
+note bottom of core_attribute_catalog
+  Operator policy:
+  - Operator Registry (code-level) defines allowed operators per data_type + arity.
+  - If allowed_operators is NULL, use defaults from the Registry.
+  - If present, treat as a per-field override (subset of Registry).
+end note
+
+' ---
+' Indexes
+' ----------------------------------
+' CREATE INDEX idx_workflows_customer_active_priority ON data_workflows(customer_id, active, priority) WHERE active = true;
+' CREATE INDEX idx_workflow_versions_workflow_status ON data_workflow_versions(workflow_id, status);
+' CREATE INDEX idx_workflow_rules_version_priority ON data_workflow_rules(workflow_version_id, priority);
+' CREATE INDEX idx_workflow_executions_case ON data_workflow_executions(case_id, executed_at);
+' CREATE INDEX idx_workflow_change_log_workflow ON data_workflow_change_log(workflow_id, changed_at);
+' CREATE INDEX idx_workflow_executions_matched_rule ON data_workflow_executions(matched_rule_id);
+
+@enduml

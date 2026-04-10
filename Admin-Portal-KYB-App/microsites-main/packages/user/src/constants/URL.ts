@@ -1,0 +1,16 @@
+export const URL = {
+	HOME: "/home",
+	USERS: "/team/users",
+	USERS_NEW: "/users_new",
+	USER_DETAILS: "/customers/:slug/users/:id",
+	USER_DETAILS_NEW: "/users_new/:id",
+	STANDALONE_USERS: "/users/standalone",
+	STANDALONE_USER_DETAILS: "/users/standalone/:id",
+	LOGIN: "/",
+	AUTH_ERROR: "/autherror",
+	ROLES: "/team/roles",
+	ROLES_CREATE: "/team/roles/create",
+	ROLES_EDIT: "/team/roles/:id/edit",
+	CREATE_USER: "/users/create",
+	CREATE_CUSTOMER_USER: "/customers/:slug/users/create",
+};

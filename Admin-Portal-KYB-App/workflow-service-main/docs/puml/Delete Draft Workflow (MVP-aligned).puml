@@ -1,0 +1,34 @@
+@startuml
+title Delete Draft Workflow (MVP-aligned) - TDD Compliant
+
+actor "Risk Analyst" as Analyst
+participant "UI" as UI
+participant "Workflow Service" as WF
+database  "Workflow DB" as WDB
+
+Analyst -> UI: Delete workflow
+UI -> WF: DELETE /workflows/{id}
+WF -> WF: Authorize (RBAC: CRO or Risk Analyst for drafts)
+
+WF -> WDB: SELECT * FROM workflows WHERE id=?
+alt workflow not found
+  WF --> UI: 404 Not Found
+else workflow found
+  WF -> WDB: SELECT * FROM workflow_versions WHERE workflow_id=? AND status='published'
+  alt has published versions
+    WF --> UI: 409 Conflict (cannot delete workflow with published versions)
+  else no published versions
+    WF -> WDB: SELECT * FROM workflow_versions WHERE workflow_id=? AND status='draft'
+    alt no draft versions
+      WF --> UI: 404 Not Found (no draft versions found)
+    else has draft versions
+      loop for each draft version
+        WF -> WDB: DELETE FROM workflow_rules WHERE workflow_version_id=?
+        WF -> WDB: DELETE FROM workflow_versions WHERE id=?
+      end
+      WF -> WDB: DELETE FROM workflows WHERE id=?
+      WF --> UI: 200 OK
+    end
+  end
+end
+@enduml

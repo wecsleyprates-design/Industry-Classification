@@ -1,0 +1,40 @@
+FROM python:3.10.13
+
+# Set default environment variable
+ENV ENTRY_PYTHON_SCRIPT="start.py"
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies and Doppler CLI
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y wget gnupg && \
+    # Install Doppler CLI
+    wget -qO- 'https://packages.doppler.com/public/cli/gpg.DE2A7741A397C129.key' | gpg --dearmor -o /usr/share/keyrings/doppler-archive-keyring.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/doppler-archive-keyring.gpg] https://packages.doppler.com/public/cli/deb/debian any-version main" | tee /etc/apt/sources.list.d/doppler-cli.list && \
+    apt-get update && \
+    apt-get install -y doppler && \
+    # Clean up
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+ADD requirements.txt /app/requirements.txt
+
+# Install Python dependencies
+RUN pip install -r requirements.txt
+
+# Copy all source files
+ADD . /app/
+
+# Use Doppler to run the entrypoint script
+ENTRYPOINT ["doppler", "run", "--", "/bin/sh", "/app/entrypoint.sh"]
+
+# Comment above line and uncomment below if you would like to run without Doppler
+# ENTRYPOINT ["/bin/sh", "/app/entrypoint.sh"]
+
+# Build and run examples:
+# docker build -t aiscore:1 .
+# docker run -e ENTRY_PYTHON_SCRIPT='local-start.py' aiscore:1
+# docker run -e ENTRY_PYTHON_SCRIPT='start.py' aiscore:1

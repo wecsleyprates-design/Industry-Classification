@@ -1,0 +1,114 @@
+@startuml
+title Workflow Version State Machine
+
+skinparam linetype ortho
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam roundcorner 5
+skinparam state {
+  BackgroundColor lightblue
+  BorderColor darkblue
+  FontColor black
+}
+
+state "DRAFT" as Draft {
+  [*] --> Draft : Create workflow version
+  
+  Draft : Can be edited ✓
+  Draft : Can be deleted ✓
+  Draft : Eligible for evaluation ✗
+  Draft : is_current = false
+}
+
+state "PUBLISHED" as Published {
+  Published : Immutable ✗
+  Published : Cannot be deleted ✗
+  Published : Eligible for evaluation ✓\n(if workflow.active = true)
+  Published : is_current = true
+}
+
+state "ARCHIVED" as Archived {
+  Archived : Immutable ✗
+  Archived : Cannot be deleted ✗
+  Archived : Eligible for evaluation ✗
+  Archived : is_current = false
+}
+
+[*] --> Draft : POST /workflows\n(create new workflow)
+
+Draft --> Draft : PUT /workflow-versions/{id}\n(edit rules/conditions)
+
+Draft --> Published : POST /workflow-versions/{id}:publish\n(first publish)
+
+Published --> Archived : POST /workflow-versions/{new_id}:publish\n(publish new version)
+
+Draft --> [*] : DELETE /workflow-versions/{id}\n(delete draft only)
+
+note right of Draft
+  **DRAFT State**
+  
+  **Actions Allowed:**
+  - Edit rules and conditions
+  - Delete the version (hard delete)
+  - Publish to make it active
+  
+  **Actions NOT Allowed:**
+  - Cannot be used for evaluation
+  - Cannot be archived directly
+end note
+
+note right of Published
+  **PUBLISHED State**
+  
+  **Actions Allowed:**
+  - Used for workflow evaluation\n  (only if workflow.active = true)
+  - Can be activated/deactivated\n  (toggle workflow.active)
+  - Can be viewed/exported
+  - Can create new version (DRAFT)
+  
+  **Actions NOT Allowed:**
+  - Cannot be edited (immutable)
+  - Cannot be deleted
+  - Cannot be directly archived
+  (only archived when new version published)
+  - Cannot "unpublish" or "set to draft"
+end note
+
+note right of Archived
+  **ARCHIVED State**
+  
+  **Purpose:**
+  - Maintains audit trail
+  - Preserves historical decisions
+  - Reference for change logs
+  
+  **Actions NOT Allowed:**
+  - Cannot be edited
+  - Cannot be deleted
+  - Cannot be republished
+  - Cannot be used for evaluation
+end note
+
+note bottom
+  **State Transition Rules:**
+  
+  1. **DRAFT → PUBLISHED**: Only when publishing (one-way transition)
+  2. **PUBLISHED → ARCHIVED**: Automatically when new version is published
+  3. **DRAFT → [DELETED]**: Only draft versions can be deleted
+  4. **ARCHIVED → [NO TRANSITIONS]**: Archived versions are immutable
+  5. **PUBLISHED → DRAFT**: NOT POSSIBLE (must create new version)
+  
+  **Constraints:**
+  - Only one PUBLISHED version per workflow (is_current=true)
+  - Multiple ARCHIVED versions allowed per workflow
+  - Version numbers are sequential and unique per workflow
+  - Evaluation eligibility requires: PUBLISHED + workflow.active=true
+  
+  **Note:** The workflow entity has an `active` boolean field that controls
+  evaluation eligibility independently of version status. This is separate
+  from the version state machine shown above.
+end note
+
+@enduml
+
+

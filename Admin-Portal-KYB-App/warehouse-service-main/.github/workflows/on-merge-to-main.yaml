@@ -1,0 +1,65 @@
+name: Deploy to Dev & QA on Merge
+
+run-name: "Deploy to Dev + QA: ${{ github.event.head_commit.message }}"
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/**'
+      - 'README.md'
+      - 'docs/**'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-to-dev:
+    name: Deploy to Development
+    uses: ./.github/workflows/deploy.yaml
+    with:
+      environment: development
+      ref_to_build: main
+    secrets: inherit
+
+  deploy-to-qa1:
+    name: Deploy to QA1
+    uses: ./.github/workflows/deploy.yaml
+    with:
+      environment: qa1
+      ref_to_build: main
+    secrets: inherit
+
+  deploy-to-qa2:
+    name: Deploy to QA2
+    uses: ./.github/workflows/deploy.yaml
+    with:
+      environment: qa2
+      ref_to_build: main
+    secrets: inherit
+
+  deploy-to-qa3:
+    name: Deploy to QA3
+    uses: ./.github/workflows/deploy.yaml
+    with:
+      environment: qa3
+      ref_to_build: main
+    secrets: inherit
+
+  deploy-to-qa4:
+    name: Deploy to QA4
+    uses: ./.github/workflows/deploy.yaml
+    with:
+      environment: qa4
+      ref_to_build: main
+    secrets: inherit
+
+  deploy-to-qa5:
+    name: Deploy to QA5
+    uses: ./.github/workflows/deploy.yaml
+    with:
+      environment: qa5
+      ref_to_build: main
+    secrets: inherit

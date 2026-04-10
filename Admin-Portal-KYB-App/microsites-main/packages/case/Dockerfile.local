@@ -1,0 +1,47 @@
+# Use official Node.js base image
+FROM node:24-alpine
+
+# Set working directory
+WORKDIR /app
+
+# Accept build argument for npm_token
+ARG NPM_TOKEN
+
+# Install dependencies for builds and development tooling
+RUN apk add --no-cache make git bash inotify-tools
+
+# Create .npmrc file with authentication
+RUN if [ -n "$NPM_TOKEN" ]; then \
+    echo "//npm.pkg.github.com/:_authToken=$NPM_TOKEN" > .npmrc; \
+    echo "@joinworth:registry=https://npm.pkg.github.com" >> .npmrc; \
+    echo "always-auth=true" >> .npmrc; \
+    else \
+    echo "Warning: No NPM_TOKEN provided, private packages may fail to install"; \
+    fi
+
+# Copy package files first for layer caching
+COPY package*.json ./
+
+# Install Doppler CLI
+RUN wget -q -t3 'https://packages.doppler.com/public/cli/rsa.8004D9FF50437357.key' -O /etc/apk/keys/cli@doppler-8004D9FF50437357.rsa.pub && \
+    echo 'https://packages.doppler.com/public/cli/alpine/any-version/main' | tee -a /etc/apk/repositories && \
+    apk add doppler
+
+# Install dependencies without running postinstall scripts
+RUN npm ci --ignore-scripts
+
+# Copy all remaining app files
+COPY . .
+
+# Expose Vite preview server port
+EXPOSE 5177
+
+# Set environment variables for Vite preview server
+ENV HOST=0.0.0.0
+ENV PORT=5177
+
+# Build the application when container starts (not during image build)
+CMD ["sh", "-c", "npm run build:doppler && npm run preview:doppler"]
+
+# Uncomment the below to run the application outside of the host app
+# CMD ["sh", "-c", "npm run build:doppler && npm run start:doppler"]

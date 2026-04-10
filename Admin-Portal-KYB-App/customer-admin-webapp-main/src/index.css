@@ -1,0 +1,196 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+@source "../node_modules/react-tailwindcss-datepicker/dist/**/*.js";
+
+@theme {
+	--font-family-sans: "Inter", sans-serif;
+	--color-dark-blue: #050038;
+}
+
+@layer components {
+	.left-pr-pic {
+		margin-left: -25px;
+	}
+
+	.right-pro-pic {
+		margin-right: -25px;
+	}
+
+	.d-img-wrap {
+		background: url("../public/pattern.svg") no-repeat center center;
+		background-size: cover;
+	}
+
+	.main-bg {
+		background: url("/public/login-bg.svg") no-repeat 100% 46px;
+		background-size: contain;
+	}
+	.user-banner-img {
+		position: relative;
+		z-index: 1;
+	}
+
+	.option-divider {
+		position: relative;
+	}
+
+	.option-divider::before {
+		content: "";
+		position: absolute;
+		width: calc(50% - 1.4em);
+		height: 1px;
+		background: #dfdfdf;
+		left: 0px;
+		top: 50%;
+	}
+
+	.option-divider::after {
+		content: "";
+		position: absolute;
+		width: calc(50% - 1.4em);
+		height: 1px;
+		background: #dfdfdf;
+		right: 0px;
+		top: 50%;
+	}
+	.clip-bottom {
+		clip-path: polygon(50% 0, 100% 100%, 0 100%);
+	}
+
+	@media (max-width: 1199px) {
+		.main-bg {
+			background: url(/public/login-bg.svg) no-repeat 100% 100%;
+			background-size: 58%;
+		}
+	}
+
+	@media (max-width: 575px) {
+		.main-bg {
+			background: url(/public/login-bg.svg) no-repeat 100% 100%;
+			background-size: 73%;
+			min-height: 100vh;
+		}
+	}
+}
+
+/* Target the root wrapper added by the library and any custom class you may pass.
+   Use both to be resilient based on how you render the component. */
+.react-phone-number-input,
+.custom-phone,
+.PhoneInput {
+	display: flex;
+	align-items: center;
+	height: 44px;
+	width: 100%;
+	padding: 0 12px;
+	border-radius: 0.5rem; /* rounded-lg */
+	border: 1px solid #e5e7eb; /* neutral border */
+	background: #ffffff;
+	box-sizing: border-box;
+	transition: box-shadow 0.12s, border-color 0.12s;
+}
+
+.PhoneInput--disabled {
+	background-color: #f9fafb !important;
+	color: #6b7280 !important;
+}
+
+.custom-phone input:disabled {
+	color: #6b7280 !important;
+}
+
+/* Focus style on wrapper (keyboard/tab focus applies to input — style wrapper when input focused) */
+.react-phone-number-input:focus-within,
+.custom-phone:focus-within,
+.PhoneInput:focus-within {
+	border-color: #1f2937;
+	border-width: 2px;
+	/* box-shadow: 0 0 0 4px rgba(37,99,235,0.08); */
+}
+
+/* Country/flag area (left side) */
+.react-phone-number-input__country,
+.react-phone-number-input__country-select,
+.PhoneInputCountry {
+	display: flex;
+	align-items: center;
+	gap: 8px; /* spacing between flag and dial code */
+	padding-right: 12px;
+	padding-left: 0;
+	margin-right: 0;
+	height: 100%;
+	border-right: 1px solid #e5e7eb; /* vertical divider */
+	box-sizing: border-box;
+}
+
+/* Make the flag area compact so it doesn't change the input height */
+.react-phone-number-input__icon,
+.react-phone-number-input__country__icon,
+.react-phone-number-input__country-flag,
+.PhoneInputCountryIcon {
+	line-height: 1;
+	font-size: 18px;
+	display: inline-block;
+	vertical-align: middle;
+}
+
+/* Dial code (e.g. +1) styling */
+.react-phone-number-input__country .react-phone-number-input__country-select,
+.react-phone-number-input__country .react-phone-number-input__country,
+.PhoneInputCountry .PhoneInputCountrySelect {
+	margin: 0;
+	padding: 0;
+	font-size: 14px;
+	color: #111827; /* same as input text */
+}
+
+/* Make the country select non-clickable visually (you already set disabled in props) */
+.react-phone-number-input__country,
+.react-phone-number-input__country * {
+	pointer-events: none;
+}
+
+/* Main input area */
+.react-phone-number-input__input,
+.PhoneInputInput,
+.custom-phone input {
+	flex: 1 1 auto;
+	height: 100%;
+	border: none;
+	outline: none;
+	background: transparent;
+	font-size: 14px;
+	line-height: 1.2;
+	color: #1f2937; /* input text color from Figma */
+	padding-left: 12px; /* breathing room after the divider */
+	box-sizing: border-box;
+}
+
+/* Placeholder color */
+.react-phone-number-input__input::placeholder,
+.custom-phone input::placeholder,
+.PhoneInputInput::placeholder {
+	color: #9ca3af;
+}
+
+/* Error state - make wrapper border red and small red text below (the text below is assumed to be rendered by you) */
+.react-phone-number-input.error,
+.custom-phone.error,
+.PhoneInput.error {
+	border-color: #dc2626;
+}
+
+/* Makes the dropdown arrow (caret icon) larger and bolder */
+.PhoneInputCountrySelectArrow {
+	width: 8px !important; /* increase from default ~6px */
+	height: 8px !important;
+	margin-left: 6px;
+	border-bottom-width: 2px !important;
+	border-right-width: 2px !important;
+	opacity: 1 !important;
+}
+
+/* Optional: fine-tune spacing in the flag area */
+.PhoneInputCountry {
+	padding-right: 16px;
+}

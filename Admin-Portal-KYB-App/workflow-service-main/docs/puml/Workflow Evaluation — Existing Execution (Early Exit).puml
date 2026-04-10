@@ -1,0 +1,47 @@
+	@startuml
+	title Workflow Evaluation — Existing Execution (Early Exit)
+
+	skinparam linetype ortho
+	skinparam shadowing false
+	skinparam backgroundColor white
+	skinparam roundcorner 5
+
+	actor Kafka as Kafka
+	participant "Workflow Service" as WF
+	participant "Case Service" as CASE
+	database "Workflow DB" as WDB
+
+	== Trigger: case.status = SUBMITTED ==
+	Kafka -> WF : onCaseStatusUpdated(case_id, status="SUBMITTED", customer_id, facts?)
+	activate WF
+
+	WF -> WF : compute inputs_hash(customer_id, case_id, facts)
+	WF -> WDB : SELECT * FROM workflow_executions WHERE inputs_hash=?
+	WDB --> WF : existing_execution? (row | null)
+
+	alt Existing execution found (same inputs)
+		note right of WF
+			Idempotent exit:
+			• No new evaluation
+			• No new decision event (MVP)
+			• Ensure case reflects outcome
+		end note
+
+		WF -> CASE : GET /cases/{id}
+		CASE --> WF : case {status, ...}
+
+		alt Case status != existing_execution.outcome
+			WF -> CASE : PATCH /cases/{id}/status {status=existing_execution.outcome}
+			CASE --> WF : 200 OK
+		else Case already aligned
+			WF -> WF : no-op
+		end
+
+		WF -> WDB : append evaluation_log (reason = "duplicate_inputs")
+		deactivate WF
+		return EXIT (early stop)
+	else Unexpected — no execution (handled in other SQ)
+		WF -> WF : (out-of-scope for this SQ)
+	end
+
+	@enduml

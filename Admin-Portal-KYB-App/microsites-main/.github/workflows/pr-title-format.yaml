@@ -1,0 +1,351 @@
+name: PR Title Validation
+permissions:
+  contents: write
+  pull-requests: write
+on:
+  pull_request:
+    types: [edited, opened, synchronize, reopened, ready_for_review]
+jobs:
+  verify_title_format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const title = context.payload.pull_request.title;
+            const baseBranch = context.payload.pull_request.base.ref;
+            const prNumber = context.payload.pull_request.number;
+            
+            // Conventional commit types (https://github.com/conventional-changelog/commitlint/?tab=readme-ov-file#what-is-commitlint)
+            const conventionalTypes = ['build', 'chore', 'ci', 'docs', 'feat', 'fix', 'perf', 'refactor', 'revert', 'style', 'test'];
+            const typePattern = new RegExp(`^[A-Z]+-[0-9]+:\\s*(${conventionalTypes.join('|')})(\\(.+\\))?:\\s*.+`);
+            const typePatternNoJira = new RegExp(`(${conventionalTypes.join('|')})(\\(.+\\))?:\\s*.+`);
+            
+            const hasJIRA = /^[A-Z]+-[0-9]+:/.test(title);
+            const hasNOJIRA = /#(NO_JIRA)/.test(title);
+            const hasConventionalType = typePattern.test(title) || (hasNOJIRA && typePatternNoJira.test(title));
+            const hasFF = /#(LIVE|FLAG)/.test(title);
+            const isReleaseBranch = /^release\/.+/.test(baseBranch);
+            const hasObjective = /#(HOTFIX|FAST|REGULAR)/.test(title);
+            
+            const commentIdentifier = '<!-- PR_TITLE_VALIDATION_COMMENT -->';
+            let validationErrors = [];
+            
+            // Detect changed microsites
+            const { execSync } = require('child_process');
+            let changedMicrosites = new Set();
+            
+            try {
+              // Get the list of changed files in this PR
+              const baseSha = context.payload.pull_request.base.sha;
+              const headSha = context.payload.pull_request.head.sha;
+              
+              const diffOutput = execSync(
+                `git diff --name-only ${baseSha}...${headSha}`,
+                { encoding: 'utf-8' }
+              );
+              
+              const changedFiles = diffOutput.split('\n').filter(Boolean);
+              
+              // Extract microsite names from packages/* paths
+              changedFiles.forEach(file => {
+                const match = file.match(/^packages\/([^\/]+)\//);
+                if (match) {
+                  const micrositeName = match[1].toUpperCase();
+                  changedMicrosites.add(micrositeName);
+                }
+              });
+              
+              core.info(`Detected changed microsites: ${Array.from(changedMicrosites).join(', ')}`);
+            } catch (error) {
+              core.warning(`Failed to detect changed microsites: ${error.message}`);
+            }
+            
+            // Check if title has the expected microsite tags
+            let hasMicrositeTags = true;
+            let missingTags = [];
+            
+            if (changedMicrosites.size > 0) {
+              changedMicrosites.forEach(microsite => {
+                const tagPattern = new RegExp(`#${microsite}\\b`);
+                if (!tagPattern.test(title)) {
+                  hasMicrositeTags = false;
+                  missingTags.push(`#${microsite}`);
+                }
+              });
+            }
+            
+            // Check JIRA requirement
+            if (!hasJIRA && !hasNOJIRA) {
+              validationErrors.push('❌ Title must begin with a JIRA ID (e.g., "WIN-123:") or contain #NO_JIRA');
+            }
+            
+            // Check conventional commit type
+            if (!hasConventionalType) {
+              validationErrors.push(`❌ Title must include a conventional commit type: ${conventionalTypes.join(', ')}`);
+            }
+            
+            // Check feature flag tag
+            if (!hasFF) {
+              validationErrors.push('❌ Title must include #FLAG (if changes can be disabled by feature flag) or #LIVE (otherwise)');
+            }
+            
+            // Auto-add microsite tags to PR title if missing (ONLY if tags are missing)
+            let titleUpdated = false;
+            if (!hasMicrositeTags && changedMicrosites.size > 0 && missingTags.length > 0) {
+              // Generate only the missing tags
+              const missingTagsStr = missingTags.sort().join(' ');
+              
+              // Extract JIRA ID if present
+              const jiraMatch = title.match(/^([A-Z]+-[0-9]+):?\s*/);
+              let newTitle = '';
+              
+              if (jiraMatch) {
+                const jiraId = jiraMatch[1];
+                const restOfTitle = title.substring(jiraMatch[0].length);
+                // Insert missing microsite tags after JIRA ID
+                newTitle = `${jiraId}: ${missingTagsStr} ${restOfTitle}`.trim();
+              } else {
+                // Insert missing microsite tags at the beginning
+                newTitle = `${missingTagsStr} ${title}`.trim();
+              }
+              
+              // Update the PR title
+              try {
+                await github.rest.pulls.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber,
+                  title: newTitle,
+                });
+                
+                core.info(`Updated PR title from "${title}" to "${newTitle}"`);
+                titleUpdated = true;
+                
+                // Add a comment about the auto-update
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body: `🤖 **Auto-updated PR title**\n\nAdded missing microsite tags ${missingTagsStr} based on detected changes.\n\n**Previous:** \`${title}\`\n**Updated:** \`${newTitle}\``
+                });
+              } catch (error) {
+                core.warning(`Failed to update PR title: ${error.message}`);
+                validationErrors.push(`❌ Title must include microsite tags: ${missingTags.join(' ')}`);
+              }
+            } else if (!hasMicrositeTags && changedMicrosites.size > 0) {
+              // If we get here, there are missing tags but we didn't update
+              validationErrors.push(`❌ Title must include microsite tags: ${missingTags.join(' ')}`);
+            }
+            
+            // Check release branch requirements
+            if (isReleaseBranch && !hasObjective) {
+              validationErrors.push(`❌ PRs targeting release branch "${baseBranch}" must contain #HOTFIX or #FAST`);
+            }
+            
+            // Get existing comments to find and replace our comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+            
+            const existingComment = comments.find(comment => 
+              comment.body.includes(commentIdentifier)
+            );
+            
+            let commentBody;
+            
+            // Only show validation errors if title wasn't auto-updated
+            if (validationErrors.length > 0 && !titleUpdated) {
+              // Create error comment
+              let errorMessage = `${commentIdentifier}
+            ## 🚨 PR Title Validation Failed
+                        
+            **Current title:** \`${title}\`
+                        
+            **Issues found:**
+            ${validationErrors.map(error => `- ${error}`).join('\n')}`;
+              
+              if (changedMicrosites.size > 0) {
+                errorMessage += `
+            
+            **Detected changed microsites:** ${Array.from(changedMicrosites).join(', ')}`;
+              }
+              
+              errorMessage += `
+            
+            **Expected format:**
+            - \`JIRA-123: feat: #MICROSITE Description #FLAG\` or \`JIRA-123: fix: #MICROSITE Description #LIVE\`
+            - With optional scope: \`JIRA-123: feat(auth): #CASE Description #FLAG\`
+            - Or use \`#NO_JIRA\`: \`feat: #DASHBOARD Description #NO_JIRA #LIVE\`
+            - For release branches: include \`#HOTFIX\` or \`#FAST\`
+            - Microsite tags (like #CASE, #DASHBOARD, #CUSTOMER, #USER) are auto-added based on changed folders
+            
+            **Valid types:** ${conventionalTypes.join(', ')}
+            
+            📚 [Conventional Commits Reference](https://github.com/conventional-changelog/commitlint/?tab=readme-ov-file#what-is-commitlint)
+                        
+            Please edit the PR title to match the expected format. This check will automatically re-run when the title is updated.`;
+              
+              commentBody = errorMessage;
+              
+              // Fail the workflow
+              core.setFailed('PR title validation failed. See comment for details.');
+            } else {
+              // Create success comment
+              let successMessage = `${commentIdentifier}
+            ## ✅ PR Title Validation Passed
+                        
+            **Title:** \`${title}\``;
+              
+              if (changedMicrosites.size > 0) {
+                successMessage += `
+            
+            **Changed microsites:** ${Array.from(changedMicrosites).join(', ')}`;
+              }
+              
+              successMessage += `
+            
+            All validation checks passed! 🎉`;
+              
+              commentBody = successMessage;
+            }
+            
+            if (existingComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: commentBody,
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body: commentBody,
+              });
+            }
+            
+            // Add microsite changes comment if microsites were detected
+            if (changedMicrosites.size > 0) {
+              const micrositeCommentIdentifier = '<!-- MICROSITE_CHANGES_COMMENT -->';
+              
+              const existingMicrositeComment = comments.find(comment => 
+                comment.body.includes(micrositeCommentIdentifier)
+              );
+              
+              // Build the list of changed files per microsite
+              let micrositeDetails = '';
+              try {
+                const baseSha = context.payload.pull_request.base.sha;
+                const headSha = context.payload.pull_request.head.sha;
+                
+                const diffOutput = execSync(
+                  `git diff --name-only ${baseSha}...${headSha}`,
+                  { encoding: 'utf-8' }
+                );
+                
+                const changedFiles = diffOutput.split('\n').filter(Boolean);
+                
+                // Group files by microsite
+                const micrositeFiles = {};
+                changedFiles.forEach(file => {
+                  const match = file.match(/^packages\/([^\/]+)\//);
+                  if (match) {
+                    const micrositeName = match[1];
+                    if (!micrositeFiles[micrositeName]) {
+                      micrositeFiles[micrositeName] = [];
+                    }
+                    micrositeFiles[micrositeName].push(file);
+                  }
+                });
+                
+                // Build details for each microsite
+                for (const [microsite, files] of Object.entries(micrositeFiles)) {
+                  const fileCount = files.length;
+                  const sampleFiles = files.slice(0, 5); // Show max 5 files
+                  const hasMore = fileCount > 5;
+                  
+                  micrositeDetails += `\n### 📦 ${microsite.toUpperCase()}\n`;
+                  micrositeDetails += `- **Files changed:** ${fileCount}\n`;
+                  micrositeDetails += `- **Sample files:**\n`;
+                  sampleFiles.forEach(file => {
+                    micrositeDetails += `  - \`${file}\`\n`;
+                  });
+                  if (hasMore) {
+                    micrositeDetails += `  - _...and ${fileCount - 5} more files_\n`;
+                  }
+                }
+              } catch (error) {
+                core.warning(`Failed to get detailed file changes: ${error.message}`);
+              }
+              
+              const micrositeCommentBody = `${micrositeCommentIdentifier}
+            ## 🎯 Microsite Changes Detected
+            
+            This PR includes changes in the following microsite(s):
+            
+            **Affected Microsites:** ${Array.from(changedMicrosites).map(m => `\`#${m}\``).join(', ')}
+            ${micrositeDetails}
+            
+            > 💡 **Note:** The PR title should include hashtags for all affected microsites (e.g., ${Array.from(changedMicrosites).map(m => `#${m}`).join(' ')}) to help with tracking and filtering.`;
+              
+              if (existingMicrositeComment) {
+                // Update existing comment
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: existingMicrositeComment.id,
+                  body: micrositeCommentBody,
+                });
+                core.info('Updated microsite changes comment');
+              } else {
+                // Create new comment
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: prNumber,
+                  body: micrositeCommentBody,
+                });
+                core.info('Created microsite changes comment');
+              }
+            }
+            
+            // Add JIRA link as a comment if JIRA ID is present
+            if (hasJIRA) {
+              // Extract JIRA ID using a match
+              const jiraIdMatch = title.match(/^([A-Z]+-[0-9]+):?/);
+              if (jiraIdMatch) {
+                const jiraId = jiraIdMatch[1];
+                const jiraBaseUrl = 'https://worth-ai.atlassian.net/browse/';
+                const jiraLink = `${jiraBaseUrl}${jiraId}`;
+                
+                // Check if we already added a comment for this JIRA ID
+                const jiraCommentExists = comments.find(comment =>
+                  comment.user.type === 'Bot' &&
+                  comment.body.includes(jiraId)
+                );
+                
+                if (!jiraCommentExists) {
+                  // Create a new comment with the JIRA link
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: prNumber,
+                    body: `📎 JIRA ticket: [${jiraId}](${jiraLink})`
+                  });
+                  core.info(`Added JIRA link comment for ticket ${jiraId}`);
+                } else {
+                  core.info(`JIRA link comment already exists for ticket ${jiraId}`);
+                }
+              }
+            }

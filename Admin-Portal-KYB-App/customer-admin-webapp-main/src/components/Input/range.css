@@ -1,0 +1,34 @@
+/*
+Range selector css styling
+*/
+input[type="range"] {
+	-webkit-appearance: none;
+	appearance: none;
+	width: 100%;
+	height: 8px;
+	background: #ddd;
+	border-radius: 5px;
+	cursor: pointer;
+}
+
+/* WebKit browsers */
+input[type="range"]::-webkit-slider-thumb {
+	-webkit-appearance: none;
+	appearance: none;
+	width: 24px;
+	height: 24px;
+	border-radius: 50%;
+	background: #2563eb;
+	cursor: pointer;
+	border: 0px solid #fff;
+}
+
+/* Mozilla browsers */
+input[type="range"]::-moz-range-thumb {
+	width: 24px;
+	height: 24px;
+	border-radius: 50%;
+	background: #2563eb;
+	cursor: pointer;
+	border: 0px solid #fff;
+}

@@ -1,0 +1,79 @@
+# =============================================================================
+# Workflow Service .gitattributes
+# =============================================================================
+
+# =============================================================================
+# Text file handling
+# =============================================================================
+# Set default behavior to automatically normalize line endings
+* text=auto
+
+# =============================================================================
+# Line ending specifications
+# =============================================================================
+# Force CRLF line endings for Windows compatibility
+* text eol=crlf
+
+# Shell scripts and husky hooks must use LF (Unix style) for Mac/Linux compatibility
+*.sh text eol=lf
+.husky/* text eol=lf
+
+# JavaScript files should use CRLF
+*.js text eol=crlf
+
+# JSON files should use LF (Unix style)
+*.json text eol=lf
+package.json text eol=lf
+package-lock.json text eol=lf
+
+# =============================================================================
+# Source code files
+# =============================================================================
+# TypeScript files
+*.ts text eol=crlf
+*.tsx text eol=crlf
+
+# Configuration files
+*.config.js text eol=crlf
+*.config.ts text eol=crlf
+
+# =============================================================================
+# Documentation and markup
+# =============================================================================
+# Markdown files
+*.md text eol=crlf
+
+# YAML files
+*.yml text eol=crlf
+*.yaml text eol=crlf
+
+# =============================================================================
+# Binary files
+# =============================================================================
+# Images
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.svg binary
+
+# Archives
+*.zip binary
+*.tar binary
+*.gz binary
+
+# =============================================================================
+# Git merge strategy
+# =============================================================================
+# Lock files should be merged with union strategy
+package-lock.json merge=union
+yarn.lock merge=union
+
+# =============================================================================
+# Language detection
+# =============================================================================
+# Force language detection for specific files
+*.js linguist-language=JavaScript
+*.ts linguist-language=TypeScript
+*.tsx linguist-language=TypeScript

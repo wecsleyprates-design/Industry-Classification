@@ -1,0 +1,13 @@
+{
+	"!(node_modules/**/*)*.{js,ts}": [
+    "npx prettier --write"
+  ],
+
+	"**/*.{md,yml,json,babelrc,eslintrc,prettierrc}": [
+    "npx prettier --write"
+  ],
+
+  "*.{js,ts}": [
+    "npm run lint:fix"
+  ]
+}

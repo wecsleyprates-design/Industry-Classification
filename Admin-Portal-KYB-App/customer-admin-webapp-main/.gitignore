@@ -1,0 +1,15 @@
+node_modules
+.DS_Store
+dist
+dist-ssr
+dev-dist
+build
+.env.local
+.env
+.env.development
+.env.production
+src/styles.css
+ssl/*
+!ssl/.gitkeep
+.idea
+coverage

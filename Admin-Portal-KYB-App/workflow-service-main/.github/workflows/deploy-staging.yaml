@@ -1,0 +1,69 @@
+name: Deploy to Staging
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_type:
+        description: 'Deploy latest tag or specific tag?'
+        required: true
+        type: choice
+        options:
+          - latest
+          - specific
+        default: 'latest'
+      ref_to_deploy:
+        description: 'Tag to deploy (e.g., v0.55.1) - only used when deploy_type is "specific"'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  get-tag:
+    name: Determine Release Tag to Deploy
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Get latest tag or use specific tag
+        id: tag
+        run: |
+          if [ "${{ inputs.deploy_type }}" == "latest" ]; then
+            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            if [ -z "$LATEST_TAG" ]; then
+              echo "❌ No tags found in repository"
+              exit 1
+            fi
+            echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+            echo "✅ Using latest tag: $LATEST_TAG"
+          else
+            if [ -z "${{ inputs.ref_to_deploy }}" ]; then
+              echo "❌ ref_to_deploy is required when deploy_type is 'specific'"
+              exit 1
+            fi
+            # Verify tag exists
+            if ! git rev-parse "${{ inputs.ref_to_deploy }}" >/dev/null 2>&1; then
+              echo "❌ Tag '${{ inputs.ref_to_deploy }}' not found"
+              echo "Available tags (last 10):"
+              git tag --sort=-version:refname | head -10
+              exit 1
+            fi
+            echo "tag=${{ inputs.ref_to_deploy }}" >> $GITHUB_OUTPUT
+            echo "✅ Using specific tag: ${{ inputs.ref_to_deploy }}"
+          fi
+
+  deploy:
+    name: Deploy to Staging
+    needs: get-tag
+    uses: ./.github/workflows/deploy.yaml
+    with:
+      environment: staging
+      ref_to_build: ${{ needs.get-tag.outputs.tag }}
+    secrets: inherit

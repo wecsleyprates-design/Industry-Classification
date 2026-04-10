@@ -1,0 +1,35 @@
+@startuml
+title Create & Publish Workflow (MVP-aligned)
+
+actor "Risk Analyst" as Analyst
+participant "UI: Workflow Builder" as UI
+participant "Workflow Service" as WF
+database  "Workflow DB" as WDB
+
+Analyst -> UI: Open Workflow Builder
+UI -> WF: POST /workflows {name, description}
+WF -> WDB: INSERT workflows\n (active=false, priority=?, default_action=?,\n trigger_id=SUBMITTED)
+WF -> WDB: INSERT\n workflow_versions (status='draft', snapshot={})
+WF -> WDB: Append workflow_change_log (creation)
+WF --> UI: 201 Created {workflow_id, draft_version_id}
+
+loop Edit phase (whole-tree)
+  Analyst -> UI: Edit rule tree
+  UI -> WF: PUT /workflow-versions/{id} {snapshot}
+  WF -> WF: Validate(snapshot) with attribute_catalog + operator registry
+  alt invalid
+    WF --> UI: 400\n {code: UNKNOWN_FIELD | OPERATOR_NOT_ALLOWED\n | TYPE_MISMATCH | UNREACHABLE_BRANCH}
+  else valid
+    WF -> WDB: UPDATE workflow_versions.snapshot
+    WF -> WDB: UPDATE workflow_rules (upsert)
+    WF -> WDB: Append workflow_change_log (diffs)
+    WF --> UI: 200 OK
+  end
+end
+
+Analyst -> UI: Publish draft
+UI -> WF: POST /workflow-versions/{id}:publish
+WF -> WDB: SET this version status='published', is_current=true;\n retire previous is_current
+WF -> WDB: Append workflow_change_log {status change}
+WF --> UI: 200 OK
+@enduml

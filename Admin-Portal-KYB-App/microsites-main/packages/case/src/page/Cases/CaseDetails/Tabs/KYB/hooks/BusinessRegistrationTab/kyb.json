@@ -1,0 +1,1507 @@
+{
+	"created_at": 1774369423686,
+	"expires_at": 1774369723686,
+	"key": "integration-express-cache::bb0fecf2-0fd7-4e00-ae29-13f8b69818b3::/api/v1/facts/business/f96b6364-0350-4542-bc5e-afe3f32558fc/kyb?",
+	"data": {
+		"address_match": {
+			"name": "address_match",
+			"value": "success",
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["address_verification"],
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"address_match_boolean": {
+			"name": "address_match_boolean",
+			"value": true,
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["address_match"],
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"address_registered_agent": {
+			"name": "address_registered_agent",
+			"value": null,
+			"schema": null,
+			"source": null,
+			"override": null,
+			"alternatives": []
+		},
+		"address_verification": {
+			"name": "address_verification",
+			"value": {
+				"addresses": ["354 Circle Ct, Bronx, NY, 10468"],
+				"baseAddresses": ["354 circle ct, bronx, ny, 10468"],
+				"status": "success",
+				"message": "Match identified to the submitted Office Address",
+				"label": "Office Address",
+				"sublabel": "Verified"
+			},
+			"schema": null,
+			"source": {
+				"confidence": 0.9188032746315002,
+				"platformId": 16
+			},
+			"override": null,
+			"source.confidence": 0.9188032746315002,
+			"source.platformId": 16,
+			"alternatives": []
+		},
+		"address_verification_boolean": {
+			"name": "address_verification_boolean",
+			"value": true,
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["address_verification"],
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"addresses": {
+			"name": "addresses",
+			"value": [
+				"354 Circle Ct, Bronx, NY, 10468, United States",
+				"1937 Stanley Ave, Santa Clara, CA, 95050, United States",
+				"One Apple Park Way, Cupertino, CA, 95014, United States",
+				"10600 N Tantau Ave, Cupertino, CA, 95014, United States"
+			],
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"type": "array",
+				"items": {
+					"type": "string"
+				}
+			},
+			"source": {
+				"confidence": null,
+				"platformId": null
+			},
+			"override": null,
+			"source.confidence": null,
+			"source.platformId": null,
+			"alternatives": [
+				{
+					"value": ["354 Circle Ct, Bronx, NY 10468"],
+					"source": 16,
+					"confidence": 0.9188032746315002
+				},
+				{
+					"value": [
+						"1937 STANLEY AVE, SANTA CLARA, CA, 95050-5716, USA"
+					],
+					"source": 23,
+					"confidence": 1,
+					"updatedAt": "2026-03-06T17:49:37.201Z"
+				},
+				{
+					"value": ["One Apple Park Way, Cupertino, CA 95014"],
+					"source": 22,
+					"confidence": 0.9929498434066772
+				},
+				{
+					"value": ["10600 N Tantau Ave, , Cupertino, CA, 95014"],
+					"source": 4,
+					"confidence": 0.12198400497436523,
+					"updatedAt": "2026-03-09T18:17:57.588Z"
+				},
+				{
+					"value": [
+						"1937 Stanley Ave, Santa Clara, California 95050"
+					],
+					"source": 24,
+					"confidence": 1,
+					"updatedAt": "2026-03-06T17:50:09.887Z"
+				}
+			],
+			"isNormalized": true
+		},
+		"addresses_deliverable": {
+			"name": "addresses_deliverable",
+			"value": ["354 Circle Ct, Bronx, NY, 10468"],
+			"schema": null,
+			"source": {
+				"confidence": 0.9188032746315002,
+				"platformId": 16
+			},
+			"override": null,
+			"source.confidence": 0.9188032746315002,
+			"source.platformId": 16,
+			"alternatives": []
+		},
+		"addresses_found": {
+			"name": "addresses_found",
+			"value": [
+				"1937 Stanley Ave, Santa Clara, CA, 95050, United States",
+				"One Apple Park Way, Cupertino, CA, 95014, United States",
+				"10600 N Tantau Ave, Cupertino, CA, 95014, United States"
+			],
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"type": "array",
+				"items": {
+					"type": "string"
+				}
+			},
+			"source": {
+				"confidence": null,
+				"platformId": null
+			},
+			"override": null,
+			"source.confidence": null,
+			"source.platformId": null,
+			"alternatives": [
+				{
+					"value": [
+						"1937 STANLEY AVE, SANTA CLARA, CA, 95050-5716, USA"
+					],
+					"source": 23,
+					"confidence": 1,
+					"updatedAt": "2026-03-06T17:49:37.201Z"
+				},
+				{
+					"value": ["One Apple Park Way, Cupertino, CA 95014"],
+					"source": 22,
+					"confidence": 0.9929498434066772
+				},
+				{
+					"value": ["10600 N Tantau Ave, , Cupertino, CA, 95014"],
+					"source": 4,
+					"confidence": 0.12198400497436523,
+					"updatedAt": "2026-03-09T18:17:57.588Z"
+				},
+				{
+					"value": [
+						"1937 Stanley Ave, Santa Clara, California 95050"
+					],
+					"source": 24,
+					"confidence": 1,
+					"updatedAt": "2026-03-06T17:50:09.887Z"
+				}
+			],
+			"isNormalized": true
+		},
+		"addresses_submitted": {
+			"name": "addresses_submitted",
+			"value": ["354 Circle Ct, Bronx, NY 10468"],
+			"schema": null,
+			"source": {
+				"confidence": 0.9188032746315002,
+				"platformId": 16
+			},
+			"override": null,
+			"source.confidence": 0.9188032746315002,
+			"source.platformId": 16,
+			"alternatives": []
+		},
+		"adverse_media_hits": {
+			"name": "adverse_media_hits",
+			"value": 43,
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": 27,
+				"updatedAt": "2026-03-09T18:17:18.081Z"
+			},
+			"override": null,
+			"source.confidence": null,
+			"source.platformId": 27,
+			"alternatives": []
+		},
+		"business_verified": {
+			"name": "business_verified",
+			"value": null,
+			"schema": null,
+			"source": null,
+			"override": null,
+			"alternatives": []
+		},
+		"compliance_status": {
+			"name": "compliance_status",
+			"value": "pending",
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["business_verified", "risk_score"],
+			"description": "Compliance status based on verification and risk assessment",
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"corporation": {
+			"name": "corporation",
+			"value": "Private",
+			"schema": null,
+			"source": {
+				"confidence": 1,
+				"platformId": 24,
+				"updatedAt": "2026-03-06T17:50:09.887Z"
+			},
+			"override": null,
+			"source.confidence": 1,
+			"source.platformId": 24,
+			"alternatives": []
+		},
+		"countries": {
+			"name": "countries",
+			"value": ["US"],
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["addresses"],
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"dba_found": {
+			"name": "dba_found",
+			"value": [
+				"Apple Park LLC",
+				"Apple Park Ltd",
+				"Mhc Apple Park LLC",
+				"Apple Park",
+				"Apple Park Learning Solutions Inc",
+				"Mini Apple Park Inc"
+			],
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": null
+			},
+			"override": null,
+			"source.confidence": null,
+			"source.platformId": null,
+			"alternatives": [
+				{
+					"value": [
+						"Apple Park LLC",
+						"Apple Park Ltd",
+						"Mhc Apple Park LLC",
+						"Apple Park",
+						"Apple Park Learning Solutions Inc",
+						"Mini Apple Park Inc"
+					],
+					"source": 24,
+					"confidence": 1,
+					"updatedAt": "2026-03-06T17:50:09.887Z"
+				}
+			]
+		},
+		"email": {
+			"name": "email",
+			"value": null,
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"anyOf": [
+					{
+						"type": "string",
+						"format": "email",
+						"pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+					},
+					{
+						"type": "null"
+					}
+				]
+			},
+			"source": null,
+			"override": null,
+			"alternatives": []
+		},
+		"formation_date": {
+			"name": "formation_date",
+			"value": "2018-06-05",
+			"schema": null,
+			"source": {
+				"confidence": 1,
+				"platformId": 23,
+				"updatedAt": "2026-03-06T17:49:37.201Z"
+			},
+			"override": null,
+			"source.confidence": 1,
+			"source.platformId": 23,
+			"alternatives": [
+				{
+					"value": "2020-02-24T00:00:00.000Z",
+					"source": 16,
+					"confidence": 0.9188032746315002
+				},
+				{
+					"value": "2000-01-01",
+					"source": 24,
+					"confidence": 0.2,
+					"updatedAt": "2026-03-06T17:50:09.887Z"
+				}
+			]
+		},
+		"formation_state": {
+			"name": "formation_state",
+			"value": "NY",
+			"schema": null,
+			"source": {
+				"confidence": 0.9188032746315002,
+				"platformId": 16
+			},
+			"override": null,
+			"source.confidence": 0.9188032746315002,
+			"source.platformId": 16,
+			"alternatives": []
+		},
+		"high_risk_people": {
+			"name": "high_risk_people",
+			"value": null,
+			"schema": null,
+			"source": null,
+			"override": null,
+			"alternatives": [],
+			"dependencies": ["screened_people"]
+		},
+		"idv_passed": {
+			"name": "idv_passed",
+			"value": 0,
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"type": "number"
+			},
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["idv_status"],
+			"description": "Count of successful identity verification attempts on this business - undefined if not enough data",
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"idv_passed_boolean": {
+			"name": "idv_passed_boolean",
+			"value": false,
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"type": "boolean"
+			},
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["idv_passed"],
+			"description": "Whether the business has passed identity verification true or false - undefined if not enough data",
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"idv_status": {
+			"name": "idv_status",
+			"value": {
+				"SUCCESS": 0,
+				"PENDING": 1,
+				"CANCELED": 0,
+				"EXPIRED": 0,
+				"FAILED": 0
+			},
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"type": "object",
+				"propertyNames": {
+					"type": "string",
+					"enum": [
+						"SUCCESS",
+						"PENDING",
+						"CANCELED",
+						"EXPIRED",
+						"FAILED"
+					]
+				},
+				"additionalProperties": {
+					"type": "number"
+				},
+				"required": [
+					"SUCCESS",
+					"PENDING",
+					"CANCELED",
+					"EXPIRED",
+					"FAILED"
+				]
+			},
+			"source": {
+				"confidence": null,
+				"platformId": 18
+			},
+			"override": null,
+			"description": "Overall status counts for owner identity verification attempts on this business",
+			"source.confidence": null,
+			"source.platformId": 18,
+			"alternatives": []
+		},
+		"is_sole_prop": {
+			"name": "is_sole_prop",
+			"value": false,
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["tin_submitted", "idv_passed_boolean"],
+			"description": "Whether the business is a sole proprietorship: true or false - null if not enough data",
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"kyb_complete": {
+			"name": "kyb_complete",
+			"value": false,
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["business_verified", "screened_people"],
+			"description": "Whether KYB process is complete (business verified + people screened)",
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"kyb_submitted": {
+			"name": "kyb_submitted",
+			"value": true,
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["addresses"],
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"legal_name": {
+			"name": "legal_name",
+			"value": "sdk demo 1",
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": 21,
+				"updatedAt": "2026-03-24T13:35:32.394Z"
+			},
+			"override": {
+				"value": "sdk demo 1",
+				"source": "manual",
+				"userID": "bb0fecf2-0fd7-4e00-ae29-13f8b69818b3",
+				"comment": "Changed from \"Apple Park\" to \"sdk demo 1\"",
+				"timestamp": "2026-03-24T13:35:31.832Z"
+			},
+			"source.confidence": null,
+			"source.platformId": 21,
+			"alternatives": [
+				{
+					"value": "Apple Park",
+					"source": 16,
+					"confidence": 0.9188032746315002
+				},
+				{
+					"value": "Apple Park, LLC",
+					"source": 23,
+					"confidence": 1,
+					"updatedAt": "2026-03-06T17:49:37.201Z"
+				},
+				{
+					"value": "Apple Park",
+					"source": 0,
+					"confidence": 1,
+					"updatedAt": "2026-03-24T13:01:38.993Z"
+				}
+			]
+		},
+		"minority_owned": {
+			"name": "minority_owned",
+			"value": null,
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"anyOf": [
+					{
+						"type": "boolean"
+					},
+					{
+						"type": "null"
+					}
+				]
+			},
+			"source": null,
+			"override": null,
+			"alternatives": []
+		},
+		"name_match": {
+			"name": "name_match",
+			"value": {
+				"status": "success",
+				"message": "Match Found",
+				"sublabel": ""
+			},
+			"schema": null,
+			"source": {
+				"confidence": 1,
+				"platformId": 23,
+				"updatedAt": "2026-03-06T17:49:37.201Z"
+			},
+			"override": null,
+			"source.confidence": 1,
+			"source.platformId": 23,
+			"alternatives": [
+				{
+					"value": {
+						"status": "success",
+						"message": "Match identified to the submitted Business Name",
+						"sublabel": "Verified"
+					},
+					"source": 16,
+					"confidence": 0.9188032746315002
+				}
+			]
+		},
+		"name_match_boolean": {
+			"name": "name_match_boolean",
+			"value": true,
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["name_match"],
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"names_found": {
+			"name": "names_found",
+			"value": [
+				"Apple Park LLC",
+				"Apple Park Ltd",
+				"Mhc Apple Park LLC",
+				"Apple Park",
+				"Apple Park Learning Solutions Inc",
+				"Mini Apple Park Inc",
+				"Apple Park Visitor Center",
+				"Apple Park, LLC"
+			],
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": null
+			},
+			"override": null,
+			"source.confidence": null,
+			"source.platformId": null,
+			"alternatives": [
+				{
+					"value": [
+						"Apple Park LLC",
+						"Apple Park Ltd",
+						"Mhc Apple Park LLC",
+						"Apple Park",
+						"Apple Park Learning Solutions Inc",
+						"Mini Apple Park Inc"
+					],
+					"source": 24,
+					"confidence": 1,
+					"updatedAt": "2026-03-06T17:50:09.887Z"
+				},
+				{
+					"value": "Apple Park Visitor Center",
+					"source": 4,
+					"confidence": 0.12198400497436523,
+					"updatedAt": "2026-03-09T18:17:57.588Z"
+				},
+				{
+					"value": ["Apple Park, LLC", "Apple Park, LLC"],
+					"source": 23,
+					"confidence": 1,
+					"updatedAt": "2026-03-06T17:49:37.201Z"
+				},
+				{
+					"value": "Apple Park",
+					"source": 0,
+					"confidence": 1,
+					"updatedAt": "2026-03-24T13:01:38.993Z"
+				}
+			]
+		},
+		"names_submitted": {
+			"name": "names_submitted",
+			"value": [
+				{
+					"name": "Apple Park",
+					"submitted": true
+				}
+			],
+			"schema": null,
+			"source": {
+				"confidence": 0.9188032746315002,
+				"platformId": 16
+			},
+			"override": null,
+			"source.confidence": 0.9188032746315002,
+			"source.platformId": 16,
+			"alternatives": []
+		},
+		"npi": {
+			"name": "npi",
+			"value": null,
+			"schema": null,
+			"source": null,
+			"override": null,
+			"alternatives": []
+		},
+		"people": {
+			"name": "people",
+			"value": [
+				{
+					"jurisdictions": ["us::tx"],
+					"name": "DEIDRE BAKER",
+					"titles": [],
+					"address": {}
+				},
+				{
+					"jurisdictions": ["us::tx"],
+					"name": "Brett Baker",
+					"titles": [],
+					"address": {}
+				},
+				{
+					"jurisdictions": ["us::tx"],
+					"name": "DEIDRE BAKER",
+					"titles": [],
+					"address": {}
+				},
+				{
+					"jurisdictions": ["us::tx"],
+					"name": "DEIDRE BAKER",
+					"titles": [],
+					"address": {}
+				},
+				{
+					"jurisdictions": ["us::tx"],
+					"name": "BRETT BAKER",
+					"titles": [],
+					"address": {}
+				},
+				{
+					"jurisdictions": ["us::tx"],
+					"name": "BRETT BAKER",
+					"titles": [],
+					"address": {}
+				}
+			],
+			"schema": null,
+			"source": {
+				"confidence": 1,
+				"platformId": 23,
+				"updatedAt": "2026-03-06T17:49:37.201Z"
+			},
+			"override": null,
+			"source.confidence": 1,
+			"source.platformId": 23,
+			"alternatives": [
+				{
+					"value": [
+						{
+							"name": "Leslie Knope",
+							"titles": ["CEO"],
+							"submitted": true,
+							"source": ["25e304cb-10b6-46a6-a1b5-cc0240cc85cd"],
+							"jurisdictions": ["us::ny"]
+						}
+					],
+					"source": 16,
+					"confidence": 0.9188032746315002
+				},
+				{
+					"value": [
+						{
+							"name": "Leslie Knope",
+							"titles": ["Owner/Controller"]
+						}
+					],
+					"source": 38,
+					"confidence": 0.7,
+					"updatedAt": "2026-03-24T16:23:43.519Z"
+				}
+			]
+		},
+		"pep_hits": {
+			"name": "pep_hits",
+			"value": null,
+			"schema": null,
+			"source": null,
+			"override": null,
+			"alternatives": []
+		},
+		"phone_found": {
+			"name": "phone_found",
+			"value": ["(408) 996-1010", "(408) 961-1560"],
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"anyOf": [
+					{
+						"type": "string"
+					},
+					{
+						"type": "array",
+						"items": {
+							"type": "string"
+						}
+					}
+				]
+			},
+			"source": {
+				"confidence": null,
+				"platformId": null
+			},
+			"override": null,
+			"source.confidence": null,
+			"source.platformId": null,
+			"alternatives": [
+				{
+					"value": "(408) 996-1010",
+					"source": 22,
+					"confidence": 0.9929498434066772
+				},
+				{
+					"value": "4089611560",
+					"source": 4,
+					"confidence": 0.12198400497436523,
+					"updatedAt": "2026-03-09T18:17:57.588Z"
+				}
+			],
+			"isNormalized": true
+		},
+		"primary_address": {
+			"name": "primary_address",
+			"value": {
+				"line_1": "One Apple Park Way",
+				"apartment": null,
+				"city": "Cupertino",
+				"state": "CA",
+				"country": "US",
+				"postal_code": "95014",
+				"mobile": "+14089961010",
+				"is_primary": true
+			},
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["addresses"],
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"process_completion_data": {
+			"all_kyb_processes_complete": true,
+			"last_updated": "2026-03-24T13:10:00.390Z"
+		},
+		"risk_score": {
+			"name": "risk_score",
+			"value": 0,
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["watchlist_hits", "high_risk_people"],
+			"description": "Risk score based on watchlist hits and high-risk people (0-100)",
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"sanctions_hits": {
+			"name": "sanctions_hits",
+			"value": null,
+			"schema": null,
+			"source": null,
+			"override": null,
+			"alternatives": []
+		},
+		"screened_people": {
+			"name": "screened_people",
+			"value": [
+				{
+					"fullName": "Leslie Knope",
+					"screeningResults": {
+						"watchlistHits": [],
+						"provider": "",
+						"screenedAt": "2026-03-24T16:23:43.519Z"
+					}
+				}
+			],
+			"schema": null,
+			"source": {
+				"confidence": 0.7,
+				"platformId": 38,
+				"updatedAt": "2026-03-24T16:23:43.519Z"
+			},
+			"override": null,
+			"description": "People screened by PSC flow",
+			"source.confidence": 0.7,
+			"source.platformId": 38,
+			"alternatives": []
+		},
+		"shareholder_document": {
+			"name": "shareholder_document",
+			"value": null,
+			"schema": null,
+			"source": null,
+			"override": null,
+			"alternatives": [],
+			"dependencies": ["business_verified"]
+		},
+		"sos_active": {
+			"name": "sos_active",
+			"value": true,
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["sos_filings"],
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"sos_filings": {
+			"name": "sos_filings",
+			"value": [
+				{
+					"id": "us_tx-803034916",
+					"filing_date": "2018-06-05",
+					"registration_date": "2018-06-05",
+					"entity_type": "llc",
+					"filing_name": "Apple Park, LLC",
+					"active": true,
+					"foreign_domestic": "domestic",
+					"state": "TX",
+					"url": "https://mycpa.cpa.state.tx.us/coa/",
+					"jurisdiction": "us::tx",
+					"officers": [
+						{
+							"jurisdictions": ["us::tx"],
+							"name": "DEIDRE BAKER",
+							"titles": [],
+							"address": {}
+						},
+						{
+							"jurisdictions": ["us::tx"],
+							"name": "Brett Baker",
+							"titles": [],
+							"address": {}
+						},
+						{
+							"jurisdictions": ["us::tx"],
+							"name": "DEIDRE BAKER",
+							"titles": [],
+							"address": {}
+						},
+						{
+							"jurisdictions": ["us::tx"],
+							"name": "DEIDRE BAKER",
+							"titles": [],
+							"address": {}
+						},
+						{
+							"jurisdictions": ["us::tx"],
+							"name": "BRETT BAKER",
+							"titles": [],
+							"address": {}
+						},
+						{
+							"jurisdictions": ["us::tx"],
+							"name": "BRETT BAKER",
+							"titles": [],
+							"address": {}
+						}
+					]
+				}
+			],
+			"schema": null,
+			"source": {
+				"confidence": 1,
+				"platformId": 23,
+				"updatedAt": "2026-03-06T17:49:37.201Z"
+			},
+			"override": null,
+			"source.confidence": 1,
+			"source.platformId": 23,
+			"alternatives": [
+				{
+					"value": [
+						{
+							"jurisdiction": "us::ny",
+							"id": "25e304cb-10b6-46a6-a1b5-cc0240cc85cd",
+							"internal_reference": "6a1d4643-0cf2-421b-94cd-882ebe566aca",
+							"filing_date": "2020-02-24T00:00:00.000Z",
+							"entity_type": "CORPORATION",
+							"active": true,
+							"foreign_domestic": "domestic",
+							"state": "NY",
+							"url": "https://apps.dos.ny.gov/publicInquiry/",
+							"filing_name": "Apple Park",
+							"registration_date": "2020-02-24T00:00:00.000Z",
+							"officers": [
+								{
+									"name": "Leslie Knope",
+									"titles": ["CEO"],
+									"submitted": true,
+									"source": [
+										"25e304cb-10b6-46a6-a1b5-cc0240cc85cd"
+									],
+									"jurisdictions": ["us::ny"]
+								}
+							]
+						},
+						{
+							"jurisdiction": "us::co",
+							"id": "79427584-56ce-4ffd-a414-a5abb6aa447e",
+							"internal_reference": "84dc78cf-88f0-42a8-b4e9-50650c81c3b9",
+							"filing_date": "2020-02-24T00:00:00.000Z",
+							"entity_type": "CORPORATION",
+							"active": true,
+							"foreign_domestic": "foreign",
+							"state": "CO",
+							"url": "https://www.sos.state.co.us/biz/BusinessEntityCriteriaExt.do",
+							"filing_name": "Apple Park",
+							"registration_date": "2020-02-24T00:00:00.000Z",
+							"officers": []
+						}
+					],
+					"source": 16,
+					"confidence": 0.9188032746315002
+				}
+			]
+		},
+		"sos_match": {
+			"name": "sos_match",
+			"value": "success",
+			"schema": null,
+			"source": {
+				"confidence": 1,
+				"platformId": 23,
+				"updatedAt": "2026-03-06T17:49:37.201Z"
+			},
+			"override": null,
+			"source.confidence": 1,
+			"source.platformId": 23,
+			"alternatives": [
+				{
+					"value": "success",
+					"source": 16,
+					"confidence": 0.9188032746315002
+				}
+			]
+		},
+		"sos_match_boolean": {
+			"name": "sos_match_boolean",
+			"value": true,
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["sos_match"],
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"stock_symbol": {
+			"name": "stock_symbol",
+			"value": null,
+			"schema": null,
+			"source": null,
+			"override": null,
+			"alternatives": []
+		},
+		"tin": {
+			"name": "tin",
+			"value": "942404110",
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": 21,
+				"updatedAt": "2026-03-24T13:35:32.394Z"
+			},
+			"override": {
+				"value": "942404110",
+				"source": "manual",
+				"userID": "bb0fecf2-0fd7-4e00-ae29-13f8b69818b3",
+				"comment": "Changed from \"112233445\" to \"942404110\"",
+				"timestamp": "2026-03-24T13:01:28.088Z"
+			},
+			"source.confidence": null,
+			"source.platformId": 21,
+			"alternatives": [
+				{
+					"value": "942404110",
+					"source": 16,
+					"confidence": 0.9188032746315002
+				},
+				{
+					"value": "942404110",
+					"source": 0,
+					"confidence": 1,
+					"updatedAt": "2026-03-24T13:01:38.993Z"
+				}
+			]
+		},
+		"tin_match": {
+			"name": "tin_match",
+			"value": {
+				"status": "success",
+				"message": "The IRS has a record for the submitted TIN and Business Name combination",
+				"sublabel": "Found"
+			},
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"type": "object",
+				"properties": {
+					"status": {
+						"anyOf": [
+							{
+								"type": "string",
+								"enum": ["success", "failure"]
+							},
+							{
+								"type": "null"
+							}
+						]
+					},
+					"message": {
+						"type": "string"
+					},
+					"sublabel": {
+						"type": "string"
+					}
+				},
+				"required": ["message", "sublabel"],
+				"additionalProperties": false
+			},
+			"source": {
+				"confidence": 0.9188032746315002,
+				"platformId": 16
+			},
+			"override": null,
+			"description": "An object containing details about if the Tax Identification Number submitted matches the best business candidate we found",
+			"source.confidence": 0.9188032746315002,
+			"source.platformId": 16,
+			"alternatives": []
+		},
+		"tin_match_boolean": {
+			"name": "tin_match_boolean",
+			"value": true,
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"type": "boolean"
+			},
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["tin_match"],
+			"description": "A boolean value indicating if the business Tax Identification Number matches the TIN submitted by the user",
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"tin_submitted": {
+			"name": "tin_submitted",
+			"value": "XXXXX4110",
+			"schema": null,
+			"source": {
+				"confidence": 1,
+				"platformId": 0,
+				"updatedAt": "2026-03-24T13:01:38.993Z"
+			},
+			"override": null,
+			"description": "The TIN provided for the business",
+			"source.confidence": 1,
+			"source.platformId": 0,
+			"alternatives": [
+				{
+					"value": "942404110",
+					"source": 16,
+					"confidence": 0.9188032746315002
+				},
+				{
+					"value": "XXXXX4110",
+					"source": 16,
+					"updatedAt": "2026-03-24T13:01:38.230Z"
+				}
+			]
+		},
+		"verification_status": {
+			"name": "verification_status",
+			"value": null,
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"anyOf": [
+					{
+						"type": "string"
+					},
+					{
+						"type": "null"
+					}
+				]
+			},
+			"source": null,
+			"override": null,
+			"alternatives": []
+		},
+		"veteran_owned": {
+			"name": "veteran_owned",
+			"value": null,
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"anyOf": [
+					{
+						"type": "boolean"
+					},
+					{
+						"type": "null"
+					}
+				]
+			},
+			"source": null,
+			"override": null,
+			"alternatives": []
+		},
+		"watchlist": {
+			"name": "watchlist",
+			"value": {
+				"metadata": [],
+				"message": "No Watchlist hits were identified"
+			},
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"type": "object",
+				"properties": {
+					"metadata": {
+						"type": "array",
+						"items": {
+							"type": "object",
+							"properties": {
+								"id": {
+									"type": "string"
+								},
+								"type": {
+									"type": "string"
+								},
+								"entity_type": {
+									"type": "string"
+								},
+								"metadata": {
+									"type": "object",
+									"properties": {
+										"abbr": {
+											"type": "string"
+										},
+										"title": {
+											"type": "string"
+										},
+										"agency": {
+											"type": "string"
+										},
+										"agency_abbr": {
+											"type": "string"
+										},
+										"entity_name": {
+											"type": "string"
+										}
+									},
+									"required": [
+										"abbr",
+										"title",
+										"agency",
+										"agency_abbr",
+										"entity_name"
+									],
+									"additionalProperties": false
+								},
+								"url": {
+									"anyOf": [
+										{
+											"type": "string"
+										},
+										{
+											"type": "null"
+										}
+									]
+								},
+								"list_url": {
+									"anyOf": [
+										{
+											"type": "string"
+										},
+										{
+											"type": "null"
+										}
+									]
+								},
+								"agency_information_url": {
+									"anyOf": [
+										{
+											"type": "string"
+										},
+										{
+											"type": "null"
+										}
+									]
+								},
+								"agency_list_url": {
+									"anyOf": [
+										{
+											"type": "string"
+										},
+										{
+											"type": "null"
+										}
+									]
+								},
+								"list_country": {
+									"anyOf": [
+										{
+											"type": "string"
+										},
+										{
+											"type": "null"
+										}
+									]
+								},
+								"list_region": {
+									"anyOf": [
+										{
+											"type": "string"
+										},
+										{
+											"type": "null"
+										}
+									]
+								},
+								"entity_aliases": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"addresses": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"properties": {
+											"full_address": {
+												"type": "string"
+											}
+										},
+										"required": ["full_address"],
+										"additionalProperties": false
+									}
+								},
+								"listed_at": {
+									"anyOf": [
+										{
+											"type": "string"
+										},
+										{
+											"type": "null"
+										}
+									]
+								},
+								"categories": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"score": {
+									"type": "number"
+								}
+							},
+							"required": ["id", "type", "metadata"],
+							"additionalProperties": false
+						}
+					},
+					"message": {
+						"type": "string"
+					}
+				},
+				"required": ["metadata", "message"],
+				"additionalProperties": false
+			},
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["watchlist_raw", "screened_people"],
+			"description": "Consolidated watchlist hits from business (KYB) and person (PSC) screenings",
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"watchlist_hits": {
+			"name": "watchlist_hits",
+			"value": 0,
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": -1
+			},
+			"override": null,
+			"dependencies": ["watchlist"],
+			"source.confidence": null,
+			"source.platformId": -1,
+			"alternatives": []
+		},
+		"watchlist_raw": {
+			"name": "watchlist_raw",
+			"value": {
+				"metadata": [],
+				"message": "No Watchlist hits were identified"
+			},
+			"schema": null,
+			"source": {
+				"confidence": null,
+				"platformId": null
+			},
+			"override": null,
+			"source.confidence": null,
+			"source.platformId": null,
+			"alternatives": [
+				{
+					"value": {
+						"metadata": [],
+						"message": "No Watchlist hits were identified"
+					},
+					"source": 16,
+					"confidence": 0.9188032746315002
+				}
+			]
+		},
+		"website_found": {
+			"name": "website_found",
+			"value": [
+				"http://applepark.com",
+				"http://www.apple.com",
+				"http://apple.com"
+			],
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"type": "array",
+				"items": {
+					"type": "string",
+					"format": "uri"
+				}
+			},
+			"source": {
+				"confidence": null,
+				"platformId": null
+			},
+			"override": null,
+			"source.confidence": null,
+			"source.platformId": null,
+			"alternatives": [
+				{
+					"value": ["http://applepark.com"],
+					"source": 24,
+					"confidence": 1,
+					"updatedAt": "2026-03-06T17:50:09.887Z"
+				},
+				{
+					"value": ["http://www.apple.com/"],
+					"source": 22,
+					"confidence": 0.9929498434066772
+				},
+				{
+					"value": ["http://apple.com"],
+					"source": 4,
+					"confidence": 0.12198400497436523,
+					"updatedAt": "2026-03-09T18:17:57.588Z"
+				}
+			],
+			"isNormalized": true
+		},
+		"woman_owned": {
+			"name": "woman_owned",
+			"value": null,
+			"schema": {
+				"$schema": "https://json-schema.org/draft/2020-12/schema",
+				"anyOf": [
+					{
+						"type": "boolean"
+					},
+					{
+						"type": "null"
+					}
+				]
+			},
+			"source": null,
+			"override": null,
+			"alternatives": []
+		},
+		"year_established": {
+			"name": "year_established",
+			"value": "2018",
+			"schema": null,
+			"source": {
+				"confidence": 1,
+				"platformId": 23,
+				"updatedAt": "2026-03-06T17:49:37.201Z"
+			},
+			"override": null,
+			"source.confidence": 1,
+			"source.platformId": 23,
+			"alternatives": [
+				{
+					"value": "2020",
+					"source": 16,
+					"confidence": 0.9188032746315002
+				},
+				{
+					"value": "2000",
+					"source": 24,
+					"confidence": 1,
+					"updatedAt": "2026-03-06T17:50:09.887Z"
+				}
+			]
+		},
+		"guest_owner_edits": ["mobile"]
+	}
+}

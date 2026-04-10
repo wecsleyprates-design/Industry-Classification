@@ -1,0 +1,212 @@
+name: Create Release Branch
+on:
+  workflow_dispatch:
+    inputs:
+      branchNameOption:
+        description: 'Branch name source'
+        required: true
+        type: choice
+        options:
+          - google-calendar
+          - custom
+        default: google-calendar
+      customBranchName:
+        description: 'Custom branch name (only required if "custom" is selected)'
+        required: false
+        type: string
+      tagOption:
+        description: 'Tag to create release branch from'
+        required: true
+        type: choice
+        options:
+          - latest-prod-tag
+          - custom
+        default: latest-prod-tag
+      customTagName:
+        description: 'Custom tag name (only required if "custom" is selected)'
+        required: false
+        type: string
+  
+  repository_dispatch:
+    types: [create-release-branch]
+
+permissions:
+  contents: write
+  actions: read
+  deployments: read
+  
+jobs:
+  create-release-branch:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+    
+    - name: Setup Git
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+    
+    - name: Set input values from dispatch or workflow_dispatch
+      id: inputs
+      run: |
+        if [ "${{ github.event_name }}" == "repository_dispatch" ]; then
+          echo "🔔 Triggered via repository_dispatch"
+          echo "branchNameOption=${{ github.event.client_payload.branchNameOption }}" >> $GITHUB_OUTPUT
+          echo "customBranchName=${{ github.event.client_payload.customBranchName }}" >> $GITHUB_OUTPUT
+          echo "tagOption=${{ github.event.client_payload.tagOption }}" >> $GITHUB_OUTPUT
+          echo "customTagName=${{ github.event.client_payload.customTagName }}" >> $GITHUB_OUTPUT
+        else
+          echo "🖱️ Triggered via workflow_dispatch"
+          echo "branchNameOption=${{ inputs.branchNameOption }}" >> $GITHUB_OUTPUT
+          echo "customBranchName=${{ inputs.customBranchName }}" >> $GITHUB_OUTPUT
+          echo "tagOption=${{ inputs.tagOption }}" >> $GITHUB_OUTPUT
+          echo "customTagName=${{ inputs.customTagName }}" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Set up Python for Calendar Fetch
+      if: steps.inputs.outputs.branchNameOption == 'google-calendar'
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    
+    - name: Install Python dependencies
+      if: steps.inputs.outputs.branchNameOption == 'google-calendar'
+      run: |
+        pip install google-auth google-api-python-client requests google-auth-httplib2 google-auth-oauthlib packaging
+    
+    - name: Check Google Calendar for Current Release Train
+      if: steps.inputs.outputs.branchNameOption == 'google-calendar'
+      id: calendar-fetch
+      env:
+        CALENDAR_ID: ${{ secrets.SPRINT_AND_RELEASE_CALENDAR_ID }}
+        SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_CREDENTIALS_JSON }}
+      run: |
+        echo "$SERVICE_ACCOUNT_JSON" > service-account.json
+        echo "Running calendar check script..."
+        PY_OUTPUT=$(python .github/scripts/calendar_fetch.py | tee /dev/stderr)
+        echo "Full Python output:"
+        echo "$PY_OUTPUT"
+        
+        # Extract release trains and filter only standard release branches
+        RELEASE_TRAINS=$(echo "$PY_OUTPUT" | grep -oE "release/v[0-9]+\.[0-9]+\.[0-9]+" | sort -u)
+        
+        if [ -z "$RELEASE_TRAINS" ]; then
+          echo "❌ Error: No release trains found in calendar"
+          exit 1
+        fi
+        
+        echo "Found release trains:"
+        echo "$RELEASE_TRAINS"
+        
+        # Find the highest version release branch
+        HIGHEST_RELEASE=$(echo "$RELEASE_TRAINS" | sort -t'/' -k2 -V | tail -n1)
+        
+        echo "calendar_branch=$HIGHEST_RELEASE" >> $GITHUB_OUTPUT
+        echo "✅ Highest release train found: $HIGHEST_RELEASE"
+    
+    - name: Validate custom branch name input
+      if: steps.inputs.outputs.branchNameOption == 'custom'
+      run: |
+        if [ -z "${{ steps.inputs.outputs.customBranchName }}" ]; then
+          echo "❌ Error: Custom branch name is required when 'custom' option is selected"
+          exit 1
+        fi
+    
+    - name: Set branch name
+      id: branch-name
+      run: |
+        if [ "${{ steps.inputs.outputs.branchNameOption }}" == "google-calendar" ]; then
+          BRANCH_NAME="${{ steps.calendar-fetch.outputs.calendar_branch }}"
+        else
+          BRANCH_NAME="${{ steps.inputs.outputs.customBranchName }}"
+        fi
+        
+        SANITIZED_BRANCH_NAME=$(echo "$BRANCH_NAME" | tr -d '[:space:]')
+        echo "branch_name=$SANITIZED_BRANCH_NAME" >> $GITHUB_OUTPUT
+        echo "🎯 Branch name set to: $SANITIZED_BRANCH_NAME"
+    
+    - name: Validate custom tag input
+      if: steps.inputs.outputs.tagOption == 'custom'
+      run: |
+        if [ -z "${{ steps.inputs.outputs.customTagName }}" ]; then
+          echo "❌ Error: Custom tag name is required when 'custom' option is selected"
+          exit 1
+        fi
+    
+    - name: Get latest production deployment tag
+      if: steps.inputs.outputs.tagOption == 'latest-prod-tag'
+      id: latest-prod-tag
+      run: |
+        # Get latest production deployment using GitHub API
+        DEPLOYMENT_DATA=$(curl -s \
+          -H "Authorization: Bearer ${{ secrets.PERSONAL_ACCESS_TOKEN }}" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${{ github.repository }}/deployments?environment=production&per_page=1")
+        
+        # Check if any deployments exist
+        if [ "$(echo "$DEPLOYMENT_DATA" | jq length)" -eq 0 ]; then
+          echo "❌ Error: No production deployments found"
+          exit 1
+        fi
+        
+        # Extract the ref (which could be a tag, branch, or commit SHA)
+        DEPLOYMENT_REF=$(echo "$DEPLOYMENT_DATA" | jq -r '.[0].ref')
+        
+        if [ -z "$DEPLOYMENT_REF" ] || [ "$DEPLOYMENT_REF" == "null" ]; then
+          echo "❌ Error: Could not extract ref from latest deployment"
+          exit 1
+        fi
+        
+        # Check if the ref is a tag (tags are prefixed with refs/tags/ in git)
+        if git rev-parse --verify "refs/tags/$DEPLOYMENT_REF" >/dev/null 2>&1; then
+          DEPLOYMENT_TAG="$DEPLOYMENT_REF"
+        else
+          echo "❌ Error: Deployment ref '$DEPLOYMENT_REF' does not exist in repository"
+          exit 1
+        fi
+        
+        echo "prod_tag=$DEPLOYMENT_TAG" >> $GITHUB_OUTPUT
+        echo "✅ Latest production deployment tag found: $DEPLOYMENT_TAG"
+    
+    - name: Set target tag
+      id: target-tag
+      run: |
+        if [ "${{ steps.inputs.outputs.tagOption }}" == "latest-prod-tag" ]; then
+          TARGET_TAG="${{ steps.latest-prod-tag.outputs.prod_tag }}"
+        else
+          TARGET_TAG="${{ steps.inputs.outputs.customTagName }}"
+        fi
+        
+        SANITIZED_TAG_NAME=$(echo "$TARGET_TAG" | tr -d '[:space:]')
+        echo "target_tag=$SANITIZED_TAG_NAME" >> $GITHUB_OUTPUT
+        echo "🎯 Target tag set to: $SANITIZED_TAG_NAME"
+    
+    - name: Create release branch from tag
+      run: |
+        SANITIZED_BRANCH_NAME="${{ steps.branch-name.outputs.branch_name }}"
+        TARGET_TAG="${{ steps.target-tag.outputs.target_tag }}"
+        
+        # Check if tag exists
+        if git rev-parse --verify "refs/tags/$TARGET_TAG" >/dev/null 2>&1; then
+          echo "✅ Tag '$TARGET_TAG' exists"
+          
+          # Check if branch exists on remote
+          if git ls-remote --exit-code --heads origin "$SANITIZED_BRANCH_NAME" >/dev/null 2>&1; then
+            echo "❌ Error: Branch '$SANITIZED_BRANCH_NAME' already exists on remote"
+            exit 1
+          fi
+          
+          git checkout -b "$SANITIZED_BRANCH_NAME" "refs/tags/$TARGET_TAG"
+          git push origin "$SANITIZED_BRANCH_NAME"
+          
+          echo "✅ Successfully created branch '$SANITIZED_BRANCH_NAME' from tag '$TARGET_TAG'"
+          
+        else
+          echo "❌ Error: Tag '$TARGET_TAG' does not exist in this repository"
+          exit 1
+        fi

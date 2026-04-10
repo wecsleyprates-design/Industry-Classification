@@ -1,0 +1,11 @@
+export { default as Settings } from "./SettingsTabs";
+export { default as GeneralSettings } from "./GeneralSettings";
+export { default as DesignAndBranding } from "./DesignAndBranding";
+export { default as Notifications } from "./Notifications/Notifications";
+export { default as Scoring } from "./Scores";
+export { default as Advancing } from "./Advancing";
+export { default as Manage } from "./Advancing/Manage";
+export { default as AddEndpoints } from "./Advancing/AddEndpoints";
+export { default as WebhookDetail } from "./Advancing/WebhookDetail";
+export { default as Integrations } from "./Integrations";
+export { default as FeatureSetting } from "./Feature/FeatureSetting";

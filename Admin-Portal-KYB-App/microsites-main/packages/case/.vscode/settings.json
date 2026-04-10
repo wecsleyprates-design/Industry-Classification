@@ -1,0 +1,13 @@
+{
+	"editor.defaultFormatter": "rvest.vs-code-prettier-eslint",
+	"editor.formatOnType": false, // required
+	"editor.formatOnPaste": false, // optional
+	"editor.formatOnSave": true, // optional
+	"editor.formatOnSaveMode": "file", // required to format on save
+	"vs-code-prettier-eslint.prettierLast": false, // set as "true" to run 'prettier' last not first
+	"git.confirmSync": false, // Disable confirmation dialog when syncing with Git
+	"errorLens.statusBarColorsEnabled": true, // Enable colored status bar for Error Lens extension
+	"scm.alwaysShowRepositories": true, // Always show all repositories in the Source Control Manager
+	"terminal.integrated.defaultProfile.windows": "Git Bash", // Set default terminal profile to Git Bash on Windows
+	"typescript.tsdk": "node_modules/typescript/lib"
+}

@@ -1,0 +1,136 @@
+@startuml
+title Workflow Status Transitions (with ARCHIVED)
+
+skinparam linetype ortho
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam roundcorner 5
+
+actor "Risk Analyst" as Analyst
+participant "UI: Workflow Builder" as UI
+participant "Workflow Service" as WF
+database "Workflow DB" as WDB
+
+== Initial Workflow Creation ==
+Analyst -> UI: Create new workflow
+UI -> WF: POST /workflows {name, description}
+WF -> WDB: INSERT workflows\n (active=false, priority=?, default_action=?,\n trigger_id=SUBMITTED)
+WF -> WDB: INSERT workflow_versions\n (status='DRAFT', snapshot={}, version_number=1)
+WF -> WDB: Append workflow_change_log (creation)
+WF --> UI: 201 Created {workflow_id, draft_version_id}
+
+note right of WDB
+  Status: DRAFT
+  - Can be edited
+  - Can be deleted (hard delete)
+  - Not eligible for evaluation
+end note
+
+== Edit Draft Phase ==
+loop Edit phase (whole-tree)
+  Analyst -> UI: Edit rule tree
+  UI -> WF: PUT /workflow-versions/{id} {snapshot}
+  WF -> WF: Validate(snapshot) with attribute_catalog + operator registry
+  alt invalid
+    WF --> UI: 400\n {code: UNKNOWN_FIELD | OPERATOR_NOT_ALLOWED\n | TYPE_MISMATCH | UNREACHABLE_BRANCH}
+  else valid
+    WF -> WDB: UPDATE workflow_versions.snapshot\n (status remains 'DRAFT')
+    WF -> WDB: UPDATE workflow_rules (upsert)
+    WF -> WDB: Append workflow_change_log (diffs)
+    WF --> UI: 200 OK
+  end
+end
+
+note right of WDB
+  Status: DRAFT (still)
+  - Still editable
+  - Still deletable
+  - Still not eligible for evaluation
+end note
+
+== Publish Draft ==
+Analyst -> UI: Publish draft
+UI -> WF: POST /workflow-versions/{id}:publish
+WF -> WDB: SET this version status='PUBLISHED', is_current=true,\n published_at=NOW()
+WF -> WDB: Append workflow_change_log {status change: DRAFT → PUBLISHED}
+WF --> UI: 200 OK
+
+note right of WDB
+  Status: PUBLISHED
+  - Immutable (cannot be edited)
+  - Cannot be deleted
+  - Eligible for evaluation
+  - is_current=true
+end note
+
+== Create New Version from Published ==
+Analyst -> UI: Create new version from published
+UI -> WF: POST /workflows/{id}/versions
+WF -> WDB: INSERT workflow_versions\n (status='DRAFT', snapshot=copy_from_published,\n version_number=2)
+WF -> WDB: Append workflow_change_log (new version created)
+WF --> UI: 201 Created {new_draft_version_id}
+
+note right of WDB
+  Previous version: PUBLISHED (still)
+  New version: DRAFT
+  - Previous remains immutable
+  - New version is editable
+end note
+
+== Edit New Draft ==
+Analyst -> UI: Edit new draft version
+UI -> WF: PUT /workflow-versions/{new_id} {updated_snapshot}
+WF -> WDB: UPDATE workflow_versions.snapshot\n (status remains 'DRAFT')
+WF -> WDB: Append workflow_change_log (diffs)
+WF --> UI: 200 OK
+
+== Publish New Version (ARCHIVE Previous) ==
+Analyst -> UI: Publish new version
+UI -> WF: POST /workflow-versions/{new_id}:publish
+WF -> WDB: SET previous version status='ARCHIVED', is_current=false
+WF -> WDB: SET new version status='PUBLISHED', is_current=true,\n published_at=NOW()
+WF -> WDB: Append workflow_change_log {status change: PUBLISHED → ARCHIVED}
+WF -> WDB: Append workflow_change_log {status change: DRAFT → PUBLISHED}
+WF --> UI: 200 OK
+
+note right of WDB
+  Previous version: ARCHIVED
+  - Immutable (cannot be edited)
+  - Cannot be deleted
+  - Not eligible for evaluation
+  - is_current=false
+
+  New version: PUBLISHED
+  - Immutable (cannot be edited)
+  - Cannot be deleted
+  - Eligible for evaluation
+  - is_current=true
+end note
+
+== Status Summary ==
+note over WDB
+  Workflow Version Statuses:
+
+  DRAFT:
+  - Can be edited ✓
+  - Can be deleted ✓
+  - Eligible for evaluation ✗
+  - is_current: false
+
+  PUBLISHED:
+  - Can be edited ✗
+  - Can be deleted ✗
+  - Eligible for evaluation ✓
+  - is_current: true
+
+  ARCHIVED:
+  - Can be edited ✗
+  - Can be deleted ✗
+  - Eligible for evaluation ✗
+  - is_current: false
+end note
+
+@enduml
+
+
+

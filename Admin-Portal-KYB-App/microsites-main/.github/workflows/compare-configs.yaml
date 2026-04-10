@@ -1,0 +1,413 @@
+name: Compare Environment Variables with Doppler
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+env:
+  DOPPLER_CONFIGS: development,qa,staging,production
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      microsites: ${{ steps.detect.outputs.microsites }}
+      has_changes: ${{ steps.detect.outputs.has_changes }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed microsites
+        id: detect
+        run: |
+          # Get the list of changed files
+          if [ "${{ github.event.pull_request.base.sha }}" != "" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE_SHA="origin/${{ github.event.pull_request.base.ref }}"
+          fi
+          
+          # Get changed files in packages directory
+          CHANGED_FILES=$(git diff --name-only $BASE_SHA ${{ github.sha }} | grep '^packages/' || true)
+          
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No changes detected in packages directory"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "microsites=[]" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Extract unique microsite names from changed files
+          MICROSITES=$(echo "$CHANGED_FILES" | \
+            grep '^packages/[^/]\+/' | \
+            sed 's|^packages/\([^/]\+\)/.*|\1|' | \
+            sort -u)
+          
+          if [ -z "$MICROSITES" ]; then
+            echo "No microsite changes detected"
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "microsites=[]" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Convert to JSON array for matrix
+          MICROSITES_JSON=$(echo "$MICROSITES" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          
+          echo "Detected changed microsites: $MICROSITES_JSON"
+          echo "has_changes=true" >> $GITHUB_OUTPUT
+          echo "microsites=$MICROSITES_JSON" >> $GITHUB_OUTPUT
+
+  compare-env-vars:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        microsite: ${{ fromJson(needs.detect-changes.outputs.microsites) }}
+    env:
+      OPTIONAL_ENV_KEYS: VITE_PORT,VITE_ELECTRONIC_CONSENT,VITE_LOCAL_ESIGN,VITE_SERVICE_AUTH,VITE_SERVICE_CASE,VITE_SERVICE_INTEGRATION,VITE_SERVICE_NOTIFICATION,VITE_SERVICE_REPORT,VITE_SERVICE_SCORE,VITE_SERVICE_WORKFLOW,VITE_LD_CLIENT_KEY
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+
+      - name: Set Doppler project name
+        run: |
+          echo "DOPPLER_PROJECT=microsites-${{ matrix.microsite }}" >> $GITHUB_ENV
+
+      # Get OIDC token manually
+      - name: Get OIDC token
+        id: get_token
+        run: |
+          TOKEN=$(curl -s -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+                       "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://github.com/$GITHUB_REPOSITORY_OWNER")
+          echo "OIDC_TOKEN=$(echo $TOKEN | jq -r '.value')" >> $GITHUB_ENV
+
+      - name: Install Doppler CLI
+        uses: dopplerhq/cli-action@v3
+
+      - name: Login with OIDC token
+        run: doppler oidc login --scope=. --identity=${{ secrets.DOPPLER_ALL_PROJECTS_OIDC_ID }} --token=$OIDC_TOKEN
+
+      # Fetch secrets from all environments using doppler run
+      - name: Fetch All Environment Secrets
+        run: |
+          # Function to fetch secrets using doppler run
+          fetch_secrets() {
+            local config=$1
+            local var_name=$2
+            echo "Fetching secrets for $config from project $DOPPLER_PROJECT..."
+            
+            # Use doppler run to get environment variables, then convert to JSON
+            secrets_json=$(doppler run -p "$DOPPLER_PROJECT" -c "$config" -- node -e "
+              const secrets = {};
+              Object.keys(process.env).forEach(key => {
+                secrets[key] = process.env[key];
+              });
+              console.log(JSON.stringify(secrets));
+            ")
+            
+            echo "$var_name=$(echo "$secrets_json" | tr -d '\n')" >> $GITHUB_ENV
+          }
+          
+          # Fetch secrets for each environment
+          fetch_secrets "development" "DEV_SECRETS"
+          fetch_secrets "qa" "QA_SECRETS" 
+          fetch_secrets "staging" "STAGING_SECRETS"
+          fetch_secrets "production" "PROD_SECRETS"
+
+      - name: Compare Environment Variables
+        id: compare
+        run: |
+          # Create the comparison script
+          cat > compare_env.cjs << 'EOF'
+          const fs = require('fs');
+          const path = require('path');
+          
+          try {
+            const microsite = process.env.MICROSITE;
+            const dopplerProject = process.env.DOPPLER_PROJECT;
+            
+            // Read .ts file from the microsite package
+            let Keys = [];
+            const envConfigPath = path.resolve(__dirname, `packages/${microsite}/src/config/envConfig.ts`);
+
+            if (!fs.existsSync(envConfigPath)) {
+              throw new Error(`envConfig.ts file not found at packages/${microsite}/src/config/envConfig.ts`);
+            }
+
+            const configContent = fs.readFileSync(envConfigPath, "utf8");
+            
+            // Extract keys from the destructuring pattern
+            // Match: const { KEY1, KEY2, ... } = import.meta.env;
+            const destructuringMatch = configContent.match(/const\s*\{([^}]+)\}\s*=\s*import\.meta\.env/s);
+            
+            if (destructuringMatch) {
+              const keysString = destructuringMatch[1];
+              // Split by comma and clean up whitespace
+              envConfigKeys = keysString
+                .split(',')
+                .map(key => key.trim())
+                .filter(key => key && key !== '')
+                .sort();
+            } else {
+              throw new Error('Could not parse keys from envConfig.ts. Expected pattern: const { ... } = import.meta.env;');
+            }
+
+            console.log(`Found ${envConfigKeys.length} keys in envConfig.ts for ${microsite}`);
+
+            // Load optional keys from GitHub secret
+            const optionalKeys = process.env.OPTIONAL_ENV_KEYS
+              ? process.env.OPTIONAL_ENV_KEYS.split(',').map(k => k.trim()).filter(Boolean)
+              : [];
+            console.log(`Loaded ${optionalKeys.length} optional keys from secret`);
+            
+            // Parse secrets from environment variables
+            const parseSecrets = (secretsJson) => {
+              try {
+                return secretsJson ? JSON.parse(secretsJson) : {};
+              } catch (error) {
+                console.error('Error parsing secrets:', error.message);
+                return {};
+              }
+            };
+            
+            // Get secrets from environment variables
+            const configSecrets = {
+              'development': parseSecrets(process.env.DEV_SECRETS),
+              'qa': parseSecrets(process.env.QA_SECRETS),
+              'staging': parseSecrets(process.env.STAGING_SECRETS),
+              'production': parseSecrets(process.env.PROD_SECRETS)
+            };
+            
+            // Filter out configs that have no secrets (weren't fetched)
+            const activeConfigs = Object.entries(configSecrets)
+              .filter(([config, secrets]) => Object.keys(secrets).length > 0)
+              .map(([config]) => config);
+            
+            if (activeConfigs.length === 0) {
+              throw new Error('No environment configurations found');
+            }
+            
+            if (envConfigKeys.length === 0) {
+              throw new Error('No environment variables found in envConfig.ts');
+            }
+            
+            // Generate comparison table headers
+            const headers = ['Keys', 'envConfig.ts', ...activeConfigs.map(c => c.charAt(0).toUpperCase() + c.slice(1))];
+            const headerRow = `| ${headers.join(' | ')} |`;
+            const separatorRow = `|${headers.map(() => '-----').join('|')}|`;
+            
+            // Generate comparison table rows and track missing keys
+            let tableRows = [];
+            let missingRequiredKeys = [];
+            let allMissingKeys = [];
+            
+            for (const key of envConfigKeys) {
+              const row = [key];
+              let isMissingAnywhere = false;
+              
+              // envConfig.ts is the source of truth, so it's always present
+              row.push('✅');
+              
+              // Check each active config
+              for (const config of activeConfigs) {
+                const inConfig = configSecrets[config].hasOwnProperty(key);
+                row.push(inConfig ? '✅' : '❌');
+                if (!inConfig) isMissingAnywhere = true;
+              }
+              
+              // If missing anywhere, add to table
+              if (isMissingAnywhere) {
+                tableRows.push(`| ${row.join(' | ')} |`);
+                allMissingKeys.push(key);
+                
+                // Only add to required missing if it's not optional
+                if (!optionalKeys.includes(key)) {
+                  missingRequiredKeys.push(key);
+                }
+              }
+            }
+            
+            let fullComment;
+            
+            if (missingRequiredKeys.length === 0) {
+              // No missing required keys - show success message
+              const optionalMissingCount = allMissingKeys.length;
+              let successMessage = [
+                `## ✅ Environment Variables Comparison - All Required Keys Present! (\`${microsite}\`)`,
+                `**Project:** ${dopplerProject}`,
+                `**Configs:** ${activeConfigs.join(', ')}`,
+                '',
+                '🎉 **Great news!** All required environment variables from `envConfig.ts` are present.'
+              ];
+              
+              if (optionalMissingCount > 0) {
+                successMessage.push('');
+                successMessage.push(`ℹ️ **Note:** ${optionalMissingCount} optional key(s) are missing, but this is acceptable:`);
+                successMessage.push('```');
+                successMessage.push(allMissingKeys.filter(key => optionalKeys.includes(key)).join('\n'));
+                successMessage.push('```');
+                
+                if (tableRows.length > 0) {
+                  successMessage.push('');
+                  successMessage.push('**Detailed comparison:**');
+                  successMessage.push(headerRow);
+                  successMessage.push(separatorRow);
+                  successMessage.push(...tableRows);
+                }
+              }
+              
+              successMessage.push('');
+              successMessage.push(`**Summary:**`);
+              successMessage.push(`- Total keys in envConfig.ts: ${envConfigKeys.length}`);
+              successMessage.push(`- Missing required keys: 0`);
+              successMessage.push(`- Missing optional keys: ${optionalMissingCount}`);
+              
+              fullComment = successMessage.join('\n');
+            } else {
+              // Show missing required keys with detailed table
+              fullComment = [
+                `## ⚠️ Required Environment Variables Missing (\`${microsite}\`)`,
+                `**Project:** ${dopplerProject}`,
+                `**Configs:** ${activeConfigs.join(', ')}`,
+                '',
+                `The following **${missingRequiredKeys.length}** required key(s) are missing:`,
+                '',
+                '```',
+                missingRequiredKeys.join('\n'),
+                '```',
+                ''
+              ];
+              
+              const optionalMissingKeys = allMissingKeys.filter(key => optionalKeys.includes(key));
+              if (optionalMissingKeys.length > 0) {
+                fullComment.push(`Additionally, **${optionalMissingKeys.length}** optional key(s) are missing (acceptable):`);
+                fullComment.push('```');
+                fullComment.push(optionalMissingKeys.join('\n'));
+                fullComment.push('```');
+                fullComment.push('');
+              }
+              
+              fullComment.push('**Detailed comparison:**');
+              fullComment.push(headerRow);
+              fullComment.push(separatorRow);
+              fullComment.push(...tableRows);
+              fullComment.push('');
+              fullComment.push(`**Summary:**`);
+              fullComment.push(`- Total keys in envConfig.ts: ${envConfigKeys.length}`);
+              fullComment.push(`- Missing required keys: ${missingRequiredKeys.length}`);
+              fullComment.push(`- Missing optional keys: ${optionalMissingKeys.length}`);
+              
+              fullComment = fullComment.join('\n');
+            }
+            
+            // Save comment to file with microsite name to avoid conflicts
+            fs.writeFileSync(`pr-comment-${microsite}.md`, fullComment);
+            
+            // Log the status but don't exit yet - let PR comment step run first
+            if (missingRequiredKeys.length > 0) {
+              console.error(`❌ Missing required keys: ${missingRequiredKeys.join(', ')}`);
+              // Set output for next step to know if it should fail
+              console.log(`::set-output name=has_missing_required::true`);
+              console.log(`::set-output name=missing_required_keys::${missingRequiredKeys.join(', ')}`);
+            } else {
+              console.log(`✅ All required keys are present`);
+              console.log(`::set-output name=has_missing_required::false`);
+            }
+          } catch (error) {
+            console.error('Error during comparison:', error);
+            const errorComment = `## ❌ Environment Variables Comparison Failed (\`${process.env.MICROSITE}\`)
+            
+            An error occurred while comparing environment variables: ${error.message}
+            
+            Please check the workflow logs for more details.`;
+            
+            fs.writeFileSync(`pr-comment-${process.env.MICROSITE}.md`, errorComment);
+            console.log(`::set-output name=has_missing_required::true`);
+            console.log(`::set-output name=missing_required_keys::Error occurred during comparison`);
+          }
+          EOF
+          
+          # Run the comparison
+          MICROSITE="${{ matrix.microsite }}" DOPPLER_PROJECT="$DOPPLER_PROJECT" node compare_env.cjs
+
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const microsite = '${{ matrix.microsite }}';
+            const commentFile = `pr-comment-${microsite}.md`;
+            
+            if (!fs.existsSync(commentFile)) {
+              console.log('No comment file found, skipping PR comment');
+              return;
+            }
+            
+            const comment = fs.readFileSync(commentFile, 'utf8');
+            
+            try {
+              // Check if there's already a comment from this action for this microsite
+              const comments = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+              });
+              
+              const botComment = comments.data.find(comment => 
+                comment.user.type === 'Bot' && 
+                comment.body.includes(`(\`${microsite}\`)`) &&
+                (comment.body.includes('Environment Variables Comparison') || 
+                 comment.body.includes('Environment Variables Missing') ||
+                 comment.body.includes('Required Environment Variables Missing'))
+              );
+              
+              if (botComment) {
+                // Update existing comment
+                await github.rest.issues.updateComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  comment_id: botComment.id,
+                  body: comment
+                });
+                console.log(`Updated existing PR comment for ${microsite}`);
+              } else {
+                // Create new comment
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: context.issue.number,
+                  body: comment
+                });
+                console.log(`Created new PR comment for ${microsite}`);
+              }
+            } catch (error) {
+              console.error('Error posting PR comment:', error);
+            }
+
+      - name: Fail if required keys are missing
+        if: steps.compare.outputs.has_missing_required == 'true'
+        run: |
+          echo "❌ Workflow failed for microsite '${{ matrix.microsite }}' because required environment variables are missing:"
+          echo "${{ steps.compare.outputs.missing_required_keys }}"
+          echo ""
+          echo "Please check the PR comment above for detailed information about which keys are missing."
+          exit 1
+
+      - name: Clean up files
+        if: always()
+        run: |
+          rm -f pr-comment-${{ matrix.microsite }}.md compare_env.cjs

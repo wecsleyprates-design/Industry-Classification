@@ -1,0 +1,13 @@
+export { default as customDomain } from "./BrandSetting-subDomain.png";
+export { default as buttonColor } from "./BrandSetting-ButtonColor.png";
+export { default as buttonText } from "./BrandSetting-ButtonText.png";
+export { default as inviteEmail } from "./BrandSetting-InviteEmail.png";
+export { default as logo } from "./BrandSetting-Logo.png";
+export { default as supportEmail } from "./BrandSetting-SupportEmail.png";
+export { default as thankYouBodyMessage } from "./BrandSetting-ThankYouBodyMessage.png";
+export { default as thankYouMessageTitle } from "./BrandSetting-ThankYouMessageTitle.png";
+export { default as userAggrement } from "./BrandSetting-UserAggrement.png";
+export { default as welcomePageBackgroundColor } from "./BrandSetting-WelcomePageBackgroundColor.png";
+export { default as welcomePageBackgroundImage } from "./BrandSetting-WelcomePageBackgroundImage.png";
+export { default as ProgressionBarImage } from "./BrandSetting-ProgressBar.png";
+export { default as backgroundImage } from "./BackgroundImage.png";

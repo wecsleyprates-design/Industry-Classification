@@ -1,0 +1,6 @@
+export const DATE_FORMATS = {
+	MONTH_DAY_YEAR_TIME: "MM/DD/YYYY h:mm A",
+	MONTH_DAY_YEAR: "MM/DD/YYYY",
+	MONTH: "MMM",
+	DEFAULT: "MM/DD/YYYY",
+};

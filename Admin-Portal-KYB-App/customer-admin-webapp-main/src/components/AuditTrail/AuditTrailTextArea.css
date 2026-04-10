@@ -1,0 +1,5 @@
+textarea {
+  border: none; /* border-0 */
+  resize: none; /* disable resizing */
+  outline: none; /* remove default outline */
+}

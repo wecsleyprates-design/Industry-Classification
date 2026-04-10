@@ -1,0 +1,93 @@
+@startuml
+title Workflow Preview Evaluation (Dry-Run)
+
+skinparam linetype ortho
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam roundcorner 5
+
+actor "Risk Analyst" as Analyst
+participant "UI: Workflow Builder" as UI
+participant "Workflow Service" as WF
+database "Workflow DB" as WDB
+participant "Case Service" as CASE
+participant "Warehouse" as WH
+
+== Preview Workflow (Before Publishing) ==
+Analyst -> UI: Test workflow impact\n(dry-run mode)
+UI -> WF: POST /workflows/{id}/preview\n{case_id OR business_id, sample_size?}
+WF -> WDB: SELECT workflow + version + rules
+WDB --> WF: workflow data (draft or published)
+
+alt Preview with specific case_id
+  WF -> CASE: GET /cases/{case_id}
+  CASE --> WF: case data
+  
+else Preview with business_id (sampling)
+  WF -> CASE: GET /cases?business_id={id}&limit={sample_size}
+  CASE --> WF: sampled cases[]
+end
+
+note right of WF
+  Dry-Run Mode:
+  • No side effects
+  • No persistence
+  • No Kafka events
+  • Returns "what would happen"
+end note
+
+== Evaluation Logic ==
+WF -> WF: Evaluate trigger conditions
+alt Trigger matches
+  WF -> WH: GET /facts/{business_id}
+  WH --> WF: facts (kyc, financials, etc.)
+  
+  loop For each rule (by priority)
+    WF -> WF: Evaluate rule conditions\n(against case + facts)
+    alt Rule matches (first match wins)
+      WF -> WF: Identify matched rule + actions
+      note right
+        Actions NOT executed
+        Just returned for preview
+      end note
+      break
+    end
+  end
+  
+  alt No rule matched
+    WF -> WF: Use default_action
+  end
+else Trigger does not match
+  WF -> WF: Skip evaluation
+end
+
+== Return Preview Results ==
+WF --> UI: 200 OK\n{evaluation_result: {\n  trigger_matched,\n  matched_rule_id?,\n  applied_action[] (preview only),\n  evaluation_log\n}, sampled_cases?}
+
+UI -> UI: Display:\n• Which rule would match\n• Actions that would apply\n• Sample statistics\n• Evaluation logs
+
+note over Analyst, UI
+  Analyst can verify workflow logic
+  and make adjustments before publishing
+end note
+
+note bottom
+  **Key Difference from Real Evaluation:**
+  
+  Preview (Dry-Run):
+  ✓ Fetches real data (cases + facts)
+  ✓ Evaluates triggers and rules
+  ✗ Does NOT execute actions
+  ✗ Does NOT persist to workflow_executions
+  ✗ Does NOT publish Kafka events
+  ✗ Does NOT update case status
+  
+  Real Evaluation:
+  ✓ All of the above PLUS
+  ✓ Executes actions (set_field, etc.)
+  ✓ Persists execution logs
+  ✓ Publishes events and updates cases
+end note
+
+@enduml
+

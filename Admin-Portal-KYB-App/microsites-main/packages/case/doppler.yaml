@@ -1,0 +1,3 @@
+setup:
+  project: microsites-case
+  config: local

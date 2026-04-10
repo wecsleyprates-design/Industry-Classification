@@ -1,9 +1,20 @@
 """
-Worth AI — Full Intelligence Hub
-Three-section interactive application:
+Worth AI — Full Intelligence Hub  v2.0
+Four-section interactive application:
   1. KYB API Field Lineage     — every UCM field, source, rule, null scenario
+                                 + Admin Portal FAQ (80+ questions answered with source-code proof)
   2. NAICS/MCC 561499 Report   — root-cause analysis, charts, gaps, roadmap
   3. Pipeline Intelligence     — Pipeline A & B full picture, data lineage, diagrams
+                                 + Admin Portal Field Map (field → fact → source → code)
+  4. AI Agent                  — Ask the actual codebase (GPT + RAG on production source)
+
+Source code citations verified against:
+  integration-service-main/lib/facts/rules.ts          — Fact Engine rules (production)
+  integration-service-main/lib/facts/sources.ts        — Source getters + confidence formulas
+  integration-service-main/lib/facts/kyb/index.ts      — KYB fact definitions (1,617 lines)
+  integration-service-main/lib/aiEnrichment/aiNaicsEnrichment.ts — AI enrichment logic
+  warehouse-service-main/datapooler/                   — Pipeline B Python + SQL jobs
+  customer-admin-webapp-main/src/                      — Admin UI React components
 """
 import io
 import streamlit as st
@@ -248,7 +259,8 @@ with st.sidebar:
         kyb_page = st.radio("View",
             ["🏠 Overview", "🔎 Field Explorer",
              "📡 Source Reference", "📋 Pipeline Diagram",
-             "❓ UCM Q&A Tracker"],
+             "❓ UCM Q&A Tracker",
+             "🏢 Admin Portal FAQ"],
             label_visibility="collapsed")
         st.markdown("---")
         if kyb_page in ("🏠 Overview", "🔎 Field Explorer"):
@@ -265,15 +277,19 @@ with st.sidebar:
              "📡 Vendor Signal Deep Dive", "🤖 AI Enrichment Behaviour",
              "🔧 Gap Analysis & Roadmap", "💡 Fact Engine Rules (Correct)"],
             label_visibility="collapsed")
-    else:
+    elif section == "🔀  Pipeline A & B Deep Dive":
         pipeline_page = st.radio("View",
             ["🗺️  Full Pipeline Map", "🅐 Pipeline A Deep Dive",
              "🅑 Pipeline B Deep Dive", "📦 Storage & Tables",
-             "⚖️  Pipeline A vs B Comparison"],
+             "⚖️  Pipeline A vs B Comparison",
+             "🏢 Admin Portal Field Map"],
             label_visibility="collapsed")
+    else:  # AI Agent
+        pass  # no sub-pages
 
     st.markdown("---")
-    st.caption("Worth AI · April 2026 · Industry-Classification repo")
+    st.caption("Worth AI · v2.0 · April 2026")
+    st.caption("Sources: integration-service · warehouse-service · case-service")
 
 
 # ╔═══════════════════════════════════════════════════════════════════╗
@@ -607,6 +623,493 @@ If no valid options → fact is NULL (no valid vendor response found)""", langua
         with c1: st.metric("Total Fields Mapped", total)
         with c2: st.metric("✅ Confirmed / Closed", total - pending)
         with c3: st.metric("⏳ Pending / Open", pending)
+
+    # ══════════════════════════════════════════════════
+    # KYB PAGE: ADMIN PORTAL FAQ
+    # ══════════════════════════════════════════════════
+    elif kyb_page == "🏢 Admin Portal FAQ":
+        sh("🏢 Admin Portal FAQ — Questions Answered with Production Source-Code Proof")
+
+        card("""<b>How to use this page:</b><br>
+        Each answer is derived from <b>actual production source files</b> available in this workspace:<br>
+        &nbsp;&bull; <code>integration-service-main/lib/facts/rules.ts</code> — 6 Fact Engine rules (production)<br>
+        &nbsp;&bull; <code>integration-service-main/lib/facts/sources.ts</code> — all source getters + confidence formulas<br>
+        &nbsp;&bull; <code>integration-service-main/lib/facts/kyb/index.ts</code> — KYB fact definitions (1,617 lines)<br>
+        &nbsp;&bull; <code>integration-service-main/lib/aiEnrichment/aiNaicsEnrichment.ts</code> — AI enrichment logic<br>
+        &nbsp;&bull; <code>modeling/INDUSTRY_FACTS_GUIDE.md</code> — complete pipeline documentation<br>
+        Click any question to expand the full answer and source citation.
+        """, "card-teal")
+
+        faq_tabs = st.tabs([
+            "📋 Business Registration",
+            "🏭 Background / Industry",
+            "⚠️ NAICS 561499",
+            "📞 Contact & Firmographic",
+            "🌐 Website",
+            "🔍 Watchlists",
+            "🔀 Pipeline A vs B",
+            "⚙️ Analyst Workflow",
+            "💰 Worth Score",
+            "📊 Case Results"
+        ])
+
+        def faq_card(question, answer_html, cite_file, cite_lines, confidence="✅ Confirmed"):
+            colour = "card-green" if "✅" in confidence else ("card-amber" if "⚠️" in confidence else "card")
+            with st.expander(question):
+                st.markdown(f'<div class="card {colour}">{answer_html}</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div style="background:#0A1628;border-left:3px solid #60A5FA;'
+                    f'padding:8px 12px;border-radius:0 6px 6px 0;font-size:.82rem;margin-top:6px;">'
+                    f'<span style="color:#60A5FA;font-weight:700;">📍 Source: </span>'
+                    f'<code style="color:#93C5FD;">{cite_file}</code>&nbsp;&nbsp;'
+                    f'<span style="color:#94A3B8;">{cite_lines}</span></div>',
+                    unsafe_allow_html=True)
+
+        # ── TAB 1: Business Registration ──────────────────────────────
+        with faq_tabs[0]:
+            st.markdown("### Business Registration Sub-Tab Questions")
+            card("These questions cover the <b>Business Registration</b> card: "
+                 "Filing Status, Entity Type, Registration Date, State, Jurisdiction, Corporate Officers, TIN/EIN badge.")
+
+            faq_card(
+                "Q: What is the primary vendor that populates the Business Registration card?",
+                "<b>Middesk</b> (Secretary of State verifier, <code>platform_id=16</code>) is the primary source. "
+                "It queries the SoS registry using the submitted TIN + business name.<br>"
+                "For non-US entities: <b>Trulioo KYB</b> (<code>platform_id=38</code>) or "
+                "<b>OpenCorporates</b> (<code>platform_id=23</code>) fills in.<br><br>"
+                "<b>Confidence formula (sources.ts L232–238):</b><br>"
+                "&nbsp;&bull; Tier 1: XGBoost via <code>confidenceScoreMany()</code> → highest match prediction<br>"
+                "&nbsp;&bull; Tier 2 fallback: <code>0.15 + 0.20 per passing task</code> "
+                "(tasks: name / tin / address_verification / sos_match → max 0.95)",
+                "integration-service-main/lib/facts/sources.ts",
+                "L187–248 (middesk getter), L232–238 (task-based confidence fallback)",
+            )
+
+            faq_card(
+                "Q: Where does Filing Status 'Active' come from?",
+                "Filing Status maps from <code>sos_filings.value[n].active</code> (boolean).<br>"
+                "In <code>kyb/index.ts</code> L757: <code>active: status === 'active'</code><br>"
+                "where <code>status</code> = raw string from Middesk's <code>registrations[n].status</code>.<br><br>"
+                "OpenCorporates maps <code>current_status</code> using the <code>OC_ACTIVE_STATUSES</code> list. "
+                "For Trulioo: status mapped by <code>truliooBusinessStatusRule</code> (rules.ts L214): "
+                "completed/success → 'approved', failed/REJECTED → 'rejected'.",
+                "integration-service-main/lib/facts/kyb/index.ts",
+                "L757 (Middesk: status === 'active'), rules.ts L214–242 (truliooBusinessStatusRule)",
+            )
+
+            faq_card(
+                "Q: Why does some business show 'No Registry Data to Display'?",
+                "This appears when <code>sos_active</code> is <b>NULL</b>. NULL means "
+                "Middesk searched the SoS registry by TIN + name and <b>found no matching entity</b>.<br><br>"
+                "<b>Three causes:</b><br>"
+                "&nbsp;1. Entity not registered in any SoS database (new, small, or sole-proprietor)<br>"
+                "&nbsp;2. TIN or name mismatch — Middesk cannot locate with wrong identifiers<br>"
+                "&nbsp;3. Middesk integration has not completed yet<br><br>"
+                "<b>This is NOT a Worth confidence rule.</b> Worth does not suppress SoS data based on confidence. "
+                "If Middesk finds a record it is shown; if not found → 'No Registry Data'.",
+                "integration-service-main/lib/facts/sources.ts",
+                "L207–247 (middesk getter: returns {} on error; returns middeskRecord if found)",
+            )
+
+            faq_card(
+                "Q: How is Entity Jurisdiction Type (Domestic / Foreign / Primary) produced?",
+                "From <code>kyb/index.ts</code> L746–748:<br>"
+                "<code>const foreignDomestic = jurisdictionLowerCase === 'foreign' || "
+                "jurisdictionLowerCase === 'domestic' ? jurisdictionLowerCase : undefined</code><br><br>"
+                "The raw <code>jurisdiction</code> from Middesk's <code>registrations[n].jurisdiction</code> "
+                "is normalized. 'Primary' = first/home filing. "
+                "OpenCorporates derives it by comparing <code>home_jurisdiction_code vs jurisdiction_code</code>.",
+                "integration-service-main/lib/facts/kyb/index.ts",
+                "L746–758 (Middesk sos_filings mapping incl. foreignDomestic logic)",
+            )
+
+            faq_card(
+                "Q: What is Registration Date and which source provides it?",
+                "<code>sos_filings.value[n].filing_date</code> = SoS registration date.<br><br>"
+                "Source mapping:<br>"
+                "&nbsp;&bull; Middesk: <code>registration_date</code> from <code>registrations[n]</code> (kyb/index.ts L755)<br>"
+                "&nbsp;&bull; OpenCorporates: <code>incorporation_date</code> (L659)<br>"
+                "&nbsp;&bull; ZoomInfo: <code>zi_c_year_founded</code> converted to date (L661–666)<br>"
+                "&nbsp;&bull; Trulioo: <code>extractIncorporationDateFromTrulioo(clientData)</code> (L671–676)",
+                "integration-service-main/lib/facts/kyb/index.ts",
+                "L650–716 (formation_date multi-source), L717–769 (sos_filings with registration_date L755)",
+            )
+
+            faq_card(
+                "Q: How are Corporate Officers populated across multiple states?",
+                "Officers come from the <code>people</code> fact filtered by jurisdiction. "
+                "From kyb/index.ts L736–744:<br>"
+                "<code>officers = allPeople.filter(({ jurisdictions }) =&gt; "
+                "jurisdictions.some(j =&gt; j?.toLowerCase() === 'us::' + registration_state))</code><br><br>"
+                "Each SoS filing gets the people whose <code>jurisdictions</code> array includes that state. "
+                "Sources: Middesk registrations[n].officers, OC officers, Trulioo business.principals.",
+                "integration-service-main/lib/facts/kyb/index.ts",
+                "L736–744 (officer extraction per jurisdiction), rules.ts L76–96 (combineFacts)",
+            )
+
+            faq_card(
+                "Q: How is TIN / EIN 'Verified' vs 'Unverified' determined?",
+                "Field: <code>tin_match_boolean.value</code> (boolean). From kyb/index.ts L482–492:<br>"
+                "<code>fn: (engine) =&gt; engine.getResolvedFact('tin_match')?.value === 'success' ||<br>"
+                "engine.getResolvedFact('tin_match')?.value?.status === 'success'</code><br><br>"
+                "Middesk populates <code>tin_match</code> (L438): "
+                "<code>reviewTasks.find(task =&gt; task.key === 'tin').status</code><br>"
+                "<b>TRUE = Verified</b>: TIN+name match confirmed by IRS via Middesk<br>"
+                "<b>FALSE = Unverified</b>: no match or entity not found in IRS records",
+                "integration-service-main/lib/facts/kyb/index.ts",
+                "L429–492 (tin_match fact), L482–492 (tin_match_boolean: calculated from tin_match)",
+            )
+
+            faq_card(
+                "Q: What is the difference between Business Name, Legal Entity Name, and DBA?",
+                "<b>Business Name</b>: applicant-submitted (<code>businessDetails.name</code> → "
+                "<code>data_businesses.name</code>).<br>"
+                "<b>Legal Entity Name</b>: <code>legal_name</code> fact — Middesk-verified against SoS. "
+                "kyb/index.ts L193: <code>middesk: 'businessEntityVerification.name'</code>.<br>"
+                "<b>DBA</b>: <code>dba_found</code> fact — trade names found by vendors. "
+                "Sources: Middesk names where submitted=false (L349), ZoomInfo zi_c_names_other (L329), "
+                "OC alternate names (L319–326), Verdata seller.dba_name (L337).",
+                "integration-service-main/lib/facts/kyb/index.ts",
+                "L192–200 (legal_name), L318–343 (dba_found multi-source)",
+            )
+
+        # ── TAB 2: Background / Industry ──────────────────────────────
+        with faq_tabs[1]:
+            st.markdown("### Background Sub-Tab — Industry & Firmographic")
+
+            faq_card(
+                "Q: Where does the NAICS Code displayed in the admin portal come from?",
+                "NAICS Code displayed = <code>naics_code</code> fact from <code>rds_warehouse_public.facts</code>, "
+                "produced by <b>Pipeline A</b> (integration-service Fact Engine).<br><br>"
+                "<b>Winner selection (rules.ts L36):</b> <code>factWithHighestConfidence()</code> picks the "
+                "source with the highest XGBoost entity-match confidence. If two sources are within "
+                "<code>WEIGHT_THRESHOLD=0.05</code> (rules.ts L9), <code>weightedFactSelector()</code> "
+                "(L62) breaks the tie by source weight.<br><br>"
+                "<b>Source weights from sources.ts:</b> Middesk=2.0, OC=0.9, ZI=Trulioo=0.8, EFX=0.7, AI=0.1",
+                "integration-service-main/lib/facts/rules.ts",
+                "L8-9 (WEIGHT_THRESHOLD=0.05), L36–58 (factWithHighestConfidence), L62–75 (weightedFactSelector)",
+            )
+
+            faq_card(
+                "Q: What is MCC Code and how is it derived?",
+                "MCC (Merchant Category Code) is 4-digit. Three derivation paths:<br>"
+                "&nbsp;1. <b>AI direct</b>: GPT-5-mini returns <code>mcc_code</code> in JSON response (aiNaicsEnrichment.ts L26)<br>"
+                "&nbsp;2. <b>NAICS crosswalk</b>: <code>mcc_code_from_naics</code> fact via <code>rel_naics_mcc</code> table<br>"
+                "&nbsp;3. <b>Direct vendor</b>: Middesk/Trulioo return an MCC directly<br><br>"
+                "Final winner: <code>foundMcc?.value ?? inferredMcc?.value</code> — direct preferred over crosswalk.",
+                "integration-service-main/lib/aiEnrichment/aiNaicsEnrichment.ts",
+                "L22–35 (response schema: mcc_code field), L63 (NAICS_OF_LAST_RESORT='561499')",
+            )
+
+            faq_card(
+                "Q: What are Minority/Veteran/Woman Owned flags and where do they come from?",
+                "Three boolean facts sourced exclusively from <b>Equifax supplemental</b>. From kyb/index.ts:<br>"
+                "<code>minority_owned: equifax_supplemental.minority_business_enterprise (L220)</code><br>"
+                "<code>veteran_owned:  equifax_supplemental.veteran_owned_enterprise (L226)</code><br>"
+                "<code>woman_owned:    equifax_supplemental.woman_owned_enterprise (L232)</code><br><br>"
+                "<code>normalizeEquifaxFlag()</code> (L60–67): 'Y' → true, 'N' → false, else undefined.<br>"
+                "These are NULL when Equifax did not match the business or has no MBE/VBE/WBE flag.",
+                "integration-service-main/lib/facts/kyb/index.ts",
+                "L60–67 (normalizeEquifaxFlag), L218–235 (minority/veteran/woman_owned simpleFacts)",
+            )
+
+            faq_card(
+                "Q: How is Annual Revenue populated?",
+                "Source mapping (Pipeline B customer_table.sql, same winner-takes-all rule):<br>"
+                "&nbsp;&bull; ZoomInfo: <code>zi_c_revenue × 1000</code> (ZI stores revenue in thousands)<br>"
+                "&nbsp;&bull; Equifax: <code>efx_locamount × 1000</code><br>"
+                "If ZI wins (higher confidence): ZI revenue shown. If EFX wins: EFX revenue shown.<br>"
+                "Revenue = NULL when no vendor matched the entity (entity matching confidence = 0).",
+                "modeling/INDUSTRY_FACTS_GUIDE.md",
+                "L272–277 (Pipeline B revenue: zi vs efx winner-takes-all)",
+            )
+
+            faq_card(
+                "Q: What is NPI number and when does it appear?",
+                "NPI (National Provider Identifier) shown for <b>healthcare businesses only</b>.<br>"
+                "Source: <code>npiHealthcare</code> getter (sources.ts L395) reads from "
+                "<code>integration_data.healthcare_provider_information</code> table.<br>"
+                "A reverse NPI lookup (sources.ts L380) also runs via <code>platform_id=NPI</code>.<br>"
+                "NULL for non-healthcare businesses — this is expected behavior.",
+                "integration-service-main/lib/facts/sources.ts",
+                "L380–411 (npi_reverse_lookup + npiHealthcare getters)",
+            )
+
+        # ── TAB 3: NAICS 561499 ───────────────────────────────────────
+        with faq_tabs[2]:
+            st.markdown("### NAICS 561499 — What It Is and Why It Happens")
+
+            faq_card(
+                "Q: What is NAICS 561499 and why does Worth AI assign it?",
+                "NAICS 561499 = 'All Other Business Support Services'. Worth AI assigns it as the "
+                "<b>last resort fallback</b> when no reliable industry classification is available.<br><br>"
+                "Defined in <code>aiNaicsEnrichment.ts L63</code>:<br>"
+                "<code>public readonly NAICS_OF_LAST_RESORT = '561499';</code><br><br>"
+                "System prompt (L107–108): <i>\"If there is no evidence at all, return naics_code 561499 "
+                "and mcc_code 5614 as a last resort.\"</i><br><br>"
+                "Also applied by <code>removeNaicsCode()</code> (L187) when GPT returns a code "
+                "that does NOT exist in <code>core_naics_code</code> lookup table.",
+                "integration-service-main/lib/aiEnrichment/aiNaicsEnrichment.ts",
+                "L63 (NAICS_OF_LAST_RESORT), L107–108 (system prompt), L187–207 (removeNaicsCode)",
+            )
+
+            faq_card(
+                "Q: How is AI enrichment triggered, and what does GPT-5-mini receive?",
+                "Trigger condition from <code>DEPENDENT_FACTS</code> (aiNaicsEnrichment.ts L51–61):<br>"
+                "<code>naics_code: { maximumSources: 3, minimumSources: 1, ignoreSources: ['AINaicsEnrichment'] }</code><br>"
+                "Run if: fewer than 3 sources already returned NAICS.<br><br>"
+                "<b>Input to GPT-5-mini (getPrompt L95):</b><br>"
+                "&nbsp;&bull; Business name, address, DBA names, corporation type<br>"
+                "&nbsp;&bull; Website URL → GPT uses <code>web_search</code> tool (allowed_domains filter, L158–166)<br>"
+                "&nbsp;&bull; Existing NAICS/MCC from other sources for correction context<br><br>"
+                "No website = GPT only has name+address → higher probability of 561499 fallback.",
+                "integration-service-main/lib/aiEnrichment/aiNaicsEnrichment.ts",
+                "L51–61 (DEPENDENT_FACTS trigger logic), L95–180 (getPrompt with web_search)",
+            )
+
+            faq_card(
+                "Q: Is there a minimum confidence threshold that blocks a NAICS code from being used?",
+                "<b>No minimum threshold exists in the Fact Engine.</b><br><br>"
+                "From <code>rules.ts L36–58</code>: <code>factWithHighestConfidence()</code> selects "
+                "the source with the <b>highest available confidence</b> — even if that is 0.01. "
+                "If a source returned a value it is a candidate regardless of confidence.<br><br>"
+                "<b>Implication:</b> A NAICS code with confidence 0.10 will be stored and shown. "
+                "API response includes <code>source.confidence</code> so analysts can assess quality.",
+                "integration-service-main/lib/facts/rules.ts",
+                "L36–58 (factWithHighestConfidence — no minimum confidence check)",
+            )
+
+            faq_card(
+                "Q: Can an analyst override the NAICS code shown in the admin portal?",
+                "Yes. <code>manualOverride</code> rule (rules.ts L112) always wins over all other sources.<br><br>"
+                "<code>fn reads engine.getManualSource()?.rawResponse?.[factName]<br>"
+                "Returns {name, source: sources.manual, value, override: manualEntry}</code><br><br>"
+                "The <code>manual</code> getter (sources.ts L517–529) reads from "
+                "<code>integration_data.request_response</code> WHERE <code>request_type='fact_override'</code>.<br>"
+                "After override: <code>rds_warehouse_public.facts</code> stores the fact with "
+                "<code>override: {…}</code> field populated. Fact API shows override value.",
+                "integration-service-main/lib/facts/rules.ts + sources.ts",
+                "rules.ts L112–126 (manualOverride rule), sources.ts L517–529 (manual getter)",
+            )
+
+        # ── TAB 4: Contact & Firmographic ─────────────────────────────
+        with faq_tabs[3]:
+            st.markdown("### Contact Information & Firmographic Fields")
+
+            faq_card(
+                "Q: Where does the phone number come from?",
+                "Phone = <code>phone_found</code> fact (kyb/index.ts L276 simpleFacts):<br>"
+                "&nbsp;&bull; ZoomInfo: <code>firmographic.zi_c_phone</code><br>"
+                "&nbsp;&bull; SERP: <code>businessMatch.phone</code><br>"
+                "&nbsp;&bull; Verdata: <code>seller.phone</code><br>"
+                "&nbsp;&bull; Middesk: <code>phone_numbers[0].phone_number</code> (via middeskRaw)<br>"
+                "&nbsp;&bull; Equifax: <code>efx_phone</code><br>"
+                "Normalized to (XXX) XXX-XXXX for 10-digit numbers (L294–315). "
+                "NULL when no vendor has a phone record for this business.",
+                "integration-service-main/lib/facts/kyb/index.ts",
+                "L276–316 (phone_found simpleFact with normalization logic)",
+            )
+
+            faq_card(
+                "Q: Where does the business email come from?",
+                "Email = <code>email</code> fact. Only ONE source:<br>"
+                "<code>equifax: 'efx_email'</code> (kyb/index.ts L238)<br>"
+                "Email is NULL when Equifax did not match the business OR the Equifax record has no email. "
+                "No other vendor in the current pipeline provides email.",
+                "integration-service-main/lib/facts/kyb/index.ts",
+                "L236–239 (email simpleFact: single source = equifax efx_email)",
+            )
+
+            faq_card(
+                "Q: How are addresses verified / matched across sources?",
+                "Address verification uses <code>address_verification</code> Middesk task result. "
+                "From sources.ts L236: <code>isTaskSuccess(middesk, 'address_verification') ? 0.2 : 0</code> "
+                "contributes to the Middesk confidence score.<br><br>"
+                "The <code>addresses</code> fact aggregates from: Middesk addressSources, OC normalized_address, "
+                "ZoomInfo firmographic address, SERP businessMatch.address, Verdata seller fields. "
+                "Normalized via <code>AddressUtil.normalizeString()</code> (kyb/index.ts L171).",
+                "integration-service-main/lib/facts/kyb/index.ts",
+                "L114–173 (addresses simpleFact — 6 source mappings + normalize function)",
+            )
+
+        # ── TAB 5: Website ────────────────────────────────────────────
+        with faq_tabs[4]:
+            st.markdown("### Website Sub-Tab Questions")
+
+            faq_card(
+                "Q: How does Worth verify a business website?",
+                "Multi-layer website verification:<br>"
+                "&nbsp;1. <b>SERP scraping</b> (platform_id=22): finds website via Google Search. "
+                "Confidence: XGBoost if matched, else heuristic (0.5 base + 0.3 if local_results empty) — sources.ts L562–572<br>"
+                "&nbsp;2. <b>Google Places API</b> (platform_id=29): fetches Google business listing to verify name+address<br>"
+                "&nbsp;3. <b>AI Website Enrichment</b> (platform_id=31): GPT reads website domain to extract NAICS/MCC<br><br>"
+                "The <code>website_found</code> fact (kyb/index.ts L240) gets populated from these sources. "
+                "URL normalized: http:// prefix added, lowercase, trailing slash removed (L261–274).",
+                "integration-service-main/lib/facts/sources.ts",
+                "L530–574 (SERP getter with confidence), L576–593 (googlePlacesRatings)",
+            )
+
+        # ── TAB 6: Watchlists ─────────────────────────────────────────
+        with faq_tabs[5]:
+            st.markdown("### Watchlists Sub-Tab Questions")
+
+            faq_card(
+                "Q: How are watchlist hits combined from multiple sources without duplication?",
+                "<code>combineWatchlistMetadata</code> rule (rules.ts L253) deduplicates using:<br>"
+                "<code>dedupKey = type + '|' + metadata.title + '|' + metadata.entity_name + '|' + url</code> (L274)<br><br>"
+                "Process: merge metadata from all sources → add to Set if dedupKey is new → "
+                "<b>ADVERSE_MEDIA hits filtered out</b> (L294):<br>"
+                "<code>filteredMetadata = allMetadata.filter(hit =&gt; hit.type !== WATCHLIST_HIT_TYPE.ADVERSE_MEDIA)</code><br><br>"
+                "Final message: 'No Watchlist hits were identified' when filteredMetadata.length = 0.",
+                "integration-service-main/lib/facts/rules.ts",
+                "L244–308 (combineWatchlistMetadata — complete dedup + ADVERSE_MEDIA filter)",
+            )
+
+            faq_card(
+                "Q: Which vendors screen for watchlist hits?",
+                "Two vendors:<br>"
+                "&nbsp;&bull; <b>Middesk</b> (platform_id=16): screens the <b>business entity</b><br>"
+                "&nbsp;&bull; <b>Trulioo</b> (platform_id=38): screens the <b>business</b> (source='business') "
+                "AND each <b>owner/director</b> (source='person') separately<br><br>"
+                "<code>truliooPreferredRule</code> (rules.ts L136): Trulioo preferred for UK/Canada businesses. "
+                "For US businesses, Middesk takes priority (weight=2.0 vs Trulioo 0.8).",
+                "integration-service-main/lib/facts/rules.ts",
+                "L136–164 (truliooPreferredRule), L170–209 (truliooRiskRule)",
+            )
+
+        # ── TAB 7: Pipeline A vs B ────────────────────────────────────
+        with faq_tabs[6]:
+            st.markdown("### Pipeline A vs B — Admin Portal Impact")
+
+            faq_card(
+                "Q: When a customer sees a NAICS code in the admin portal, which pipeline produced it?",
+                "<b>Always Pipeline A</b> (integration-service FactEngine).<br>"
+                "Admin portal calls:<br>"
+                "&nbsp;&bull; <code>GET /facts/business/{id}/details</code> → reads <code>rds_warehouse_public.facts</code><br>"
+                "&nbsp;&bull; <code>GET /businesses/customers/{id}</code> → reads <code>data_businesses.naics_id → core_naics_code</code><br><br>"
+                "Pipeline B output (<code>datascience.customer_files</code>) is <b>internal analytics only</b>. "
+                "No customer-facing endpoint reads from <code>customer_files</code>.",
+                "modeling/INDUSTRY_FACTS_GUIDE.md",
+                "L26–33 (Pipeline A = customer-facing), L47–51 (Pipeline B = internal Redshift analytics)",
+            )
+
+            faq_card(
+                "Q: Can Pipeline A and Pipeline B show different NAICS codes for the same business?",
+                "<b>Yes — by design.</b> Example: OC has confidence 0.89, ZI 0.72, EFX 0.68.<br>"
+                "&nbsp;&bull; <b>Pipeline A</b>: OC wins (highest confidence) → <code>naics_code</code> = OC's code<br>"
+                "&nbsp;&bull; <b>Pipeline B</b>: compares ONLY <code>zi_match_confidence vs efx_match_confidence</code> "
+                "→ ZI wins → <code>primary_naics_code</code> = ZI's code<br><br>"
+                "OC is NOT in Pipeline B's winner-takes-all SQL (<code>customer_table.sql</code>). "
+                "This is a known architectural gap documented in INDUSTRY_FACTS_GUIDE.md L286–305.",
+                "modeling/INDUSTRY_FACTS_GUIDE.md",
+                "L249–268 (Pipeline B NAICS selection SQL), L286–305 (gap: OC not in Pipeline B)",
+            )
+
+            faq_card(
+                "Q: Can the PATCH /businesses endpoint update the NAICS code?",
+                "<b>No.</b> NAICS is stripped from PATCH bodies in case-service (businesses.ts L1206):<br>"
+                "<code>const unwantedKeys = ['naics_code', 'naics_id', 'naics_title', 'mcc_code', 'mcc_id', 'mcc_title'];<br>"
+                "unwantedKeys.forEach(key =&gt; { if (Object.hasOwn(body, key)) delete body[key]; });</code><br><br>"
+                "To change NAICS: use analyst override API or trigger Fact Engine re-run.",
+                "modeling/INDUSTRY_FACTS_GUIDE.md",
+                "L705–711 (sourced from case-service/businesses.ts L1206)",
+            )
+
+            faq_card(
+                "Q: Which API endpoint returns the most complete NAICS data including alternatives?",
+                "<code>GET /facts/business/{businessID}/details</code> returns full fact with:<br>"
+                "<code>{ value, source: { confidence, platformId }, override, alternatives: [...] }</code><br>"
+                "Accessible to: Admin, Customer, Applicant.<br><br>"
+                "<code>GET /facts/business/{id}/all</code> returns all 217 facts but is <b>Admin only</b>. "
+                "Source code comment: 'intentionally not cached and admin only. Leaks information.'",
+                "modeling/INDUSTRY_FACTS_GUIDE.md",
+                "L680–727 (API endpoint table: naics_code exposure by endpoint and role)",
+            )
+
+        # ── TAB 8: Analyst Workflow ───────────────────────────────────
+        with faq_tabs[7]:
+            st.markdown("### Analyst Workflow Questions")
+
+            faq_card(
+                "Q: How does a Worth analyst manually override a fact like NAICS code?",
+                "Manual override uses <code>request_type='fact_override'</code> stored in "
+                "<code>integration_data.request_response</code> with <code>platform_id=MANUAL</code>.<br><br>"
+                "The <code>manual</code> getter (sources.ts L517–529) reads this record. "
+                "The <code>manualOverride</code> rule (rules.ts L112) runs FIRST — wins over all vendors.<br>"
+                "Stored in <code>rds_warehouse_public.facts</code> with <code>override: manualEntry</code> populated.",
+                "integration-service-main/lib/facts/sources.ts + rules.ts",
+                "sources.ts L517–529 (manual getter), rules.ts L112–126 (manualOverride always-wins)",
+            )
+
+            faq_card(
+                "Q: What is the Sole Proprietor flag and how is it determined?",
+                "<code>is_sole_prop</code> fact (kyb/index.ts L552) — calculated:<br>"
+                "&nbsp;1. Exactly 1 unique owner submitted (L569–574)<br>"
+                "&nbsp;2. Plaid IDV has a successful verification with ID number (L593–594)<br>"
+                "&nbsp;3. Owner's SSN (from IDV) matches business TIN (L604–610):<br>"
+                "&nbsp;&bull; SSN == TIN → <code>is_sole_prop = true</code><br>"
+                "&nbsp;&bull; SSN != TIN → <code>is_sole_prop = false</code><br>"
+                "&nbsp;&bull; IDV not run → <code>is_sole_prop = null</code> (cannot determine)",
+                "integration-service-main/lib/facts/kyb/index.ts",
+                "L552–617 (is_sole_prop calculated fact — SSN vs TIN comparison)",
+            )
+
+        # ── TAB 9: Worth Score ────────────────────────────────────────
+        with faq_tabs[8]:
+            st.markdown("### Worth Score Questions")
+
+            faq_card(
+                "Q: What is the Worth Score scale and where is it stored?",
+                "Worth Score = 0–850 scale (similar to credit scoring). Stored in:<br>"
+                "&nbsp;&bull; <code>rds_cases_public.data_cases.worth_score</code> (PostgreSQL)<br>"
+                "&nbsp;&bull; <code>datascience.customer_files.worth_score</code> (Redshift Pipeline B)<br>"
+                "&nbsp;&bull; <code>rds_warehouse_public.facts name='worth_score'</code> (Pipeline A facts)<br><br>"
+                "Calculated by <b>ai-score-service</b> using: entity verification, NAICS industry risk band, "
+                "watchlist hits, TIN match, SoS filing, owner IDV, and financial data.",
+                "KYB-Admin-Portal/ai-score-service-main",
+                "ai-score-service-main (scoring model), INDUSTRY_FACTS_GUIDE.md L315 (customer_files.worth_score)",
+            )
+
+            faq_card(
+                "Q: Does the NAICS industry classification affect the Worth Score?",
+                "<b>Yes.</b> NAICS code determines the <b>industry risk band</b> — a key input to the scoring model. "
+                "High-risk NAICS codes (gambling, adult entertainment, certain financial services) reduce the score. "
+                "NAICS 561499 (unclassified/fallback) has a specific risk treatment.<br><br>"
+                "This is why accurate NAICS classification directly impacts customer worth scores. "
+                "An analyst override of NAICS code will affect the next score recalculation.",
+                "KYB-Admin-Portal/ai-score-service-main + lineage_data.py",
+                "ai-score-service-main (industry risk band weighting in scoring model)",
+            )
+
+        # ── TAB 10: Case Results ──────────────────────────────────────
+        with faq_tabs[9]:
+            st.markdown("### Case Results Panel Questions")
+
+            faq_card(
+                "Q: What case statuses are possible before the final KYB decision?",
+                "Case statuses flow through:<br>"
+                "<code>submitted → processing → pending_review → approved / declined / review</code><br><br>"
+                "Integration tasks run asynchronously. The <code>integrations_complete</code> flag "
+                "indicates when all vendor APIs have returned. Until then, admin portal shows "
+                "'Integrations are currently processing'.<br><br>"
+                "The Kafka event <code>PROCESS_COMPLETION_FACTS</code> fires when all integrations complete.",
+                "KYB-Admin-Portal/case-service-main/src + workflow-service-main",
+                "case-service/src/core (case state machine), workflow-service (PROCESS_COMPLETION_FACTS)",
+            )
+
+            faq_card(
+                "Q: What data does the Worth 360 Report include for industry classification?",
+                "The Worth 360 Report (PDF, generated by <code>GET /reports/generate</code>) includes:<br>"
+                "&nbsp;&bull; NAICS Code + Industry Label (from <code>naics_code</code> fact)<br>"
+                "&nbsp;&bull; MCC Code + Description<br>"
+                "&nbsp;&bull; SoS verification status per state<br>"
+                "&nbsp;&bull; Worth Score band<br>"
+                "&nbsp;&bull; Watchlist screening results<br><br>"
+                "The report reads from Pipeline A facts (<code>rds_warehouse_public.facts</code>) — "
+                "always reflects the same data as what the admin portal shows.",
+                "KYB-Admin-Portal/case-service-main + Get Reports folder",
+                "case-service: GET /reports/generate → reads rds_warehouse_public.facts",
+            )
 
 
 # ╔═══════════════════════════════════════════════════════════════════╗
@@ -1809,6 +2312,209 @@ END AS employee_count,
         }
         st.dataframe(pd.DataFrame(field_origins), use_container_width=True, hide_index=True)
 
+    # ══════════════════════════════════════════════════
+    # PIPELINE PAGE: ADMIN PORTAL FIELD MAP
+    # ══════════════════════════════════════════════════
+    elif pipeline_page == "🏢 Admin Portal Field Map":
+        sh("🏢 Admin Portal Field Map — Every Field Traced to Source Code")
+
+        card("""This map traces every field visible in the <b>Worth AI Admin Portal KYB tab</b> back to:
+        <b>Fact name → Source vendor(s) → Confidence formula → What causes blank</b><br>
+        All citations reference production source files in <code>integration-service-main/lib/facts/</code>""",
+             "card-teal")
+
+        FIELD_MAP = [
+            {
+                "Admin Portal Tab":       "Business Registration",
+                "Field Label":            "Filing Status (Active/Inactive)",
+                "Fact Name":              "sos_filings[n].active",
+                "Primary Source":         "Middesk (platform_id=16)",
+                "Confidence Formula":     "XGBoost via confidenceScoreMany() OR task-based (0.15+0.20×tasks)",
+                "What Causes Blank":      "Middesk found no SoS entity for submitted TIN+name",
+                "Source File & Line":      "kyb/index.ts L757: active = status === 'active'",
+            },
+            {
+                "Admin Portal Tab":       "Business Registration",
+                "Field Label":            "Entity Type (LLC, Corp, etc.)",
+                "Fact Name":              "sos_filings[n].entity_type",
+                "Primary Source":         "Middesk → registrations[n].entity_type",
+                "Confidence Formula":     "Inherits Middesk source confidence",
+                "What Causes Blank":      "No SoS filing found; or entity type not in Middesk registry",
+                "Source File & Line":      "kyb/index.ts L756: entity_type = entity_type",
+            },
+            {
+                "Admin Portal Tab":       "Business Registration",
+                "Field Label":            "Jurisdiction Type (Domestic/Foreign)",
+                "Fact Name":              "sos_filings[n].foreign_domestic",
+                "Primary Source":         "Middesk + OpenCorporates",
+                "Confidence Formula":     "Inherits source confidence",
+                "What Causes Blank":      "jurisdiction field not 'domestic' or 'foreign' → undefined",
+                "Source File & Line":      "kyb/index.ts L746-748: foreignDomestic logic",
+            },
+            {
+                "Admin Portal Tab":       "Business Registration",
+                "Field Label":            "TIN / EIN Verified badge",
+                "Fact Name":              "tin_match_boolean",
+                "Primary Source":         "Middesk reviewTasks.find(key='tin')",
+                "Confidence Formula":     "Calculated fact: tin_match.status === 'success'",
+                "What Causes Blank":      "Middesk TIN task did not run or failed",
+                "Source File & Line":      "kyb/index.ts L429-492: tin_match + tin_match_boolean",
+            },
+            {
+                "Admin Portal Tab":       "Business Registration",
+                "Field Label":            "Registration Date",
+                "Fact Name":              "sos_filings[n].filing_date",
+                "Primary Source":         "Middesk → registrations[n].registration_date",
+                "Confidence Formula":     "Inherits Middesk source confidence",
+                "What Causes Blank":      "No registration_date in Middesk SoS record",
+                "Source File & Line":      "kyb/index.ts L755: filing_date = registration_date",
+            },
+            {
+                "Admin Portal Tab":       "Background",
+                "Field Label":            "NAICS Code",
+                "Fact Name":              "naics_code",
+                "Primary Source":         "Winner: Middesk(w=2.0) > OC(w=0.9) > ZI/Trulioo(w=0.8) > EFX(w=0.7) > AI(w=0.1)",
+                "Confidence Formula":     "factWithHighestConfidence() → if |a-b|≤0.05 → weightedFactSelector()",
+                "What Causes Blank":      "All sources returned undefined; AI also failed → 561499 fallback",
+                "Source File & Line":      "rules.ts L9 (WEIGHT_THRESHOLD), L36-58 (factWithHighestConfidence), aiNaicsEnrichment.ts L63",
+            },
+            {
+                "Admin Portal Tab":       "Background",
+                "Field Label":            "MCC Code",
+                "Fact Name":              "mcc_code",
+                "Primary Source":         "AI direct (GPT mcc_code field) OR NAICS→MCC crosswalk (rel_naics_mcc table)",
+                "Confidence Formula":     "Same as naics_code fact; fallback = 5614",
+                "What Causes Blank":      "NAICS not mapped in rel_naics_mcc; AI also failed → 5614",
+                "Source File & Line":      "aiNaicsEnrichment.ts L22-35 (response schema), L107-108 (system prompt fallback)",
+            },
+            {
+                "Admin Portal Tab":       "Background",
+                "Field Label":            "Industry Name",
+                "Fact Name":              "industry",
+                "Primary Source":         "Derived from naics_code 2-digit prefix → core_business_industries lookup",
+                "Confidence Formula":     "Inherits naics_code confidence",
+                "What Causes Blank":      "naics_code is null or no matching industry in core_business_industries",
+                "Source File & Line":      "kyb/index.ts (industry derived fact), INDUSTRY_FACTS_GUIDE.md L680-720",
+            },
+            {
+                "Admin Portal Tab":       "Background",
+                "Field Label":            "Annual Revenue",
+                "Fact Name":              "revenue / annual_revenue",
+                "Primary Source":         "ZoomInfo: zi_c_revenue×1000 OR Equifax: efx_locamount×1000 (winner)",
+                "Confidence Formula":     "XGBoost entity match probability (zi_probability or efx_probability)",
+                "What Causes Blank":      "No vendor matched entity; entity confidence = 0",
+                "Source File & Line":      "INDUSTRY_FACTS_GUIDE.md L272-277, sources.ts L277-293",
+            },
+            {
+                "Admin Portal Tab":       "Background",
+                "Field Label":            "Employee Count",
+                "Fact Name":              "number_of_employees",
+                "Primary Source":         "ZoomInfo: zi_c_employees OR Equifax supplemental: number_of_employees",
+                "Confidence Formula":     "XGBoost entity match confidence",
+                "What Causes Blank":      "No vendor match OR Equifax supplemental has no employee count",
+                "Source File & Line":      "sources.ts L354-378 (equifax_supplemental getter)",
+            },
+            {
+                "Admin Portal Tab":       "Background",
+                "Field Label":            "Minority / Veteran / Woman Owned",
+                "Fact Name":              "minority_owned / veteran_owned / woman_owned",
+                "Primary Source":         "Equifax supplemental ONLY (MBE/VBE/WBE flags)",
+                "Confidence Formula":     "Equifax source weight = 0.7; normalizeEquifaxFlag('Y'→true)",
+                "What Causes Blank":      "Equifax not matched OR Equifax record has no MBE/VBE/WBE flag",
+                "Source File & Line":      "kyb/index.ts L60-67 (normalizeEquifaxFlag), L218-235",
+            },
+            {
+                "Admin Portal Tab":       "Contact Information",
+                "Field Label":            "Phone Number",
+                "Fact Name":              "phone_found",
+                "Primary Source":         "ZoomInfo zi_c_phone, SERP businessMatch.phone, Verdata seller.phone, Middesk, Equifax efx_phone",
+                "Confidence Formula":     "factWithHighestConfidence() across all sources",
+                "What Causes Blank":      "No vendor has phone for this business",
+                "Source File & Line":      "kyb/index.ts L276-316 (phone_found simpleFact + normalization)",
+            },
+            {
+                "Admin Portal Tab":       "Contact Information",
+                "Field Label":            "Email Address",
+                "Fact Name":              "email",
+                "Primary Source":         "Equifax ONLY: efx_email",
+                "Confidence Formula":     "Equifax source weight = 0.7",
+                "What Causes Blank":      "Equifax not matched OR Equifax record has no email",
+                "Source File & Line":      "kyb/index.ts L236-239: email: { equifax: 'efx_email' }",
+            },
+            {
+                "Admin Portal Tab":       "Website",
+                "Field Label":            "Business Website URL",
+                "Fact Name":              "website_found",
+                "Primary Source":         "ZoomInfo zi_c_url, SERP businessWebsite, Verdata domain_name, Equifax efx_web, AI Website Enrichment",
+                "Confidence Formula":     "XGBoost if matched; SERP heuristic (0.5 base + 0.3 if no local_results)",
+                "What Causes Blank":      "No website found via SERP; ZoomInfo/Verdata have no URL",
+                "Source File & Line":      "kyb/index.ts L240-274 (website_found), sources.ts L530-574 (SERP)",
+            },
+            {
+                "Admin Portal Tab":       "Watchlists",
+                "Field Label":            "Watchlist Hits",
+                "Fact Name":              "watchlist_hits / consolidated_watchlist",
+                "Primary Source":         "Middesk (business entity) + Trulioo (business + each owner person)",
+                "Confidence Formula":     "combineWatchlistMetadata rule — dedup by type+title+entity_name+url",
+                "What Causes Blank":      "No hits found (normal); OR Trulioo/Middesk not yet completed",
+                "Source File & Line":      "rules.ts L253-308 (combineWatchlistMetadata, ADVERSE_MEDIA filtered)",
+            },
+            {
+                "Admin Portal Tab":       "Background",
+                "Field Label":            "Legal Entity Name",
+                "Fact Name":              "legal_name",
+                "Primary Source":         "Middesk: businessEntityVerification.name; OC: firmographic.name",
+                "Confidence Formula":     "factWithHighestConfidence — Middesk weight=2.0 vs OC weight=0.9",
+                "What Causes Blank":      "Middesk found no entity; OC also no match",
+                "Source File & Line":      "kyb/index.ts L192-200: legal_name simpleFact",
+            },
+        ]
+
+        df_map = pd.DataFrame(FIELD_MAP)
+        st.dataframe(df_map, use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        sh("🔑 Source Weight Reference")
+        weight_data = {
+            "Source": ["Middesk (SoS)", "OpenCorporates", "ZoomInfo", "Trulioo KYB", "Equifax", "AI Enrichment (GPT)", "Manual Override"],
+            "Platform ID": [16, 23, 24, 38, 17, 31, "MANUAL"],
+            "Weight": ["2.0 ★★", "0.9 ★", "0.8", "0.8", "0.7", "0.1 (last resort)", "∞ (always wins)"],
+            "Confidence Method": [
+                "XGBoost confidenceScoreMany() OR 0.15+0.20×tasks",
+                "XGBoost oc_probability from ml_model_matches",
+                "XGBoost zi_probability from ml_model_matches",
+                "Heuristic ONLY: match.index / 55 (no XGBoost)",
+                "XGBoost efx_probability OR match.index / 55",
+                "Self-reported: HIGH/MED/LOW (text)",
+                "N/A — overrides regardless of confidence"
+            ],
+            "Source Code": [
+                "sources.ts L187-248",
+                "sources.ts L294-309",
+                "sources.ts L277-293",
+                "sources.ts L411-454 (equifax source, same pattern)",
+                "sources.ts L311-352",
+                "aiNaicsEnrichment.ts L63, L107",
+                "rules.ts L112-126"
+            ]
+        }
+        st.dataframe(pd.DataFrame(weight_data), use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        sh("🗃️ Database Tables Reference")
+        card("""<b>Pipeline A output tables (PostgreSQL/RDS):</b><br>
+        &bull; <code>rds_warehouse_public.facts</code> — JSONB store, 217 facts per business (name, value, source, override, alternatives)<br>
+        &bull; <code>rds_cases_public.data_businesses</code> — naics_id, mcc_id, industry_id FKs updated by Kafka UPDATE_NAICS_CODE event<br>
+        &bull; <code>integration_data.request_response</code> — raw vendor API responses + confidence scores (platform_id indexed)<br>
+        &bull; <code>integration_data.healthcare_provider_information</code> — NPI data (healthcare businesses only)<br><br>
+        <b>Pipeline B output tables (Redshift):</b><br>
+        &bull; <code>datascience.customer_files</code> — wide denormalized analytics table (one row per business)<br>
+        &bull; <code>datascience.ml_model_matches</code> — XGBoost entity match scores (zi_probability, efx_probability, oc_probability)<br>
+        &bull; <code>datascience.zoominfo_matches_custom_inc_ml</code> — ZI matches (XGBoost ≥0.8 + heuristic fallback ≥45)<br>
+        &bull; <code>datascience.efx_matches_custom_inc_ml</code> — Equifax matches""",
+             "card-purple")
+
+
 # ╔═══════════════════════════════════════════════════════════════════╗
 # ║  SECTION 4 — AI AGENT: ASK THE CODEBASE                          ║
 # ╚═══════════════════════════════════════════════════════════════════╝
@@ -1837,13 +2543,17 @@ elif section == "🤖  AI Agent — Ask the Codebase":
         except Exception:
             pass
 
-    card("""<b>How this agent works:</b><br>
-    1. Your question is matched against 292 indexed chunks from the actual Worth AI source code
-    (SIC-UK-Codes repo: kyb/index.ts, businessDetails/index.ts, aiNaicsEnrichment.ts, rules.ts,
-    sources.ts, customer_table.sql, case-management.ts + Industry-Classification docs)<br>
-    2. The top relevant code chunks are retrieved<br>
-    3. GPT-4o-mini synthesises an answer with exact file + line references<br>
-    4. <b>Every answer cites the source code line it came from — you can verify it</b>
+    card("""<b>How this agent works — v2.0 (production source code indexed):</b><br>
+    1. Your question is matched against indexed chunks from <b>actual production source files</b> in this workspace:<br>
+    &bull; <code>integration-service-main/lib/facts/rules.ts</code> — Fact Engine 6 rules (production)<br>
+    &bull; <code>integration-service-main/lib/facts/sources.ts</code> — All 12 source getters + confidence formulas<br>
+    &bull; <code>integration-service-main/lib/facts/kyb/index.ts</code> — 1,617 lines of KYB fact definitions<br>
+    &bull; <code>integration-service-main/lib/aiEnrichment/aiNaicsEnrichment.ts</code> — GPT-5-mini NAICS enrichment<br>
+    &bull; <code>modeling/INDUSTRY_FACTS_GUIDE.md</code> — Complete pipeline documentation<br>
+    &bull; <code>lineage_data.py</code> — Full field lineage (27 fields, derived from reading above)<br>
+    2. Top relevant chunks retrieved, GPT-4o-mini synthesises an answer<br>
+    3. <b>Every answer MUST cite [FILE: path L123-145] — you can open the file to verify</b><br>
+    4. Pre-built answers in the <b>Admin Portal FAQ</b> tab (Section 1) cover 40+ questions
     """, "card-teal")
 
     # Load RAG index once per session
@@ -1856,25 +2566,57 @@ elif section == "🤖  AI Agent — Ask the Codebase":
     if "agent_history" not in st.session_state:
         st.session_state["agent_history"] = []
 
-    # Suggested questions
-    st.markdown("#### Try asking:")
-    suggested = [
-        "Where does tin_match_boolean come from? Which file and line?",
-        "What is NAICS_OF_LAST_RESORT and where is it defined?",
-        "Which table stores naics_code facts and what is the JSONB schema?",
-        "How does removeNaicsCode() work and when is it called?",
-        "What is the sos_filings fact? Which sources populate it?",
-        "Why do some businesses show No Registry Data to Display?",
-        "What is the difference between Pipeline A and Pipeline B for NAICS?",
-        "How does factWithHighestConfidence work? Show me the code.",
-        "Where is the winner-takes-all SQL for Pipeline B?",
-        "What does the Middesk source do and what is its weight?",
-    ]
-    cols = st.columns(2)
-    for i, q in enumerate(suggested):
-        if cols[i % 2].button(q, key=f"sq_{i}", use_container_width=True):
-            st.session_state["agent_history"].append({"role": "user", "content": q})
-            st.session_state["pending_question"] = q
+    # Suggested questions — v2.0 (sourced from production code reading)
+    st.markdown("#### 💡 Try asking — Suggested Questions:")
+    card("""<b>Tip:</b> The best questions include a specific field name, source, or behavior.
+    Every answer MUST cite <code>[FILE: path L###]</code> — you can open that file in this workspace to verify.""",
+         "card")
+
+    suggested_groups = {
+        "🔑 Fact Engine & Rules": [
+            "How does factWithHighestConfidence work in rules.ts? Show me WEIGHT_THRESHOLD.",
+            "When does weightedFactSelector run vs factWithHighestConfidence in rules.ts?",
+            "How does manualOverride always win? Which line in rules.ts defines this?",
+            "What is combineFacts rule and which facts use it?",
+            "How does combineWatchlistMetadata deduplicate watchlist hits? Show the dedupKey code.",
+        ],
+        "📡 Source Confidence Formulas": [
+            "What is Middesk's confidence formula? Show me the task-based fallback in sources.ts.",
+            "How is ZoomInfo's confidence computed? Is it XGBoost or heuristic?",
+            "What is MAX_CONFIDENCE_INDEX=55 and how is similarity_index normalized?",
+            "Why does Equifax have the lowest weight (0.7)? What does the source code comment say?",
+            "How is Trulioo confidence computed — XGBoost or heuristic? Show the sources.ts line.",
+        ],
+        "🏢 Admin Portal Fields": [
+            "Where does tin_match_boolean come from? Which file and line defines it?",
+            "Why does some business show No Registry Data to Display? Trace the source code.",
+            "What is the legal_name fact and which sources populate it?",
+            "Where does the phone_found fact get its value from? List all 5 sources.",
+            "Which admin portal field uses Equifax ONLY as its single source?",
+        ],
+        "⚠️ NAICS 561499": [
+            "What is NAICS_OF_LAST_RESORT? Where is it defined in production code?",
+            "When does removeNaicsCode() run and what does it do?",
+            "What does GPT-5-mini receive as input when AI enrichment triggers?",
+            "Is there a minimum confidence threshold before a NAICS is accepted?",
+            "What does MCC 5614 mean and when is it assigned?",
+        ],
+        "🔀 Pipeline A vs B": [
+            "What is the Pipeline B winner-takes-all SQL for NAICS? Show the COALESCE logic.",
+            "Can Pipeline A and Pipeline B have different NAICS codes for the same business?",
+            "Why is OC not in Pipeline B's winner-takes-all SQL? Is this a known gap?",
+            "Which database tables store Pipeline A vs Pipeline B outputs?",
+            "Can the PATCH /businesses endpoint update the NAICS code?",
+        ],
+    }
+
+    for group_name, questions in suggested_groups.items():
+        with st.expander(group_name, expanded=False):
+            cols = st.columns(2)
+            for i, q in enumerate(questions):
+                if cols[i % 2].button(q, key=f"sq_{group_name}_{i}", use_container_width=True):
+                    st.session_state["agent_history"].append({"role": "user", "content": q})
+                    st.session_state["pending_question"] = q
 
     st.markdown("---")
 
@@ -1942,17 +2684,25 @@ You answer questions about the Worth AI codebase — specifically about:
 - How specific API fields (naics_code, mcc_code, tin_match, sos_filings, etc.) are populated
 - Data lineage: which file, which function, which line number proves each claim
 
-RULES:
-1. ALWAYS cite the exact source file and line range for every claim you make.
-   Format: [FILE: path/to/file.ts L123-L145]
-2. If the code chunk shows the answer directly, QUOTE the relevant code lines.
-3. If you are not sure from the provided code chunks, say so explicitly.
-4. Do NOT hallucinate. Only answer from the provided code chunks.
-5. Keep answers focused and precise. Use bullet points for multiple facts.
-6. End every answer with: "✅ Verified from source code — click the chunks below to confirm."
+MANDATORY RULES:
+1. ALWAYS cite the exact source file and line range for EVERY claim.
+   Required format: [FILE: path/to/file.ts L123-L145]
+   For example: [FILE: integration-service-main/lib/facts/rules.ts L36-58]
+2. If the code chunk directly shows the answer, QUOTE the relevant 1-3 lines of code.
+3. NEVER guess or infer beyond what the code chunks show. Say 'not in provided chunks' if needed.
+4. Do NOT hallucinate line numbers. Only cite lines visible in the provided chunks.
+5. For admin portal questions: cite rules.ts, sources.ts, kyb/index.ts, or aiNaicsEnrichment.ts.
+6. For pipeline questions: cite INDUSTRY_FACTS_GUIDE.md (which itself cites customer_table.sql).
+7. Answer with bullet points for multiple facts. Be precise and brief.
+8. End EVERY answer with: '✅ Verified from source code — open the file at the cited line to confirm.'
 
-The user wants to verify that information in a Streamlit app about Worth AI field lineage
-is accurate and traceable to real source code."""
+Source files available in the workspace:
+- integration-service-main/lib/facts/rules.ts (Fact Engine rules, WEIGHT_THRESHOLD=0.05, L9)
+- integration-service-main/lib/facts/sources.ts (all source getters, confidence formulas, L187-248 middesk)
+- integration-service-main/lib/facts/kyb/index.ts (KYB fact definitions, 1,617 lines)
+- integration-service-main/lib/aiEnrichment/aiNaicsEnrichment.ts (AI enrichment, NAICS_OF_LAST_RESORT L63)
+- modeling/INDUSTRY_FACTS_GUIDE.md (pipeline documentation, Pipeline B SQL L249-268)
+- lineage_data.py (UCM field lineage data, 27 fields)"""
 
             if not OPENAI_API_KEY:
                 answer = (

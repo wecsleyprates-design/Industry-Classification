@@ -1,0 +1,1 @@
+DROP TABLE IF EXISTS integrations.core_integrations_platforms_config;

@@ -1,0 +1,1 @@
+DROP TABLE IF EXISTS shared.data_rule_versions;

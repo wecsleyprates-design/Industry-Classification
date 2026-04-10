@@ -1,0 +1,227 @@
+name: Create Tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_type:
+        description: "Version increment type"
+        required: true
+        type: choice
+        options: [patch, minor, major, custom]
+        default: "patch"
+      custom_tag:
+        description: "Custom tag name (only used when version_type is 'custom')"
+        required: false
+        type: string
+      commit_id:
+        description: "Specific commit ID (optional - uses latest commit if empty)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  create_tag:
+    runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.create_tag.outputs.new_tag }}
+      
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+      - name: Set Target Commit
+        id: set_commit
+        run: |
+          if [ -n "${{ inputs.commit_id }}" ]; then
+            if ! git cat-file -e "${{ inputs.commit_id }}" 2>/dev/null; then
+              echo "::error::Commit '${{ inputs.commit_id }}' not found"
+              exit 1
+            fi
+            git checkout "${{ inputs.commit_id }}"
+            echo "commit=${{ inputs.commit_id }}" >> $GITHUB_OUTPUT
+          else
+            echo "commit=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          fi
+          
+      - name: Process Version
+        id: process_version
+        env:
+          BRANCH: ${{ github.ref_name }}
+          VERSION_TYPE: ${{ inputs.version_type }}
+          CUSTOM_TAG: ${{ inputs.custom_tag }}
+        run: |
+          set -e
+          
+          # Handle custom tag separately
+          if [ "$VERSION_TYPE" = "custom" ]; then
+            custom_tag="$(echo "$CUSTOM_TAG" | xargs)"
+            if [ -z "$custom_tag" ]; then
+              echo "::error::Custom tag name is required when version_type is 'custom'"
+              exit 1
+            fi
+            
+            # Validate custom tag format: v1.2.3 or v1.2.3-<name>-v[1-2].0
+            if [[ ! $custom_tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9]+-v[1-2]\.[0-9]+)?$ ]]; then
+              echo "::error::Invalid custom tag format. Use 'v1.2.3' or 'v1.2.3-name-v1.0'"
+              exit 1
+            fi
+            
+            echo "new_tag=$custom_tag" >> $GITHUB_OUTPUT
+            echo "is_custom=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Validate branch format and extract version base
+          if [[ $BRANCH =~ ^release/v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            # Standard release branch: release/v0.51.0
+            BASE_MAJOR="${BASH_REMATCH[1]}"
+            BASE_MINOR="${BASH_REMATCH[2]}"
+            BASE_PATCH="${BASH_REMATCH[3]}"
+            TAG_PATTERN="^v${BASE_MAJOR}\.${BASE_MINOR}\.[0-9]+$"
+            VERSION_PREFIX="v${BASE_MAJOR}.${BASE_MINOR}"
+            BRANCH_TYPE="standard"
+            
+          elif [[ $BRANCH =~ ^release/v([0-9]+)\.([0-9]+)\.([0-9]+)-([a-zA-Z0-9]+)-(v[1-2])$ ]]; then
+            # special release branch: release/v0.51.0-fast-v1
+            BASE_MAJOR="${BASH_REMATCH[1]}"
+            BASE_MINOR="${BASH_REMATCH[2]}"
+            BASE_PATCH="${BASH_REMATCH[3]}"
+            SUFFIX_NAME="${BASH_REMATCH[4]}"
+            SUFFIX_VERSION="${BASH_REMATCH[5]}"
+            TAG_PATTERN="^v${BASE_MAJOR}\.${BASE_MINOR}\.${BASE_PATCH}-${SUFFIX_NAME}-${SUFFIX_VERSION}\.[0-9]+$"
+            VERSION_PREFIX="v${BASE_MAJOR}.${BASE_MINOR}.${BASE_PATCH}-${SUFFIX_NAME}-${SUFFIX_VERSION}"
+            BRANCH_TYPE="special"
+            
+          else
+            echo "::error::Invalid branch format: '$BRANCH'"
+            echo "::error::Expected Pattern: 'release/v0.51.0' or 'release/v0.51.0-special-v1 (e.g. release/v0.51.0-fast-v1, release/v0.51.0-hotfix-v2)'"
+            exit 1
+          fi
+          
+          # Find latest matching tag on this branch
+          latest_tag=$(git tag --merged HEAD | grep -E "$TAG_PATTERN" | sort -V | tail -n1 || echo "")
+          
+          echo "Branch: $BRANCH"
+          echo "Branch Type: $BRANCH_TYPE"
+          echo "Tag Pattern: $TAG_PATTERN"
+          echo "Latest Tag: ${latest_tag:-none}"
+          
+          # Handle tag creation based on latest tag existence
+          if [ -z "$latest_tag" ]; then
+            # No existing tag found - create initial tag
+            if [ "$VERSION_TYPE" = "patch" ] || [ "$VERSION_TYPE" = "minor" ]; then
+              # Create initial tag for both patch and minor
+              if [ "$BRANCH_TYPE" = "standard" ]; then
+                new_tag="${VERSION_PREFIX}.0"
+              else
+                new_tag="${VERSION_PREFIX}.0"
+              fi
+              echo "Creating initial tag: $new_tag"
+            elif [ "$VERSION_TYPE" = "major" ]; then
+              echo "::error::Cannot increment major version with no existing tags"
+              echo "::error::Use 'patch' or 'minor' to create the initial tag first"
+              exit 1
+            fi
+          else
+            # Extract current version number
+            if [ "$BRANCH_TYPE" = "standard" ]; then
+              # Extract patch from v0.51.3 -> 3
+              current_patch=$(echo "$latest_tag" | sed -E "s/^v${BASE_MAJOR}\.${BASE_MINOR}\.([0-9]+)$/\1/")
+              
+              case "$VERSION_TYPE" in
+                patch)
+                  new_patch=$((current_patch + 1))
+                  new_tag="${VERSION_PREFIX}.${new_patch}"
+                  ;;
+                minor|major)
+                  echo "::error::Tag already exists for this release branch: $latest_tag"
+                  echo "::error::Cannot create minor/major version on branch '$BRANCH'"
+                  echo "::error::Use 'patch' to increment within this branch, or create a new release branch"
+                  exit 1
+                  ;;
+              esac
+            else
+              # Extract patch from v0.51.0-fast-v1.3 -> 3
+              current_patch=$(echo "$latest_tag" | sed -E "s/^v${BASE_MAJOR}\.${BASE_MINOR}\.${BASE_PATCH}-${SUFFIX_NAME}-${SUFFIX_VERSION}\.([0-9]+)$/\1/")
+              
+              case "$VERSION_TYPE" in
+                patch)
+                  new_patch=$((current_patch + 1))
+                  new_tag="${VERSION_PREFIX}.${new_patch}"
+                  ;;
+                minor|major)
+                  echo "::error::Tag already exists for this release branch: $latest_tag"
+                  echo "::error::Cannot create minor/major version on branch '$BRANCH'"
+                  echo "::error::Use 'patch' to increment within this branch, or create a new release branch"
+                  exit 1
+                  ;;
+              esac
+            fi
+            
+            echo "Previous tag: $latest_tag"
+            echo "New tag: $new_tag"
+          fi
+          
+          echo "new_tag=$new_tag" >> $GITHUB_OUTPUT
+          echo "latest_tag=$latest_tag" >> $GITHUB_OUTPUT
+          echo "is_custom=false" >> $GITHUB_OUTPUT
+          
+      - name: Create and Push Tag
+        id: create_tag
+        env:
+          NEW_TAG: ${{ steps.process_version.outputs.new_tag }}
+          LATEST_TAG: ${{ steps.process_version.outputs.latest_tag }}
+          IS_CUSTOM: ${{ steps.process_version.outputs.is_custom }}
+          TARGET_COMMIT: ${{ steps.set_commit.outputs.commit }}
+        run: |
+          set -e
+          
+          # Check if tag already exists
+          if git rev-parse "$NEW_TAG" >/dev/null 2>&1; then
+            echo "::error::Tag '$NEW_TAG' already exists"
+            echo "Existing tags (5 most recent):"
+            git tag --sort=-version:refname | head -5
+            exit 1
+          fi
+          
+          # Create tag message
+          if [ "$IS_CUSTOM" = "true" ]; then
+            tag_message="Custom Release $NEW_TAG          
+              Branch: ${{ github.ref_name }}
+              Commit: $TARGET_COMMIT
+              Created: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+              Triggered by: ${{ github.actor }}"
+          else
+            if [ -n "$LATEST_TAG" ]; then
+              tag_message="Release $NEW_TAG (${{ inputs.version_type }})          
+                Previous: $LATEST_TAG
+                Branch: ${{ github.ref_name }}
+                Commit: $TARGET_COMMIT
+                Created: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+                Triggered by: ${{ github.actor }}"
+            else
+              tag_message="Initial Release $NEW_TAG                          
+                Branch: ${{ github.ref_name }}
+                Commit: $TARGET_COMMIT
+                Created: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+                Triggered by: ${{ github.actor }}"
+            fi
+          fi
+          
+          # Create annotated tag
+          git tag -a "$NEW_TAG" -m "$tag_message" "$TARGET_COMMIT"
+          
+          # Push tag
+          git push origin "$NEW_TAG"
+          
+          echo "✅ Successfully created and pushed tag: $NEW_TAG"
+          echo "new_tag=$NEW_TAG" >> $GITHUB_OUTPUT

@@ -1,0 +1,7 @@
+const COLORS = {
+	WORTH_INDIGO: "#6B66C4",
+	WORTH_PURPLE: "#CC99FF",
+	WORTH_PINK: "#FF6FBC",
+	WORTH_SKY: "#4CC8E9",
+};
+export default COLORS;

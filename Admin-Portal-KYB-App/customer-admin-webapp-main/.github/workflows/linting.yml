@@ -1,0 +1,55 @@
+name: Linting
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        node-version: [24.x]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: |
+          echo "//npm.pkg.github.com/:_authToken=${{secrets.PERSONAL_ACCESS_TOKEN_READ_PACKAGE}}" > ~/.npmrc
+          npm ci --ignore-scripts
+
+      - name: Run Formatter
+        env:
+          NODE_OPTIONS: "--max_old_space_size=4096"
+        run: npm run format
+
+      - name: Commit Formatting Changes
+        if: github.event_name == 'pull_request'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git reset .npmrc
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No formatting changes to commit."
+          else
+            git commit -m "chore: auto-format code"
+            # Pull latest changes to avoid push rejection
+            git pull --rebase origin ${{ github.head_ref }}
+            git push origin HEAD:${{ github.head_ref }}
+          fi
+
+      - name: Run Lint
+        env:
+          NODE_OPTIONS: "--max_old_space_size=4096"
+        run: npm run lint

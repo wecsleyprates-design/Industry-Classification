@@ -1,0 +1,17 @@
+import { type ERROR_CODES } from "#constants/index";
+import { type StatusCodes } from "http-status-codes";
+
+
+class {{pascalCase name}}ApiError extends Error {
+    status: StatusCodes;
+    errorCode: typeof ERROR_CODES;
+
+    constructor(message: string, httpCode: StatusCodes, errorCode: typeof ERROR_CODES) {
+        super(message);
+        this.name = "{{pascalCase name}}ApiError";
+        this.status = httpCode;
+        this.errorCode = errorCode;
+    }
+};
+
+export { {{pascalCase name}}ApiError };

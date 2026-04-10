@@ -1,0 +1,214 @@
+feature,group
+custom_total_liabilities_over_assets_ratio_4,Financial Trends
+is_revenue_4,Financial Trends
+ratio_returnonequityroe_3,Financial Trends
+ratio_equitymultiplier_3,Financial Trends
+bs_totalequity_4,Financial Trends
+FL,Company Profile
+bs_totalliabilitiesandequity_3,Financial Trends
+ratio_netprofitmargin_3,Financial Trends
+Financial Services,Company Profile
+ratio_returnonequityroe_1,Financial Trends
+is_netincome_1,Financial Trends
+ratio_returnoninvestedcapitalroic_1,Financial Trends
+custom_total_liabilities_over_assets_ratio_2,Financial Trends
+CO,Company Profile
+bs_totalliabilitiesandequity_4,Financial Trends
+is_operatingexpenses_4,Financial Trends
+isnet_income_negative_flag,Business Operations
+ratio_returnoninvestedcapitalroic_3,Financial Trends
+bs_totalequity,Business Operations
+is_netincome_2,Financial Trends
+ratio_ebittorevenue,Liquidity
+is_operatingincomeratio_4,Financial Trends
+UT,Company Profile
+Q1,Financial Trends
+RI,Company Profile
+AZ,Company Profile
+MN,Company Profile
+is_incomebeforetax_3,Financial Trends
+is_revenue_3,Financial Trends
+is_operatingexpenses_2,Financial Trends
+OR,Company Profile
+is_costofgoodssold_4,Financial Trends
+ratio_operatingcashflowtosalesratio_2,Financial Trends
+MA,Company Profile
+custom_total_liabilities_over_assets_ratio,Liquidity
+total_liabilities_over_assets_flag,Business Operations
+NM,Company Profile
+ratio_operatingmargin,Liquidity
+WA,Company Profile
+ratio_debttoequityratio,Liquidity
+is_netincomeratio_2,Financial Trends
+IL,Company Profile
+SD,Company Profile
+ratio_equitymultiplier_1,Financial Trends
+Industrials,Company Profile
+ratio_returnonequityroe,Liquidity
+ratio_netprofitmargin,Liquidity
+bs_totalliabilities_1,Financial Trends
+ratio_grossmargin_1,Financial Trends
+NE,Company Profile
+cf_cashendofperiod_1,Financial Trends
+bs_totalliabilitiesandequity,Business Operations
+NV,Company Profile
+OK,Company Profile
+ratio_returnoninvestedcapitalroic_2,Financial Trends
+ratio_ebittorevenue_2,Financial Trends
+bs_totalassets_3,Financial Trends
+bs_totalassets_1,Financial Trends
+ratio_returnonassetsroa_4,Financial Trends
+custom_total_liabilities_over_assets_ratio_3,Financial Trends
+Consumer Cyclical,Company Profile
+is_costofgoodssold_3,Financial Trends
+ratio_debttoequityratio_4,Financial Trends
+ratio_equitymultiplier,Liquidity
+NH,Company Profile
+cf_operatingcashflow_3,Financial Trends
+is_revenue_2,Financial Trends
+PR,Company Profile
+is_netincomeratio_1,Financial Trends
+is_operatingexpenses,Business Operations
+PA,Company Profile
+ratio_operatingcashflowtosalesratio_4,Financial Trends
+ratio_operatingmargin_1,Financial Trends
+ratio_returnonassetsroa_1,Financial Trends
+ratio_netprofitmargin_4,Financial Trends
+is_netincomeratio,Liquidity
+ratio_incomequalityratio_4,Financial Trends
+is_incomebeforetax_1,Financial Trends
+ratio_incomequalityratio_2,Financial Trends
+ratio_incomequalityratio,Liquidity
+custom_total_liabilities_over_assets_ratio_1,Financial Trends
+MO,Company Profile
+bs_totalequity_3,Financial Trends
+is_grossprofit_4,Financial Trends
+cf_cashendofperiod_2,Financial Trends
+ratio_returnonassetsroa_3,Financial Trends
+is_revenue_1,Financial Trends
+bs_totalequity_2,Financial Trends
+is_revenue,Business Operations
+Consumer Defensive,Company Profile
+is_operatingincomeratio_1,Financial Trends
+is_grossprofit_2,Financial Trends
+ratio_debttoequityratio_1,Financial Trends
+DE,Company Profile
+ratio_operatingcashflowtosalesratio_1,Financial Trends
+AR,Company Profile
+MS,Company Profile
+ratio_netprofitmargin_2,Financial Trends
+ratio_assetturnoverratio,Liquidity
+ratio_returnonequityroe_4,Financial Trends
+is_ebit_3,Financial Trends
+is_grossprofit_1,Financial Trends
+AL,Company Profile
+KS,Company Profile
+cf_cashendofperiod_3,Financial Trends
+cf_operatingcashflow_4,Financial Trends
+IN,Company Profile
+HI,Company Profile
+WY,Company Profile
+WI,Company Profile
+IA,Company Profile
+MD,Company Profile
+GU,Company Profile
+ME,Company Profile
+ratio_assetturnoverratio_2,Financial Trends
+is_operatingincomeratio,Liquidity
+age,Company Profile
+is_costofgoodssold_2,Financial Trends
+OH,Company Profile
+TN,Company Profile
+WV,Company Profile
+ratio_incomequalityratio_1,Financial Trends
+SC,Company Profile
+bs_totalliabilities_3,Financial Trends
+Energy,Company Profile
+is_costofgoodssold_1,Financial Trends
+bs_totalliabilitiesandequity_1,Financial Trends
+ratio_debttoequityratio_3,Financial Trends
+ID,Company Profile
+ratio_grossmargin_4,Financial Trends
+Basic Materials,Company Profile
+is_costofgoodssold,Business Operations
+LA,Company Profile
+is_netincomeratio_3,Financial Trends
+VT,Company Profile
+bs_totalliabilities,Business Operations
+bs_totalassets,Business Operations
+is_netincome,Business Operations
+ratio_assetturnoverratio_3,Financial Trends
+ratio_grossmargin_2,Financial Trends
+ratio_returnoninvestedcapitalroic,Liquidity
+Q2,Financial Trends
+bs_totalassets_4,Financial Trends
+is_netincome_3,Financial Trends
+bs_totalliabilitiesandequity_2,Financial Trends
+Communication Services,Company Profile
+CT,Company Profile
+Healthcare,Company Profile
+is_operatingincomeratio_2,Financial Trends
+ratio_returnonassetsroa_2,Financial Trends
+bs_totalliabilities_2,Financial Trends
+GA,Company Profile
+ratio_debttoequityratio_2,Financial Trends
+ratio_returnonequityroe_2,Financial Trends
+cf_operatingcashflow_2,Financial Trends
+is_ebit_4,Financial Trends
+ratio_operatingmargin_4,Financial Trends
+Q4,Financial Trends
+NC,Company Profile
+VA,Company Profile
+ratio_assetturnoverratio_4,Financial Trends
+ND,Company Profile
+ratio_assetturnoverratio_1,Financial Trends
+bs_totalliabilities_4,Financial Trends
+cf_operatingcashflow_1,Financial Trends
+is_incomebeforetax_2,Financial Trends
+MI,Company Profile
+MT,Company Profile
+is_operatingexpenses_1,Financial Trends
+ratio_grossmargin,Liquidity
+ratio_returnoninvestedcapitalroic_4,Financial Trends
+is_operatingexpenses_3,Financial Trends
+AK,Company Profile
+ratio_incomequalityratio_3,Financial Trends
+KY,Company Profile
+ratio_equitymultiplier_4,Financial Trends
+VI,Company Profile
+is_netincome_4,Financial Trends
+is_ebit_2,Financial Trends
+bs_totalassets_2,Financial Trends
+ratio_operatingcashflowtosalesratio_3,Financial Trends
+TX,Company Profile
+DC,Company Profile
+is_grossprofit,Business Operations
+Q3,Financial Trends
+NJ,Company Profile
+cf_operatingcashflow,Liquidity
+cf_cashendofperiod_4,Financial Trends
+cf_cashendofperiod,Liquidity
+ratio_equitymultiplier_2,Financial Trends
+ratio_ebittorevenue_3,Financial Trends
+ratio_returnonassetsroa,Liquidity
+CA,Company Profile
+Utilities,Company Profile
+is_incomebeforetax,Business Operations
+Technology,Company Profile
+ratio_ebittorevenue_4,Financial Trends
+ratio_grossmargin_3,Financial Trends
+is_ebit,Business Operations
+ratio_operatingcashflowtosalesratio,Liquidity
+is_grossprofit_3,Financial Trends
+bs_totalequity_1,Financial Trends
+ratio_operatingmargin_2,Financial Trends
+is_ebit_1,Financial Trends
+ratio_operatingmargin_3,Financial Trends
+NY,Company Profile
+is_operatingincomeratio_3,Financial Trends
+Real Estate,Company Profile
+is_incomebeforetax_4,Financial Trends
+ratio_ebittorevenue_1,Financial Trends
+is_netincomeratio_4,Financial Trends
+ratio_netprofitmargin_1,Financial Trends
+base_value,Baseline

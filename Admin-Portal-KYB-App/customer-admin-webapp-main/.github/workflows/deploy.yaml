@@ -1,0 +1,156 @@
+name: Deploy to Environment
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        description: 'Environment to deploy to (development, qa, staging, production)'
+      ref_to_build:
+        required: true
+        type: string
+        description: 'Git ref (tag, branch, or SHA) to build and deploy'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    name: Build for ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    strategy:
+      matrix:
+        node-version: [24.x]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref_to_build }}
+          fetch-depth: 0
+
+      - name: Get Git SHA (short)
+        id: git-info
+        run: |
+          echo "SHA_SHORT=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "SHA_FULL=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: "npm"
+
+      - name: Fetch Doppler Secrets
+        uses: dopplerhq/secrets-fetch-action@v1.3.0
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ secrets.DOPPLER_OIDC_ID }}
+          doppler-project: customer-admin-webapp
+          doppler-config: ${{ inputs.environment == 'development' && 'development' || startsWith(inputs.environment, 'qa') && 'qa' || inputs.environment == 'staging' && 'staging' || 'production' }}
+          inject-env-vars: true
+
+      - name: Override QA environment URLs
+        if: startsWith(inputs.environment, 'qa')
+        run: |
+          QA_NUM="${{ inputs.environment }}"
+          QA_NUM="${QA_NUM#qa}"
+          echo "VITE_API_ENDPOINT=https://api.qa${QA_NUM}.joinworth.com" >> $GITHUB_ENV
+          echo "VITE_CASE_REMOTE_ENTRY_URL=https://case.qa${QA_NUM}.joinworth.com/assets/remoteEntry.js" >> $GITHUB_ENV
+          echo "VITE_CUSTOMER_REMOTE_ENTRY_URL=https://customers.qa${QA_NUM}.joinworth.com/assets/remoteEntry.js" >> $GITHUB_ENV
+          echo "VITE_DASHBOARD_REMOTE_ENTRY_URL=https://dashboard.qa${QA_NUM}.joinworth.com/assets/remoteEntry.js" >> $GITHUB_ENV
+          echo "VITE_USER_REMOTE_ENTRY_URL=https://user.qa${QA_NUM}.joinworth.com/assets/remoteEntry.js" >> $GITHUB_ENV
+
+      - name: Install dependencies
+        run: |
+          echo "//npm.pkg.github.com/:_authToken=${{secrets.PERSONAL_ACCESS_TOKEN_READ_PACKAGE}}" > .npmrc
+          npm ci --ignore-scripts
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ inputs.environment }}-${{ steps.git-info.outputs.SHA_SHORT }}
+          path: dist
+          retention-days: 1
+
+    outputs:
+      sha_short: ${{ steps.git-info.outputs.SHA_SHORT }}
+      sha_full: ${{ steps.git-info.outputs.SHA_FULL }}
+
+  deploy:
+    name: Deploy to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    needs: build
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref_to_build }}
+
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build-${{ inputs.environment }}-${{ needs.build.outputs.sha_short }}
+          path: /home/runner/work/build/build/build-artifacts
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_ACCESS_KEY_SECRET }}
+          aws-region: us-east-1
+
+      - name: Create version file
+        run: |
+          REF="${{ inputs.ref_to_build }}"
+          SHA="${{ needs.build.outputs.sha_full }}"
+          SHA_SHORT="${{ needs.build.outputs.sha_short }}"
+
+          BUILD_ID=$(date +%s)
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          NORMALIZED_REF="${REF#refs/heads/}"
+          NORMALIZED_REF="${NORMALIZED_REF#refs/tags/}"
+          
+          if TAG_NAME=$(git describe --exact-match --tags "$NORMALIZED_REF" 2>/dev/null); then
+            VERSION="${TAG_NAME}_${BUILD_ID}"
+          else
+            if git show-ref --verify --quiet "refs/heads/$NORMALIZED_REF" 2>/dev/null; then
+              BRANCH_NAME="${NORMALIZED_REF##*/}"
+              VERSION="${BRANCH_NAME}_${SHA_SHORT}_${BUILD_ID}"
+            else
+              VERSION="sha_${SHA_SHORT}_${BUILD_ID}"
+            fi
+            TAG_NAME=""
+          fi
+
+          echo "🚀 Started creating version file for customer-admin-webapp..."
+          cat > /home/runner/work/build/build/build-artifacts/version.json << EOF
+          {
+            "version": "$VERSION",
+            "timestamp": "$TIMESTAMP",
+            "tag": "$TAG_NAME",
+            "ref": "$REF",
+            "sha": "$SHA"
+          }
+          EOF
+          echo "✅ Version.json created with version: $VERSION"
+
+      - name: Remove previous build and upload
+        run: |
+          aws s3 rm s3://${{ vars.AWS_S3_BUCKET_NAME }} --recursive
+          aws s3 sync /home/runner/work/build/build/build-artifacts s3://${{ vars.AWS_S3_BUCKET_NAME }} --cache-control "max-age=31536000,public,immutable" --exclude index.html --exclude version.json
+          aws s3 cp /home/runner/work/build/build/build-artifacts/index.html s3://${{ vars.AWS_S3_BUCKET_NAME }}/index.html --cache-control "no-cache, no-store, must-revalidate"
+          aws s3 cp /home/runner/work/build/build/build-artifacts/version.json s3://${{ vars.AWS_S3_BUCKET_NAME }}/version.json --cache-control "no-cache, no-store, must-revalidate"
+
+      - name: Cache Invalidation
+        run: aws cloudfront create-invalidation --distribution-id ${{secrets.AWS_CLOUDFRONT_DISTRIBUTION_ID}} --paths "/*"
+

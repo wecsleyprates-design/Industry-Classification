@@ -1,0 +1,68 @@
+@startuml
+title Workflow Evaluation — Async via Queue
+
+skinparam linetype ortho
+skinparam shadowing false
+skinparam backgroundColor white
+skinparam roundcorner 5
+
+actor User as User
+participant "Case Service" as CASE
+participant "Workflow Service (API)" as WF_API
+queue "Workflow Queue" as QUEUE
+participant "Workflow Worker" as WF_WORKER
+database "Workflow DB" as WDB
+participant "Warehouse" as WH
+participant "Kafka" as KAFKA
+
+== User submits case ==
+User -> CASE : POST /case/api/v1/business/{businessId}/case/{caseId}/submit
+CASE -> CASE : update status → SUBMITTED
+CASE -> WF_API : notifyWorkflow(case_id, customer_id)
+WF_API -> QUEUE : enqueue {case_id, customer_id}\n(delay 2 mins - no blocking)
+WF_API --> CASE : 202 Accepted
+
+== Async Workflow Processing ==
+WF_WORKER -> QUEUE : dequeue message
+WF_WORKER -> CASE : GET /cases/{id}
+CASE --> WF_WORKER : case {business_id, attributes, status}
+
+WF_WORKER -> WH: GET /facts/{business_id}
+WH --> WF_WORKER: FACTS
+
+WF_WORKER -> WDB : SELECT * FROM data_workflows WHERE customer_id=? AND active=TRUE ORDER BY priority ASC
+WDB --> WF_WORKER : workflows[]
+
+loop For each workflow by priority
+  WF_WORKER -> WF_WORKER : check trigger == SUBMITTED
+  alt Trigger matches
+    WF_WORKER -> WDB : get current workflow_version + rules
+    WDB --> WF_WORKER : workflow_version, rules[]
+
+    loop Evaluate rules
+      WF_WORKER -> WF_WORKER : evaluate rule.conditions
+      alt Rule matches
+        WF_WORKER -> WF_WORKER : apply rule.actions → outcome_status
+        WF_WORKER -> WDB : INSERT INTO data_workflow_executions(...)
+        WF_WORKER -> KAFKA : publish workflow_change_attribute_event\ntopic: cases.v1
+        KAFKA -> CASE : workflow_change_attribute_event\n{case_id, status=outcome_status}
+        CASE -> CASE : update case status (async)
+        WF_WORKER -> WDB : append evaluation_log
+        break
+      end
+    end
+  else
+    WF_WORKER -> WF_WORKER : continue
+  end
+end
+
+alt No rule matched any workflow
+  WF_WORKER -> WF_WORKER : apply default_action of highest-priority workflow
+  WF_WORKER -> WDB : INSERT INTO data_workflow_executions(..., default_applied=true)
+  WF_WORKER -> KAFKA : publish workflow_change_attribute_event\ntopic: cases.v1
+  KAFKA -> CASE : workflow_change_attribute_event\n{case_id, status=default_action.status}
+  CASE -> CASE : update case status (async)
+  WF_WORKER -> WDB : append evaluation_log
+end
+
+@enduml

@@ -1,0 +1,3 @@
+# DEVOPS-21
+npx lint-staged
+node scripts/check-env-sync.ts

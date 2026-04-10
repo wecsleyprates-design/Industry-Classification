@@ -1,0 +1,177 @@
+name: Deploy Microsite to Environment
+
+on:
+  workflow_call:
+    inputs:
+      microsite:
+        required: true
+        type: string
+        description: 'Microsite to deploy (case, customer, dashboard, user)'
+      environment:
+        required: true
+        type: string
+        description: 'Environment to deploy to (development, qa, staging, production)'
+      ref_to_build:
+        required: true
+        type: string
+        description: 'Git ref (tag, branch, or SHA) to build and deploy'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ inputs.microsite }} for ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    strategy:
+      matrix:
+        node-version: [24.x]
+    defaults:
+      run:
+        working-directory: packages/${{ inputs.microsite }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref_to_build }}
+          fetch-depth: 0
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+
+      - name: Get Git SHA (short)
+        id: git-info
+        run: |
+          echo "SHA_SHORT=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "SHA_FULL=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Use Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: "npm"
+          cache-dependency-path: packages/${{ inputs.microsite }}/package-lock.json
+
+      - name: Fetch Doppler Secrets
+        uses: dopplerhq/secrets-fetch-action@v1.3.0
+        with:
+          auth-method: oidc
+          doppler-identity-id: ${{ secrets.DOPPLER_OIDC_ID }}
+          doppler-project: microsites-${{ inputs.microsite }}
+          doppler-config: ${{ startsWith(inputs.environment, 'qa') && 'qa' || inputs.environment }}
+          inject-env-vars: true
+
+      - name: Override QA environment URLs
+        if: startsWith(inputs.environment, 'qa')
+        run: |
+          QA_NUM="${{ inputs.environment }}"
+          QA_NUM="${QA_NUM#qa}"
+          echo "VITE_API_ENDPOINT=https://api.qa${QA_NUM}.joinworth.com" >> $GITHUB_ENV
+
+      - name: Install dependencies
+        run: |
+          echo "@joinworth:registry=https://npm.pkg.github.com" > .npmrc
+          echo "//npm.pkg.github.com/:_authToken=${{secrets.PERSONAL_ACCESS_TOKEN_READ_PACKAGE}}" >> .npmrc
+          npm ci --ignore-scripts
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ inputs.microsite }}-${{ inputs.environment }}-${{ steps.git-info.outputs.SHA_SHORT }}
+          path: packages/${{ inputs.microsite }}/dist
+          retention-days: 1
+
+    outputs:
+      sha_short: ${{ steps.git-info.outputs.SHA_SHORT }}
+      sha_full: ${{ steps.git-info.outputs.SHA_FULL }}
+
+  deploy:
+    name: Deploy ${{ inputs.microsite }} to ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    needs: build
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref_to_build }}
+
+      - name: Download Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: build-${{ inputs.microsite }}-${{ inputs.environment }}-${{ needs.build.outputs.sha_short }}
+          path: dist
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_ACCESS_KEY_SECRET }}
+          aws-region: us-east-1
+
+      - name: Create version file
+        run: |
+          REF="${{ inputs.ref_to_build }}"
+          SHA="${{ needs.build.outputs.sha_full }}"
+          SHA_SHORT="${{ needs.build.outputs.sha_short }}"
+
+          BUILD_ID=$(date +%s)
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          NORMALIZED_REF="${REF#refs/heads/}"
+          NORMALIZED_REF="${NORMALIZED_REF#refs/tags/}"
+          
+          if TAG_NAME=$(git describe --exact-match --tags "$NORMALIZED_REF" 2>/dev/null); then
+            VERSION="${TAG_NAME}_${BUILD_ID}"
+          else
+            if git show-ref --verify --quiet "refs/heads/$NORMALIZED_REF" 2>/dev/null; then
+              BRANCH_NAME="${NORMALIZED_REF##*/}"
+              VERSION="${BRANCH_NAME}_${SHA_SHORT}_${BUILD_ID}"
+            else
+              VERSION="sha_${SHA_SHORT}_${BUILD_ID}"
+            fi
+            TAG_NAME=""
+          fi
+
+          echo "🚀 Started creating version file for microsites-${{ inputs.microsite }}..."
+          cat > dist/version.json << EOF
+          {
+            "version": "$VERSION",
+            "timestamp": "$TIMESTAMP",
+            "tag": "$TAG_NAME",
+            "ref": "$REF",
+            "sha": "$SHA",
+            "microsite": "${{ inputs.microsite }}"
+          }
+          EOF
+          echo "✅ Version.json created with version: $VERSION"
+
+      - name: Set S3 bucket name
+        id: s3-bucket
+        run: |
+          MICROSITE="${{ inputs.microsite }}"
+          MICROSITE_UPPER=$(echo "$MICROSITE" | tr '[:lower:]' '[:upper:]')
+          echo "bucket_var=AWS_${MICROSITE_UPPER}_S3_BUCKET_NAME" >> $GITHUB_OUTPUT
+
+      - name: Deploy to S3
+        env:
+          S3_BUCKET: ${{ inputs.microsite == 'case' && vars.AWS_CASE_S3_BUCKET_NAME || inputs.microsite == 'customer' && vars.AWS_CUSTOMER_S3_BUCKET_NAME || inputs.microsite == 'dashboard' && vars.AWS_DASHBOARD_S3_BUCKET_NAME || vars.AWS_USER_S3_BUCKET_NAME }}
+        run: |
+          aws s3 rm s3://$S3_BUCKET --recursive
+          aws s3 sync dist s3://$S3_BUCKET --cache-control "max-age=31536000,public,immutable" --exclude index.html --exclude version.json --exclude assets/remoteEntry.js
+          aws s3 cp dist/index.html s3://$S3_BUCKET/index.html --cache-control "no-cache, no-store, must-revalidate"
+          aws s3 cp dist/version.json s3://$S3_BUCKET/version.json --cache-control "no-cache, no-store, must-revalidate"
+          if [ -f dist/assets/remoteEntry.js ]; then
+            aws s3 cp dist/assets/remoteEntry.js s3://$S3_BUCKET/assets/remoteEntry.js --cache-control "no-cache, no-store, must-revalidate"
+          fi
+
+      - name: Cache Invalidation
+        env:
+          CLOUDFRONT_ID: ${{ inputs.microsite == 'case' && secrets.AWS_CASE_CLOUDFRONT_DISTRIBUTION_ID || inputs.microsite == 'customer' && secrets.AWS_CUSTOMER_CLOUDFRONT_DISTRIBUTION_ID || inputs.microsite == 'dashboard' && secrets.AWS_DASHBOARD_CLOUDFRONT_DISTRIBUTION_ID || secrets.AWS_USER_CLOUDFRONT_DISTRIBUTION_ID }}
+        run: aws cloudfront create-invalidation --distribution-id $CLOUDFRONT_ID --paths "/*"
+

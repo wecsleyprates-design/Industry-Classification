@@ -1,0 +1,13 @@
+node_modules
+**/.DS_Store
+dist
+dist-ssr
+dev-dist
+build
+.env
+.env.local
+.env.production
+.env.development
+src/tailwind.css
+ssl/*
+!ssl/.gitkeep

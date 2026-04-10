@@ -1,0 +1,64 @@
+name: "Doppler Production Variable Update"
+
+run-name: "${{ inputs.microsite }} - Update Doppler Prod Var: ${{ inputs.doppler_variable_name }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      microsite:
+        description: 'Microsite to update'
+        required: true
+        type: choice
+        options:
+          - case
+          - customer
+          - dashboard
+          - user
+      doppler_variable_name:
+        description: 'Name of the Doppler variable to add or update'
+        required: true
+      doppler_variable_value:
+        description: 'Value of the variable'
+        required: true
+
+jobs:
+  update-prod-variable:
+    name: Update Doppler Variable in Production
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Install Doppler CLI
+        uses: dopplerhq/cli-action@v3
+
+      - name: Get OIDC token
+        id: get_token
+        run: |
+          TOKEN=$(curl -s -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+                       "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://github.com/joinworth")
+          echo "::add-mask::$(echo $TOKEN | jq -r '.value')"
+          echo "OIDC_TOKEN=$(echo $TOKEN | jq -r '.value')" >> $GITHUB_ENV
+    
+      - name: Login with OIDC token
+        run: doppler oidc login --scope=. --identity=${{ secrets.DOPPLER_OIDC_ID }} --token=$OIDC_TOKEN
+
+      - name: Log audit information
+        run: |
+          echo "=== AUDIT LOG ==="
+          echo "Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Actor: ${{ github.actor }}"
+          echo "Triggered by: ${{ github.triggering_actor }}"
+          echo "Run ID: ${{ github.run_id }}"
+          echo "Run URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Variable Name: ${{ inputs.doppler_variable_name }}"
+          echo "Project: microsites-${{ inputs.microsite }}"
+          echo "Config: production"
+          echo "=================="
+
+      - name: Update Doppler Variable
+        run: |
+          doppler secrets set ${{ inputs.doppler_variable_name }}="${{ inputs.doppler_variable_value }}" --project microsites-${{ inputs.microsite }} --config production
+

@@ -1,0 +1,1 @@
+export { RuleRepository } from "./ruleRepository";

@@ -1,0 +1,33 @@
+
+.table-no-border {
+  border-spacing: 0;
+  width: 100%; 
+}
+
+.table-no-border thead th {
+  font-size: 12px;
+  font-weight: 400;
+  color:#5E5E5E;
+}
+
+.table-no-border tbody td {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.table-no-border tbody {
+  border: none;
+}
+
+.table-no-border td > div.bg-gray-100 {
+  background-color: transparent !important;
+}
+
+.table-no-border td {
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+
+.table-no-border thead + tbody {
+  margin-top: 2px;
+}

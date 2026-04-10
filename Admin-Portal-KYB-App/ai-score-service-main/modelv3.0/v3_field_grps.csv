@@ -1,0 +1,106 @@
+model_field,grp,grp_interm
+score_reviews,Public Records,Social Reviews
+count_reviews,Public Records,Social Reviews
+count_employees,Company Profile,Credit Bureau
+gdp_pch,Financial Trends,Economics
+gdp_pc1,Financial Trends,Economics
+t10y2y,Financial Trends,Economics
+t10y2y_chg,Financial Trends,Economics
+t10y2y_ch1,Financial Trends,Economics
+t10y,Financial Trends,Economics
+t10y_chg,Financial Trends,Economics
+t10y_ch1,Financial Trends,Economics
+t2y,Financial Trends,Economics
+t2y_chg,Financial Trends,Economics
+t2y_ch1,Financial Trends,Economics
+brent_pch,Financial Trends,Economics
+brent_pc1,Financial Trends,Economics
+wtispot_pch,Financial Trends,Economics
+wtispot_pc1,Financial Trends,Economics
+vix,Financial Trends,Economics
+vix_chg,Financial Trends,Economics
+vix_ch1,Financial Trends,Economics
+csentiment,Financial Trends,Economics
+csentiment_chg,Financial Trends,Economics
+csentiment_ch1,Financial Trends,Economics
+dolindx,Financial Trends,Economics
+dolindx_chg,Financial Trends,Economics
+dolindx_ch1,Financial Trends,Economics
+unemp,Financial Trends,Economics
+unemp_chg,Financial Trends,Economics
+unemp_ch1,Financial Trends,Economics
+cpi,Financial Trends,Economics
+cpi_chg,Financial Trends,Economics
+cpi_ch1,Financial Trends,Economics
+cpicore,Financial Trends,Economics
+cpicore_chg,Financial Trends,Economics
+cpicore_ch1,Financial Trends,Economics
+ccdelinq,Financial Trends,Economics
+ccdelinq_chg,Financial Trends,Economics
+ccdelinq_ch1,Financial Trends,Economics
+cloandelinq,Financial Trends,Economics
+cloandelinq_chg,Financial Trends,Economics
+cloandelinq_ch1,Financial Trends,Economics
+busloandelinq,Financial Trends,Economics
+busloandelinq_chg,Financial Trends,Economics
+busloandelinq_ch1,Financial Trends,Economics
+wagegrowth,Financial Trends,Economics
+wagegrowth_chg,Financial Trends,Economics
+usdeur,Financial Trends,Economics
+usdeur_chg,Financial Trends,Economics
+usdeur_ch1,Financial Trends,Economics
+usdpeso,Financial Trends,Economics
+usdpeso_chg,Financial Trends,Economics
+usdpeso_ch1,Financial Trends,Economics
+usdcan,Financial Trends,Economics
+usdcan_chg,Financial Trends,Economics
+usdcan_ch1,Financial Trends,Economics
+ppi_chg,Financial Trends,Economics
+ppi_ch1,Financial Trends,Economics
+age_business,Company Profile,Credit Bureau
+state,Company Profile,Credit Bureau
+city,Company Profile,Credit Bureau
+primsic,Company Profile,Credit Bureau
+naics6,Company Profile,Credit Bureau
+count_lien,Public Records,Judgments and Liens
+count_bankruptcy,Public Records,Bankruptcies
+count_judgment,Public Records,Judgments and Liens
+age_lien,Public Records,Judgments and Liens
+age_bankruptcy,Public Records,Bankruptcies
+age_judgment,Public Records,Judgments and Liens
+ratio_accounts_payable_cash,Financial Trends,Liquidity Ratios
+ratio_total_liabilities_cash,Financial Trends,Solvency Ratios
+ratio_total_liabilities_assets,Financial Trends,Solvency Ratios
+ratio_return_on_equity,Performance Measures,Profitability Ratios
+ratio_return_on_assets,Performance Measures,Profitability Ratios
+ratio_net_income_ratio,Performance Measures,Profitability Ratios
+ratio_income_quality_ratio,Performance Measures,Profitability Ratios
+ratio_gross_margin,Performance Measures,Profitability Ratios
+ratio_equity_multiplier,Performance Measures,Valuation Ratios
+ratio_debt_to_equity,Financial Trends,Solvency Ratios
+ratio_operating_margin,Financial Trends,Efficiency Ratios
+ratio_cash_ratio,Financial Trends,Liquidity Ratios
+ratio_accounts_recievable_cash,Financial Trends,Liquidity Ratios
+flag_total_liabilities_over_assets,Performance Measures,Financial Risk
+flag_equity_negative,Performance Measures,Financial Risk
+flag_net_income_negative,Performance Measures,Financial Risk
+revenue,Business Operations,Profit & Loss
+is_operating_expense,Business Operations,Profit & Loss
+is_net_income,Business Operations,Profit & Loss
+is_gross_profit,Business Operations,Profit & Loss
+is_cost_of_goods_sold,Business Operations,Profit & Loss
+cf_operating_cash_flow,Business Operations,Cash Flow
+cf_cash_at_end_of_period,Business Operations,Cash Flow
+cf_capex,Business Operations,Cash Flow
+bs_total_liabilities_and_equity,Business Operations,Balance Sheet
+bs_total_liabilities,Business Operations,Balance Sheet
+bs_total_equity,Business Operations,Balance Sheet
+bs_total_debt,Business Operations,Balance Sheet
+bs_total_assets,Business Operations,Balance Sheet
+bs_accounts_receivable,Business Operations,Balance Sheet
+bs_accounts_payable,Business Operations,Balance Sheet
+bus_struct,Company Profile,Credit Bureau
+indicator_government,Company Profile,Credit Bureau
+indicator_federal_government,Company Profile,Credit Bureau
+indicator_education,Company Profile,Credit Bureau
+indicator_public,Company Profile,Credit Bureau

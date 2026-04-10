@@ -1,0 +1,1 @@
+# Score-specific test fixtures for AI Score Service

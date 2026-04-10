@@ -1,0 +1,67 @@
+name: Webapp Health Verification
+
+on:
+  pull_request:
+    branches: 
+      - "main"
+      - "release/*"
+    
+permissions:
+  id-token: write
+  contents: read
+  
+jobs:
+  verify:
+    name: Verify Webapp Health
+    runs-on: ubuntu-latest   
+    env:
+      DOPPLER_PROJECT: customer-admin-webapp
+      DOPPLER_CONFIG: development
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          
+      - name: Get OIDC token
+        id: get_token
+        run: |
+          TOKEN=$(curl -s -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+                       "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://github.com/$GITHUB_REPOSITORY_OWNER")
+          echo "OIDC_TOKEN=$(echo $TOKEN | jq -r '.value')" >> $GITHUB_ENV
+          
+      - name: Install Doppler CLI
+        uses: dopplerhq/cli-action@v3
+        
+      - name: Login with OIDC token
+        run: doppler oidc login --scope=. --identity=${{ secrets.DOPPLER_ALL_PROJECTS_OIDC_ID }} --token=$OIDC_TOKEN
+        
+      - name: Fetch Environment Variables from Doppler
+        run: |
+          doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" -- env > .env
+                  
+      - name: Install dependencies
+        run: |
+          echo "//npm.pkg.github.com/:_authToken=${{secrets.PERSONAL_ACCESS_TOKEN_READ_PACKAGE}}" > .npmrc
+          npm ci --ignore-scripts
+          
+      - name: Determine Port
+        id: port
+        run: |          
+          # Use VITE_PORT from Doppler if set, otherwise use default port 5174
+          if [ -n "$VITE_PORT" ]; then
+            PORT=$VITE_PORT
+          else
+            PORT=5174
+          fi          
+          echo "PORT=$PORT" >> $GITHUB_OUTPUT
+          echo "Using port $PORT for health check"
+
+      - name: Build
+        run: npm run build

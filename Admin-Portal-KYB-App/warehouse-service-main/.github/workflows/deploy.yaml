@@ -1,0 +1,204 @@
+name: Deploy to Environment
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+        description: 'Environment to deploy to (development, qa1-qa5, staging, production)'
+      ref_to_build:
+        required: true
+        type: string
+        description: 'Git ref (branch, tag, or SHA) to build and deploy'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    environment: ${{ startsWith(inputs.environment, 'qa') && 'development' || inputs.environment }}
+
+    outputs:
+      IMAGE_TAG: ${{ steps.capture-image-tag.outputs.IMAGE_TAG }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref_to_build }}
+          fetch-depth: 0
+
+      - name: Check if branch is up-to-date with main
+        if: ${{ inputs.ref_to_build != 'refs/heads/main' && inputs.ref_to_build != 'main' && github.ref_type != 'tag' }}
+        run: |
+          CURRENT_REF="${{ inputs.ref_to_build }}"
+          if [[ ! "$CURRENT_REF" == refs/* ]] && git branch -r --contains $CURRENT_REF | grep -q "origin/main"; then
+            echo "Commit belongs to main branch, skipping check."
+            exit 0
+          fi
+          git merge-base --is-ancestor origin/main $CURRENT_REF || (echo "Error: Branch not up-to-date with main. Please rebase or merge." && exit 1)
+
+      - name: Get Git Branch
+        run: echo "BRANCH=`git rev-parse --abbrev-ref HEAD | sed -r 's/HEAD/pr/g'`" >> $GITHUB_ENV
+
+      - name: Get Git Commit SHA (short)
+        run: echo "SHA_SHORT=`git rev-parse --short HEAD`" >> $GITHUB_ENV
+
+      - name: Check Branch and Commit
+        run: echo running on branch ${{ env.BRANCH }} with commit ${{ env.SHA_SHORT }}
+
+      - name: Capture Image Tag
+        id: capture-image-tag
+        run: |
+          SAFE_BRANCH=$(echo "${{ env.BRANCH }}" | sed 's/\//-/g')
+          TAG="${SAFE_BRANCH}_${{ env.SHA_SHORT }}"
+          echo "The image tag is $TAG"
+          echo "IMAGE_TAG=$TAG" >> $GITHUB_ENV
+          echo "IMAGE_TAG=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_ACCESS_KEY_SECRET }}
+          aws-region: us-east-1
+
+      - name: Login to AWS ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push service image to AWS ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ env.IMAGE_TAG }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f ./Dockerfile .
+          echo "Pushing image to ECR..."
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "name=image::$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+  deploy:
+    name: Create PR on deploy repo
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      GITHUB_USER: "patjoinworth"
+      GITHUB_USER_EMAIL: "github.pat@joinworth.com"
+      IMAGE_TAG: ${{ needs.build.outputs.IMAGE_TAG }}
+      DEPLOY_REPO: "warehouse-service-deploy"
+    steps:
+      - name: Set environment-specific variables
+        id: env-vars
+        run: |
+          case "${{ inputs.environment }}" in
+            development)
+              echo "TARGET_FILE=dev/kustomization.yaml" >> $GITHUB_OUTPUT
+              echo "ENV_NAME=development" >> $GITHUB_OUTPUT
+              ;;
+            qa1|qa2|qa3|qa4|qa5)
+              echo "TARGET_FILE=${{ inputs.environment }}/kustomization.yaml" >> $GITHUB_OUTPUT
+              echo "ENV_NAME=${{ inputs.environment }}" >> $GITHUB_OUTPUT
+              ;;
+            staging)
+              echo "TARGET_FILE=staging/kustomization.yaml" >> $GITHUB_OUTPUT
+              echo "ENV_NAME=staging" >> $GITHUB_OUTPUT
+              ;;
+            production)
+              echo "TARGET_FILE=prod/kustomization.yaml" >> $GITHUB_OUTPUT
+              echo "ENV_NAME=prod" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Set commit message and branch name
+        run: |
+          echo "COMMIT_MSG_UPDATE=Auto update tag ${{ steps.env-vars.outputs.ENV_NAME }}: ${{ env.IMAGE_TAG }}" >> $GITHUB_ENV
+          echo "TARGET_BRANCH=${{ steps.env-vars.outputs.ENV_NAME }}-tag-update-${{ env.IMAGE_TAG }}" >> $GITHUB_ENV
+          echo "TARGET_FILE=${{ steps.env-vars.outputs.TARGET_FILE }}" >> $GITHUB_ENV
+
+      - name: Create new branch
+        run: |
+          git clone https://${{ secrets.PERSONAL_ACCESS_TOKEN }}@github.com/joinworth/${{ env.DEPLOY_REPO }}.git
+          echo "Cloned ${{ env.DEPLOY_REPO }} repository successfully."
+          cd ${{ env.DEPLOY_REPO }}
+          echo "Creating branch ${{ env.TARGET_BRANCH }} . . ."
+          git checkout -b ${{ env.TARGET_BRANCH }}
+          git config --global user.email $GITHUB_USER_EMAIL
+          git config --global user.name $GITHUB_USER
+          git push origin ${{ env.TARGET_BRANCH }}
+
+      - name: checkout deploy repo
+        uses: actions/checkout@v4
+        with:
+          repository: joinworth/${{ env.DEPLOY_REPO }}
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          path: ${{ env.DEPLOY_REPO }}
+          ref: ${{ env.TARGET_BRANCH }}
+
+      - name: check image version
+        run: |
+          yq eval '.images[0].newTag' "$DEPLOY_REPO/$TARGET_FILE" || true
+          echo "### $TARGET_FILE: "
+          cat "$DEPLOY_REPO/$TARGET_FILE"
+
+      - name: Change image
+        run: |
+          yq eval --inplace ".images[0].newTag=\"${{ env.IMAGE_TAG }}\"" "$DEPLOY_REPO/$TARGET_FILE"
+          echo "### Updated $TARGET_FILE: "
+          cat "$DEPLOY_REPO/$TARGET_FILE"
+
+      - name: commit changes and create PR
+        id: create-pr
+        run: |
+          git config --global user.email $GITHUB_USER_EMAIL
+          git config --global user.name $GITHUB_USER
+          cd $DEPLOY_REPO
+          git add .
+          git commit -m "$COMMIT_MSG_UPDATE"
+          git push
+
+          echo "${{ secrets.PERSONAL_ACCESS_TOKEN }}" > token.txt
+          gh auth login --with-token < token.txt
+          gh pr create \
+            --body "Tag update for deployment - Created by Github Action
+                    Triggered by: ${{ github.actor }}
+                    Ref: ${{ inputs.ref_to_build }}" \
+            --title "$COMMIT_MSG_UPDATE by ${{ github.actor }}" \
+            --head "$TARGET_BRANCH" \
+            --base "main"
+
+          echo "Waiting for PR to be fully created..."
+          sleep 5
+
+          PR_URL=$(gh pr view --json url -q ".url")
+          echo "Pull Request created: $PR_URL"
+          echo "pr_url=$PR_URL" >> $GITHUB_OUTPUT
+
+          if [[ "${{ inputs.environment }}" == "development" || "${{ inputs.environment }}" == qa* || "${{ inputs.environment }}" == "staging" ]]; then
+            echo "${{ secrets.PERSONAL_ACCESS_TOKEN_AUTOAPPROVEBOT }}" > token.txt
+            gh auth login --with-token < token.txt
+            gh pr review --approve "$PR_URL"
+            sleep 5
+
+            MAX_RETRIES=5
+            RETRY_COUNT=0
+            while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+              if gh pr merge --squash --auto "$PR_URL"; then
+                echo "✅ PR merged successfully"
+                break
+              else
+                echo "Merge failed, retrying... (Attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)"
+                sleep 5
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+              fi
+            done
+            if [ $RETRY_COUNT -eq $MAX_RETRIES ]; then
+              echo "❌ Failed to merge PR after $MAX_RETRIES attempts"
+              exit 1
+            fi
+          fi

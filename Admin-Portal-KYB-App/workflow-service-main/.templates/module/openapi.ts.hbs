@@ -1,0 +1,50 @@
+import type { OpenAPIV3 } from "openapi-types";
+import joiToSwagger from "joi-to-swagger";
+import { schema } from "./schema";
+
+// Convert Joi schemas to Swagger format
+const swaggerSchemas = {
+	userParams: joiToSwagger(schema.dummySchema.params).swagger,
+	userBody: joiToSwagger(schema.dummySchema.body).swagger
+};
+
+// This is a dummy description.
+// You can add more routes description to this file.
+// You can also remove this route description if you do not need it.
+
+const {{camelCase name}}OpenAPI: OpenAPIV3.PathsObject = {
+	"/customers/{customerID}/example-route": {
+		// POST method for dummy route
+		post: {
+			summary: "Dummy API",
+			description: "Example Route",
+			tags: ["{{properCase name}}"],
+			security: [{ bearerAuth: [] }], // Requires authentication
+			parameters: [
+				{
+					name: "customerID",
+					in: "path",
+					required: true,
+					schema: swaggerSchemas.userParams.properties.customerID,
+				},
+			],
+			requestBody: {
+				required: true,
+				content: {
+					"application/json": {
+						schema: swaggerSchemas.userBody,
+					},
+				},
+			},
+			responses: {
+				"200": { $ref: "#/components/responses/SuccessResponse" },
+				"400": { $ref: "#/components/responses/BadRequest" },
+				"401": { $ref: "#/components/responses/Unauthorized" },
+				"403": { $ref: "#/components/responses/Forbidden" },
+				"500": { $ref: "#/components/responses/InternalServerError" },
+			},
+		},
+	}
+};
+
+export default {{camelCase name}}OpenAPI;

@@ -1,0 +1,47 @@
+# Use official Node.js base image
+FROM node:24-alpine
+
+# Set working directory
+WORKDIR /app
+
+# Accept build argument for npm_token
+ARG NPM_TOKEN
+
+# Install dependencies for builds and development tooling
+RUN apk add --no-cache make git bash
+
+# Create .npmrc file with authentication
+RUN if [ -n "$NPM_TOKEN" ]; then \
+    echo "//npm.pkg.github.com/:_authToken=$NPM_TOKEN" > .npmrc; \
+    echo "@joinworth:registry=https://npm.pkg.github.com" >> .npmrc; \
+    echo "always-auth=true" >> .npmrc; \
+    else \
+    echo "Warning: No NPM_TOKEN provided, private packages may fail to install"; \
+    fi
+
+# Install Doppler CLI
+RUN wget -q -t3 'https://packages.doppler.com/public/cli/rsa.8004D9FF50437357.key' -O /etc/apk/keys/cli@doppler-8004D9FF50437357.rsa.pub && \
+    echo 'https://packages.doppler.com/public/cli/alpine/any-version/main' | tee -a /etc/apk/repositories && \
+    apk add doppler
+
+# Copy package files first for layer caching
+COPY package*.json ./
+
+# Install dependencies without running postinstall scripts
+RUN npm ci --ignore-scripts
+
+# Copy all remaining app files
+COPY . .
+
+# Expose Vite dev server port
+EXPOSE 5174
+
+# Set environment variables for Vite dev server
+ENV HOST=0.0.0.0
+ENV PORT=5174
+
+# Start the development server
+CMD ["doppler", "run", "--", "npm", "run", "start"]
+
+# Comment above line and uncomment below if you would like to run without Doppler and a .env.local file
+# CMD ["npm", "run", "start"]
