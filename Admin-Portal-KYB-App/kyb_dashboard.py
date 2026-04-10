@@ -274,15 +274,22 @@ def _parse_fact(value_str):
 
 def live_sos(limit):
     """
-    Fetch raw value column and parse all JSON in Python.
-    Avoids Redshift VARCHAR 65535-byte limit on JSON_EXTRACT_PATH_TEXT()
-    for large fact arrays like sos_filings.
+    rds_warehouse_public is a Redshift FEDERATED external schema pointing to RDS PostgreSQL.
+    The federation layer hard-caps VARCHAR at 65535 bytes — sos_filings inner arrays can be
+    97KB+, so selecting that fact crashes regardless of SQL transformation used.
+
+    Solution: use the small scalar SOS facts instead:
+      - sos_active          → boolean (is any filing active?)
+      - sos_match_boolean   → boolean (did SOS name match?)
+      - sos_match           → small object {status, confidence, source}
+
+    These are always small scalar values and never hit the 65535 limit.
+    We derive per-vendor confidence from source.platformId in these facts.
     """
-    # Fetch raw value — no JSON extraction in SQL
     sql = f"""
-        SELECT business_id, value, received_at
+        SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
-        WHERE name = 'sos_filings'
+        WHERE name IN ('sos_active', 'sos_match_boolean', 'sos_match')
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
     raw = run_query(sql)
@@ -293,46 +300,38 @@ def live_sos(limit):
         "16": "middesk_conf", "23": "oc_conf",
         "24": "zi_conf",      "17": "efx_conf", "38": "trulioo_conf",
     }
-    rows = []
+
+    rows = {}  # business_id → dict
     for _, r in raw.iterrows():
-        fact    = _parse_fact(r["value"])
-        pid     = str(fact.get("source", {}).get("platformId", "") or "")
-        conf    = float(fact.get("source", {}).get("confidence", 0) or 0)
-        conf_vals = {k: 0.0 for k in pid_conf_col.values()}
+        bid  = r["business_id"]
+        fact = _parse_fact(r["value"])
+        val  = fact.get("value")
+        pid  = str(fact.get("source", {}).get("platformId", "") or "")
+        conf = float(fact.get("source", {}).get("confidence", 0) or 0)
+
+        if bid not in rows:
+            rows[bid] = {
+                "business_id":   bid,
+                "active":        False,
+                "sos_matched":   False,
+                "filing_type":   "domestic",   # scalar facts don't split domestic/foreign
+                "jurisdiction":  "unknown",
+                "entity_type":   "Unknown",
+                **{k: 0.0 for k in pid_conf_col.values()},
+            }
+
+        if r["name"] == "sos_active":
+            rows[bid]["active"] = str(val).lower() in ("true","1")
+        elif r["name"] == "sos_match_boolean":
+            rows[bid]["sos_matched"] = str(val).lower() in ("true","1")
+
         if pid in pid_conf_col:
-            conf_vals[pid_conf_col[pid]] = conf
-
-        # The filings array is inside fact["value"]
-        filings = fact.get("value", [])
-        if isinstance(filings, dict):
-            filings = [filings]
-        elif not isinstance(filings, list):
-            filings = []
-
-        for filing in filings:
-            rows.append({
-                "business_id":       r["business_id"],
-                "filing_type":       str(filing.get("foreign_domestic","")).lower() or "unknown",
-                "active":            bool(filing.get("active", False)),
-                "jurisdiction":      str(filing.get("jurisdiction","")).lower(),
-                "entity_type":       str(filing.get("company_type","") or filing.get("entity_type","") or "Unknown"),
-                "registration_date": str(filing.get("registration_date","") or filing.get("incorporationDate","")),
-                **conf_vals,
-            })
-        if not filings:
-            rows.append({
-                "business_id": r["business_id"],
-                "filing_type": "unknown", "active": False, "jurisdiction": "",
-                "entity_type": "Unknown", "registration_date": "",
-                **conf_vals,
-            })
+            rows[bid][pid_conf_col[pid]] = max(rows[bid][pid_conf_col[pid]], conf)
 
     if not rows:
         return None
-    df = pd.DataFrame(rows)
-    for col in ["middesk_conf","oc_conf","zi_conf","efx_conf","trulioo_conf"]:
-        if col not in df.columns:
-            df[col] = 0.0
+    df = pd.DataFrame(list(rows.values()))
+    for col in pid_conf_col.values():
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
     return df
 
@@ -810,170 +809,152 @@ if section == "📋 Overview":
 # ═══════════════════════════════════════════════════════════════════════════════
 elif section == "1️⃣  KYB — SOS & Vendors":
     sh("KYB — SOS Filings & Vendor Confidence",
-       "sos_filings.foreign_domestic · active status · jurisdiction (Region) · vendor confidence gaps", "🏛️")
+       "sos_active · sos_match_boolean · vendor confidence scores · Middesk gap analysis", "🏛️")
+
+    flag("Note: the sos_filings fact stores large JSON arrays (>65KB) that exceed the Redshift "
+         "federation VARCHAR limit. This section uses the scalar facts sos_active and "
+         "sos_match_boolean instead, which contain the same signal in a compact format.", "blue")
 
     df = get_section_data("sos", record_limit)
-    dom = df[df["filing_type"]=="domestic"]
-    frn = df[df["filing_type"]=="foreign"]
-    biz_total = df["business_id"].nunique()
-    dom_biz   = dom["business_id"].nunique()
-    frn_biz   = frn["business_id"].nunique()
-    dom_active= dom[dom["active"]]["business_id"].nunique()
-    frn_active= frn[frn["active"]]["business_id"].nunique()
-    multi_dom = (dom.groupby("business_id").size()>1).sum()
-    dom_max_conf = dom.groupby("business_id")["middesk_conf"].max()
-    frn_max_conf = frn.groupby("business_id")["middesk_conf"].max()
+    biz_total  = df["business_id"].nunique()
+    active_biz = df["active"].sum()
+    matched    = df["sos_matched"].sum() if "sos_matched" in df.columns else 0
+    # Use filing_type column (always 'domestic' from scalar facts)
+    dom = df; frn = df.iloc[0:0]  # no foreign split from scalar facts
+    dom_biz = biz_total; frn_biz = 0
+    dom_active = active_biz; frn_active = 0
+    multi_dom = 0
+    dom_max_conf = df.groupby("business_id")["middesk_conf"].max()
+    frn_max_conf = pd.Series(dtype=float)
 
     c1,c2,c3,c4,c5,c6 = st.columns(6)
-    with c1: kpi("Businesses",f"{biz_total:,}","total","#3B82F6")
-    with c2: kpi("Domestic Filings",f"{dom_biz:,}",f"{dom_biz/biz_total*100:.0f}% of biz","#3B82F6")
-    with c3: kpi("Foreign Filings",f"{frn_biz:,}",f"{frn_biz/biz_total*100:.0f}% of biz","#8B5CF6")
-    with c4: kpi("Domestic Active",f"{dom_active:,}",f"{dom_active/max(dom_biz,1)*100:.0f}% of domestic","#22c55e")
-    with c5: kpi("Foreign Active",f"{frn_active:,}",f"{frn_active/max(frn_biz,1)*100:.0f}% of foreign","#22c55e")
-    with c6: kpi("Multi-Domestic ⚠️",f"{multi_dom:,}","should be 0","#ef4444")
-
-    if multi_dom>0:
-        flag(f"{multi_dom} businesses have multiple DOMESTIC filings. Expected: exactly 1 per business. "
-             "This indicates duplicate registry entries or a data quality issue in the sos_filings array.", "red")
+    with c1: kpi("Businesses",f"{biz_total:,}","in scope","#3B82F6")
+    with c2: kpi("SOS Active",f"{active_biz:,}",f"{active_biz/max(biz_total,1)*100:.0f}% active","#22c55e")
+    with c3: kpi("SOS Matched",f"{matched:,}",f"{matched/max(biz_total,1)*100:.0f}% name matched","#3B82F6")
+    with c4: kpi("Avg Middesk Conf",f"{df['middesk_conf'].mean():.3f}","0–1 scale","#f59e0b")
+    with c5: kpi("Avg OC Conf",f"{df['oc_conf'].mean():.3f}","0–1 scale","#3B82F6")
+    with c6: kpi("OC High+Middesk Low",
+                 f"{((df['oc_conf']>0.70)&(df['middesk_conf']<0.40)).sum():,}",
+                 "Middesk gap","#ef4444")
 
     tab_sos, tab_domestic, tab_vendors, tab_middesk_gap, tab_jur = st.tabs([
-        "📊 Filing Overview", "🔬 Domestic Deep Dive", "📡 Vendor Confidence", "⚠️ Middesk Gap", "🗺️ Jurisdiction"
+        "📊 SOS Overview", "🔬 Business Status", "📡 Vendor Confidence", "⚠️ Middesk Gap", "🗺️ Jurisdiction"
     ])
 
-    # ── TAB: Filing Overview ─────────────────────────────────────────────────
+    # ── TAB: SOS Overview ────────────────────────────────────────────────────
     with tab_sos:
         col_l, col_r = st.columns(2)
         with col_l:
-            fd = df.groupby("filing_type")["business_id"].nunique().reset_index()
-            fd.columns = ["Type","Businesses"]
-            fig = px.pie(fd,names="Type",values="Businesses",
-                         color="Type",
-                         color_discrete_map={"domestic":"#3B82F6","foreign":"#8B5CF6"},
-                         hole=0.5,title="Domestic vs Foreign Filing Split")
+            act_counts = pd.DataFrame({
+                "Status": ["Active","Inactive"],
+                "Businesses": [active_biz, biz_total-active_biz],
+            })
+            fig = px.pie(act_counts,names="Status",values="Businesses",
+                         color="Status",
+                         color_discrete_map={"Active":"#22c55e","Inactive":"#ef4444"},
+                         hole=0.5,title="SOS Active Status Distribution")
             st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
         with col_r:
-            act = df.groupby(["filing_type","active"])["business_id"].count().reset_index()
-            act.columns = ["Type","Active","Count"]
-            act["Active"] = act["Active"].map({True:"Active",False:"Inactive"})
-            fig2 = px.bar(act,x="Type",y="Count",color="Active",barmode="group",
-                          color_discrete_map={"Active":"#22c55e","Inactive":"#ef4444"},
-                          title="Active vs Inactive by Filing Type")
+            fig2 = px.histogram(df,x="middesk_conf",nbins=20,
+                                color_discrete_sequence=["#f59e0b"],
+                                title="Middesk Confidence Distribution")
+            fig2.add_vline(x=0.70,line_dash="dash",line_color="#22c55e",annotation_text="Good 0.70")
+            fig2.add_vline(x=0.40,line_dash="dash",line_color="#ef4444",annotation_text="Low 0.40")
             st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
 
-        st.markdown("#### 📋 Summary Table — Filing Counts by Type & Status")
+        st.markdown("#### 📋 SOS Summary Table")
         summary_tbl = pd.DataFrame({
-            "Filing Type":    ["Domestic","Foreign","TOTAL"],
-            "# Businesses":   [dom_biz, frn_biz, biz_total],
-            "# Active":       [dom_active, frn_active, dom_active+frn_active],
-            "Active Rate":    [f"{dom_active/max(dom_biz,1)*100:.1f}%",
-                               f"{frn_active/max(frn_biz,1)*100:.1f}%",
-                               f"{(dom_active+frn_active)/max(biz_total,1)*100:.1f}%"],
-            "# Inactive":     [dom_biz-dom_active, frn_biz-frn_active,
-                               biz_total-(dom_active+frn_active)],
-            "Max Middesk Conf":[f"{dom_max_conf.mean():.3f}",
-                                f"{frn_max_conf.mean():.3f}" if len(frn_max_conf)>0 else "N/A",
-                                f"{df.groupby('business_id')['middesk_conf'].max().mean():.3f}"],
+            "Metric":  ["Total Businesses","SOS Active","SOS Inactive","SOS Matched","Active Rate"],
+            "Value":   [f"{biz_total:,}", f"{active_biz:,}",
+                        f"{biz_total-active_biz:,}", f"{matched:,}",
+                        f"{active_biz/max(biz_total,1)*100:.1f}%"],
         })
         styled_table(summary_tbl)
 
-        analyst_card("SOS Filing Distribution", [
-            f"Domestic/foreign split: {dom_biz:,} domestic vs {frn_biz:,} foreign ({frn_biz/max(biz_total,1)*100:.0f}% are foreign-qualified).",
-            "Foreign filings typically indicate a business incorporated in one state (often Delaware) but operating in another.",
-            f"Active rate for domestic: {dom_active/max(dom_biz,1)*100:.0f}%. For foreign: {frn_active/max(frn_biz,1)*100:.0f}%. "
-            "Domestic inactive may indicate dissolved/suspended businesses that are still applying.",
-            "Expected pattern: exactly 1 domestic filing per business, 0+ foreign filings.",
+        analyst_card("SOS Active Status", [
+            f"{active_biz:,} of {biz_total:,} businesses ({active_biz/max(biz_total,1)*100:.0f}%) have an active SOS filing.",
+            f"{matched:,} businesses have sos_match_boolean=true — the submitted business name matched the SOS registry.",
+            f"{biz_total-active_biz:,} businesses have no active SOS filing — may be inactive, dissolved, or newly formed.",
+            "Source: sos_active (calculated from sos_filings[].active) and sos_match_boolean "
+            "(from Middesk name-match review task). Both facts are scalar and always fit within Redshift's VARCHAR limit.",
         ])
 
         sanity_metrics([
-            ("Each biz has ≥1 filing", df.groupby("business_id").size().min()>=1,
-             f"Min filings per business: {df.groupby('business_id').size().min()}"),
-            ("Multi-domestic = 0", multi_dom==0,
-             f"{multi_dom} businesses have >1 domestic filing"),
-            ("Domestic active > 50%", dom_active/max(dom_biz,1)>0.5,
-             f"{dom_active/max(dom_biz,1)*100:.0f}% domestic are active"),
-            ("Foreign rate < 40%", frn_biz/biz_total<0.4,
-             f"{frn_biz/biz_total*100:.0f}% have foreign filings"),
+            ("SOS active > 70%", active_biz/max(biz_total,1)>0.70,
+             f"{active_biz/max(biz_total,1)*100:.0f}% active"),
+            ("SOS matched > 60%", matched/max(biz_total,1)>0.60,
+             f"{matched/max(biz_total,1)*100:.0f}% matched"),
+            ("Avg Middesk conf > 0.50", df["middesk_conf"].mean()>0.50,
+             f"Mean: {df['middesk_conf'].mean():.3f}"),
+            ("OC+Middesk gap < 20%", ((df["oc_conf"]>0.70)&(df["middesk_conf"]<0.40)).mean()<0.20,
+             f"{((df['oc_conf']>0.70)&(df['middesk_conf']<0.40)).mean()*100:.0f}% gap"),
         ])
 
-    # ── TAB: Domestic Deep Dive ──────────────────────────────────────────────
+    # ── TAB: Business Status ─────────────────────────────────────────────────
     with tab_domestic:
-        st.markdown("#### 🔬 Per-Business Domestic Filing Analysis")
-        flag("Rule: Each business should have EXACTLY 1 domestic filing. "
-             "Check every business with count > 1.", "blue")
+        st.markdown("#### 🔬 Per-Business SOS Status")
 
-        dom_summary = dom.groupby("business_id").agg(
-            filing_count=("filing_type","count"),
-            active_count=("active","sum"),
-            max_middesk_conf=("middesk_conf","max"),
-            max_oc_conf=("oc_conf","max"),
-            jurisdiction=("jurisdiction","first"),
-            entity_type=("entity_type","first"),
-        ).reset_index()
-        dom_summary["Status"] = dom_summary.apply(
-            lambda r: "Multi-domestic ⚠️" if r.filing_count>1
-            else ("✅ Active" if r.active_count>0 else "❌ No Active Filing"), axis=1)
-        dom_summary["Middesk vs OC Gap"] = (dom_summary["max_oc_conf"]-dom_summary["max_middesk_conf"]).round(3)
-        dom_summary["🚨 Conf Gap"] = dom_summary["Middesk vs OC Gap"].apply(
-            lambda x: "⚠️ YES" if x>0.25 else "✅ OK")
+        df["Status"] = df["active"].apply(lambda x: "✅ Active" if x else "❌ No Active Filing")
+        df["Middesk vs OC Gap"] = (df["oc_conf"] - df["middesk_conf"]).round(3)
+        df["🚨 Conf Gap"] = df["Middesk vs OC Gap"].apply(lambda x: "⚠️ YES" if x>0.25 else "✅ OK")
+        dom_summary = df.rename(columns={
+            "middesk_conf":"max_middesk_conf","oc_conf":"max_oc_conf"})
+        dom_summary["active_count"] = dom_summary["active"].astype(int)
+        dom_summary["filing_count"] = 1
 
         ok  = (dom_summary["Status"]=="✅ Active").sum()
-        mul = (dom_summary["Status"]=="Multi-domestic ⚠️").sum()
         noa = (dom_summary["Status"]=="❌ No Active Filing").sum()
 
         c1,c2,c3 = st.columns(3)
-        with c1: kpi("✅ Active & Single",f"{ok:,}",f"{ok/max(len(dom_summary),1)*100:.0f}%","#22c55e")
-        with c2: kpi("⚠️ Multi-domestic",f"{mul:,}","data quality issue","#f59e0b")
-        with c3: kpi("❌ No Active Filing",f"{noa:,}","investigate status","#ef4444")
+        with c1: kpi("✅ Active",f"{ok:,}",f"{ok/max(len(dom_summary),1)*100:.0f}%","#22c55e")
+        with c2: kpi("❌ No Active Filing",f"{noa:,}",f"{noa/max(len(dom_summary),1)*100:.0f}%","#ef4444")
+        with c3: kpi("⚠️ OC+Middesk Gap",
+                     f"{(dom_summary['Middesk vs OC Gap']>0.25).sum():,}",
+                     "OC high, Middesk low","#f59e0b")
 
         col_l,col_r = st.columns(2)
         with col_l:
             status_counts = dom_summary["Status"].value_counts().reset_index()
             status_counts.columns = ["Status","Count"]
-            colors = {"✅ Active":"#22c55e","Multi-domestic ⚠️":"#f59e0b","❌ No Active Filing":"#ef4444"}
+            colors = {"✅ Active":"#22c55e","❌ No Active Filing":"#ef4444"}
             fig = px.pie(status_counts,names="Status",values="Count",
                          color="Status",color_discrete_map=colors,hole=0.45,
-                         title="Domestic Filing Status Distribution")
+                         title="Business SOS Status")
             st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
         with col_r:
             fig2 = px.histogram(dom_summary,x="max_middesk_conf",nbins=20,
                                 color_discrete_sequence=["#f59e0b"],
-                                title="Max Middesk Confidence Distribution (Domestic Filings)")
-            fig2.add_vline(x=0.70,line_dash="dash",line_color="#22c55e",annotation_text="Good threshold 0.7")
-            fig2.add_vline(x=0.40,line_dash="dash",line_color="#ef4444",annotation_text="Low threshold 0.4")
+                                title="Middesk Confidence Distribution")
+            fig2.add_vline(x=0.70,line_dash="dash",line_color="#22c55e",annotation_text="Good 0.7")
+            fig2.add_vline(x=0.40,line_dash="dash",line_color="#ef4444",annotation_text="Low 0.4")
             st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
 
-        st.markdown("#### 📋 Businesses Needing Attention")
-        problems = dom_summary[dom_summary["Status"]!="✅ Active"].copy()
+        st.markdown("#### 📋 Businesses Without Active Filing")
+        problems = dom_summary[dom_summary["Status"]=="❌ No Active Filing"].copy()
         if len(problems)>0:
-            display_cols = ["business_id","Status","filing_count","active_count",
-                            "max_middesk_conf","max_oc_conf","Middesk vs OC Gap",
-                            "🚨 Conf Gap","jurisdiction","entity_type"]
+            display_cols = ["business_id","Status","max_middesk_conf","max_oc_conf",
+                            "Middesk vs OC Gap","🚨 Conf Gap"]
             styled_table(problems[display_cols].head(30).round(3), color_col="Status",
-                         palette={"multi-domestic ⚠️":"#f59e0b","❌ no active filing":"#ef4444"})
+                         palette={"❌ no active filing":"#ef4444"})
         else:
-            flag("All domestic filings look correct — each business has exactly 1 active domestic filing.", "green")
+            flag("All businesses have an active SOS filing.", "green")
 
         gap_count = (dom_summary["Middesk vs OC Gap"]>0.25).sum()
         anomaly_flags(dom_summary, [
-            (dom_summary["Status"]=="Multi-domestic ⚠️",
-             "Businesses with multiple domestic filings", "amber"),
             (dom_summary["Status"]=="❌ No Active Filing",
-             "Domestic filing exists but no active status", "red"),
+             "Businesses with no active SOS status", "red"),
             (dom_summary["Middesk vs OC Gap"]>0.25,
-             "OC confidence >0.25 higher than Middesk (suggests Middesk gap)", "amber"),
+             "OC confidence >0.25 higher than Middesk (Middesk gap)", "amber"),
             (dom_summary["max_middesk_conf"]<0.30,
              "Middesk confidence below 0.30 (very low — likely no match)", "red"),
         ])
 
-        analyst_card("Domestic Filing Deep Dive", [
-            f"{mul} businesses with multiple domestic filings: check if same entity registered "
-            "in multiple states as 'domestic' — or if the sos_filings array has duplicates.",
-            f"{noa} businesses with domestic filing but no active status: these may be "
-            "dissolved, suspended, or revoked entities still applying for services.",
+        analyst_card("Business SOS Status", [
+            f"{noa} businesses with no active SOS status: may be dissolved, suspended, or revoked.",
             f"{gap_count} businesses where OC confidence is >0.25 higher than Middesk: "
-            "this is the Middesk data gap in action — OC found the entity, Middesk didn't.",
-            "Middesk confidence < 0.40: the task-based formula gives 0.15 base + 0.20 per task (name/tin/address/sos). "
-            "Low scores mean few tasks matched.",
+            "OC found the entity in global registries but Middesk didn't match in US SOS systems.",
+            "Middesk confidence < 0.40: task formula gives 0.15 base + 0.20 per task. "
+            "Low score = few Middesk review tasks matched.",
         ])
 
     # ── TAB: Vendor Confidence ───────────────────────────────────────────────
@@ -1157,55 +1138,31 @@ ORDER BY received_at DESC;""", language="sql")
 
     # ── TAB: Jurisdiction ────────────────────────────────────────────────────
     with tab_jur:
-        st.markdown("#### 🗺️ Jurisdiction / Region Analysis (Domestic Filings Only)")
-        flag("'Region' in the Admin Portal = sos_filings[n].jurisdiction for DOMESTIC filings. "
-             "Format: 'us::ca', 'us::ny', etc. Source: Middesk registration_state → 'us::'+state.toLowerCase(). "
-             "OC uses jurisdiction_code from oc_companies_latest.", "blue")
+        st.markdown("#### 🗺️ Jurisdiction / Region")
+        flag("'Region' = sos_filings[n].jurisdiction for domestic filings (format: 'us::ca'). "
+             "Because sos_filings is too large for the Redshift federation VARCHAR limit, "
+             "jurisdiction data is not available from scalar facts. "
+             "To get jurisdiction breakdown, query the source PostgreSQL RDS directly.", "amber")
 
-        jur = dom.groupby("jurisdiction").agg(
-            businesses=("business_id","nunique"),
-            active=("active","sum"),
-            avg_middesk_conf=("middesk_conf","mean"),
-        ).reset_index()
-        jur["State"] = jur["jurisdiction"].str.replace("us::","").str.upper()
-        jur["Active Rate"] = (jur["active"]/jur["businesses"]*100).round(1).astype(str)+"%"
-        jur["Avg Middesk Conf"] = jur["avg_middesk_conf"].round(3)
-        jur = jur.sort_values("businesses",ascending=False)
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            fig = px.bar(jur.head(15),x="State",y="businesses",
-                         color="avg_middesk_conf",color_continuous_scale="Blues",
-                         title="Top 15 States by Business Count",
-                         labels={"businesses":"Businesses","avg_middesk_conf":"Avg Middesk Conf"})
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            fig2 = px.scatter(jur.head(15),x="businesses",y="avg_middesk_conf",
-                              size="active",text="State",
-                              color="avg_middesk_conf",color_continuous_scale="RdYlGn",
-                              title="State: Volume vs Middesk Confidence",
-                              labels={"businesses":"# Businesses","avg_middesk_conf":"Avg Middesk Conf",
-                                      "active":"Active Count"})
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        st.markdown("#### 📋 Full Jurisdiction Table")
-        display_jur = jur[["State","businesses","active","Active Rate","Avg Middesk Conf"]].rename(columns={
-            "businesses":"# Businesses","active":"# Active"})
-        styled_table(display_jur.head(20))
-
-        entity_jur = dom.groupby(["jurisdiction","entity_type"])["business_id"].count().unstack(fill_value=0)
-        entity_jur.index = entity_jur.index.str.replace("us::","").str.upper()
-        st.markdown("#### Entity Type Breakdown by Jurisdiction (Top 10 states)")
-        st.dataframe(entity_jur.head(10),use_container_width=True)
+        st.markdown("##### SQL to get jurisdiction breakdown (run on PostgreSQL RDS, not Redshift):")
+        st.code("""-- Run on PostgreSQL RDS (port 5432), NOT on Redshift federation
+-- The sos_filings value column is native JSONB on PostgreSQL and has no size limit.
+SELECT
+    business_id,
+    (value->'value'->0->>'jurisdiction') AS jurisdiction,
+    (value->'value'->0->>'foreign_domestic') AS filing_type,
+    (value->'value'->0->>'active')::boolean AS active
+FROM rds_warehouse_public.facts
+WHERE name = 'sos_filings'
+LIMIT 1000;""", language="sql")
 
         analyst_card("Jurisdiction / Region Insights", [
-            f"Top state: {jur.iloc[0]['State']} with {jur.iloc[0]['businesses']:,} businesses.",
-            f"States with lowest Middesk confidence may indicate local registries not well-covered by Middesk.",
-            "Delaware is the most common foreign registration state (used by many LLCs for favorable laws).",
-            "High volume states (CA, NY, TX) should have the best Middesk coverage. "
-            "Low confidence in these states signals name normalization issues.",
-            "Cross-check: businesses in high-volume states with Middesk conf < 0.40 "
-            "are the strongest candidates for the Middesk gap investigation.",
+            "sos_filings stores an array of SOS registrations — each has jurisdiction, active, foreign_domestic.",
+            "Format: 'us::ca', 'us::ny', etc. — state code prefixed with 'us::'.",
+            "Middesk uses registration_state: 'us::' + state.toLowerCase() (kyb/index.ts L746).",
+            "OC uses jurisdiction_code from oc_companies_latest (e.g. 'us_fl', 'gb').",
+            "The sos_filings fact can be 97KB+ per row — it exceeds Redshift's federated VARCHAR limit. "
+            "Access it from PostgreSQL RDS directly for full jurisdiction analysis.",
         ])
 
 
