@@ -928,14 +928,45 @@ def live_dd(limit):
 
 # Sections that are optional — if their facts don't exist, show info instead of error
 OPTIONAL_SECTIONS = {"banking", "kyc", "worth"}
-# Note: worth is still optional because rds_manual_score_public may return no rows
-# if no scores have been computed yet, or if the federated schema isn't accessible.
+
+# ── Session-state cache helpers ────────────────────────────────────────────────
+def _cache_key(section_key, limit):
+    """Unique key for session_state cache — includes limit so changing the
+    slider correctly invalidates the cached data."""
+    return f"_data_{section_key}_{limit}"
+
+def _cache_ts_key(section_key, limit):
+    return f"_ts_{section_key}_{limit}"
+
+def clear_data_cache():
+    """Remove all cached DataFrames from session_state.
+    Called when the user clicks 'Refresh All Data'.
+    Clears: section data, timestamps, consistency facts, and per-business caches."""
+    keys_to_del = [k for k in st.session_state
+                   if k.startswith(("_data_","_ts_","_biz_","_biz_ts_"))]
+    for k in keys_to_del:
+        del st.session_state[k]
+
+def get_cache_age(section_key, limit):
+    """Return how many seconds ago this dataset was loaded, or None if not cached."""
+    ts = st.session_state.get(_cache_ts_key(section_key, limit))
+    if ts is None:
+        return None
+    return int((datetime.now(timezone.utc) - ts).total_seconds())
 
 def get_section_data(section_key, limit):
     """
-    Load real data from Redshift.
-    - Required sections (sos, tin, naics, worth, dd): error + stop if no data
-    - Optional sections (banking, kyc): info message + return None if no data
+    Load data with session_state caching.
+
+    Flow:
+      1. Check session_state for a cached DataFrame under (section_key, limit).
+      2. If found → return immediately (no Redshift query).
+      3. If not found → query Redshift, store result in session_state, return.
+
+    Cache is invalidated when:
+      - User clicks '🔄 Refresh All Data' in the sidebar (calls clear_data_cache())
+      - The 'Records to load' slider value changes (different limit = different key)
+      - The Streamlit server restarts (session_state is process-local)
     """
     loaders = {
         "sos":     live_sos,
@@ -946,15 +977,30 @@ def get_section_data(section_key, limit):
         "kyc":     live_kyc,
         "dd":      live_dd,
     }
-    live_fn = loaders[section_key]
+    live_fn    = loaders[section_key]
     is_optional = section_key in OPTIONAL_SECTIONS
+    cache_key  = _cache_key(section_key, limit)
 
+    # ── Step 1: return cached data if available ────────────────────────────────
+    if cache_key in st.session_state:
+        cached = st.session_state[cache_key]
+        # None is a valid cached value (optional section returned no data)
+        if cached is None and is_optional:
+            return None
+        if cached is not None and not (hasattr(cached,"empty") and cached.empty):
+            return cached
+
+    # ── Step 2: not cached — need to query Redshift ────────────────────────────
     if not live:
         st.error("🔴 Not connected to Redshift. Connect VPN and click **Retry connection** in the sidebar.")
         st.stop()
 
-    with st.spinner(f"Loading {section_key} data from Redshift…"):
+    with st.spinner(f"⏳ Loading {section_key} data from Redshift… (will cache for this session)"):
         df = live_fn(limit)
+
+    # Store in session_state regardless of success/failure (None = no data available)
+    st.session_state[cache_key] = df
+    st.session_state[_cache_ts_key(section_key, limit)] = datetime.now(timezone.utc)
 
     if df is None or (hasattr(df, 'empty') and df.empty):
         err = st.session_state.get("_last_db_error", "")
@@ -1038,6 +1084,37 @@ with st.sidebar:
             value=5_000,
         )
         st.caption(f"Up to {record_limit:,} records")
+
+    # ── Cache status & refresh ─────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("**📦 Data Cache**")
+
+    ALL_SECTIONS = ["sos","tin","naics","banking","worth","kyc","dd"]
+    SECTION_LABELS = {
+        "sos":"SOS/Vendors","tin":"TIN","naics":"NAICS/MCC",
+        "banking":"Banking","worth":"Worth Score","kyc":"KYC/IDV","dd":"Due Diligence"
+    }
+    any_cached = False
+    for sk in ALL_SECTIONS:
+        age = get_cache_age(sk, record_limit)
+        if age is not None:
+            any_cached = True
+            mins = age // 60
+            secs = age % 60
+            age_str = f"{mins}m {secs}s ago" if mins > 0 else f"{secs}s ago"
+            st.caption(f"✅ {SECTION_LABELS[sk]} — {age_str}")
+        else:
+            st.caption(f"⚪ {SECTION_LABELS[sk]} — not loaded yet")
+
+    if any_cached:
+        if st.button("🔄 Refresh All Data", use_container_width=True):
+            clear_data_cache()
+            st.success("Cache cleared — data will reload on next visit to each section.")
+            st.rerun()
+    else:
+        st.caption("Data loads automatically when you visit each section.")
+
+    st.markdown("---")
     st.caption("Sources: `rds_warehouse_public.facts`")
     st.caption("`rds_manual_score_public.business_scores`")
     st.caption("`rds_integration_data.*`")
@@ -1063,13 +1140,12 @@ if section == "📋 Overview":
     st.markdown("# 🏦 Admin Portal — KYB Intelligence Dashboard")
     st.markdown("*All KYB fields · vendor match rates · data quality · risk signals · anomaly detection*")
 
-    # ── Load all datasets ──────────────────────────────────────────────────────
-    with st.spinner("Loading data from Redshift…"):
-        sos  = get_section_data("sos",   record_limit)
-        tin  = get_section_data("tin",   record_limit)
-        dd   = get_section_data("dd",    record_limit)
-        naics= get_section_data("naics", record_limit)
-        kyc  = get_section_data("kyc",   record_limit)
+    # ── Load all datasets (served from session_state cache on repeat visits) ──
+    sos   = get_section_data("sos",   record_limit)
+    tin   = get_section_data("tin",   record_limit)
+    dd    = get_section_data("dd",    record_limit)
+    naics = get_section_data("naics", record_limit)
+    kyc   = get_section_data("kyc",   record_limit)
 
     biz = sos["business_id"].nunique()
     sos_active_pct   = sos["active"].mean()*100
@@ -1292,10 +1368,9 @@ elif section == "🏛️ Identity & Registry":
        "SOS filings · TIN verification · IDV (Plaid) · vendor match rates · "
        "Middesk gap · inactive+perpetual · consistency checks", "🏛️")
 
-    with st.spinner("Loading Identity & Registry data…"):
-        sos = get_section_data("sos",  record_limit)
-        tin = get_section_data("tin",  record_limit)
-        kyc = get_section_data("kyc",  record_limit)
+    sos = get_section_data("sos",  record_limit)
+    tin = get_section_data("tin",  record_limit)
+    kyc = get_section_data("kyc",  record_limit)
 
     tin["tin_match_boolean"] = tin["tin_match_boolean"].astype(bool)
     tin["tin_submitted"]     = tin["tin_submitted"].astype(bool)
@@ -1885,8 +1960,7 @@ elif section == "🏭 Classification":
        "naics_code · mcc_code · 561499 fallback · vendor source breakdown · "
        "entity-type cross-analysis · data quality checks", "🏭")
 
-    with st.spinner("Loading NAICS data…"):
-        naics = get_section_data("naics", record_limit)
+    naics = get_section_data("naics", record_limit)
 
     total = len(naics); fallbacks = int(naics["is_fallback"].sum()); real = total-fallbacks
     top_src = naics.groupby("naics_source").size().idxmax() if "naics_source" in naics.columns else "unknown"
@@ -2036,12 +2110,16 @@ elif section == "🏭 Classification":
             "Inconsistencies may indicate mis-classification, AI hallucination, or data gaps."
         )
 
-        # ── Pull enriching facts for cross-check ─────────────────────────────
-        with st.spinner("Loading website, MCC and description facts for consistency analysis…"):
-            consist_facts = query_facts_safe([
-                'naics_code','mcc_code','naics_description','mcc_description',
-                'industry','website','website_found',
-            ], record_limit)
+        # ── Pull enriching facts for cross-check (cached in session_state) ──────
+        consist_key = _cache_key("consist_facts", record_limit)
+        if consist_key not in st.session_state:
+            with st.spinner("Loading website, MCC and description facts for consistency analysis…"):
+                st.session_state[consist_key] = query_facts_safe([
+                    'naics_code','mcc_code','naics_description','mcc_description',
+                    'industry','website','website_found',
+                ], record_limit)
+                st.session_state[_cache_ts_key("consist_facts", record_limit)] = datetime.now(timezone.utc)
+        consist_facts = st.session_state[consist_key]
 
         if consist_facts is None or consist_facts.empty:
             st.warning("Consistency analysis requires naics_code, mcc_code and website facts.")
@@ -2329,9 +2407,8 @@ elif section == "💰 Risk & Score":
        "Worth Score · score_decision · Due Diligence · watchlist · sanctions · PEP · "
        "BK/judgments/liens · cross-analysis", "💰")
 
-    with st.spinner("Loading Risk & Score data…"):
-        dd    = get_section_data("dd",    record_limit)
-        worth = get_section_data("worth", record_limit)
+    dd    = get_section_data("dd",    record_limit)
+    worth = get_section_data("worth", record_limit)
 
     # ── Due Diligence KPIs ─────────────────────────────────────────────────────
     biz_dd = dd["business_id"].nunique() if "business_id" in dd.columns else len(dd)
@@ -2923,14 +3000,22 @@ elif section == "🔎 Business Lookup":
     else:
         bid = business_id.strip()
 
-        with st.spinner(f"Loading all KYB data for {bid}…"):
-            facts_sql = f"""
-                SELECT name, value, received_at
-                FROM rds_warehouse_public.facts
-                WHERE business_id = '{bid}'
-                ORDER BY name, received_at DESC
-            """
-            facts_df = run_query(facts_sql)
+        biz_cache_key = f"_biz_{bid}"
+        if biz_cache_key not in st.session_state:
+            with st.spinner(f"Loading all KYB data for {bid}…"):
+                facts_sql = f"""
+                    SELECT name, value, received_at
+                    FROM rds_warehouse_public.facts
+                    WHERE business_id = '{bid}'
+                    ORDER BY name, received_at DESC
+                """
+                st.session_state[biz_cache_key] = run_query(facts_sql)
+                st.session_state[f"_biz_ts_{bid}"] = datetime.now(timezone.utc)
+        else:
+            biz_age = int((datetime.now(timezone.utc) - st.session_state[f"_biz_ts_{bid}"]).total_seconds())
+            st.caption(f"📦 Using cached data for this business (loaded {biz_age}s ago) — "
+                       f"[clear]({bid}) or change UUID to reload.")
+        facts_df = st.session_state[biz_cache_key]
 
         if facts_df is None or facts_df.empty:
             st.error(f"No facts found for business_id = `{bid}`. Check UUID and connection.")
