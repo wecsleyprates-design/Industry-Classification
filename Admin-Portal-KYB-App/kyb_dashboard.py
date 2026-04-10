@@ -108,196 +108,54 @@ IDV_STATUS_MEANINGS = {
 }
 
 # ── Connection ─────────────────────────────────────────────────────────────────
-# TTL = 60s so a cached failure clears quickly when VPN connects.
-# Use st.cache_resource so the connection object is shared across reruns.
-@st.cache_resource(ttl=60)
-def get_conn():
-    try:
-        import psycopg2
-        conn = psycopg2.connect(
-            dbname=os.getenv("REDSHIFT_DB", "dev"),
-            user=os.getenv("REDSHIFT_USER", "readonly_all_access"),
-            password=os.getenv("REDSHIFT_PASSWORD", "Y7&.D3!09WvT4/nSqXS2>qbO"),
-            host=os.getenv("REDSHIFT_HOST",
-                "worthai-services-redshift-endpoint-k9sdhv2ja6lgojidri87"
-                ".808338307022.us-east-1.redshift-serverless.amazonaws.com"),
-            port=int(os.getenv("REDSHIFT_PORT", "5439")),
-            connect_timeout=10,
-        )
-        return conn, True, None
-    except Exception as e:
-        return None, False, str(e)
+def _make_conn():
+    """Open a fresh psycopg2 connection. Never cached — always fresh."""
+    import psycopg2
+    return psycopg2.connect(
+        dbname=os.getenv("REDSHIFT_DB", "dev"),
+        user=os.getenv("REDSHIFT_USER", "readonly_all_access"),
+        password=os.getenv("REDSHIFT_PASSWORD", "Y7&.D3!09WvT4/nSqXS2>qbO"),
+        host=os.getenv("REDSHIFT_HOST",
+            "worthai-services-redshift-endpoint-k9sdhv2ja6lgojidri87"
+            ".808338307022.us-east-1.redshift-serverless.amazonaws.com"),
+        port=int(os.getenv("REDSHIFT_PORT", "5439")),
+        connect_timeout=10,
+    )
 
 def run_query(sql):
-    conn, live, _ = get_conn()
-    if not live or conn is None:
-        return None
+    """
+    Open a fresh connection per query, run SQL, close immediately.
+    Fresh connection per query is the only reliable way to avoid:
+      - 'current transaction is aborted' (broken cached connection)
+      - Stale SSL sessions after VPN reconnect
+    """
     try:
-        return pd.read_sql(sql, conn)
-    except Exception:
+        conn = _make_conn()
+        try:
+            df = pd.read_sql(sql, conn)
+        finally:
+            conn.close()
+        return df
+    except Exception as e:
+        st.session_state["_last_db_error"] = str(e)
         return None
+
+def test_connection():
+    """Return (is_live, error_message). Fresh connection every call."""
+    try:
+        conn = _make_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.fetchone()
+        cur.close()
+        conn.close()
+        return True, None
+    except Exception as e:
+        return False, str(e)
 
 def _limit_clause(limit):
     return f" LIMIT {limit}" if limit is not None else ""
 
-def _synth_n(limit):
-    return min(limit, 2000) if limit is not None else 2000
-
-# ── Synthetic data ─────────────────────────────────────────────────────────────
-def _synth_sos(n=500):
-    random.seed(42); rows = []
-    states = ["us::ca","us::ny","us::tx","us::fl","us::il","us::wa","us::nv","us::de",
-              "us::ga","us::pa","us::oh","us::az","us::nc","us::mi","us::nj"]
-    for i in range(n):
-        nf = random.choices([1,2,3],[0.65,0.25,0.10])[0]
-        for j in range(nf):
-            fd = "domestic" if j==0 else random.choice(["domestic","foreign"])
-            rows.append({
-                "business_id":    f"biz-{i:04d}",
-                "filing_type":    fd,
-                "active":         random.random() > 0.22,
-                "jurisdiction":   random.choice(states) if fd=="domestic" else "us::de",
-                "middesk_conf":   round(random.triangular(0.2,0.95,0.72),3),
-                "oc_conf":        round(random.triangular(0.1,0.90,0.65),3),
-                "zi_conf":        round(random.triangular(0.1,0.85,0.60),3),
-                "efx_conf":       round(random.triangular(0.1,0.80,0.55),3),
-                "trulioo_conf":   round(random.triangular(0.1,0.75,0.45),3),
-                "entity_type":    random.choice(["LLC","Corporation","Partnership","Sole Prop","S-Corp"]),
-                "registration_date": f"20{random.randint(10,24):02d}-{random.randint(1,12):02d}-01",
-            })
-    return pd.DataFrame(rows)
-
-def _synth_tin(n=500):
-    random.seed(1); rows = []
-    for i in range(n):
-        s = random.choices(["success","failure","pending",""],weights=[0.58,0.25,0.10,0.07])[0]
-        middesk_task = random.choices(["success","failure","pending","none"],weights=[0.45,0.28,0.15,0.12])[0]
-        rows.append({
-            "business_id":       f"biz-{i:04d}",
-            "tin_match_status":  s,
-            "tin_match_boolean": s=="success",
-            "tin_submitted":     random.random() > 0.05,
-            "middesk_tin_task":  middesk_task,
-            "has_middesk":       middesk_task != "none",
-            "has_trulioo":       random.random() > 0.30,
-            "entity_type":       random.choice(["LLC","Corporation","Sole Prop","Partnership"]),
-            "state":             random.choice(["CA","NY","TX","FL","IL","GA","PA","AZ"]),
-        })
-    return pd.DataFrame(rows)
-
-def _synth_naics(n=500):
-    random.seed(2); rows = []
-    naics = [("722511","Full-Service Restaurants"),("561499","All Other Business Support"),
-             ("541512","Computer Systems Design"),("621111","Offices of Physicians"),
-             ("448110","Men's Clothing Stores"),("531110","Lessors of Residential Buildings"),
-             ("423840","Industrial Machinery Wholesalers"),("712110","Museums"),
-             ("812113","Nail Salons"),("236220","Commercial Building Construction"),
-             ("541110","Offices of Lawyers"),("722515","Snack and Nonalcoholic Beverage Bars")]
-    mcc_map = {"722511":"5812","561499":"5614","541512":"7372","621111":"8099",
-               "448110":"5651","531110":"6552","423840":"5065","712110":"7991",
-               "812113":"7230","236220":"1740","541110":"8111","722515":"5812"}
-    sources = ["equifax","zoominfo","opencorporates","ai","trulioo","businessDetails"]
-    sw = [0.25,0.30,0.15,0.15,0.10,0.05]
-    for i in range(n):
-        idx = random.choices(range(len(naics)),weights=[15,20,8,6,5,5,4,3,4,6,7,4])[0]
-        code, label = naics[idx]; src = random.choices(sources,weights=sw)[0]
-        rows.append({
-            "business_id":      f"biz-{i:04d}",
-            "naics_code":       code,
-            "naics_label":      label,
-            "mcc_code":         mcc_map.get(code,"5999"),
-            "naics_source":     src,
-            "naics_confidence": round(random.triangular(0.05,0.95,0.55),3),
-            "is_fallback":      code=="561499",
-            "state":            random.choice(["CA","NY","TX","FL","IL"]),
-            "entity_type":      random.choice(["LLC","Corporation","Sole Prop"]),
-        })
-    return pd.DataFrame(rows)
-
-def _synth_banking(n=500):
-    random.seed(3); rows = []
-    # Weighted toward realistic codes
-    vc_choices = [12,12,12,6,6,14,15,21,1,2,9,19,7,11,0]
-    ac_choices = [2,2,2,3,4,5,6,7,8,1,11,9,0,18]
-    for i in range(n):
-        vc = random.choice(vc_choices); ac = random.choice(ac_choices)
-        rows.append({
-            "business_id":          f"biz-{i:04d}",
-            "verify_response_code": vc,
-            "auth_response_code":   ac,
-            "account_status":       GIACT_ACCOUNT_STATUS.get(vc,("missing",""))[0],
-            "account_name_status":  GIACT_ACCOUNT_NAME.get(ac,("missing",""))[0],
-            "contact_verification": GIACT_CONTACT_VERIFICATION.get(ac,("missing",""))[0],
-            "account_tooltip":      GIACT_ACCOUNT_STATUS.get(vc,("missing","Unknown"))[1],
-            "has_bank_account":     random.random() > 0.08,
-            "state":                random.choice(["CA","NY","TX","FL","IL","GA","PA"]),
-        })
-    return pd.DataFrame(rows)
-
-def _synth_worth(n=500):
-    random.seed(4); rows = []
-    for i in range(n):
-        score = max(300,min(850,random.gauss(635,100)))
-        rows.append({
-            "business_id":         f"biz-{i:04d}",
-            "worth_score_850":     round(score),
-            "risk_level":          "HIGH" if score<500 else ("MODERATE" if score<650 else "LOW"),
-            "shap_public_records": round(random.gauss(-25,20)),
-            "shap_company_profile":round(random.gauss(35,22)),
-            "shap_financials":     round(random.gauss(12,28)),
-            "shap_banking":        round(random.gauss(18,20)),
-            "count_bk":            random.choices([0,1,2],[0.78,0.16,0.06])[0],
-            "count_judgment":      random.choices([0,1,2,3],[0.65,0.20,0.10,0.05])[0],
-            "count_lien":          random.choices([0,1,2,3],[0.60,0.22,0.12,0.06])[0],
-            "state":               random.choice(["CA","NY","TX","FL","IL","GA","PA","AZ","NC","MI"]),
-        })
-    return pd.DataFrame(rows)
-
-def _synth_kyc(n=500):
-    random.seed(5); rows = []
-    for i in range(n):
-        verified = random.random()>0.26
-        status = random.choices(
-            ["SUCCESS","PENDING","CANCELED","EXPIRED","FAILED"],
-            weights=[0.68,0.12,0.06,0.05,0.09])[0]
-        rows.append({
-            "business_id":      f"biz-{i:04d}",
-            "idv_status":       status,
-            "idv_passed":       status=="SUCCESS",
-            "risk_level":       random.choices(["low_risk","medium_risk","high_risk"],weights=[0.42,0.35,0.23])[0],
-            "name_match":       random.choices(["success","failure","pending"],weights=[0.72,0.20,0.08])[0],
-            "dob_match":        random.choices(["success","failure","none"],weights=[0.68,0.22,0.10])[0],
-            "ssn_match":        random.choices(["success","failure","none"],weights=[0.62,0.28,0.10])[0],
-            "address_match":    random.choices(["success","failure","pending"],weights=[0.65,0.25,0.10])[0],
-            "phone_match":      random.choices(["success","failure","none"],weights=[0.58,0.30,0.12])[0],
-            "synthetic_score":  round(max(0,min(1,random.gauss(0.22,0.25))),3),
-            "stolen_score":     round(max(0,min(1,random.gauss(0.18,0.22))),3),
-            "entity_type":      random.choice(["LLC","Corporation","Sole Prop","Partnership"]),
-            "state":            random.choice(["CA","NY","TX","FL","IL","GA","PA"]),
-        })
-    return pd.DataFrame(rows)
-
-def _synth_dd(n=500):
-    random.seed(6); rows = []
-    for i in range(n):
-        wh = random.choices([0,1,2,3,4],[0.72,0.14,0.08,0.04,0.02])[0]
-        rows.append({
-            "business_id":    f"biz-{i:04d}",
-            "watchlist_hits": wh,
-            "sanctions_hits": random.choices([0,1,2],[0.88,0.09,0.03])[0],
-            "pep_hits":       random.choices([0,1,2],[0.85,0.12,0.03])[0],
-            "adverse_media":  random.choices([0,1,2,3],[0.70,0.18,0.08,0.04])[0],
-            "bk_hits":        random.choices([0,1,2],[0.79,0.16,0.05])[0],
-            "judgment_hits":  random.choices([0,1,2,3],[0.65,0.22,0.09,0.04])[0],
-            "lien_hits":      random.choices([0,1,2,3],[0.60,0.24,0.11,0.05])[0],
-            "bk_age_months":  random.randint(1,240) if random.random()>0.6 else None,
-            "state":          random.choice(["CA","NY","TX","FL","IL","GA","PA","AZ"]),
-            "entity_type":    random.choice(["LLC","Corporation","Sole Prop","Partnership"]),
-        })
-    return pd.DataFrame(rows)
-
-
-# ── Helper widgets ─────────────────────────────────────────────────────────────
 def kpi(label, value, sub="", color="#3B82F6"):
     st.markdown(f"""<div class="kpi" style="border-left-color:{color}">
       <div class="lbl">{label}</div><div class="val">{value}</div>
@@ -769,53 +627,46 @@ def live_dd(limit):
 
 def get_section_data(section_key, limit):
     """
-    Returns real Redshift data when connected, synthetic demo data otherwise.
+    Load real data from Redshift. No synthetic fallback — errors are shown explicitly.
     section_key: 'sos' | 'tin' | 'naics' | 'banking' | 'worth' | 'kyc' | 'dd'
     """
     loaders = {
-        "sos":     (live_sos,     _synth_sos),
-        "tin":     (live_tin,     _synth_tin),
-        "naics":   (live_naics,   _synth_naics),
-        "banking": (live_banking, _synth_banking),
-        "worth":   (live_worth,   _synth_worth),
-        "kyc":     (live_kyc,     _synth_kyc),
-        "dd":      (live_dd,      _synth_dd),
+        "sos":     live_sos,
+        "tin":     live_tin,
+        "naics":   live_naics,
+        "banking": live_banking,
+        "worth":   live_worth,
+        "kyc":     live_kyc,
+        "dd":      live_dd,
     }
-    live_fn, synth_fn = loaders[section_key]
+    live_fn = loaders[section_key]
 
-    if live:
-        with st.spinner(f"Loading live {section_key} data…"):
-            df = live_fn(limit)
-        if df is not None and not df.empty:
-            return df, True   # (dataframe, is_live)
+    if not live:
+        st.error("🔴 Not connected to Redshift. Connect VPN and click **Retry connection** in the sidebar.")
+        st.stop()
 
-    # Fallback
-    return synth_fn(_synth_n(limit)), False
+    with st.spinner(f"Loading {section_key} data from Redshift…"):
+        df = live_fn(limit)
+
+    if df is None:
+        err = st.session_state.get("_last_db_error", "Query returned no results")
+        st.error(f"❌ Failed to load {section_key} data from Redshift.\n\n**Error:** {err}")
+        st.info("Try: click **Retry connection** in the sidebar, or check the SQL query.")
+        st.stop()
+
+    if df.empty:
+        st.warning(f"⚠️ Query succeeded but returned 0 rows for `{section_key}`. "
+                   "The table may be empty or the fact name may not exist yet.")
+        st.stop()
+
+    return df
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ═══════════════════════════════════════════════════════════════════════════════
-# Test connection with a lightweight query every time the app loads.
-# This avoids relying on the cached (possibly stale) live flag.
-def _test_live_connection():
-    """Run a cheap query to confirm the connection is truly usable."""
-    try:
-        conn, ok, err = get_conn()
-        if not ok or conn is None:
-            return False, err
-        cur = conn.cursor()
-        cur.execute("SELECT 1")
-        cur.fetchone()
-        cur.close()
-        return True, None
-    except Exception as e:
-        # Connection object exists but is broken (e.g. was cached before VPN)
-        get_conn.clear()
-        return False, str(e)
-
-live, _conn_err = _test_live_connection()
-_conn = None  # don't hold a module-level ref; run_query fetches it fresh
+# Test connection on every app load — fresh TCP each time, no caching.
+live, _conn_err = test_connection()
 
 with st.sidebar:
     st.markdown("## 🏦 KYB Dashboard")
@@ -829,9 +680,6 @@ with st.sidebar:
                 st.code(_conn_err, language=None)
         st.caption("Make sure VPN is active, then click Retry.")
         if st.button("🔄 Retry connection", use_container_width=True, type="primary"):
-            # Clear ALL caches — connection + all data loaders
-            st.cache_data.clear()
-            st.cache_resource.clear()
             st.rerun()
 
     section = st.radio("Navigation", [
@@ -866,14 +714,12 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════════════════════
 if section == "📋 Overview":
     st.markdown("# 🏦 Admin Portal — KYB Tracking Dashboard")
-    sos,  sos_live  = get_section_data("sos",     record_limit)
-    tin,  tin_live  = get_section_data("tin",     record_limit)
-    naics,_         = get_section_data("naics",   record_limit)
-    bank, _         = get_section_data("banking", record_limit)
-    kyc,  _         = get_section_data("kyc",     record_limit)
-    dd,   _         = get_section_data("dd",      record_limit)
-    if not sos_live:
-        flag("Using synthetic demo data — connect to Redshift via VPN to see real business IDs and real results.", "amber")
+    sos   = get_section_data("sos",     record_limit)
+    tin   = get_section_data("tin",     record_limit)
+    naics = get_section_data("naics",   record_limit)
+    bank  = get_section_data("banking", record_limit)
+    kyc   = get_section_data("kyc",     record_limit)
+    dd    = get_section_data("dd",      record_limit)
 
     biz = tin["business_id"].nunique()
     sos_act = sos[sos["active"]]["business_id"].nunique()
@@ -960,8 +806,7 @@ elif section == "1️⃣  KYB — SOS & Vendors":
     sh("KYB — SOS Filings & Vendor Confidence",
        "sos_filings.foreign_domestic · active status · jurisdiction (Region) · vendor confidence gaps", "🏛️")
 
-    df, _is_live = get_section_data("sos", record_limit)
-    if not _is_live: flag("Demo data — connect to Redshift via VPN for real business IDs and results.", "amber")
+    df = get_section_data("sos", record_limit)
     dom = df[df["filing_type"]=="domestic"]
     frn = df[df["filing_type"]=="foreign"]
     biz_total = df["business_id"].nunique()
@@ -1364,8 +1209,7 @@ ORDER BY received_at DESC;""", language="sql")
 elif section == "2️⃣  TIN Verification":
     sh("TIN Verification","tin_match · tin_match_boolean · Middesk TIN task · inconsistency analysis","🔐")
 
-    df, _is_live = get_section_data("tin", record_limit)
-    if not _is_live: flag("Demo data — connect to Redshift via VPN for real business IDs and results.", "amber")
+    df = get_section_data("tin", record_limit)
     total = len(df)
     verified   = df["tin_match_boolean"].sum()
     unverified = (df["tin_match_status"]=="failure").sum()
@@ -1606,8 +1450,7 @@ elif section == "3️⃣  NAICS / MCC":
     sh("NAICS / MCC Classification",
        "naics_code · mcc_code · fallback 561499 analysis · vendor source breakdown · consistency","🏭")
 
-    df, _is_live = get_section_data("naics", record_limit)
-    if not _is_live: flag("Demo data — connect to Redshift via VPN for real business IDs and results.", "amber")
+    df = get_section_data("naics", record_limit)
     total = len(df); fallbacks = df["is_fallback"].sum(); real = total-fallbacks
     avg_conf = df[~df["is_fallback"]]["naics_confidence"].mean()
     top_src  = df.groupby("naics_source").size().idxmax()
@@ -1860,8 +1703,7 @@ elif section == "4️⃣  Banking (GIACT)":
     sh("Banking — GIACT gVerify & gAuthenticate",
        "Account Status (verify_response_code 0–22) · Account Name · Contact Verification","🏦")
 
-    df, _is_live = get_section_data("banking", record_limit)
-    if not _is_live: flag("Demo data — connect to Redshift via VPN for real business IDs and results.", "amber")
+    df = get_section_data("banking", record_limit)
     total = len(df)
     passed  = (df["account_status"]=="passed").sum()
     failed  = (df["account_status"]=="failed").sum()
@@ -2112,8 +1954,7 @@ WHERE business_id = 'YOUR-UUID'
 elif section == "5️⃣  Worth Score":
     sh("Worth Score","300–850 scale · risk level · SHAP contributions · public records impact","💰")
 
-    df, _is_live = get_section_data("worth", record_limit)
-    if not _is_live: flag("Demo data — connect to Redshift via VPN for real business IDs and results.", "amber")
+    df = get_section_data("worth", record_limit)
     total = len(df)
     avg_s = df["worth_score_850"].mean(); med_s = df["worth_score_850"].median()
     high  = (df["risk_level"]=="HIGH").sum()
@@ -2353,8 +2194,7 @@ elif section == "6️⃣  KYC — Identity":
     sh("KYC — Identity Verification",
        "IDV (Plaid) · name/DOB/SSN/address/phone match · synthetic + stolen identity risk","🪪")
 
-    df, _is_live = get_section_data("kyc", record_limit)
-    if not _is_live: flag("Demo data — connect to Redshift via VPN for real business IDs and results.", "amber")
+    df = get_section_data("kyc", record_limit)
     total = len(df)
     passed   = df["idv_passed"].sum()
     high_r   = (df["risk_level"]=="high_risk").sum()
@@ -2666,8 +2506,7 @@ elif section == "7️⃣  Due Diligence":
     sh("Due Diligence — Watchlist, Sanctions, PEP, Adverse Media, Public Records",
        "watchlist_hits · sanctions · PEP · adverse_media · BK · Judgments · Liens","🔍")
 
-    df, _is_live = get_section_data("dd", record_limit)
-    if not _is_live: flag("Demo data — connect to Redshift via VPN for real business IDs and results.", "amber")
+    df = get_section_data("dd", record_limit)
     total = len(df)
     any_wl   = (df["watchlist_hits"]>0).sum()
     any_sanc = (df["sanctions_hits"]>0).sum()
