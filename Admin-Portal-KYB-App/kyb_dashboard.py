@@ -2013,7 +2013,7 @@ elif section == "🏭 Classification":
             et["Fallback %"] = (et["Fallback"]/(et["Real NAICS"]+et["Fallback"])*100).round(1)
             col_l,col_r = st.columns(2)
             with col_l:
-                fig = px.bar(et,x="entity_type",y="Fallback %",color="Fallback %",
+                fig = px.bar(et,x="Entity Type",y="Fallback %",color="Fallback %",
                              color_continuous_scale="RdYlGn_r",title="Fallback Rate by Entity Type")
                 st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
             with col_r:
