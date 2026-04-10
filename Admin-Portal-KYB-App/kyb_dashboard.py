@@ -108,26 +108,28 @@ IDV_STATUS_MEANINGS = {
 }
 
 # ── Connection ─────────────────────────────────────────────────────────────────
-@st.cache_resource(ttl=300)
+# TTL = 60s so a cached failure clears quickly when VPN connects.
+# Use st.cache_resource so the connection object is shared across reruns.
+@st.cache_resource(ttl=60)
 def get_conn():
     try:
         import psycopg2
         conn = psycopg2.connect(
-            dbname=os.getenv("REDSHIFT_DB","dev"),
-            user=os.getenv("REDSHIFT_USER","readonly_all_access"),
-            password=os.getenv("REDSHIFT_PASSWORD","Y7&.D3!09WvT4/nSqXS2>qbO"),
+            dbname=os.getenv("REDSHIFT_DB", "dev"),
+            user=os.getenv("REDSHIFT_USER", "readonly_all_access"),
+            password=os.getenv("REDSHIFT_PASSWORD", "Y7&.D3!09WvT4/nSqXS2>qbO"),
             host=os.getenv("REDSHIFT_HOST",
                 "worthai-services-redshift-endpoint-k9sdhv2ja6lgojidri87"
                 ".808338307022.us-east-1.redshift-serverless.amazonaws.com"),
-            port=int(os.getenv("REDSHIFT_PORT","5439")),
-            connect_timeout=8,
+            port=int(os.getenv("REDSHIFT_PORT", "5439")),
+            connect_timeout=10,
         )
-        return conn, True
-    except Exception:
-        return None, False
+        return conn, True, None
+    except Exception as e:
+        return None, False, str(e)
 
 def run_query(sql):
-    conn, live = get_conn()
+    conn, live, _ = get_conn()
     if not live or conn is None:
         return None
     try:
@@ -801,7 +803,7 @@ def get_section_data(section_key, limit):
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ═══════════════════════════════════════════════════════════════════════════════
-_, live = get_conn()
+_conn, live, _conn_err = get_conn()
 
 with st.sidebar:
     st.markdown("## 🏦 KYB Dashboard")
@@ -809,7 +811,13 @@ with st.sidebar:
     if live:
         st.success("🟢 Connected to Redshift")
     else:
-        st.warning("🟡 Demo mode — synthetic data")
+        st.error("🔴 Redshift not connected")
+        if _conn_err:
+            st.caption(f"Error: {_conn_err[:120]}")
+        if st.button("🔄 Retry connection", use_container_width=True):
+            # Clear the cached (failed) connection and immediately retry
+            get_conn.clear()
+            st.rerun()
 
     section = st.radio("Navigation", [
         "📋 Overview",
