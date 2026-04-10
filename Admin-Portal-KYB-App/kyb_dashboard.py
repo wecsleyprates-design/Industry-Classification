@@ -263,11 +263,14 @@ def sanity_metrics(checks):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _parse_fact(value_str):
-    """Parse the raw VARCHAR JSON from rds_warehouse_public.facts.value column."""
+    """Parse the raw VARCHAR JSON from rds_warehouse_public.facts.value column.
+    Always returns a dict — never None — even when value is 'null', empty, or invalid."""
     if not value_str:
         return {}
     try:
-        return json.loads(value_str)
+        result = json.loads(value_str)
+        # json.loads("null") returns None — guard against it
+        return result if isinstance(result, dict) else {}
     except Exception:
         return {}
 
