@@ -883,47 +883,124 @@ def live_kyc(limit):
 
 
 def live_dd(limit):
-    # Query each fact individually — skip any that exceed the 65535-byte
-    # Redshift federation VARCHAR limit (watchlist has 71KB value rows).
-    raw = query_facts_safe([
-        'watchlist_hits',
-        'num_bankruptcies',
-        'num_judgements',
-        'num_liens',
-        'adverse_media_hits',
-        'sanctions_hits',
-        'pep_hits',
-    ], limit)
-    if raw is None or raw.empty:
-        return None
+    """
+    Due Diligence data from multiple sources:
 
+    PRIMARY (confirmed in rds_warehouse_public.facts):
+      watchlist_hits   ✅ 73K rows — scalar count from Fact Engine
+      num_bankruptcies ✅ 64K rows — scalar count
+      num_judgements   ✅ 64K rows — scalar count
+      num_liens        ✅ 64K rows — scalar count
+
+    SECONDARY (rds_integration_data — direct Redshift Spectrum tables):
+      business_entity_review_task WHERE key='watchlist' — full hit details
+      clients.customer_table — watchlist_verification + watchlist_count
+
+    Watchlist data flow:
+      Vendor → integration_data.business_entity_review_task (RDS)
+             → Facts Engine → watchlist_hits fact
+             → Redshift: rds_integration_data → clients.customer_table
+    """
     def safe_int(v):
         try: return int(float(v or 0))
         except Exception: return 0
 
-    raw["fact_value"] = raw["value"].apply(
-        lambda v: str(_parse_fact(v).get("value","")) if v else "0")
+    # Step 1: scalar facts from rds_warehouse_public.facts
+    raw = query_facts_safe([
+        'watchlist_hits', 'adverse_media_hits',
+        'num_bankruptcies', 'num_judgements', 'num_liens',
+    ], limit)
 
-    pivoted = raw.pivot_table(
-        index="business_id", columns="name", values="fact_value", aggfunc="last"
-    ).reset_index()
-    pivoted.columns.name = None
+    if raw is not None and not raw.empty:
+        raw["fact_value"] = raw["value"].apply(
+            lambda v: str(_parse_fact(v).get("value","")) if v else "0")
+        pivoted = raw.pivot_table(
+            index="business_id", columns="name", values="fact_value", aggfunc="last"
+        ).reset_index()
+        pivoted.columns.name = None
+    else:
+        pivoted = None
 
-    for col in ["watchlist_hits","adverse_media_hits","sanctions_hits","pep_hits"]:
-        pivoted[col] = pivoted[col].apply(safe_int) if col in pivoted.columns else 0
+    # Step 2: try clients.customer_table for richer watchlist data
+    cust_sql = f"""
+        SELECT business_id,
+               watchlist_verification,
+               watchlist_count
+        FROM clients.customer_table
+        WHERE watchlist_count IS NOT NULL
+        ORDER BY watchlist_count DESC{_limit_clause(limit)}
+    """
+    cust = run_query(cust_sql)
 
-    # Confirmed scalar count facts
-    pivoted["bk_hits"]       = pivoted["num_bankruptcies"].apply(safe_int) if "num_bankruptcies" in pivoted.columns else 0
-    pivoted["judgment_hits"] = pivoted["num_judgements"].apply(safe_int)   if "num_judgements"   in pivoted.columns else 0
-    pivoted["lien_hits"]     = pivoted["num_liens"].apply(safe_int)        if "num_liens"        in pivoted.columns else 0
+    # Step 3: try rds_integration_data.business_entity_review_task
+    bert_sql = f"""
+        SELECT bev.business_id,
+               bert.key,
+               bert.status,
+               bert.sublabel,
+               bert.message
+        FROM rds_integration_data.business_entity_review_task bert
+        JOIN rds_integration_data.business_entity_verification bev
+          ON bev.id = bert.business_entity_verification_id
+        WHERE bert.key = 'watchlist'
+        ORDER BY bev.business_id DESC{_limit_clause(limit)}
+    """
+    bert = run_query(bert_sql)
 
-    pivoted["bk_hits"]       = 0
-    pivoted["judgment_hits"] = 0
-    pivoted["lien_hits"]     = 0
-    pivoted["bk_age_months"] = None
-    pivoted["state"]         = "Unknown"
-    pivoted["entity_type"]   = "Unknown"
-    return pivoted
+    # Merge all sources into a unified DataFrame
+    if pivoted is not None and not pivoted.empty:
+        df = pivoted.copy()
+    elif cust is not None and not cust.empty:
+        # Build from customer_table if facts unavailable
+        df = cust.rename(columns={
+            "watchlist_count":"watchlist_hits",
+        }).copy()
+    else:
+        return None
+
+    # Apply safe_int to all numeric fact columns
+    for col in ["watchlist_hits","adverse_media_hits"]:
+        if col in df.columns:
+            df[col] = df[col].apply(safe_int)
+        else:
+            df[col] = 0
+
+    # Map num_* facts to *_hits columns (confirmed scalar facts)
+    df["bk_hits"]       = df["num_bankruptcies"].apply(safe_int) if "num_bankruptcies" in df.columns else 0
+    df["judgment_hits"] = df["num_judgements"].apply(safe_int)   if "num_judgements"   in df.columns else 0
+    df["lien_hits"]     = df["num_liens"].apply(safe_int)        if "num_liens"        in df.columns else 0
+
+    # Merge bert (detailed watchlist hits) if available
+    if bert is not None and not bert.empty:
+        bert_agg = bert.groupby("business_id").agg(
+            watchlist_status=("status","first"),
+            watchlist_sublabel=("sublabel","first"),
+        ).reset_index()
+        df = df.merge(bert_agg, on="business_id", how="left")
+    else:
+        df["watchlist_status"]   = None
+        df["watchlist_sublabel"] = None
+
+    # Merge customer_table verification flag if available
+    if cust is not None and not cust.empty:
+        df = df.merge(
+            cust[["business_id","watchlist_verification","watchlist_count"]],
+            on="business_id", how="left"
+        )
+
+    # Store data source info for the UI to explain
+    df.attrs["has_facts"]    = pivoted is not None and not pivoted.empty
+    df.attrs["has_cust"]     = cust is not None and not cust.empty
+    df.attrs["has_bert"]     = bert is not None and not bert.empty
+
+    # Defaults for missing columns
+    for col in ["sanctions_hits","pep_hits"]:
+        if col not in df.columns:
+            df[col] = 0
+
+    df["state"]       = "Unknown"
+    df["entity_type"] = "Unknown"
+    return df
 
 
 # Sections that are optional — if their facts don't exist, show info instead of error
@@ -1923,15 +2000,128 @@ A bimodal pattern (spikes at 0 and 1) = vendor is binary — it either matches c
              f"{both_no_match:,}",
              "Middesk=0 AND OC=0 = completely unconfirmed. Route to manual underwriting."),
         ]
-        rows = [{"Check":label,"Result":val,"Status":"✅ PASS" if ok else "❌ FAIL","Action":action}
-                for label,ok,val,action in checks]
+        # Detailed FAIL explanations keyed to each check
+        FAIL_REASONS = {
+            "SOS Active rate > 95%": {
+                "why": f"Your SOS Active rate is {sos_active_rate:.1f}%. "
+                       "This means {:.0f}% of businesses in the system have an INACTIVE SOS status — "
+                       "they exist in the registry but are NOT in good standing with their state.".format(100-sos_active_rate),
+                "causes": [
+                    "Administrative dissolution: state automatically dissolves entities that miss annual report filings",
+                    "Unpaid franchise tax: state suspends the entity until taxes are paid",
+                    "Voluntary dissolution: owners closed the business but didn't remove it from the system",
+                    "Data freshness: the SOS fact may reflect an old state, and the entity has since reinstated",
+                ],
+                "action": "Pull inactive businesses via the SOS Registry tab. For each, check sos_filings on "
+                          "PostgreSQL RDS (port 5432) to see the actual state filing status and expiration date.",
+            },
+            "SOS Name match rate > 90%": {
+                "why": f"Only {sos_matched_rate:.1f}% of businesses have sos_match_boolean=true. "
+                       "This means the submitted business name did not match the state registry record for the rest.",
+                "causes": [
+                    "DBA (trade name) submitted instead of legal name: 'Joe's Pizza' vs 'Joseph Smith LLC'",
+                    "Punctuation/spacing differences: 'Smith & Jones' vs 'Smith and Jones'",
+                    "Abbreviation differences: 'Corp.' vs 'Corporation'",
+                    "Name recently changed and not yet updated in vendor databases",
+                    "Middesk matched the wrong entity (name collision with similar business)",
+                ],
+                "action": "Review businesses where sos_match=false but sos_active=true — these need manual "
+                          "name reconciliation. Check the submitted name vs the registry legal name.",
+            },
+            "No multi-domain SOS coverage gaps (Middesk+OC)": {
+                "why": f"{middesk_gap:,} businesses ({middesk_gap/max(biz,1)*100:.1f}%) have OpenCorporates "
+                       "confidence >0.70 but Middesk confidence <0.40. OC found the entity globally but "
+                       "Middesk could not confirm in US SOS systems.",
+                "causes": [
+                    "Brand new incorporation: OC pulls from public filings which update faster than Middesk's SOS database",
+                    "Name mismatch: Middesk matches on exact legal name; slight differences cause misses",
+                    "Middesk API failure: the API call failed silently; check integration_data.request_response",
+                    "Middesk database lag: some states' SOS data updates slowly in Middesk's system",
+                ],
+                "action": "Run: SELECT * FROM integration_data.request_response WHERE business_id='UUID' "
+                          "AND platform_id=16 — check if Middesk was called and what it returned.",
+            },
+            "TIN submission > 90%": {
+                "why": f"Only {tin_submitted/max(tin_total,1)*100:.1f}% of businesses submitted a TIN (EIN). "
+                       f"{tin_total-tin_submitted:,} businesses did not provide an EIN.",
+                "causes": [
+                    "EIN field not marked required in the onboarding form",
+                    "Sole proprietors using SSN (not EIN) — they may not have an EIN at all",
+                    "International businesses without a US EIN",
+                    "Applicants skipping the step — no enforcement in the form flow",
+                ],
+                "action": "Work with product to make EIN required before form submission can complete. "
+                          "For sole props, allow SSN as alternative with a different verification path.",
+            },
+            "TIN success > 70% of submitted": {
+                "why": f"Of the TINs submitted, only {tin_verified/max(tin_submitted,1)*100:.1f}% match IRS records. "
+                       f"{tin_submitted-tin_verified:,} submitted TINs failed or are pending.",
+                "causes": [
+                    "DBA name submitted: EIN is registered under legal name 'Smith LLC' but applicant submitted 'Joe's Diner'",
+                    "Recent name change: EIN not yet updated with IRS to reflect new legal name",
+                    "Typo in EIN: transposed digits or missing leading zero",
+                    "Sole prop SSN submitted as EIN: different format, IRS can't match",
+                    "EIN from a different entity: reused or misremembered EIN",
+                ],
+                "action": "Pull businesses where tin_match.status='failure' and read tin_match.message — "
+                          "Middesk provides specific failure reasons for each.",
+            },
+            "TIN failure < 20% of submitted": {
+                "why": "This check PASSES — TIN failure rate is within acceptable range.",
+                "causes": [],
+                "action": "No action needed.",
+            },
+            "No TIN boolean/status inconsistency": {
+                "why": "This check PASSES — no inconsistencies found.",
+                "causes": [],
+                "action": "No action needed.",
+            },
+            "No entity with zero vendor confirmation": {
+                "why": f"{both_no_match:,} businesses have ZERO confirmation from any vendor. "
+                       "Both Middesk (US SOS live) and OpenCorporates (global registry) returned confidence=0.",
+                "causes": [
+                    "Very new incorporation (<1 week): not yet in any vendor database",
+                    "Micro-business: sole prop or home-based business with no formal registry presence",
+                    "Entity name too generic: 'ABC LLC' matches hundreds of records, none confidently",
+                    "Address format mismatch: submitted address differs from registered address",
+                    "International entity with no US presence",
+                    "Fraudulent submission: fake entity that doesn't exist",
+                ],
+                "action": "NEVER auto-approve these. Route to manual underwriting. "
+                          "Request: state registration certificate, government-issued ID, business documentation.",
+            },
+        }
+
+        rows = []
+        for label,ok,val,action in checks:
+            rows.append({"Check":label,"Result":val,"Status":"✅ PASS" if ok else "❌ FAIL","Action":action})
+
         styled_table(pd.DataFrame(rows),color_col="Status",
                      palette={"✅ pass":"#22c55e","❌ fail":"#ef4444"})
 
         pass_n = sum(1 for _,ok,_,_ in checks if ok)
         flag(f"{pass_n}/{len(checks)} identity & registry checks passing. "
-             f"{'✅ All clear' if pass_n==len(checks) else f'❌ {len(checks)-pass_n} checks failed — see actions above.'}",
+             f"{'✅ All clear' if pass_n==len(checks) else f'❌ {len(checks)-pass_n} checks failed — see details below.'}",
              "green" if pass_n==len(checks) else "red")
+
+        # Per-FAIL detailed explanations
+        failed_checks = [(label,ok,val,action) for label,ok,val,action in checks if not ok]
+        if failed_checks:
+            st.markdown("#### 🔍 Why Each Check Failed — Root Cause Analysis")
+            for label,_,val,_ in failed_checks:
+                detail = FAIL_REASONS.get(label)
+                if not detail:
+                    continue
+                color = "#ef4444"
+                st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
+                    border-radius:8px;padding:14px 18px;margin:10px 0">
+                  <div style="color:{color};font-weight:700;font-size:.88rem">
+                    ❌ FAIL — {label} (Result: {val})</div>
+                  <div style="color:#CBD5E1;font-size:.81rem;margin-top:8px">{detail['why']}</div>
+                  {'<div style="color:#94A3B8;font-size:.78rem;margin-top:8px"><strong>Most likely causes:</strong><ul>' + ''.join(f'<li>{c}</li>' for c in detail['causes']) + '</ul></div>' if detail['causes'] else ''}
+                  <div style="color:#60A5FA;font-size:.77rem;margin-top:6px">
+                    <strong>Action:</strong> {detail['action']}</div>
+                </div>""", unsafe_allow_html=True)
 
         analyst_card("Quality Checks — What They Mean and Why They Matter", [
             "Each check is a threshold derived from industry benchmarks for a healthy SMB KYB pipeline. "
@@ -1978,9 +2168,10 @@ elif section == "🏭 Classification":
         flag(f"{fallbacks/total*100:.1f}% NAICS fallback rate > 10%. "
              "Root cause: entity matching failed → AI fires with name+address only → 561499.", "red")
 
-    tab_dist, tab_src, tab_fb, tab_cross, tab_consist, tab_dq = st.tabs([
-        "📊 Code Distribution","📡 Source Analysis","⚠️ 561499 Root Cause",
-        "🔗 Cross-Analysis","🔍 Consistency Checks","🔬 Quality"
+    tab_dist, tab_src, tab_fb, tab_consist, tab_dq = st.tabs([
+        "📊 Code Distribution","📡 Source Analysis",
+        "⚠️ 561499 Root Cause & Cross-Analysis",
+        "🔍 Consistency Checks","🔬 Quality"
     ])
 
     with tab_dist:
@@ -2076,31 +2267,63 @@ elif section == "🏭 Classification":
                        "Code change","Prompt fix","Accept 561499"],
         })
         fig = px.bar(rec_df,x="Category",y="Est. Recoverable",color="Action",
-                     title="Estimated Recovery Potential")
+                     title="Estimated Recovery Potential by Fix Type")
         st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
 
-    with tab_cross:
-        st.markdown("#### 🔗 NAICS Cross-Analysis")
+        analyst_card("How to Read the Recovery Potential Chart", [
+            "Each bar shows the estimated number of businesses that COULD receive a real NAICS code "
+            "if a specific fix was implemented. These are estimates based on the diagnostic analysis.",
+            f"'G3: Name keywords' (~30% of fallbacks = ~{int(fallbacks*0.30):,} businesses): "
+            "businesses like 'Lisa's Nail Salon' get 561499 because the AI prompt doesn't check name keywords. "
+            "Fix: update aiNaicsEnrichment.ts to classify from business name patterns before giving up.",
+            f"'G2: Web search' (~20% = ~{int(fallbacks*0.20):,} businesses): "
+            "businesses with a website URL that wasn't used for AI classification. "
+            "Fix: ensure params.website is always passed to the AI enrichment function.",
+            "'Genuinely unclassifiable' (~50%): holding companies, shell entities, brand-new "
+            "registrations with no public footprint. For these, 561499 IS the correct answer. "
+            "The gap is not the NAICS code but the customer-visible MCC description (Gap G5).",
+        ])
+
+        # ── Cross-Analysis merged into this tab ──────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 🔗 Cross-Analysis — Fallback Rate by Entity Type")
+        st.markdown("Understanding which entity types drive the most 561499 fallbacks "
+                    "helps prioritize where to focus the fix effort.")
+
         if "entity_type" in naics.columns:
             et = naics.groupby(["entity_type","is_fallback"]).size().unstack(fill_value=0).reset_index()
             et.columns = ["Entity Type","Real NAICS","Fallback"]
             et["Fallback %"] = (et["Fallback"]/(et["Real NAICS"]+et["Fallback"])*100).round(1)
+            et["Total"] = et["Real NAICS"] + et["Fallback"]
             col_l,col_r = st.columns(2)
             with col_l:
-                fig = px.bar(et,x="Entity Type",y="Fallback %",color="Fallback %",
-                             color_continuous_scale="RdYlGn_r",title="Fallback Rate by Entity Type")
-                st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+                fig_et = px.bar(et,x="Entity Type",y="Fallback %",color="Fallback %",
+                             color_continuous_scale="RdYlGn_r",
+                             title="561499 Fallback Rate by Entity Type")
+                fig_et.add_hline(y=fallbacks/total*100,line_dash="dash",line_color="#3B82F6",
+                                  annotation_text=f"Overall avg {fallbacks/total*100:.1f}%")
+                st.plotly_chart(dark_chart_layout(fig_et),use_container_width=True)
             with col_r:
-                styled_table(et)
+                styled_table(et[["Entity Type","Total","Real NAICS","Fallback","Fallback %"]])
 
-        analyst_card("NAICS Classification Quality", [
-            f"Fallback rate {fallbacks/total*100:.1f}%: any rate above 10% is a concern. "
-            "Root cause is always entity-matching failure in Pipeline A.",
-            "561499 (All Other Business Support Services) is the catch-all when no specific "
-            "industry can be determined. It is a valid NAICS code but indicates data gaps.",
-            "AI winning source > 10% indicates vendor entity matching is failing broadly. "
-            "Check ZI/EFX/OC bulk data freshness in Redshift.",
-        ])
+            # Identify the entity type with highest fallback
+            if len(et)>0:
+                worst_type = et.loc[et["Fallback %"].idxmax()]
+                best_type  = et.loc[et["Fallback %"].idxmin()]
+                analyst_card("Entity Type Cross-Analysis — Why Different Types Have Different Fallback Rates", [
+                    f"Highest fallback: '{worst_type['Entity Type']}' at {worst_type['Fallback %']:.1f}%. "
+                    "Entity types with high fallback rates are typically those with weaker commercial database coverage: "
+                    "sole proprietors, partnerships, and small LLCs are underrepresented in ZI/EFX bulk data.",
+                    f"Lowest fallback: '{best_type['Entity Type']}' at {best_type['Fallback %']:.1f}%. "
+                    "Corporations and established LLCs tend to have better vendor coverage because "
+                    "they appear in more commercial databases.",
+                    "Sole proprietors specifically: they may not have a registered SOS presence in all states, "
+                    "making entity matching harder. Additionally, they often operate under personal names "
+                    "which are less searchable in firmographic databases.",
+                    "Actionable insight: if sole props drive the highest fallback rate, "
+                    "prioritize the name-keyword classification fix (Gap G3) — sole prop businesses "
+                    "often have descriptive names ('Smith's Plumbing') that the AI could classify without vendor data.",
+                ])
 
     with tab_consist:
         st.markdown("#### 🔍 Classification Consistency & Anomaly Detection")
@@ -2382,21 +2605,94 @@ elif section == "🏭 Classification":
 
     with tab_dq:
         st.markdown("#### 🔬 NAICS / MCC Quality Checks")
+        st.markdown("These automated checks detect systemic classification problems. "
+                    "`✅ PASS` = within expected range. `❌ FAIL` = outside benchmark — see explanations below.")
         low_conf = int((naics["naics_confidence"]<0.40).sum()) if "naics_confidence" in naics.columns else 0
         dq_checks = [
-            ("Fallback rate < 10%",  fallbacks/total<0.10,f"{fallbacks/total*100:.1f}%",
-             "Above 10%: entity-matching failing broadly"),
-            ("AI win rate < 10%",    ai_wins/total<0.10,  f"{ai_wins/total*100:.1f}%",
-             "AI at weight=0.1 should almost never win"),
-            ("Low conf (<0.40) < 20%",low_conf/total<0.20,f"{low_conf/total*100:.1f}%",
-             "Low confidence codes may be misclassified"),
+            ("Fallback rate < 10%",  fallbacks/total<0.10, f"{fallbacks/total*100:.1f}%",
+             "Above 10% means entity-matching is failing broadly across your portfolio."),
+            ("AI win rate < 10%",    ai_wins/total<0.10,   f"{ai_wins/total*100:.1f}%",
+             "AI (weight=0.1) should only win when ALL other vendors have no NAICS signal."),
+            ("Low confidence (<0.40) < 20%", low_conf/total<0.20, f"{low_conf/total*100:.1f}%",
+             "Low confidence codes are likely wrong — the vendor matched but wasn't confident."),
             ("No null NAICS codes",  naics["naics_code"].isna().sum()==0,
-             f"{naics['naics_code'].isna().sum()} nulls","Should be 0 — Fact Engine should always produce a value"),
+             f"{naics['naics_code'].isna().sum()} nulls",
+             "Should always be 0 — the Fact Engine always produces 561499 as a last resort."),
         ]
         rows = [{"Check":l,"Result":v,"Status":"✅ PASS" if ok else "❌ FAIL","Action":a}
                 for l,ok,v,a in dq_checks]
         styled_table(pd.DataFrame(rows),color_col="Status",
                      palette={"✅ pass":"#22c55e","❌ fail":"#ef4444"})
+
+        # Per-FAIL explanations
+        naics_fail_reasons = {
+            "Fallback rate < 10%": {
+                "why": f"Your fallback rate is {fallbacks/total*100:.1f}% — above the 10% benchmark. "
+                       f"This means {fallbacks:,} businesses received NAICS 561499 (All Other Business Support Services), "
+                       "which is the catch-all code used when the system cannot determine the real industry.",
+                "causes": [
+                    "Entity matching model (XGBoost) failed to find this business in ZI/EFX/OC databases",
+                    "Very new businesses (<1 month) not yet in bulk vendor databases",
+                    "Micro-businesses with no commercial database footprint",
+                    "AI web_search disabled for businesses without a website URL (Gap G2)",
+                    "AI prompt lacks name-keyword classification logic (Gap G3)",
+                ],
+                "action": "See the '⚠️ 561499 Root Cause & Cross-Analysis' tab for a detailed breakdown "
+                          "of why this is happening and estimated recovery potential per fix.",
+            },
+            "AI win rate < 10%": {
+                "why": f"AI (pid=31, weight=0.1) is the winning NAICS source for {ai_wins/total*100:.1f}% of businesses. "
+                       "AI has the lowest weight in the Fact Engine and should only win as a last resort.",
+                "causes": [
+                    "All 4 data vendors (Middesk, OC, ZI, EFX) returned no NAICS signal for these businesses",
+                    "Entity matching is failing broadly — no vendor matched these entities",
+                    "ZI/EFX bulk data may be stale (check last refresh date in Redshift)",
+                ],
+                "action": "Check vendor match rates in the '📡 Source Analysis' tab. "
+                          "If ZI/EFX match rates are low, the bulk data may need refreshing.",
+            },
+            "Low confidence (<0.40) < 20%": {
+                "why": f"{low_conf/total*100:.1f}% of NAICS codes have confidence below 0.40. "
+                       "These are borderline matches where the vendor found something but wasn't confident it was right.",
+                "causes": [
+                    "Partial entity match: vendor found a similar business name but not exact",
+                    "Multiple businesses with similar names — system picked the wrong one",
+                    "Sole proprietor or micro-business with minimal vendor data",
+                ],
+                "action": "Pull businesses with naics_confidence < 0.40 and review their NAICS codes manually. "
+                          "Consider adding a flag in the Admin Portal for low-confidence classifications.",
+            },
+        }
+
+        failed_naics = [(l,ok,v,a) for l,ok,v,a in dq_checks if not ok]
+        if failed_naics:
+            st.markdown("#### 🔍 FAIL Root Cause Explanations")
+            for label,_,val,_ in failed_naics:
+                detail = naics_fail_reasons.get(label)
+                if not detail:
+                    continue
+                st.markdown(f"""<div style="background:#1E293B;border-left:4px solid #ef4444;
+                    border-radius:8px;padding:14px 18px;margin:10px 0">
+                  <div style="color:#ef4444;font-weight:700;font-size:.88rem">❌ FAIL — {label} ({val})</div>
+                  <div style="color:#CBD5E1;font-size:.81rem;margin-top:8px">{detail['why']}</div>
+                  <div style="color:#94A3B8;font-size:.78rem;margin-top:8px"><strong>Root causes:</strong>
+                  <ul>{''.join(f'<li>{c}</li>' for c in detail['causes'])}</ul></div>
+                  <div style="color:#60A5FA;font-size:.77rem;margin-top:6px">
+                  <strong>Action:</strong> {detail['action']}</div>
+                </div>""", unsafe_allow_html=True)
+
+        analyst_card("NAICS / MCC Quality — Summary Interpretation", [
+            f"Fallback rate {fallbacks/total*100:.1f}%: this is the single most important NAICS quality metric. "
+            "Target: < 10%. Current rate tells you how often the pipeline cannot determine the industry.",
+            f"AI win rate {ai_wins/total*100:.1f}%: secondary indicator. "
+            "AI should win only as a last resort (weight=0.1). High AI win rate = vendor matching is failing.",
+            f"Low confidence rate {low_conf/total*100:.1f}%: tertiary indicator. "
+            "Even when a code is assigned, low confidence means it may be wrong. "
+            "These businesses should be reviewed if the NAICS code is used for underwriting decisions.",
+            "The NAICS code directly drives: MCC code selection, industry label in Admin Portal, "
+            "Worth Score NAICS feature (naics6 input), and risk categorization. "
+            "A wrong NAICS code cascades through multiple downstream decisions.",
+        ])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2442,6 +2738,65 @@ elif section == "💰 Risk & Score":
     ])
 
     with tab_dd:
+        # ── Data source transparency ──────────────────────────────────────────
+        has_facts = dd.attrs.get("has_facts", True)
+        has_cust  = dd.attrs.get("has_cust",  False)
+        has_bert  = dd.attrs.get("has_bert",  False)
+
+        src_lines = []
+        if has_facts: src_lines.append("✅ `rds_warehouse_public.facts` — watchlist_hits, num_bankruptcies, num_judgements, num_liens")
+        if has_cust:  src_lines.append("✅ `clients.customer_table` — watchlist_verification, watchlist_count")
+        if has_bert:  src_lines.append("✅ `rds_integration_data.business_entity_review_task` — hit detail (status, sublabel, metadata)")
+        if not any([has_facts, has_cust, has_bert]):
+            src_lines.append("⚠️ Using facts table only — some watchlist detail tables not accessible")
+        flag("Data sources: " + " · ".join(src_lines), "blue")
+
+        # ── Why all zeros? Diagnostic ──────────────────────────────────────────
+        all_zero = (any_wl + any_sanc + any_pep + any_am + any_bk + any_judg + any_lien) == 0
+        if all_zero:
+            flag("⚠️ All Due Diligence metrics show 0. This may be because:", "amber")
+            st.markdown("""
+**Why the dashboard shows all zeros when you have watchlist data:**
+
+The second image you shared (the spreadsheet) shows a `watchlists` column with values > 0.
+That data comes from `clients.customer_table.watchlist_count`.
+The dashboard currently reads from `rds_warehouse_public.facts` (the `watchlist_hits` fact),
+which may be stored differently or use a different population.
+
+**Possible causes:**
+1. **`watchlist_hits` fact is 0 for most businesses** — the Fact Engine stores the consolidated watchlist count,
+   but it excludes adverse_media (which is tracked separately). If your watchlist tool only returns adverse_media hits,
+   `watchlist_hits` would be 0 while the raw data shows hits.
+2. **`clients.customer_table` uses different logic** — `watchlist_verification` in that table is a derived flag
+   (1=no hits, 0=hits), and `watchlist_count` may count differently than `watchlist_hits` in the facts table.
+3. **Cache invalidation needed** — if data was cached before VPN was connected, click 🔄 Refresh All Data in sidebar.
+
+**To verify: run this SQL in Redshift:**
+            """)
+            st.code("""-- Check watchlist_hits distribution:
+SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS hits, COUNT(*) AS businesses
+FROM rds_warehouse_public.facts
+WHERE name = 'watchlist_hits'
+GROUP BY JSON_EXTRACT_PATH_TEXT(value,'value')
+ORDER BY CAST(JSON_EXTRACT_PATH_TEXT(value,'value') AS INT) DESC
+LIMIT 20;
+
+-- Check clients.customer_table:
+SELECT watchlist_count, watchlist_verification, COUNT(*) AS businesses
+FROM clients.customer_table
+GROUP BY watchlist_count, watchlist_verification
+ORDER BY watchlist_count DESC
+LIMIT 20;
+
+-- Check detailed hit records:
+SELECT bev.business_id, bert.status, bert.sublabel, bert.message
+FROM rds_integration_data.business_entity_review_task bert
+JOIN rds_integration_data.business_entity_verification bev
+  ON bev.id = bert.business_entity_verification_id
+WHERE bert.key = 'watchlist' AND bert.status = 'warning'
+LIMIT 20;""", language="sql")
+
+        # ── Main charts ────────────────────────────────────────────────────────
         col_l,col_r = st.columns(2)
         with col_l:
             hit_data = pd.DataFrame({
@@ -2453,6 +2808,19 @@ elif section == "💰 Risk & Score":
                          title="Due Diligence Hit Frequency")
             fig.update_layout(showlegend=False)
             st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+            st.markdown("""
+**What each bar represents:**
+
+| Type | Source | What a hit means | Severity |
+|---|---|---|---|
+| **Watchlist** | Trulioo PSC / Middesk review task (key='watchlist') | Business or UBO appears on a compliance watchlist (PEP, Sanctions, or other lists) | HIGH |
+| **Sanctions** | Trulioo PSC where listType='SANCTIONS' | Business/UBO is on OFAC, UN, EU, or HMT sanctions list | CRITICAL — hard stop |
+| **PEP** | Trulioo PSC where listType='PEP' | Owner is a Politically Exposed Person | HIGH — requires EDD |
+| **Adverse Media** | adverseMediaDetails.records | Negative news coverage (stored separately from watchlist) | MEDIUM |
+| **BK** | num_bankruptcies fact | Business has at least one bankruptcy filing | MEDIUM |
+| **Judgments** | num_judgements fact | Business has at least one civil judgment | MEDIUM |
+| **Liens** | num_liens fact | Business has at least one outstanding lien | LOW-MEDIUM |
+            """)
         with col_r:
             if "watchlist_hits" in dd.columns:
                 wl_dist = dd["watchlist_hits"].value_counts().sort_index().reset_index()
@@ -2461,6 +2829,17 @@ elif section == "💰 Risk & Score":
                               color_discrete_sequence=["#ef4444"],
                               title="Watchlist Hits per Business Distribution")
                 st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+                st.markdown("""
+**Reading the distribution chart:**
+Most businesses should have 0 hits (the leftmost bar should be tallest).
+Any business with > 0 hits requires review.
+Multiple hits (2+) on the same business is unusual — check if they are from the same list type
+(e.g. two aliases of the same person on OFAC) or different types (more concerning).
+
+**Source:** `watchlist_hits` fact from `rds_warehouse_public.facts`.
+Count = `watchlist.value.metadata.length` after deduplication in
+`consolidatedWatchlist.ts`. Adverse media is excluded from this count.
+                """)
 
         # Summary table
         dd_summary = pd.DataFrame({
@@ -2899,23 +3278,83 @@ Request 3 months of statements. Use Plaid for balance/transaction verification.
                 st.markdown("*These are real records. Use the Discover Columns tab to understand each column.*")
 
         with tab_discover:
-            st.markdown("#### Discover actual table schema")
+            st.markdown("#### 🔍 Discover Actual Table Schema")
+            st.markdown(
+                "This tab queries the real `rds_integration_data` tables and shows you the **actual column names** "
+                "so you can build correct JOIN queries. The number in parentheses (e.g. '9 columns') is how many "
+                "columns exist in that table — it's a schema discovery count, not a row count."
+            )
+
             col_verif_sql = "SELECT * FROM rds_integration_data.rel_banking_verifications LIMIT 1"
             col_acct_sql  = "SELECT * FROM rds_integration_data.bank_accounts LIMIT 1"
             col_v = run_query(col_verif_sql)
             col_a = run_query(col_acct_sql)
-            if col_v is not None and not col_v.empty:
-                st.success(f"✅ rel_banking_verifications columns ({len(col_v.columns)}):")
-                st.code(", ".join(col_v.columns.tolist()))
-                st.dataframe(col_v, use_container_width=True, hide_index=True)
-            else:
-                st.warning("rel_banking_verifications schema not accessible in this query.")
-            if col_a is not None and not col_a.empty:
-                st.success(f"✅ bank_accounts columns ({len(col_a.columns)}):")
-                st.code(", ".join(col_a.columns.tolist()))
-                st.dataframe(col_a, use_container_width=True, hide_index=True)
-            else:
-                st.warning("bank_accounts schema not accessible in this query.")
+
+            col_l, col_r = st.columns(2)
+            with col_l:
+                if col_v is not None and not col_v.empty:
+                    st.success(f"✅ rel_banking_verifications — {len(col_v.columns)} columns")
+                    st.markdown("""
+**What this table is:** The GIACT bank account verification results table.
+One row per bank account verification attempt.
+- Each row = one verification result for one bank account
+- `verification_status`: SUCCESS or ERRORED (see GIACT Explained tab)
+- The other columns tell you: which account was verified, when, and what the result was
+- **Important**: this is NOT a business-level table — one business can have multiple accounts
+                    """)
+                    st.markdown("**Live column names (from actual table):**")
+                    cols_v = col_v.columns.tolist()
+                    col_df = pd.DataFrame({
+                        "Column Name": cols_v,
+                        "Example Value": [str(col_v.iloc[0][c])[:50] if c in col_v.columns else "" for c in cols_v],
+                    })
+                    styled_table(col_df)
+                    st.markdown("**To join with bank_accounts:** use the column shown above "
+                                "that references the account ID. "
+                                "Run `SELECT * FROM rds_integration_data.rel_banking_verifications LIMIT 1` "
+                                "to see the actual FK column name.")
+                else:
+                    st.warning("rel_banking_verifications not accessible.")
+
+            with col_r:
+                if col_a is not None and not col_a.empty:
+                    st.success(f"✅ bank_accounts — {len(col_a.columns)} columns")
+                    st.markdown("""
+**What this table is:** The bank account metadata table from Plaid.
+One row per bank account connected by an applicant.
+- `business_id`: links to the business that connected this account
+- `account_type`: checking / savings / credit / investment
+- `account_subtype`: more specific (e.g. 'checking', 'money market')
+- `mask`: last 4 digits of account number (for display only)
+- `institution_name`: name of the bank (e.g. 'JPMorgan Chase', 'Bank of America')
+- **22 columns** = rich metadata including balance, name, status, and timestamps
+                    """)
+                    st.markdown("**Live column names (from actual table):**")
+                    cols_a = col_a.columns.tolist()
+                    col_a_df = pd.DataFrame({
+                        "Column Name": cols_a,
+                        "Example Value": [str(col_a.iloc[0][c])[:50] if c in col_a.columns else "" for c in cols_a],
+                    })
+                    styled_table(col_a_df)
+                else:
+                    st.warning("bank_accounts not accessible.")
+
+            st.markdown("---")
+            st.markdown("#### Other banking tables in rds_integration_data")
+            st.markdown("""
+| Table | Purpose | Key Columns |
+|---|---|---|
+| `rel_banking_verifications` | GIACT verification results | verification_status, verify_response_code, auth_response_code |
+| `bank_accounts` | Plaid account metadata | business_id, account_type, institution_name, mask |
+| `bank_account_transactions` | Individual Plaid transactions | amount, date, category, merchant_name |
+| `banking_balances` | Monthly balance aggregates | business_id, month, avg_balance, total_deposits |
+| `banking_balances_daily` | Daily balance snapshots | business_id, date, current_balance |
+| `data_processing_history` | Manual processing volumes (annual/monthly/AMEX) | business_id, general_data (JSONB) |
+
+The `clients.customer_table` also has banking fields:
+- `watchlist_verification` — 1=no hits, 0=hits (different from GIACT)
+- Any Plaid-derived cash flow fields used in Worth Score inputs
+            """)
 
         with tab_sql:
             st.code("""-- ✅ CONFIRMED WORKING — verification status summary:
