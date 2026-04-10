@@ -404,7 +404,6 @@ def sanity_metrics(checks):
 # LIVE DATA LOADERS — parse real Redshift facts into section-ready DataFrames
 # ═══════════════════════════════════════════════════════════════════════════════
 
-@st.cache_data(ttl=120, show_spinner="Loading SOS data from Redshift…")
 def live_sos(limit):
     """
     Pull sos_filings fact and parse the JSON value array into one row per filing.
@@ -474,7 +473,6 @@ def live_sos(limit):
     return df
 
 
-@st.cache_data(ttl=120, show_spinner="Loading TIN data from Redshift…")
 def live_tin(limit):
     sql = f"""
         SELECT
@@ -534,7 +532,6 @@ def live_tin(limit):
     return pivoted
 
 
-@st.cache_data(ttl=120, show_spinner="Loading NAICS data from Redshift…")
 def live_naics(limit):
     sql = f"""
         SELECT
@@ -576,7 +573,6 @@ def live_naics(limit):
     return raw
 
 
-@st.cache_data(ttl=120, show_spinner="Loading GIACT data from Redshift…")
 def live_banking(limit):
     sql = f"""
         SELECT
@@ -626,7 +622,6 @@ def live_banking(limit):
     return pivoted
 
 
-@st.cache_data(ttl=120, show_spinner="Loading Worth Score data from Redshift…")
 def live_worth(limit):
     sql = f"""
         SELECT
@@ -653,7 +648,6 @@ def live_worth(limit):
     return raw
 
 
-@st.cache_data(ttl=120, show_spinner="Loading KYC data from Redshift…")
 def live_kyc(limit):
     sql = f"""
         SELECT
@@ -734,7 +728,6 @@ def live_kyc(limit):
     return pivoted
 
 
-@st.cache_data(ttl=120, show_spinner="Loading Due Diligence data from Redshift…")
 def live_dd(limit):
     sql = f"""
         SELECT
@@ -803,7 +796,26 @@ def get_section_data(section_key, limit):
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ═══════════════════════════════════════════════════════════════════════════════
-_conn, live, _conn_err = get_conn()
+# Test connection with a lightweight query every time the app loads.
+# This avoids relying on the cached (possibly stale) live flag.
+def _test_live_connection():
+    """Run a cheap query to confirm the connection is truly usable."""
+    try:
+        conn, ok, err = get_conn()
+        if not ok or conn is None:
+            return False, err
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.fetchone()
+        cur.close()
+        return True, None
+    except Exception as e:
+        # Connection object exists but is broken (e.g. was cached before VPN)
+        get_conn.clear()
+        return False, str(e)
+
+live, _conn_err = _test_live_connection()
+_conn = None  # don't hold a module-level ref; run_query fetches it fresh
 
 with st.sidebar:
     st.markdown("## 🏦 KYB Dashboard")
@@ -811,12 +823,15 @@ with st.sidebar:
     if live:
         st.success("🟢 Connected to Redshift")
     else:
-        st.error("🔴 Redshift not connected")
+        st.error("🔴 Not connected")
         if _conn_err:
-            st.caption(f"Error: {_conn_err[:120]}")
-        if st.button("🔄 Retry connection", use_container_width=True):
-            # Clear the cached (failed) connection and immediately retry
-            get_conn.clear()
+            with st.expander("Show error"):
+                st.code(_conn_err, language=None)
+        st.caption("Make sure VPN is active, then click Retry.")
+        if st.button("🔄 Retry connection", use_container_width=True, type="primary"):
+            # Clear ALL caches — connection + all data loaders
+            st.cache_data.clear()
+            st.cache_resource.clear()
             st.rerun()
 
     section = st.radio("Navigation", [
