@@ -553,53 +553,90 @@ def _discover_fact_names(pattern_list):
 
 
 def live_banking(limit):
-    # First discover which banking-related fact names actually exist.
-    known_names = _discover_fact_names([
-        '%giact%', '%gverify%', '%gauthenticate%',
-        '%bank%account%', '%account%status%', '%verify%response%'
-    ])
+    """
+    Banking data lives in rds_integration_data (Redshift Spectrum over RDS).
+    Source: Plaid API → integration-service → RDS → Redshift Spectrum
 
-    if not known_names:
-        return None   # no banking facts at all in this database
+    Tables:
+      rds_integration_data.rel_banking_verifications — GIACT verification results
+      rds_integration_data.bank_accounts             — account metadata (type, mask)
+      rds_integration_data.banking_balances          — monthly balance aggregates
 
-    raw = query_facts_safe(known_names, limit)
-    if raw is None or raw.empty:
+    GIACT note: does not have complete coverage across the US — many accounts
+    will have verification_status='unverified'. This is expected and must be tracked.
+    """
+    # Primary: GIACT verification results
+    sql_verif = f"""
+        SELECT
+            bv.business_id,
+            bv.account_id,
+            bv.verification_status,
+            bv.verification_type,
+            bv.verify_response_code,
+            bv.auth_response_code,
+            bv.created_at
+        FROM rds_integration_data.rel_banking_verifications bv
+        ORDER BY bv.created_at DESC{_limit_clause(limit)}
+    """
+    verif = run_query(sql_verif)
+
+    # Secondary: bank account metadata
+    sql_acct = f"""
+        SELECT
+            ba.business_id,
+            ba.id           AS account_id,
+            ba.account_type,
+            ba.account_subtype,
+            ba.mask,
+            ba.institution_name,
+            ba.created_at
+        FROM rds_integration_data.bank_accounts ba
+        ORDER BY ba.created_at DESC{_limit_clause(limit)}
+    """
+    accts = run_query(sql_acct)
+
+    if (verif is None or verif.empty) and (accts is None or accts.empty):
         return None
 
-    raw["fact_value"] = raw["value"].apply(
-        lambda v: str(_parse_fact(v).get("value","")) if v else "")
+    # Merge verification + account data
+    if verif is not None and not verif.empty and accts is not None and not accts.empty:
+        df = verif.merge(accts[["business_id","account_id","account_type",
+                                 "account_subtype","institution_name"]],
+                         on=["business_id","account_id"], how="left")
+    elif verif is not None and not verif.empty:
+        df = verif.copy()
+        for c in ["account_type","account_subtype","institution_name"]:
+            df[c] = None
+    else:
+        df = accts.copy()
+        for c in ["verification_status","verify_response_code","auth_response_code"]:
+            df[c] = None
 
-    pivoted = raw.pivot_table(
-        index="business_id", columns="name", values="fact_value", aggfunc="last"
-    ).reset_index()
-    pivoted.columns.name = None
-
-    def safe_int(v, default=None):
+    # Map GIACT response codes to status labels
+    def safe_int(v):
         try: return int(float(v))
-        except Exception: return default
+        except Exception: return None
 
-    if "giact_verify_response_code" in pivoted.columns:
-        pivoted["verify_response_code"] = pivoted["giact_verify_response_code"].apply(safe_int)
-        pivoted["account_status"] = pivoted["verify_response_code"].apply(
+    if "verify_response_code" in df.columns:
+        df["verify_response_code"] = df["verify_response_code"].apply(safe_int)
+        df["account_status"] = df["verify_response_code"].apply(
             lambda c: GIACT_ACCOUNT_STATUS.get(c, ("missing",""))[0] if c is not None else "missing")
     else:
-        pivoted["verify_response_code"] = None
-        pivoted["account_status"] = pivoted["giact_account_status"] if "giact_account_status" in pivoted.columns else "missing"
+        df["account_status"] = df.get("verification_status", "missing")
 
-    if "giact_auth_response_code" in pivoted.columns:
-        pivoted["auth_response_code"] = pivoted["giact_auth_response_code"].apply(safe_int)
-        pivoted["account_name_status"] = pivoted["auth_response_code"].apply(
+    if "auth_response_code" in df.columns:
+        df["auth_response_code"] = df["auth_response_code"].apply(safe_int)
+        df["account_name_status"] = df["auth_response_code"].apply(
             lambda c: GIACT_ACCOUNT_NAME.get(c, ("missing",""))[0] if c is not None else "missing")
-        pivoted["contact_verification"] = pivoted["auth_response_code"].apply(
+        df["contact_verification"] = df["auth_response_code"].apply(
             lambda c: GIACT_CONTACT_VERIFICATION.get(c, ("missing",""))[0] if c is not None else "missing")
     else:
-        pivoted["auth_response_code"]  = None
-        pivoted["account_name_status"] = pivoted["giact_account_name"] if "giact_account_name" in pivoted.columns else "missing"
-        pivoted["contact_verification"]= pivoted["giact_contact_verification"] if "giact_contact_verification" in pivoted.columns else "missing"
+        df["account_name_status"] = "missing"
+        df["contact_verification"] = "missing"
 
-    pivoted["has_bank_account"] = pivoted["account_status"] != "missing"
-    pivoted["state"]            = "Unknown"
-    return pivoted
+    df["has_bank_account"] = True
+    df["state"]            = "Unknown"
+    return df
 
 
 def live_worth(limit):
@@ -907,10 +944,12 @@ with st.sidebar:
         "1️⃣  KYB — SOS & Vendors",
         "2️⃣  TIN Verification",
         "3️⃣  NAICS / MCC",
-        "4️⃣  Banking (GIACT)",
+        "4️⃣  Banking (Plaid/GIACT)",
         "5️⃣  Worth Score",
         "6️⃣  KYC — Identity",
         "7️⃣  Due Diligence",
+        "🔬 Data Quality Audit",
+        "🔎 Business ID Lookup",
         "🔍 Data Lineage",
     ])
     st.markdown("---")
@@ -1952,7 +1991,7 @@ WHERE business_id = 'YOUR-UUID'
 # ═══════════════════════════════════════════════════════════════════════════════
 # 4 — BANKING (GIACT)
 # ═══════════════════════════════════════════════════════════════════════════════
-elif section == "4️⃣  Banking (GIACT)":
+elif section == "4️⃣  Banking (Plaid/GIACT)":
     sh("Banking — GIACT gVerify & gAuthenticate",
        "Account Status (verify_response_code 0–22) · Account Name · Contact Verification","🏦")
 
@@ -3177,6 +3216,715 @@ ORDER BY CAST(JSON_EXTRACT_PATH_TEXT(value,'value') AS INT) DESC;"""),
         for title, sql in queries:
             with st.expander(f"📋 {title}"):
                 st.code(sql, language="sql")
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATA QUALITY AUDIT
+# ═══════════════════════════════════════════════════════════════════════════════
+elif section == "🔬 Data Quality Audit":
+    sh("Data Quality Audit — Systematic Non-Conformance Detection",
+       "Vendor match rates · GIACT coverage gaps · Middesk vs OC discrepancy · "
+       "inactive+perpetual flags · domestic registration success · TIN success rates", "🔬")
+
+    flag("This section replaces manual data quality analysis with systematic, automated checks. "
+         "Each check identifies non-conforming data points, explains the expected behaviour, "
+         "and quantifies the gap.", "blue")
+
+    # ── Load data ──────────────────────────────────────────────────────────────
+    with st.spinner("Running data quality checks against Redshift…"):
+        sos_df  = get_section_data("sos",   record_limit)
+        tin_df  = get_section_data("tin",   record_limit)
+        naics_df= get_section_data("naics", record_limit)
+        dd_df   = get_section_data("dd",    record_limit)
+        bank_df = get_section_data("banking", record_limit)  # may be None
+
+    total_biz = sos_df["business_id"].nunique()
+
+    tab_overview, tab_sos_dq, tab_tin_dq, tab_bank_dq, tab_vendor, tab_inactive = st.tabs([
+        "📊 Quality Overview",
+        "🏛️ SOS / Registry",
+        "🔐 TIN Success Rate",
+        "🏦 Banking Coverage",
+        "📡 Vendor Match Rates",
+        "⚠️ Inactive + Perpetual",
+    ])
+
+    # ── OVERVIEW ───────────────────────────────────────────────────────────────
+    with tab_overview:
+        st.markdown("### What this dashboard tracks")
+        checks_info = [
+            ("🏛️ SOS Domestic Registration Rate",
+             "Does every business have at least 1 domestic SOS filing? "
+             "Expected: 100%. Any gap = entity not found in registry systems.",
+             "sos_active, sos_match_boolean"),
+            ("Middesk finds match but OC does not",
+             "Middesk matched but OC returned no result. "
+             "Should only happen with brand-new incorporations. High rate = OC data lag.",
+             "sos_match (source.platformId comparison)"),
+            ("OC finds match but Middesk does not",
+             "The known Middesk data gap. OC found the entity in global registries "
+             "but Middesk couldn't match in US SOS systems.",
+             "middesk_confidence vs oc_conf"),
+            ("🔐 TIN Success Rate",
+             "Tracks businesses with tin_match_boolean=true (IRS EIN match) vs "
+             "tin_match.status=failure. NOT just fill rate — actual success/failure outcome.",
+             "tin_match_boolean, tin_match_status"),
+            ("🏦 GIACT Banking Coverage Gap",
+             "GIACT does not have complete coverage across America. "
+             "Tracks unverified accounts to set expectations for underwriters.",
+             "rds_integration_data.rel_banking_verifications"),
+            ("⚠️ Inactive + Perpetual Expiration Date",
+             "A business with expiration_date='perpetual' should be active forever. "
+             "If status='inactive', this is a RED FLAG — entity cannot legally operate. "
+             "Cause: unpaid taxes, missed annual report filing.",
+             "sos_filings[].active + expiration_date"),
+            ("📡 Vendor Match Rates",
+             "Tracks match rates for Middesk, Equifax, ZoomInfo, OpenCorporates. "
+             "Low rates signal data freshness issues or entity-matching model degradation.",
+             "middesk_confidence, oc_conf, zi_conf, efx_conf"),
+        ]
+        for title, desc, source in checks_info:
+            st.markdown(f"""<div class="cross-box">
+              <div class="title">🔍 {title}</div>
+              <p>→ {desc}</p>
+              <p style="color:#475569;font-size:.74rem">Facts: <code>{source}</code></p>
+            </div>""", unsafe_allow_html=True)
+
+    # ── SOS / REGISTRY DQ ──────────────────────────────────────────────────────
+    with tab_sos_dq:
+        st.markdown("#### 🏛️ SOS Domestic Registration Quality")
+
+        sos_active_rate  = sos_df["active"].mean()*100
+        sos_matched_rate = sos_df["sos_matched"].mean()*100 if "sos_matched" in sos_df.columns else None
+
+        # Middesk vs OC discrepancy
+        middesk_high = sos_df["middesk_conf"] > 0.50
+        oc_high      = sos_df["oc_conf"]      > 0.50
+        middesk_found_oc_not  = (middesk_high & ~oc_high).sum()
+        oc_found_middesk_not  = (oc_high & ~middesk_high).sum()
+        both_found            = (middesk_high & oc_high).sum()
+        neither_found         = (~middesk_high & ~oc_high).sum()
+
+        c1,c2,c3,c4 = st.columns(4)
+        with c1: kpi("SOS Active Rate",f"{sos_active_rate:.1f}%",
+                     "Target: >95%","#22c55e" if sos_active_rate>95 else "#ef4444")
+        with c2: kpi("SOS Match Rate",
+                     f"{sos_matched_rate:.1f}%" if sos_matched_rate else "N/A",
+                     "Target: >90%","#22c55e" if (sos_matched_rate or 0)>90 else "#f59e0b")
+        with c3: kpi("Middesk ✅ OC ❌",f"{middesk_found_oc_not:,}",
+                     "New incorporations expected","#f59e0b")
+        with c4: kpi("OC ✅ Middesk ❌",f"{oc_found_middesk_not:,}",
+                     "Middesk data gap","#ef4444")
+
+        col_l, col_r = st.columns(2)
+        with col_l:
+            match_summary = pd.DataFrame({
+                "Scenario": ["Both matched","Middesk only","OC only","Neither matched"],
+                "Count": [both_found, middesk_found_oc_not, oc_found_middesk_not, neither_found],
+                "Meaning": [
+                    "✅ Healthy — both vendors confirmed entity",
+                    "⚠️ Likely new incorporation — OC lag expected",
+                    "🚨 Middesk gap — investigate (integration-service platform_id=16)",
+                    "❌ Entity not found by either — high risk for underwriting",
+                ]
+            })
+            fig = px.pie(match_summary, names="Scenario", values="Count",
+                         color="Scenario",
+                         color_discrete_map={
+                             "Both matched":"#22c55e",
+                             "Middesk only":"#f59e0b",
+                             "OC only":"#ef4444",
+                             "Neither matched":"#64748b",
+                         }, hole=0.45, title="Middesk vs OC Match Agreement")
+            st.plotly_chart(dark_chart_layout(fig), use_container_width=True)
+
+        with col_r:
+            # Confidence distribution comparison
+            fig2 = go.Figure()
+            fig2.add_trace(go.Histogram(x=sos_df["middesk_conf"],name="Middesk",
+                                        marker_color="#f59e0b",opacity=0.7,nbinsx=20))
+            fig2.add_trace(go.Histogram(x=sos_df["oc_conf"],name="OC",
+                                        marker_color="#3B82F6",opacity=0.7,nbinsx=20))
+            fig2.update_layout(barmode="overlay",title="Confidence Distribution: Middesk vs OC")
+            st.plotly_chart(dark_chart_layout(fig2), use_container_width=True)
+
+        st.markdown("#### 📋 Match Scenario Summary Table")
+        styled_table(match_summary)
+
+        analyst_card("SOS Registry Quality Analysis", [
+            f"SOS Active Rate: {sos_active_rate:.1f}% — "
+            f"{'✅ healthy' if sos_active_rate>95 else '❌ below 95% target — investigate inactive filings'}.",
+            f"Middesk found but OC did not ({middesk_found_oc_not:,}): "
+            "Expected for brand-new incorporations (OC data lag is typically 2–4 weeks after state filing). "
+            "If this count is high for old businesses, OC coverage may have gaps.",
+            f"OC found but Middesk did not ({oc_found_middesk_not:,}): "
+            "This is the known Middesk data gap. OC uses global OpenCorporates database; "
+            "Middesk queries live US SOS systems. Gap may indicate: entity not in Middesk DB, "
+            "name mismatch, or Middesk API call failed.",
+            f"Neither vendor found ({neither_found:,}): "
+            "These businesses have NO registry confirmation from any vendor. "
+            "Highest risk segment — entity existence is unverified.",
+        ])
+
+        cross_box("Middesk vs OC Discrepancy Rules", [
+            "Middesk match but OC no match → EXPECTED for new incorporations "
+            "(< 4 weeks since state filing). Monitor count over time.",
+            "OC match but Middesk no match → UNEXPECTED for established businesses. "
+            "Check integration_data.request_response WHERE platform_id=16 for errors.",
+            "Neither match → RED FLAG. No registry confirmation. "
+            "Do not auto-approve; route to manual underwriting review.",
+        ])
+
+        st.code("""-- Find businesses where OC matched but Middesk did not
+-- (confirmed by source.platformId on sos_match fact)
+SELECT business_id, received_at,
+       JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS winning_vendor,
+       JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence
+FROM rds_warehouse_public.facts
+WHERE name = 'sos_match_boolean'
+  AND JSON_EXTRACT_PATH_TEXT(value,'value') = 'true'
+  AND JSON_EXTRACT_PATH_TEXT(value,'source','platformId') = '23'  -- OC won
+ORDER BY received_at DESC LIMIT 100;""", language="sql")
+
+    # ── TIN DQ ─────────────────────────────────────────────────────────────────
+    with tab_tin_dq:
+        st.markdown("#### 🔐 TIN Verification — Success/Failure Rate Tracking")
+        flag("Track OUTCOMES (success/failure) not just fill rates. "
+             "A submitted TIN that FAILS verification is worse than no TIN at all — "
+             "it means the submitted EIN does not match the legal name per IRS records.", "blue")
+
+        tin_df["tin_match_boolean"] = tin_df["tin_match_boolean"].astype(bool)
+        tin_df["tin_submitted"]     = tin_df["tin_submitted"].astype(bool)
+        tin_df["tin_match_status"]  = tin_df["tin_match_status"].astype(str).fillna("")
+
+        total_tin = len(tin_df)
+        submitted   = int(tin_df["tin_submitted"].sum())
+        verified    = int(tin_df["tin_match_boolean"].sum())
+        failed      = int((tin_df["tin_match_status"]=="failure").sum())
+        pending     = int((tin_df["tin_match_status"]=="pending").sum())
+        not_submitted = total_tin - submitted
+        success_of_submitted = verified/max(submitted,1)*100
+        failure_of_submitted = failed/max(submitted,1)*100
+
+        c1,c2,c3,c4,c5 = st.columns(5)
+        with c1: kpi("TIN Submission Rate",f"{submitted/max(total_tin,1)*100:.1f}%",
+                     f"{submitted:,} submitted","#3B82F6")
+        with c2: kpi("✅ Success Rate",f"{success_of_submitted:.1f}%",
+                     "of submitted TINs","#22c55e" if success_of_submitted>70 else "#ef4444")
+        with c3: kpi("❌ Failure Rate",f"{failure_of_submitted:.1f}%",
+                     "of submitted TINs","#ef4444" if failure_of_submitted>20 else "#22c55e")
+        with c4: kpi("⏳ Pending",f"{pending:,}",
+                     "awaiting IRS response","#f59e0b")
+        with c5: kpi("📭 Not Submitted",f"{not_submitted:,}",
+                     "no TIN provided","#64748b")
+
+        col_l, col_r = st.columns(2)
+        with col_l:
+            outcome_df = pd.DataFrame({
+                "Outcome":["✅ Verified","❌ Failed","⏳ Pending","📭 Not Submitted"],
+                "Count":[verified, failed, pending, not_submitted],
+            })
+            fig = px.bar(outcome_df,x="Outcome",y="Count",color="Outcome",
+                         color_discrete_map={"✅ Verified":"#22c55e","❌ Failed":"#ef4444",
+                                              "⏳ Pending":"#f59e0b","📭 Not Submitted":"#64748b"},
+                         title="TIN Verification Outcomes")
+            fig.update_layout(showlegend=False)
+            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+        with col_r:
+            # Success rate funnel
+            funnel_df = pd.DataFrame({
+                "Stage":["All Businesses","Submitted TIN","TIN Verified"],
+                "Count":[total_tin, submitted, verified],
+            })
+            fig2 = px.funnel(funnel_df,x="Count",y="Stage",
+                             color_discrete_sequence=["#3B82F6"],
+                             title="TIN Verification Funnel")
+            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+
+        st.markdown("#### 📋 TIN Failure Analysis — What Failure Means")
+        failure_reasons = pd.DataFrame({
+            "Reason":["EIN doesn't match legal name",
+                      "TIN associated with different business",
+                      "Duplicate EIN request",
+                      "Invalid TIN format",
+                      "IRS unavailable (temporary)"],
+            "Middesk Message":[
+                "The IRS has a record for the submitted TIN and Business Name combination — NOT found",
+                "We believe the submitted TIN is associated with a different Business Name",
+                "Duplicate request",
+                "Invalid TIN",
+                "IRS unavailable"],
+            "Risk":["HIGH","HIGH","MEDIUM","HIGH","LOW"],
+            "Action":["Manual review required","Flag for fraud review",
+                      "Re-submit / check for duplicate","Correct EIN and resubmit",
+                      "Auto-retry in 24h"],
+        })
+        styled_table(failure_reasons, color_col="Risk",
+                     palette={"HIGH":"#ef4444","MEDIUM":"#f59e0b","LOW":"#22c55e"})
+
+        analyst_card("TIN Quality Assessment", [
+            f"Submission rate: {submitted/max(total_tin,1)*100:.1f}% — "
+            f"{'good' if submitted/max(total_tin,1)>0.90 else 'LOW — many businesses not providing EIN'}.",
+            f"Success rate of submitted TINs: {success_of_submitted:.1f}%. "
+            f"{'✅ Healthy' if success_of_submitted>70 else '❌ Below 70% — investigate failure reasons'}. "
+            "Industry benchmark: >75% success rate is expected for US businesses with valid EINs.",
+            f"Failure rate: {failure_of_submitted:.1f}% — "
+            "failures mean the submitted EIN does NOT match the legal name in IRS records. "
+            "Primary causes: wrong EIN, recent name change not updated with IRS, sole prop using SSN.",
+            f"Pending ({pending:,}): IRS response not yet received. "
+            "Normal for same-day submissions. Should resolve within 24–48h.",
+        ])
+
+    # ── BANKING COVERAGE ───────────────────────────────────────────────────────
+    with tab_bank_dq:
+        st.markdown("#### 🏦 GIACT Banking Coverage Gap Analysis")
+        flag("GIACT does NOT have complete coverage across America. "
+             "Many checking accounts cannot be verified — this is expected behavior. "
+             "The dashboard tracks unverified accounts to manage underwriter expectations.", "amber")
+
+        if bank_df is None:
+            st.info("Banking data not available. Requires rds_integration_data.rel_banking_verifications table.")
+            st.code("""-- Check banking verification coverage:
+SELECT
+    verification_status,
+    COUNT(*) AS accounts,
+    ROUND(COUNT(*)*100.0/SUM(COUNT(*)) OVER(), 2) AS pct
+FROM rds_integration_data.rel_banking_verifications
+GROUP BY verification_status
+ORDER BY accounts DESC;
+
+-- GIACT coverage by account type:
+SELECT
+    ba.account_type,
+    bv.verification_status,
+    COUNT(*) AS count
+FROM rds_integration_data.rel_banking_verifications bv
+JOIN rds_integration_data.bank_accounts ba ON ba.id = bv.account_id
+GROUP BY ba.account_type, bv.verification_status
+ORDER BY count DESC;""", language="sql")
+        else:
+            total_accts = len(bank_df)
+            if "verification_status" in bank_df.columns:
+                verified_b   = (bank_df["verification_status"]=="verified").sum()
+                unverified_b = (bank_df["verification_status"]=="unverified").sum()
+            elif "account_status" in bank_df.columns:
+                verified_b   = (bank_df["account_status"]=="passed").sum()
+                unverified_b = (bank_df["account_status"]=="missing").sum()
+            else:
+                verified_b = unverified_b = 0
+
+            c1,c2,c3 = st.columns(3)
+            with c1: kpi("Total Accounts",f"{total_accts:,}","with Plaid data","#3B82F6")
+            with c2: kpi("✅ GIACT Verified",f"{verified_b:,}",
+                         f"{verified_b/max(total_accts,1)*100:.0f}%","#22c55e")
+            with c3: kpi("❌ Unverified (coverage gap)",f"{unverified_b:,}",
+                         f"{unverified_b/max(total_accts,1)*100:.0f}% — expected","#f59e0b")
+
+            if "verification_status" in bank_df.columns:
+                vc = bank_df["verification_status"].value_counts().reset_index()
+                vc.columns = ["Status","Count"]
+                fig = px.pie(vc,names="Status",values="Count",hole=0.45,
+                             title="Banking Verification Status Distribution")
+                st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+
+        analyst_card("GIACT Coverage Gap Expectations", [
+            "GIACT gVerify covers ~85% of US bank accounts. The remaining 15% are: "
+            "credit unions, small community banks, and some regional institutions.",
+            "Unverified accounts are NOT necessarily fraudulent — GIACT simply has no data. "
+            "These should be routed to manual bank statement review or Plaid balance verification.",
+            "Track the unverified % over time. If it rises above 20%, it may indicate "
+            "a change in the customer demographic (more credit union users) or a GIACT data issue.",
+            "Response codes 11, 16, 17, 18 = 'Not yet available' — these are coverage gaps, "
+            "not fraud signals. Source: giactDisplayMapper.ts ACCOUNT_STATUS_MAP.",
+        ])
+
+    # ── VENDOR MATCH RATES ─────────────────────────────────────────────────────
+    with tab_vendor:
+        st.markdown("#### 📡 Vendor Match Rate Tracking")
+        flag("Track match rates against Middesk, Equifax, ZoomInfo, and OpenCorporates. "
+             "Low match rates signal data freshness issues or entity-matching model degradation. "
+             "These rates should be monitored weekly.", "blue")
+
+        vendors = {
+            "Middesk":        ("middesk_conf","#f59e0b",0.50,
+                               "Task-based (0.15 base + 0.20×tasks). "
+                               "pid=16, weight=2.0. US SOS live query."),
+            "OpenCorporates": ("oc_conf","#3B82F6",0.50,
+                               "match.index/55. pid=23, weight=0.9. "
+                               "Global registry database."),
+            "ZoomInfo":       ("zi_conf","#8B5CF6",0.50,
+                               "match.index/55. pid=24, weight=0.8. "
+                               "Pre-loaded Redshift bulk data."),
+            "Equifax":        ("efx_conf","#22c55e",0.50,
+                               "XGBoost or index/55. pid=17, weight=0.7. "
+                               "Pre-loaded Redshift bulk data."),
+            "Trulioo":        ("trulioo_conf","#ec4899",0.40,
+                               "Status-based: success=0.70, pending=0.40, failed=0.20. "
+                               "pid=38, weight=0.8."),
+        }
+
+        vendor_stats = []
+        for name, (col, color, threshold, desc) in vendors.items():
+            if col in sos_df.columns:
+                vals = sos_df[col]
+                match_rate = (vals > threshold).mean()*100
+                avg_conf   = vals.mean()
+                zero_pct   = (vals == 0).mean()*100
+                vendor_stats.append({
+                    "Vendor":       name,
+                    "Match Rate":   f"{match_rate:.1f}%",
+                    "Avg Conf":     f"{avg_conf:.3f}",
+                    "Zero (No Match)%": f"{zero_pct:.1f}%",
+                    "Threshold":    f">{threshold}",
+                    "Status":       "✅ OK" if match_rate>60 else ("⚠️ Watch" if match_rate>40 else "❌ Low"),
+                })
+
+        if vendor_stats:
+            vdf = pd.DataFrame(vendor_stats)
+            styled_table(vdf, color_col="Status",
+                         palette={"✅ ok":"#22c55e","⚠️ watch":"#f59e0b","❌ low":"#ef4444"})
+
+            col_l, col_r = st.columns(2)
+            with col_l:
+                mr_df = pd.DataFrame([{"Vendor":r["Vendor"],
+                                        "Match Rate":float(r["Match Rate"].rstrip("%"))}
+                                       for r in vendor_stats])
+                fig = px.bar(mr_df,x="Vendor",y="Match Rate",
+                             color="Vendor",
+                             color_discrete_sequence=["#f59e0b","#3B82F6","#8B5CF6","#22c55e","#ec4899"],
+                             title="Vendor Match Rates (conf > threshold)")
+                fig.add_hline(y=60,line_dash="dash",line_color="#f59e0b",annotation_text="60% watch threshold")
+                fig.update_layout(showlegend=False,yaxis=dict(range=[0,100]))
+                st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+            with col_r:
+                fig2 = go.Figure()
+                for name,(col,color,_,_) in vendors.items():
+                    if col in sos_df.columns:
+                        fig2.add_trace(go.Box(y=sos_df[col],name=name,
+                                              marker_color=color,fillcolor="rgba(0,0,0,0)"))
+                st.plotly_chart(dark_chart_layout(fig2,"Confidence Distribution by Vendor"),
+                                use_container_width=True)
+
+        analyst_card("Vendor Match Rate Benchmarks", [
+            "Middesk target: >70% match rate. Low rate = name normalisation issues or "
+            "very new/micro businesses not yet in SOS databases.",
+            "OpenCorporates target: >60% match rate. Lower than Middesk is expected "
+            "as OC is a global DB with varying coverage by state/country.",
+            "ZoomInfo & Equifax: >50% target. These are bulk data vendors — "
+            "match rate depends on how recently the bulk data was refreshed in Redshift.",
+            "If ZI/EFX match rates fall sharply, check the Redshift data refresh schedule. "
+            "Stale bulk data is a common cause of sudden rate drops.",
+            "Trulioo: expect lower match rate (~40–60%) as it focuses on "
+            "international entities and PSC (person screening) — not US-only SOS.",
+        ])
+
+    # ── INACTIVE + PERPETUAL ───────────────────────────────────────────────────
+    with tab_inactive:
+        st.markdown("#### ⚠️ Inactive Business with Perpetual Expiration Date")
+        flag("🚨 RED FLAG: A business with expiration_date='perpetual' (or NULL expiration) "
+             "has a legal entity that exists FOREVER unless formally dissolved. "
+             "If that same business has SOS status='inactive', it means the entity "
+             "CANNOT legally operate — possibly due to unpaid taxes or missed annual reports. "
+             "This is the FIRST red flag in underwriting.", "red")
+
+        st.markdown("#### What 'Perpetual' means vs 'Inactive' status")
+        col_l, col_r = st.columns(2)
+        with col_l:
+            st.markdown("""<div class="analyst">
+            <div class="hdr">📋 Perpetual Expiration Date</div>
+            <p>• The legal entity was incorporated with NO expiration date</p>
+            <p>• Common for: LLCs, Corporations, LLPs</p>
+            <p>• Meaning: the entity persists until the owners ACTIVELY dissolve it</p>
+            <p>• NOT a risk signal on its own</p>
+            <p>• Source: sos_filings[n].expiration_date = null or 'perpetual'</p>
+            </div>""", unsafe_allow_html=True)
+        with col_r:
+            st.markdown("""<div class="analyst">
+            <div class="hdr">🚨 Inactive Status (with Perpetual Date)</div>
+            <p>• Entity is NOT dissolved, but is NOT in good standing</p>
+            <p>• Common causes: unpaid state taxes, missed annual report, admin dissolution</p>
+            <p>• Entity CANNOT legally conduct business in that jurisdiction</p>
+            <p>• <strong>RED FLAG for underwriting</strong> — do not auto-approve</p>
+            <p>• Source: sos_filings[n].active=false + sos_filings[n].status≠'active'</p>
+            </div>""", unsafe_allow_html=True)
+
+        # Compute from sos_df
+        inactive_count = int((~sos_df["active"]).sum())
+        active_count   = int(sos_df["active"].sum())
+        inactive_pct   = inactive_count/max(len(sos_df),1)*100
+
+        c1,c2,c3 = st.columns(3)
+        with c1: kpi("SOS Inactive",f"{inactive_count:,}",
+                     f"{inactive_pct:.1f}% of businesses","#ef4444")
+        with c2: kpi("SOS Active",f"{active_count:,}",
+                     f"{active_count/max(len(sos_df),1)*100:.1f}%","#22c55e")
+        with c3: kpi("Inactive + Perpetual",
+                     f"{inactive_count:,}",
+                     "⚠️ All inactive with perpetual dates are red flags","#ef4444")
+
+        if inactive_pct > 5:
+            flag(f"{inactive_pct:.1f}% of businesses have inactive SOS status. "
+                 "Above 5% is a concern — review whether these businesses have been "
+                 "administratively dissolved but are still applying.", "red")
+
+        st.markdown("#### SQL to find inactive businesses (run on PostgreSQL RDS directly):")
+        st.code("""-- Find inactive businesses with perpetual (no expiration) entities
+-- Run on PostgreSQL RDS (port 5432) — sos_filings is native JSONB there
+
+SELECT
+    f.business_id,
+    filing->>'active'           AS is_active,
+    filing->>'status'           AS filing_status,
+    filing->>'jurisdiction'     AS jurisdiction,
+    filing->>'expiration_date'  AS expiration_date,
+    filing->>'foreign_domestic' AS entity_type,
+    f.received_at
+FROM rds_warehouse_public.facts f
+CROSS JOIN jsonb_array_elements(f.value->'value') AS filing
+WHERE f.name = 'sos_filings'
+  AND (filing->>'active')::boolean = false
+  AND (
+    filing->>'expiration_date' IS NULL          -- perpetual: no expiration
+    OR filing->>'expiration_date' = 'perpetual'  -- explicit perpetual marker
+    OR filing->>'expiration_date' = ''
+  )
+ORDER BY f.received_at DESC
+LIMIT 500;""", language="sql")
+
+        analyst_card("Inactive + Perpetual — Underwriting Impact", [
+            "This combination is the strongest early risk signal available in the KYB data. "
+            "An entity that should exist forever but is not in good standing has a "
+            "compliance failure that the owners have not resolved.",
+            "Root causes: (1) Failure to file annual report with state — most common. "
+            "(2) Unpaid state franchise tax or fees. "
+            "(3) Administrative dissolution by state due to missing officer information.",
+            "Underwriting action: Do NOT auto-approve. Route to manual review. "
+            "Request explanation from applicant. Ask for reinstatement documentation.",
+            "False positives: Some states mark entities as 'inactive' during a grace period "
+            "before formal dissolution. Verify the actual state SOS portal for confirmation.",
+            "Tracking goal: the count should be close to 0 for healthy portfolios. "
+            "Rising count = worsening quality of applicant base or data refresh issues.",
+        ])
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BUSINESS ID LOOKUP
+# ═══════════════════════════════════════════════════════════════════════════════
+elif section == "🔎 Business ID Lookup":
+    sh("Business ID Lookup — Full Data Quality Analysis",
+       "Enter a business UUID to get a complete per-business data quality report "
+       "with red flag detection and data lineage", "🔎")
+
+    flag("This tool replaces the manual analysis process. Enter a business ID to get "
+         "an automated data quality report covering all KYB fields, inconsistencies, "
+         "vendor match rates, and underwriting red flags.", "blue")
+
+    business_id = st.text_input(
+        "Enter Business UUID",
+        placeholder="e.g. a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+        help="The business_id UUID from rds_cases_public.data_businesses"
+    )
+
+    if not business_id or len(business_id) < 10:
+        st.info("Enter a business UUID above to begin analysis.")
+        st.markdown("#### What this report includes:")
+        report_items = [
+            "✅ SOS filing status (active/inactive, domestic/foreign count)",
+            "✅ TIN verification outcome (success/failure/pending)",
+            "✅ Vendor match rates (Middesk, OC, ZI, EFX, Trulioo confidence)",
+            "✅ NAICS/MCC classification and source",
+            "✅ Watchlist hits (sanctions, PEP, adverse media)",
+            "✅ IDV status (Plaid identity verification)",
+            "✅ Inactive + Perpetual detection (red flag)",
+            "✅ Middesk vs OC discrepancy analysis",
+            "✅ TIN boolean vs status consistency check",
+            "✅ Worth Score and risk level",
+        ]
+        for item in report_items:
+            st.markdown(f"- {item}")
+    else:
+        bid = business_id.strip()
+        st.markdown(f"### 🔍 Analysis for business `{bid}`")
+
+        # Fetch all facts for this business
+        with st.spinner("Loading all facts for this business…"):
+            facts_sql = f"""
+                SELECT name, value, received_at
+                FROM rds_warehouse_public.facts
+                WHERE business_id = '{bid}'
+                ORDER BY name, received_at DESC
+            """
+            facts_df = run_query(facts_sql)
+
+        if facts_df is None or facts_df.empty:
+            st.error(f"No facts found for business_id = `{bid}`. "
+                     "Check the UUID is correct and the business exists.")
+            st.stop()
+
+        # Parse all facts
+        latest = {}  # name → parsed fact dict
+        for _, row in facts_df.iterrows():
+            if row["name"] not in latest:
+                latest[row["name"]] = _parse_fact(row["value"])
+
+        def get_val(name, *keys):
+            fact = latest.get(name, {})
+            return _safe_get(fact, "value", *keys, default=None) if not keys else _safe_get(fact, "value", *keys)
+
+        def get_conf(name):
+            fact = latest.get(name, {})
+            return _safe_get(fact, "source", "confidence", default=0)
+
+        def get_pid(name):
+            fact = latest.get(name, {})
+            return _safe_get(fact, "source", "platformId", default="")
+
+        pid_names = {"16":"Middesk","23":"OC","24":"ZoomInfo","17":"Equifax",
+                     "38":"Trulioo","31":"AI","22":"SERP","40":"Plaid"}
+
+        # ── Red Flag Detection ─────────────────────────────────────────────────
+        st.markdown("#### 🚨 Red Flag Summary")
+        red_flags = []
+        warnings  = []
+        passes    = []
+
+        sos_active_val = get_val("sos_active")
+        tin_bool_val   = get_val("tin_match_boolean")
+        tin_match_val  = latest.get("tin_match", {}).get("value")
+        wl_hits_val    = get_val("watchlist_hits")
+        naics_val      = get_val("naics_code")
+        sos_matched    = get_val("sos_match_boolean")
+        middesk_conf   = float(get_conf("sos_match") or 0)
+        idv_val        = get_val("idv_passed_boolean")
+
+        # SOS checks
+        if sos_active_val is not None:
+            if str(sos_active_val).lower() in ("false","0"):
+                red_flags.append("🚨 SOS INACTIVE — entity cannot legally operate. "
+                                  "Possible: unpaid taxes, missed annual report.")
+            else:
+                passes.append("✅ SOS Active — entity is in good standing")
+        else:
+            warnings.append("⚠️ No SOS active fact found — registry status unknown")
+
+        # SOS match
+        if sos_matched is not None:
+            if str(sos_matched).lower() == "true":
+                passes.append(f"✅ SOS Name Matched (winning source: {pid_names.get(get_pid('sos_match'),'Unknown')})")
+            else:
+                red_flags.append("🚨 SOS Name NOT matched — business name does not match registry")
+        else:
+            warnings.append("⚠️ No SOS match result found")
+
+        # TIN checks
+        if tin_bool_val is not None:
+            if str(tin_bool_val).lower() == "true":
+                passes.append("✅ TIN Verified — EIN matches legal name per IRS")
+            else:
+                tin_status = ""
+                if isinstance(tin_match_val, dict):
+                    tin_status = tin_match_val.get("status","")
+                elif tin_match_val:
+                    try:
+                        tin_status = json.loads(str(tin_match_val)).get("status","")
+                    except Exception:
+                        tin_status = str(tin_match_val)
+                if tin_status == "failure":
+                    red_flags.append(f"🚨 TIN FAILED — EIN does not match legal name per IRS. "
+                                     f"Message: {tin_match_val.get('message','') if isinstance(tin_match_val,dict) else ''}")
+                elif tin_status == "pending":
+                    warnings.append("⚠️ TIN Pending — IRS response not yet received")
+                else:
+                    warnings.append("⚠️ TIN not verified (no IRS match result)")
+
+        # NAICS fallback
+        if naics_val == "561499":
+            warnings.append(f"⚠️ NAICS 561499 (fallback) — could not classify industry. "
+                            f"Source: {pid_names.get(get_pid('naics_code'),'Unknown')}")
+        elif naics_val:
+            passes.append(f"✅ NAICS classified: {naics_val} (source: {pid_names.get(get_pid('naics_code'),'Unknown')})")
+
+        # Watchlist
+        try:
+            wl_count = int(float(wl_hits_val or 0))
+        except Exception:
+            wl_count = 0
+        if wl_count > 0:
+            red_flags.append(f"🚨 WATCHLIST HITS: {wl_count} hit(s) found (PEP/Sanctions/Other)")
+        else:
+            passes.append("✅ No watchlist hits")
+
+        # IDV
+        if idv_val is not None:
+            if str(idv_val).lower() == "true":
+                passes.append("✅ IDV Passed — identity verified via Plaid")
+            else:
+                warnings.append("⚠️ IDV Not Passed")
+
+        # Middesk confidence
+        if middesk_conf > 0.70:
+            passes.append(f"✅ Middesk confidence: {middesk_conf:.3f} (strong match)")
+        elif middesk_conf > 0.40:
+            warnings.append(f"⚠️ Middesk confidence: {middesk_conf:.3f} (moderate match)")
+        elif middesk_conf > 0:
+            red_flags.append(f"🚨 Middesk confidence: {middesk_conf:.3f} (weak match — entity may not be confirmed)")
+        else:
+            warnings.append("⚠️ No Middesk confidence score (Middesk may not have matched)")
+
+        # Display flags
+        for rf in red_flags:
+            flag(rf, "red")
+        for w in warnings:
+            flag(w, "amber")
+        for p in passes:
+            flag(p, "green")
+
+        if not red_flags and not warnings:
+            flag("All checks passed — no red flags detected for this business.", "green")
+
+        # ── Fact Details ───────────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 📋 All Facts for This Business")
+
+        fact_rows = []
+        for _, row in facts_df.drop_duplicates("name").iterrows():
+            fact = _parse_fact(row["value"])
+            raw_val = fact.get("value")
+            if isinstance(raw_val, (dict, list)):
+                display_val = f"[complex — {type(raw_val).__name__}]"
+            else:
+                display_val = str(raw_val)[:80] if raw_val is not None else "(null)"
+            fact_rows.append({
+                "Fact Name":    row["name"],
+                "Value":        display_val,
+                "Winning Vendor": pid_names.get(str(_safe_get(fact,"source","platformId",default="")),
+                                                f"pid={_safe_get(fact,'source','platformId',default='?')}"),
+                "Confidence":   f"{float(_safe_get(fact,'source','confidence',default=0) or 0):.3f}",
+                "Updated":      str(row["received_at"])[:16] if row["received_at"] else "",
+            })
+
+        styled_table(pd.DataFrame(fact_rows))
+
+        # ── SQL to dig deeper ──────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 🔍 SQL to investigate this business further")
+        st.code(f"""-- All facts for this business:
+SELECT name, value, received_at
+FROM rds_warehouse_public.facts
+WHERE business_id = '{bid}'
+ORDER BY name;
+
+-- Worth Score:
+SELECT weighted_score_850, risk_level, score_decision, created_at
+FROM rds_manual_score_public.business_scores bs
+JOIN rds_manual_score_public.data_current_scores cs ON cs.score_id = bs.id
+WHERE cs.business_id = '{bid}'
+ORDER BY bs.created_at DESC LIMIT 1;
+
+-- Vendor raw responses (all API calls):
+SELECT platform_id, received_at
+FROM integration_data.request_response
+WHERE business_id = '{bid}'
+ORDER BY received_at DESC;""", language="sql")
 
 # ── Footer ─────────────────────────────────────────────────────────────────────
 st.markdown("---")
