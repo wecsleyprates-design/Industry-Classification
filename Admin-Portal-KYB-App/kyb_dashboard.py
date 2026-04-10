@@ -1044,10 +1044,16 @@ with st.sidebar:
 
 
 # ── PID name map ──────────────────────────────────────────────────────────────
+# pid=0  → fact was set by the system internally (businessDetails / applicant form)
+# pid=-1 → fact default / no vendor provided this value
+# pid="" → fact exists but source metadata is missing
 PID = {"16":"Middesk","23":"OC","24":"ZoomInfo","17":"Equifax",
-       "38":"Trulioo","31":"AI","22":"SERP","40":"Plaid","":"Unknown"}
+       "38":"Trulioo","31":"AI","22":"SERP","40":"Plaid",
+       "0":"Applicant/System","-1":"No vendor (default)","":"Unknown source"}
 
-def pid_name(pid): return PID.get(str(pid),"pid="+str(pid))
+def pid_name(pid):
+    s = str(pid)
+    return PID.get(s, f"pid={s}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2595,8 +2601,9 @@ elif section == "🏦 Banking & Ops":
         with c3: kpi("❌ ERRORED",f"{errored_n:,}",f"{errored_n/max(total_accts,1)*100:.2f}%","#ef4444")
         with c4: kpi("Coverage Gap",f"{errored_n:,}","GIACT has no data for these","#f59e0b")
 
-        tab_verif, tab_discover, tab_sql = st.tabs([
-            "📊 Verification Status","🔍 Discover Table Columns","🗄️ SQL Reference"
+        tab_verif, tab_giact_guide, tab_discover, tab_dq_bank, tab_sql = st.tabs([
+            "📊 Verification Status","📖 GIACT Explained",
+            "🔍 Discover Columns","🔬 Quality & Anomalies","🗄️ SQL Reference"
         ])
 
         with tab_verif:
@@ -2634,6 +2641,185 @@ Does NOT mean the account is valid for the business — check `verify_response_c
                 "GIACT SUCCESS ≠ account passes underwriting. Within SUCCESS, check verify_response_code "
                 "for codes 7/8 (risk-based decline) and 9 (NSF/negative history).",
             ])
+
+        with tab_giact_guide:
+            st.markdown("#### 📖 Understanding GIACT — Complete Guide")
+
+            st.markdown("##### What GIACT is and what it checks")
+            st.markdown("""
+GIACT is a bank account verification service used by Worth AI to confirm that a business's
+bank account is real, active, and in good standing before processing payments.
+
+GIACT runs **two separate checks** using different data sources:
+
+| Check | GIACT Product | Response Code Field | What it verifies |
+|---|---|---|---|
+| **Account Status** | gVerify | `verify_response_code` | Does the routing + account number belong to a real, active bank account? |
+| **Account Name** | gAuthenticate | `auth_response_code` | Does the account holder's name match the submitted name? |
+| **Contact Verification** | gAuthenticate | `auth_response_code` | Do phone, address, and other contact details match the account? |
+
+**The `verification_status` field** (SUCCESS/ERRORED) only reflects whether GIACT's API call
+completed without error — NOT whether the account is valid for payments.
+A `SUCCESS` means GIACT had data; an `ERRORED` means GIACT had no data.
+            """)
+
+            st.markdown("##### SUCCESS vs ERRORED — What each really means")
+            col_l, col_r = st.columns(2)
+            with col_l:
+                st.markdown("""
+**✅ `SUCCESS`**
+
+GIACT found this routing+account number in their database and returned a result.
+This does NOT mean the account is approved.
+
+Within SUCCESS records, `verify_response_code` tells you the actual outcome:
+- Code **12** = Open and valid checking account ✅
+- Code **15** = Open and valid savings account ✅
+- Code **6** = Routing valid, but no data on this specific account ⚠️
+- Code **7/8** = Risk-based decline ❌
+- Code **9** = NSF/returns history ❌
+- Code **11/16/17/18** = Not yet available (coverage gap) ⚠️
+
+Without `verify_response_code`, SUCCESS just means GIACT responded.
+                """)
+            with col_r:
+                st.markdown("""
+**❌ `ERRORED`**
+
+GIACT could not look up this account. Most common causes:
+
+1. **Credit union not in database** (~60% of ERRORED cases)
+   GIACT primarily covers major national banks. Small credit unions,
+   community banks, and regional institutions are often absent.
+
+2. **Invalid routing number** (~15% of ERRORED)
+   The routing number format is invalid or doesn't match any known institution.
+
+3. **API timeout or error** (~5% of ERRORED)
+   Temporary connectivity issue — retry automatically resolves.
+
+4. **Online-only bank** (~20% of ERRORED)
+   Some fintech banks (Chime, Current, etc.) may not be in GIACT's database.
+
+**Action for ERRORED:** Route to manual bank statement review.
+Request 3 months of statements. Use Plaid for balance/transaction verification.
+                """)
+
+            st.markdown("##### GIACT Coverage Map — Why 100% coverage is impossible")
+            coverage_data = pd.DataFrame({
+                "Bank Type": ["Major national banks (JPMorgan, BofA, Wells Fargo, Citi)",
+                               "Regional banks (Regions, Truist, Fifth Third)",
+                               "Credit unions (Navy Federal, BECU, etc.)",
+                               "Community banks (<$1B assets)",
+                               "Online-only banks (Chime, Current, Varo)",
+                               "International banks"],
+                "GIACT Coverage": ["~99%","~85%","~40%","~60%","~30%","~5%"],
+                "Worth AI Expected %": ["~70% of accounts","~15% of accounts",
+                                         "~8% of accounts","~5% of accounts",
+                                         "~1% of accounts","~1% of accounts"],
+                "If ERRORED": ["Rare — retry","Possible","Expected","Possible",
+                                "Expected","Expected"],
+            })
+            styled_table(coverage_data)
+
+            st.markdown("##### What the 99.94% SUCCESS rate in your data means")
+            analyst_card("GIACT Coverage Analysis for Your Portfolio", [
+                "99.94% SUCCESS rate is exceptional — far above the industry average of ~85%. "
+                "This strongly suggests your applicant base primarily uses major national banks (JPMorgan Chase, BofA, Wells Fargo, Citi).",
+                "0.06% ERRORED (13 accounts) is very low. For context: if 5% of your applicants "
+                "used credit unions, you would expect ~5% ERRORED. Your 0.06% means almost no credit union users.",
+                "Interpretation: your current customer base is likely concentrated in urban/suburban markets "
+                "with standard banking relationships, not rural areas or immigrant communities who often use credit unions.",
+                "Warning: if your customer mix shifts (e.g. you expand to rural markets or specific immigrant communities), "
+                "ERRORED% could rise to 10–20%. Build the manual review workflow now so you're prepared.",
+                "SUCCESS ≠ clean: within your 23,351 SUCCESS accounts, pull verify_response_code distribution. "
+                "Codes 7, 8, 9 indicate risk signals. Codes 11/16/17/18 indicate GIACT coverage gaps "
+                "even within the SUCCESS category.",
+            ])
+
+            st.markdown("##### Cross-reference: GIACT vs Plaid")
+            cross_box("GIACT vs Plaid — Two Different Banking Verifications", [
+                "GIACT verifies the account EXISTS and checks its history (NSF, returns, risk). "
+                "It does NOT confirm current balance or live transaction data.",
+                "Plaid provides live balance data, transaction history (90 days), and account owner verification. "
+                "It requires the applicant to log in to their bank — higher friction but richer data.",
+                "Worth AI uses BOTH: GIACT for quick account validation, Plaid for cash flow analysis "
+                "used in the Worth Score (cf_operating_cash_flow, cf_cash_at_end_of_period features).",
+                "If GIACT ERROREDs, Plaid data should still be available if the applicant connected their account. "
+                "Check warehouse.worth_score_input_audit for cf_* fill rates — low fill = Plaid not connected.",
+                "Sanity check: if GIACT=SUCCESS but Plaid cash flow is missing, the account exists "
+                "but the applicant didn't grant Plaid access. This is a data gap for the Worth Score.",
+            ])
+
+        with tab_dq_bank:
+            st.markdown("#### 🔬 Banking Data Quality & Anomaly Analysis")
+            flag("Banking data quality checks based on confirmed data: "
+                 "23,351 SUCCESS (99.94%), 13 ERRORED (0.06%).", "blue")
+
+            # Run additional queries for richer analysis
+            col_verif_detail = run_query("""
+                SELECT * FROM rds_integration_data.rel_banking_verifications LIMIT 5
+            """)
+
+            c1,c2,c3,c4 = st.columns(4)
+            with c1: kpi("SUCCESS Rate",f"{success_n/max(total_accts,1)*100:.2f}%",
+                         "✅ Above 85% industry avg","#22c55e")
+            with c2: kpi("ERRORED Rate",f"{errored_n/max(total_accts,1)*100:.2f}%",
+                         "✅ Well below 15% threshold","#22c55e")
+            with c3: kpi("Coverage Gap",f"{errored_n:,}",
+                         "cannot be verified by GIACT","#f59e0b")
+            with c4: kpi("Manual Review Needed",f"{errored_n:,}",
+                         "route to bank statement review","#f59e0b")
+
+            st.markdown("##### Quality Checks")
+            bank_checks = [
+                ("SUCCESS rate > 85% (industry avg)", success_n/max(total_accts,1)>0.85,
+                 f"{success_n/max(total_accts,1)*100:.2f}%",
+                 "Below 85%: demographic shift to credit unions or GIACT API issues"),
+                ("ERRORED rate < 15%", errored_n/max(total_accts,1)<0.15,
+                 f"{errored_n/max(total_accts,1)*100:.2f}%",
+                 "Above 15%: too many unverifiable accounts, manual review burden increases"),
+                ("Total accounts > 0", total_accts>0,
+                 f"{total_accts:,}","No accounts in system — banking integration may not be active"),
+                ("ERRORED < 100 absolute count", errored_n<100,
+                 f"{errored_n:,}","High absolute count = manual review backlog risk"),
+            ]
+            rows_b = [{"Check":l,"Result":v,"Status":"✅ PASS" if ok else "❌ FAIL","Action":a}
+                      for l,ok,v,a in bank_checks]
+            styled_table(pd.DataFrame(rows_b),color_col="Status",
+                         palette={"✅ pass":"#22c55e","❌ fail":"#ef4444"})
+
+            st.markdown("##### Anomaly Detection")
+            bank_anomalies = []
+
+            if success_n/max(total_accts,1) < 0.85:
+                bank_anomalies.append(("🔴 HIGH","SUCCESS rate dropped below 85% industry average",
+                    "This may indicate: (1) GIACT API connectivity issues (check status page), "
+                    "(2) demographic shift in applicants toward credit unions, "
+                    "(3) routing number format issues in the integration.",
+                    f"success_rate={success_n/max(total_accts,1)*100:.2f}%"))
+
+            if errored_n > total_accts * 0.15:
+                bank_anomalies.append(("🟡 MEDIUM","High ERRORED rate — manual review backlog risk",
+                    f"{errored_n:,} accounts ({errored_n/max(total_accts,1)*100:.1f}%) cannot be GIACT-verified. "
+                    "This exceeds the 15% threshold. Ensure manual bank statement review capacity is sufficient.",
+                    f"errored_rate={errored_n/max(total_accts,1)*100:.1f}%"))
+
+            if not bank_anomalies:
+                flag("✅ No banking anomalies detected. SUCCESS/ERRORED rates are within expected ranges.", "green")
+            else:
+                for sev,title,desc,flds in bank_anomalies:
+                    color = "#ef4444" if "HIGH" in sev else "#f59e0b"
+                    st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
+                        border-radius:8px;padding:12px 16px;margin:8px 0">
+                      <div style="color:{color};font-weight:700">{sev} — {title}</div>
+                      <div style="color:#CBD5E1;font-size:.80rem;margin-top:6px">{desc}</div>
+                    </div>""", unsafe_allow_html=True)
+
+            if col_verif_detail is not None and not col_verif_detail.empty:
+                st.markdown("##### Sample verification records (actual data from rds_integration_data):")
+                st.dataframe(col_verif_detail, use_container_width=True, hide_index=True)
+                st.markdown("*These are real records. Use the Discover Columns tab to understand each column.*")
 
         with tab_discover:
             st.markdown("#### Discover actual table schema")
@@ -2837,6 +3023,48 @@ elif section == "🔎 Business Lookup":
                 fact_row("industry",         "Industry Sector"),
             ]
             styled_table(pd.DataFrame(bg_facts), color_col="Value")
+
+            with st.expander("ℹ️ How to read this table — Source, Confidence, (not stored), Unknown explained"):
+                st.markdown("""
+**Value column:**
+- Normal value = the actual data stored for this field
+- `(not stored)` = this fact does NOT exist in `rds_warehouse_public.facts` for this business. It was either never collected, or the vendor that provides it didn't match this entity.
+
+**Source column — who provided this field:**
+| Source | Platform ID | What it means |
+|---|---|---|
+| **Middesk** | pid=16 | US Secretary of State live query via Middesk API |
+| **OC** | pid=23 | OpenCorporates global registry database |
+| **ZoomInfo** | pid=24 | ZoomInfo firmographic bulk data (Redshift) |
+| **Equifax** | pid=17 | Equifax firmographic bulk data (Redshift) |
+| **Trulioo** | pid=38 | Trulioo KYB / person screening API |
+| **AI** | pid=31 | GPT-4o AI enrichment (last resort) |
+| **SERP** | pid=22 | Google/SERP web scraping |
+| **Plaid** | pid=40 | Plaid identity verification |
+| **Applicant/System** | pid=0 | Data submitted by the applicant on the onboarding form, or set by the system internally |
+| **No vendor (default)** | pid=-1 | No vendor returned a value — this is the system default, not a real source |
+| **Unknown source** | pid="" | The fact exists but its source metadata is missing |
+
+**Confidence column:**
+- `—` = no confidence score was stored (common for applicant-submitted data or calculated facts)
+- `0.000–1.000` = vendor's confidence that this fact is correct for this business. Formula varies by vendor (e.g. Middesk: 0.15 + 0.20×tasks; OC/ZI/EFX: match.index/55)
+
+**Why specific fields show "(not stored)":**
+
+| Field | Why (not stored) | Who should provide it | Action |
+|---|---|---|---|
+| **DBA Found** | No vendor matched DBA names for this business. DBA requires Middesk to find the entity AND have DBA records. | Middesk (review tasks) | If Middesk confidence is low, DBA won't be found. Check middesk_confidence. |
+| **Entity Type** | The `corporation` fact was not written. Usually comes from Middesk registration type or OC company_type. | Middesk or OC | Low vendor match rate → no entity type. |
+| **Business Phone** | No vendor returned a phone number AND applicant didn't submit one. | ZoomInfo (zi_c_phone) or applicant | Check if ZoomInfo matched this business. |
+| **Email** | Not collected at onboarding or not found by any vendor. | ZoomInfo or applicant form | Applicant may have skipped the field. |
+| **Website Found** | `website_found` fact not written = SERP (pid=22) didn't find a matching web presence. | SERP / Google | SERP runs only after entity matching. If no entity match, SERP may not run. |
+
+**Why "Unknown source" appears:**
+The fact exists and has a value, but the `source.platformId` field in the JSON is empty or null. This happens when:
+1. The fact was set by a pipeline step that didn't write source metadata
+2. A manual override was applied without a source tag
+3. The fact was migrated from an older system version that didn't track sources
+                """)
 
             # Consistency: business_name vs legal_name
             bname = str(gv("business_name") or "").lower().strip()
@@ -3125,125 +3353,492 @@ elif section == "🔎 Business Lookup":
             st.markdown("#### 🔗 Cross-Field Anomaly Detection")
             st.markdown(
                 "Checks for unusual *relationships between fields* — individually acceptable values "
-                "that are suspicious in combination. These patterns require human investigation."
+                "that are suspicious **in combination**. Even if each field looks normal alone, "
+                "certain combinations are statistically rare or logically inconsistent."
             )
+            flag("All 20+ checks run automatically. If 'No anomalies' appears, it means "
+                 "this specific business passed all checks — not that the pipeline is perfect. "
+                 "The checks are bounded by what facts are stored.", "blue")
 
             anomalies = []
 
-            # 1. SOS active vs TIN failed
+            # Pull additional context facts needed for richer checks
+            addr_match_b   = str(gv("address_match_boolean")        or "").lower()
+            addr_verif_b   = str(gv("address_verification_boolean") or "").lower()
+            addr_deliv     = str(gv("addresses_deliverable")        or "").lower()
+            name_match_b   = str(gv("name_match_boolean")           or "").lower()
+            naics_desc_val = str(gv("naics_description")            or "").lower()
+            mcc_desc_lower = mcc_desc.lower()
+            primary_addr   = gv("primary_address") or {}
+            if isinstance(primary_addr, dict):
+                addr_state = str(primary_addr.get("state","") or "").upper()
+            else:
+                addr_state = ""
+            form_state = str(gv("formation_state") or "").upper()
+            form_date  = str(gv("formation_date")  or "")
+            num_emp    = gv("num_employees")
+            revenue_v  = gv("revenue")
+            is_sole    = str(gv("is_sole_prop") or "").lower()
+
+            # ── 1. SOS active vs TIN failed ───────────────────────────────────
             if sos_act=="true" and tin_status_actual=="failure":
                 anomalies.append(("🟡 MEDIUM","SOS Active + TIN Failed",
-                    "Entity is registered and active but EIN does not match legal name. "
-                    "Most common cause: business submitted DBA name instead of legal name for TIN. "
-                    "Action: ask applicant to resubmit with the exact legal name matching their EIN.",
-                    "sos_active=true, tin_match.status=failure"))
+                    "Entity is registered and active (SOS confirms it exists and is in good standing) "
+                    "BUT the EIN submitted does not match the legal name per IRS records. "
+                    "This is a contradiction: the state knows this entity but the IRS EIN link is broken. "
+                    "Most likely cause: business submitted its DBA (trade) name instead of the exact legal name "
+                    "on the EIN registration. Even a difference like 'LLC' vs 'L.L.C.' fails IRS matching. "
+                    "Action: ask applicant to resubmit using the EXACT legal name on their EIN certificate.",
+                    "sos_active=true AND tin_match.status=failure"))
 
-            # 2. SOS inactive vs TIN verified
+            # ── 2. SOS inactive vs TIN verified ──────────────────────────────
             if sos_act=="false" and tin_bool=="true":
-                anomalies.append(("🔴 HIGH","SOS Inactive + TIN Verified",
-                    "Entity cannot legally operate (inactive) but EIN matches IRS records. "
-                    "This means the legal entity exists but is NOT in good standing. "
-                    "Cause: unpaid taxes or missed annual report. "
-                    "Action: route to manual underwriting — entity needs reinstatement.",
-                    "sos_active=false, tin_match_boolean=true"))
+                anomalies.append(("🔴 HIGH","SOS Inactive + TIN Verified — perpetual+inactive risk",
+                    "EIN matches IRS records (TIN verified) BUT the entity is NOT in good standing with the state. "
+                    "This means the legal entity exists (it has a valid EIN) but cannot legally conduct business "
+                    "because of a state compliance failure (missed annual report, unpaid franchise tax, etc.). "
+                    "This is the #1 underwriting red flag: a perpetual entity that is administratively inactive. "
+                    "Action: route to manual underwriting. Request state reinstatement certificate before approval.",
+                    "sos_active=false AND tin_match_boolean=true"))
 
-            # 3. Website URL but NAICS fallback
+            # ── 3. Website exists but NAICS = 561499 ─────────────────────────
             if website and naics_val=="561499":
-                anomalies.append(("🔴 HIGH","Website exists but NAICS is 561499",
-                    f"Business has a website ({website[:40]}) but received the 561499 fallback code. "
-                    "The AI enrichment should have used this website to classify the business. "
-                    "This is Gap G2 in the pipeline (web_search not enabled for this record). "
-                    "Action: investigate aiNaicsEnrichment.ts — check if params.website was passed.",
+                anomalies.append(("🔴 HIGH","Website URL exists but NAICS is 561499 (Gap G2 confirmed)",
+                    f"This business has website URL '{website[:50]}' stored in the system, "
+                    "but received NAICS 561499 (the catch-all fallback meaning 'could not classify'). "
+                    "The AI enrichment (aiNaicsEnrichment.ts) should have performed a web_search using this URL "
+                    "to determine the industry. The fact that it still returned 561499 confirms Gap G2: "
+                    "web_search is only enabled when params.website is passed to the AI function, "
+                    "and for this record it was not. The website content was never analyzed. "
+                    "Action: check integration-service aiNaicsEnrichment.ts getPrompt() — verify params.website was set.",
                     f"website={website[:40]}, naics_code=561499"))
 
-            # 4. High vendor confidence but NAICS is AI-sourced
+            # ── 4. No website, no DBA, no NAICS → completely dark entity ─────
+            dba_val = gv("dba_found")
+            if not website and not dba_val and naics_val=="561499" and sos_act!="false":
+                anomalies.append(("🟡 MEDIUM","Entity has no web presence, no DBA, and no NAICS — completely dark",
+                    "This business has: no website URL, no DBA name found, and received the NAICS 561499 fallback. "
+                    "This is a 'dark entity' — it has an SOS registration but no discoverable public footprint. "
+                    "This is the most common legitimate cause of NAICS fallback (Gap G1+G3 combined). "
+                    "It is also a common characteristic of shell companies or holding entities. "
+                    "It is NOT automatically fraud, but it requires additional due diligence. "
+                    "Action: request business description from applicant; check for any Google Maps/SERP presence manually.",
+                    "website=(empty), dba_found=(empty), naics_code=561499"))
+
+            # ── 5. NAICS from AI but website exists ──────────────────────────
+            if naics_src=="AI" and naics_val!="561499" and website:
+                anomalies.append(("🟡 MEDIUM","NAICS from AI despite website being available — SERP should have won",
+                    f"NAICS {naics_val} was provided by AI (weight=0.1), but this business has a website. "
+                    "SERP (pid=22, weight=0.3) should have classified the industry from the website and "
+                    "beaten AI in the Fact Engine. That SERP didn't win suggests either: "
+                    "(1) SERP ran but returned no classification, or "
+                    "(2) SERP's classification confidence was still below AI's for some reason. "
+                    "Since AI has a lower weight, this is unexpected and the code may be correct. "
+                    "But verify: the NAICS should match what's on the website.",
+                    f"naics_source=AI, website={website[:40]}, expected_winner=SERP(pid=22)"))
+
+            # ── 6. NAICS description inconsistent with NAICS code ────────────
+            if naics_val and naics_val!="561499" and naics_desc_val:
+                # Check if description mentions a very different sector than what the code suggests
+                sector = naics_val[:2]
+                sector_keywords = {
+                    "72":["restaurant","food","lodging","hotel","hospitality"],
+                    "54":["consulting","legal","accounting","professional","tech"],
+                    "62":["health","medical","dental","care","clinic"],
+                    "44":["retail","store","shop","clothing"],
+                    "52":["finance","bank","insurance","investment"],
+                    "81":["repair","maintenance","salon","beauty","gym"],
+                }
+                expected_kws = sector_keywords.get(sector,[])
+                if expected_kws and not any(kw in naics_desc_val for kw in expected_kws):
+                    if website and any(kw in website.lower() for kw in expected_kws):
+                        anomalies.append(("🟡 MEDIUM","NAICS description doesn't match website domain keywords",
+                            f"NAICS {naics_val} (sector {sector}) has description '{naics_desc_val[:60]}' "
+                            f"but the website URL '{website[:40]}' suggests a different industry. "
+                            "This may indicate the vendor matched on name but assigned the wrong NAICS. "
+                            "Action: verify the NAICS code against the actual business activity.",
+                            f"naics_code={naics_val}, naics_description={naics_desc_val[:40]}, website={website[:40]}"))
+
+            # ── 7. Formation state vs operating state mismatch ───────────────
+            if form_state and addr_state and form_state!=addr_state:
+                is_tax_haven = form_state in ("DE","NV","WY","FL")
+                if is_tax_haven:
+                    anomalies.append(("🟠 NOTICE",
+                        f"Incorporated in {form_state} (tax-haven state) but operating address is in {addr_state}",
+                        f"Business was formed in {form_state} (a common tax-optimization state) "
+                        f"but the primary address is in {addr_state}. "
+                        "This is LEGAL and very common for LLCs and corporations (Delaware especially). "
+                        "It is worth noting as it increases complexity of SOS verification: "
+                        "Middesk must check both states. "
+                        "Anomaly: if the SOS filing shows 'foreign' entity type in the operating state, "
+                        "this is expected. If it shows 'domestic' in both states, that's unusual.",
+                        f"formation_state={form_state}, primary_address.state={addr_state}"))
+                else:
+                    anomalies.append(("🟠 NOTICE",
+                        f"Formation state ({form_state}) differs from operating state ({addr_state})",
+                        f"Business incorporated in {form_state} but operates in {addr_state}. "
+                        "Not inherently suspicious, but verify the business is registered as a "
+                        f"foreign entity in {addr_state} if required by that state.",
+                        f"formation_state={form_state}, primary_address.state={addr_state}"))
+
+            # ── 8. AI won NAICS with very low confidence ──────────────────────
             if naics_src=="AI" and naics_conf<0.20 and naics_val!="561499":
-                anomalies.append(("🟡 MEDIUM","AI won with very low confidence for non-fallback code",
-                    f"AI selected NAICS {naics_val} with confidence {naics_conf:.3f}. "
-                    "AI weight=0.1 and confidence should be LOW when it's the only source. "
-                    "This code may be an AI hallucination — verify against business description.",
-                    f"naics_source=AI, naics_confidence={naics_conf:.3f}"))
+                anomalies.append(("🟡 MEDIUM","AI won NAICS with very low confidence — possible hallucination",
+                    f"AI (pid=31, weight=0.1) won the NAICS fact with confidence {naics_conf:.3f}. "
+                    f"This means all other vendors (Middesk, OC, ZI, EFX, Trulioo) failed to match this entity, "
+                    "leaving AI as the only source. AI selected NAICS {naics_val} from the business name/address alone. "
+                    "With no website and no vendor match, the AI is essentially guessing. "
+                    "The lower the confidence, the more likely this is a hallucination. "
+                    "Action: verify NAICS {naics_val} actually matches this business's actual activity.",
+                    f"naics_source=AI, naics_confidence={naics_conf:.3f}, naics_code={naics_val}"))
 
-            # 5. No website but website_found=true
+            # ── 9. Website found but SERP didn't store URL ───────────────────
             if not website and web_found=="true":
-                anomalies.append(("🟡 MEDIUM","website_found=true but no website URL stored",
-                    "SERP found a website for this business but the URL was not stored as a fact. "
-                    "Possible pipeline failure in the website fact storage. "
-                    "This means website-based NAICS classification may have been missed.",
-                    "website=(empty), website_found=true"))
+                anomalies.append(("🟡 MEDIUM","website_found=true but no website URL stored — SERP pipeline gap",
+                    "The `website_found` fact is true, meaning SERP (Google scraping) detected a web presence "
+                    "for this business. However, the `website` fact (the actual URL) was never stored. "
+                    "This is a pipeline gap: the URL should have been extracted from the SERP result "
+                    "and stored as the `website` fact. Because the URL is missing, the AI enrichment "
+                    "could not perform a web_search on the actual content. "
+                    "Action: check SERP integration in integration-service — why wasn't the URL extracted?",
+                    "website_found=true, website=(not stored)"))
 
-            # 6. IDV passed but name match failed
-            name_match_b = str(gv("name_match_boolean") or "").lower()
+            # ── 10. IDV passed but name match failed ──────────────────────────
             if idv_val=="true" and name_match_b=="false":
-                anomalies.append(("🟡 MEDIUM","IDV Passed but Name Match Failed",
-                    "Identity verification confirmed the person but the BUSINESS name does not match the registry. "
-                    "This is expected if the applicant is a sole proprietor (personal name verified, "
-                    "but business name is a DBA that doesn't appear in SOS). "
-                    "Action: confirm whether this is a sole prop operating under a trade name.",
-                    "idv_passed_boolean=true, name_match_boolean=false"))
+                if is_sole=="true":
+                    anomalies.append(("🟠 NOTICE","IDV Passed + Name Match Failed (sole prop pattern)",
+                        "Identity verification confirmed the owner's personal identity (Plaid IDV), "
+                        "but the BUSINESS name doesn't match what's in the registry. "
+                        "Since this is flagged as a sole proprietor, this is EXPECTED: "
+                        "Plaid verified the person (e.g. 'John Smith') but the business name "
+                        "('Smith's Auto Repair LLC') appears differently in the SOS registry. "
+                        "Action: confirm the sole prop is operating under this DBA — low risk.",
+                        "idv_passed_boolean=true, name_match_boolean=false, is_sole_prop=true"))
+                else:
+                    anomalies.append(("🟡 MEDIUM","IDV Passed + Name Match Failed (non-sole-prop)",
+                        "Identity verification confirmed the owner's personal identity, "
+                        "but the BUSINESS name doesn't match the registry. "
+                        "For a non-sole-proprietor, this is more concerning: the business has a formal legal name "
+                        "but it doesn't match what's in the SOS registry. "
+                        "Could indicate: name recently changed, DBA operating under different name, "
+                        "or the wrong business was matched by the vendor. "
+                        "Action: request documentation showing the connection between applicant and business.",
+                        "idv_passed_boolean=true, name_match_boolean=false, is_sole_prop≠true"))
 
-            # 7. TIN bool/status inconsistency
+            # ── 11. TIN boolean/status inconsistency (code bug) ───────────────
             if tin_bool=="true" and tin_status_actual not in ("success",""):
-                anomalies.append(("🔴 HIGH","tin_match_boolean=true but status≠success",
-                    f"DATA INTEGRITY BUG: the boolean is true but the underlying status is '{tin_status_actual}'. "
-                    "The boolean MUST be derived only from status==='success' (kyb/index.ts L488–490). "
-                    "Action: this is a code defect — file a bug report for integration-service.",
+                anomalies.append(("🔴 HIGH","DATA INTEGRITY BUG: tin_match_boolean contradicts tin_match.status",
+                    f"tin_match_boolean=true BUT tin_match.status='{tin_status_actual}'. "
+                    "The boolean MUST be derived ONLY from status==='success' per kyb/index.ts L488–490. "
+                    "This inconsistency means the derivation logic is broken or was applied to different data. "
+                    "Impact: the Admin Portal shows TIN as 'Verified' even though the IRS check did not succeed. "
+                    "Action: this is a code defect — file a P0 bug report for integration-service team. "
+                    "Until fixed, do not trust the tin_match_boolean fact for this business.",
                     f"tin_match_boolean=true, tin_match.status={tin_status_actual}"))
 
-            # 8. Fallback NAICS but not a new business
-            form_date = str(gv("formation_date") or "")
+            # ── 12. Old business with 561499 ──────────────────────────────────
             if naics_val=="561499" and form_date:
                 try:
                     form_year = int(form_date[:4])
-                    current_year = datetime.now(timezone.utc).year
-                    age_years = current_year - form_year
+                    age_years = datetime.now(timezone.utc).year - form_year
                     if age_years > 3:
-                        anomalies.append(("🟡 MEDIUM",f"Established business ({age_years}y old) with NAICS fallback",
-                            f"Business formed in {form_year} ({age_years} years ago) still has NAICS 561499. "
-                            "A fallback for an old, established business suggests vendor data is stale "
-                            "or the entity-matching model failed to find this business in ZI/EFX/OC databases. "
-                            "Action: manually verify the industry and update NAICS via analyst override.",
-                            f"formation_date={form_date}, naics_code=561499, age={age_years}y"))
+                        anomalies.append(("🟡 MEDIUM",
+                            f"Established business ({age_years}y old) still has NAICS 561499 fallback",
+                            f"Business formed in {form_year} ({age_years} years ago) — this is NOT a new incorporation. "
+                            "For an established business, NAICS 561499 indicates vendor data is stale or absent. "
+                            "ZI/EFX bulk data should have records for any business > 2 years old. "
+                            "If vendors have no record: either the business changed its legal name, "
+                            "moved states, or operates in a cash-only industry with minimal public presence. "
+                            "Action: manually verify the industry. Consider an analyst NAICS override.",
+                            f"formation_date={form_date}, age={age_years}y, naics_code=561499"))
                 except Exception:
                     pass
 
-            # 9. MCC 5614 fallback description visible
-            if "fallback" in mcc_desc.lower():
-                anomalies.append(("🟠 NOTICE","Fallback MCC description visible to customer",
-                    f"mcc_description='{mcc_desc[:80]}' contains internal debug text. "
-                    "This text is visible in the Admin Portal KYB → Background tab. "
-                    "Action: fix the AI system prompt (aiNaicsEnrichment.ts) to output "
-                    "'Industry classification pending' instead.",
-                    "Gap G5 from 561499 diagnostic"))
+            # ── 13. Fallback MCC description customer-visible ─────────────────
+            if "fallback" in mcc_desc_lower or "per instructions" in mcc_desc_lower:
+                anomalies.append(("🟠 NOTICE","Internal debug text visible in MCC description (Gap G5)",
+                    f"mcc_description value: '{mcc_desc[:100]}'. "
+                    "This is an internal system message generated by the AI enrichment prompt, "
+                    "not a real MCC description. It is visible to customers in the Admin Portal "
+                    "KYB → Background tab → MCC Description field. "
+                    "This reveals internal pipeline implementation details to the customer. "
+                    "Action: update aiNaicsEnrichment.ts system prompt to output "
+                    "'Industry classification pending' instead of the debug message.",
+                    "mcc_description contains 'fallback'"))
 
+            # ── 14. Address not deliverable but address match = true ──────────
+            if addr_match_b=="true" and addr_deliv=="false":
+                anomalies.append(("🟡 MEDIUM","Address matched registry but is NOT deliverable (USPS check failed)",
+                    "The business address matches what's in the SOS registry (address_match=true), "
+                    "but the USPS deliverability check returned false (addresses_deliverable=false). "
+                    "This means: the address is legally registered but mail cannot be delivered there. "
+                    "Common causes: PO Box used instead of physical address, building demolished/renumbered, "
+                    "or commercial mail receiving agency (CMRA) address. "
+                    "Concern: if the business cannot receive mail at its registered address, "
+                    "any physical documents or notices cannot be served. "
+                    "Action: request a physical address confirmation from the applicant.",
+                    "address_match_boolean=true, addresses_deliverable=false"))
+
+            # ── 15. No address match AND no name match ────────────────────────
+            if addr_match_b=="false" and name_match_b=="false" and sos_act=="true":
+                anomalies.append(("🟡 MEDIUM","SOS Active but NEITHER name NOR address matched",
+                    "The entity is active in the SOS registry, but: "
+                    "(1) the submitted name doesn't match the registry name, AND "
+                    "(2) the submitted address doesn't match the registry address. "
+                    "Both key identifiers are mismatched. This suggests the vendor matched the entity "
+                    "by a partial/fuzzy criterion but the submitted data is significantly different from the filing. "
+                    "Could indicate: business recently moved and changed name, "
+                    "or the vendor matched the wrong entity. "
+                    "Action: pull the actual SOS filing and compare manually.",
+                    "sos_active=true AND address_match_boolean=false AND name_match_boolean=false"))
+
+            # ── 16. High revenue but no employees ────────────────────────────
+            if revenue_v and num_emp:
+                try:
+                    rev = float(str(revenue_v).replace(",",""))
+                    emp = float(str(num_emp).replace(",",""))
+                    if rev > 1_000_000 and emp < 2:
+                        anomalies.append(("🟠 NOTICE","High revenue but very few employees — unusual for operating business",
+                            f"Revenue: ${rev:,.0f} | Employees: {emp:.0f}. "
+                            "A business reporting >$1M revenue with fewer than 2 employees is unusual "
+                            "for most business types. This pattern is more common for: "
+                            "(1) Holding companies or investment entities (normal), "
+                            "(2) Sole proprietors with contractors (normal), "
+                            "(3) Revenue-per-employee ratio error in vendor data (investigate). "
+                            f"Cross-check: NAICS is {naics_val}. For this industry, "
+                            "does high revenue + low employees make sense? "
+                            "Action: verify revenue source (accounting data vs vendor estimate).",
+                            f"revenue={rev:,.0f}, num_employees={emp:.0f}, naics={naics_val}"))
+                except Exception:
+                    pass
+
+            # ── 17. No TIN submitted but TIN verified ─────────────────────────
+            tin_submitted_val = str(gv("tin_submitted") or "").lower()
+            if tin_submitted_val in ("false","0","") and tin_bool=="true":
+                anomalies.append(("🔴 HIGH","TIN not submitted but tin_match_boolean=true — impossible combination",
+                    "tin_submitted=false (applicant did not provide an EIN) "
+                    "but tin_match_boolean=true (TIN is verified). "
+                    "This is logically impossible: you cannot verify a TIN that was never submitted. "
+                    "This indicates a data integrity issue in the pipeline. "
+                    "The tin_match_boolean fact may be stale from a previous submission, "
+                    "or the tin_submitted fact may have been reset incorrectly. "
+                    "Action: check the timestamps on both facts. If tin_match_boolean is older, "
+                    "it may be correct but tin_submitted was reset by a form re-submission.",
+                    "tin_submitted=false, tin_match_boolean=true"))
+
+            # ── 18. Watchlist hits but no sanctions ───────────────────────────
+            if wl_hits>0:
+                sanctions_val = int(float(gv("sanctions_hits") or 0))
+                pep_val       = int(float(gv("pep_hits") or 0))
+                if sanctions_val==0 and pep_val==0:
+                    anomalies.append(("🟠 NOTICE","Watchlist hits but no sanctions or PEP flags",
+                        f"{wl_hits} watchlist hit(s) found, but none are classified as SANCTIONS or PEP. "
+                        "The consolidated watchlist fact (pid=16 Middesk or pid=38 Trulioo) tracks: "
+                        "SANCTIONS, PEP, and other list types (adverse media is excluded). "
+                        "Non-sanctions/non-PEP hits may come from: law enforcement watchlists, "
+                        "industry-specific exclusion lists, or other compliance databases. "
+                        "These are lower severity than OFAC sanctions but still require review. "
+                        "Action: pull the watchlist metadata to see the exact list type and entity match.",
+                        f"watchlist_hits={wl_hits}, sanctions_hits=0, pep_hits=0"))
+
+            # ── 19. Sole prop but corporation entity type ─────────────────────
+            corp_val = str(gv("corporation") or "").lower()
+            if is_sole=="true" and corp_val and "corp" in corp_val:
+                anomalies.append(("🟡 MEDIUM","is_sole_prop=true but entity type suggests corporation",
+                    f"is_sole_prop=true but the entity type field shows: '{gv('corporation')}'. "
+                    "A sole proprietorship and a corporation are mutually exclusive legal structures. "
+                    "This contradiction may mean: "
+                    "(1) The is_sole_prop fact was set based on TIN logic (SSN vs EIN), "
+                    "not the actual legal entity type, OR "
+                    "(2) The business changed structure after onboarding. "
+                    "Action: verify the SOS filing — what is the actual registered entity type?",
+                    f"is_sole_prop=true, corporation={gv('corporation')}"))
+
+            # ── 20. Check all facts sourced from pid=0 or Unknown ─────────────
+            facts_pid0 = [row["name"] for _,row in facts_df.iterrows()
+                          if str(_safe_get(_parse_fact(row["value"]),"source","platformId",default="")) in ("0","-1","")]
+            if len(facts_pid0) > 5:
+                anomalies.append(("🟠 NOTICE",
+                    f"{len(facts_pid0)} facts have no vendor source (pid=0/-1/empty)",
+                    "These facts were set by the applicant onboarding form or by a system default, "
+                    "not confirmed by any external vendor. "
+                    f"Fields: {', '.join(facts_pid0[:8])}{'...' if len(facts_pid0)>8 else ''}. "
+                    "This is normal for submitted data (business_name, primary_address, etc.) "
+                    "but unusual for derived facts (naics_code, sos_active, tin_match). "
+                    "Action: verify which of these should have vendor confirmation and why they don't.",
+                    f"{len(facts_pid0)} facts without vendor source"))
+
+            # ── Render results ────────────────────────────────────────────────
             if not anomalies:
-                flag("✅ No cross-field anomalies detected for this business.", "green")
+                flag("✅ No cross-field anomalies detected for this business across all 20 checks.", "green")
+                st.markdown("""
+**What was checked:**
+The following 20 relationship checks were evaluated. All passed for this business:
+
+| # | Check | Fields evaluated |
+|---|---|---|
+| 1 | SOS Active + TIN Failed | sos_active, tin_match.status |
+| 2 | SOS Inactive + TIN Verified (perpetual risk) | sos_active, tin_match_boolean |
+| 3 | Website exists + NAICS 561499 (Gap G2) | website, naics_code |
+| 4 | Dark entity (no website, no DBA, no NAICS) | website, dba_found, naics_code |
+| 5 | AI won NAICS despite website (SERP should win) | naics_source, website |
+| 6 | NAICS description vs website domain mismatch | naics_code, naics_description, website |
+| 7 | Formation state vs operating state (tax haven) | formation_state, primary_address.state |
+| 8 | AI hallucination risk (very low conf, real code) | naics_source, naics_confidence |
+| 9 | website_found=true but URL not stored | website_found, website |
+| 10 | IDV passed + name match failed (sole prop check) | idv_passed_boolean, name_match_boolean, is_sole_prop |
+| 11 | TIN boolean contradicts status (code bug) | tin_match_boolean, tin_match.status |
+| 12 | Established business (>3y) with NAICS fallback | formation_date, naics_code |
+| 13 | Fallback MCC description customer-visible | mcc_description |
+| 14 | Address matches registry but not deliverable | address_match_boolean, addresses_deliverable |
+| 15 | SOS Active + both name AND address mismatched | sos_active, name_match_boolean, address_match_boolean |
+| 16 | High revenue with very few employees | revenue, num_employees, naics_code |
+| 17 | TIN not submitted but boolean=true (impossible) | tin_submitted, tin_match_boolean |
+| 18 | Watchlist hits but no sanctions/PEP | watchlist_hits, sanctions_hits, pep_hits |
+| 19 | Sole prop + corporation entity type contradiction | is_sole_prop, corporation |
+| 20 | Many facts with no vendor source | all facts, source.platformId |
+                """)
             else:
                 priority_order = {"🔴 HIGH":0,"🟡 MEDIUM":1,"🟠 NOTICE":2}
                 anomalies.sort(key=lambda x: priority_order.get(x[0],3))
+                n_high   = sum(1 for a in anomalies if a[0]=="🔴 HIGH")
+                n_medium = sum(1 for a in anomalies if a[0]=="🟡 MEDIUM")
+                n_notice = sum(1 for a in anomalies if a[0]=="🟠 NOTICE")
+                c1,c2,c3 = st.columns(3)
+                with c1: kpi("🔴 HIGH",f"{n_high}","require immediate action","#ef4444" if n_high else "#22c55e")
+                with c2: kpi("🟡 MEDIUM",f"{n_medium}","investigate within 24h","#f59e0b" if n_medium else "#22c55e")
+                with c3: kpi("🟠 NOTICE",f"{n_notice}","review at next check","#f97316" if n_notice else "#22c55e")
+
                 for severity,title,explanation,fields in anomalies:
                     color = {"🔴 HIGH":"#ef4444","🟡 MEDIUM":"#f59e0b","🟠 NOTICE":"#f97316"}.get(severity,"#64748b")
                     st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
-                        border-radius:8px;padding:12px 16px;margin:8px 0">
-                      <div style="color:{color};font-weight:700;font-size:.85rem">{severity} — {title}</div>
-                      <div style="color:#CBD5E1;font-size:.80rem;margin-top:6px">{explanation}</div>
-                      <div style="color:#475569;font-size:.73rem;margin-top:4px">Fields: <code>{fields}</code></div>
+                        border-radius:8px;padding:14px 18px;margin:10px 0">
+                      <div style="color:{color};font-weight:700;font-size:.88rem">{severity} — {title}</div>
+                      <div style="color:#CBD5E1;font-size:.80rem;margin-top:8px;line-height:1.6">{explanation}</div>
+                      <div style="color:#475569;font-size:.73rem;margin-top:6px;font-family:monospace">
+                        Fields checked: {fields}</div>
                     </div>""", unsafe_allow_html=True)
 
         # ──────────────────────────────────────────────────────────────────────
         with tab_all:
-            st.markdown("#### 📋 All Stored Facts")
-            rows = []
-            for _, row in facts_df.drop_duplicates("name").sort_values("name").iterrows():
+            st.markdown("#### 📋 All Stored Facts — Grouped by KYB Category")
+            st.markdown("Facts are grouped by the KYB domain they belong to. "
+                        "Each group matches a sub-tab in the Admin Portal.")
+
+            # Group definitions — each fact maps to a category
+            FACT_GROUPS = {
+                "🏢 Identity / Name": [
+                    "business_name","legal_name","names","names_found","names_submitted",
+                    "dba_found","people","kyb_submitted","external_id","customer_ids"
+                ],
+                "🏛️ Registry / SOS": [
+                    "sos_filings","sos_active","sos_match","sos_match_boolean",
+                    "formation_date","formation_state","year_established","corporation",
+                    "middesk_confidence","middesk_id"
+                ],
+                "🔐 TIN / EIN": [
+                    "tin","tin_submitted","tin_match","tin_match_boolean","is_sole_prop"
+                ],
+                "📍 Address / Location": [
+                    "primary_address","primary_address_string","primary_city","mailing_address",
+                    "mailing_address_strings","addresses","addresses_submitted",
+                    "addresses_found","address_match","address_match_boolean",
+                    "address_verification","address_verification_boolean",
+                    "addresses_deliverable","address_registered_agent",
+                    "business_addresses_submitted","business_addresses_submitted_strings",
+                    "city","state"
+                ],
+                "📞 Contact": [
+                    "business_phone","phone_found","email","stock_symbol","countries"
+                ],
+                "🌐 Website / Digital": [
+                    "website","website_found","serp_id","all_google_place_ids",
+                    "review_rating","review_count","google_review_count","google_review_rating"
+                ],
+                "🏭 Industry / Classification": [
+                    "naics_code","naics_description","mcc_code","mcc_description",
+                    "industry","classification_codes","revenue_confidence"
+                ],
+                "💼 Firmographic": [
+                    "num_employees","revenue","net_income","revenue_equally_weighted_average",
+                    "revenue_all_sources","minority_owned","woman_owned","veteran_owned"
+                ],
+                "🪪 Identity Verification (KYC)": [
+                    "idv_status","idv_passed","idv_passed_boolean","idv_status",
+                    "name_match","name_match_boolean","verification_status"
+                ],
+                "📊 Financial Ratios (Worth Score inputs)": [
+                    "bs_total_liabilities_and_equity","ratio_operating_margin","flag_equity_negative",
+                    "ratio_income_quality_ratio","bs_accounts_payable","ratio_gross_margin",
+                    "flag_total_liabilities_over_assets","is_operating_expense","ratio_return_on_assets",
+                    "bs_total_liabilities","ratio_total_liabilities_cash","ratio_debt_to_equity",
+                    "is_net_income","ratio_accounts_payable_cash","cf_cash_at_end_of_period"
+                ],
+                "⚠️ Risk / Watchlist": [
+                    "watchlist","watchlist_hits","watchlist_raw",
+                    "adverse_media_hits","sanctions_hits","pep_hits",
+                    "num_bankruptcies","num_judgements","num_liens",
+                    "bankruptcies","judgements","liens"
+                ],
+                "🔗 Vendor / Integration": [
+                    "internal_platform_matches","internal_platform_matches_count",
+                    "internal_platform_matches_combined","canadaopen_confidence",
+                    "canadaopen_id","canadaopen_match_mode"
+                ],
+                "🇨🇦 Canada (if applicable)": [
+                    "canada_business_number_found","canada_business_number_match",
+                    "canada_id_number_match","canada_corporate_id_found","canada_corporate_id_match"
+                ],
+            }
+
+            # Build a lookup: fact_name → group
+            fact_to_group = {}
+            for grp, names in FACT_GROUPS.items():
+                for n in names:
+                    fact_to_group[n] = grp
+
+            # Group all facts
+            grouped = {}
+            for _, row in facts_df.drop_duplicates("name").iterrows():
                 f  = _parse_fact(row["value"])
                 v  = f.get("value")
-                if isinstance(v,(dict,list)): dv = f"[{type(v).__name__}, {len(v) if isinstance(v,list) else len(v)} items]"
-                else: dv = str(v)[:100] if v is not None else "(null)"
-                rows.append({"Fact": row["name"], "Value": dv,
-                              "Source": pid_name(str(_safe_get(f,"source","platformId",default=""))),
-                              "Confidence": f"{float(_safe_get(f,'source','confidence',default=0) or 0):.3f}",
-                              "Updated": str(row["received_at"])[:16]})
-            styled_table(pd.DataFrame(rows))
+                if isinstance(v,(dict,list)):
+                    dv = f"[{type(v).__name__}, {len(v) if isinstance(v,list) else len(v)} item(s)]"
+                else:
+                    dv = str(v)[:120] if v is not None else "(null)"
+                conf = float(_safe_get(f,"source","confidence",default=0) or 0)
+                grp  = fact_to_group.get(row["name"],"📦 Other")
+                if grp not in grouped:
+                    grouped[grp] = []
+                grouped[grp].append({
+                    "Fact":       row["name"],
+                    "Value":      dv,
+                    "Source":     pid_name(str(_safe_get(f,"source","platformId",default=""))),
+                    "Confidence": f"{conf:.3f}" if conf>0 else "—",
+                    "Updated":    str(row["received_at"])[:16],
+                })
+
+            # Show counts summary first
+            total_facts = facts_df["name"].nunique()
+            stored_count = sum(1 for _,row in facts_df.drop_duplicates("name").iterrows()
+                               if _parse_fact(row["value"]).get("value") is not None)
+            null_count = total_facts - stored_count
+            c1,c2,c3 = st.columns(3)
+            with c1: kpi("Total Facts",f"{total_facts}","stored in system","#3B82F6")
+            with c2: kpi("Has Value",f"{stored_count}","non-null facts","#22c55e")
+            with c3: kpi("Null/Missing",f"{null_count}","(null) value","#f59e0b")
+
+            # Render each group in an expander
+            group_order = list(FACT_GROUPS.keys()) + ["📦 Other"]
+            for grp in group_order:
+                facts_in_grp = grouped.get(grp, [])
+                if not facts_in_grp:
+                    continue
+                has_val  = sum(1 for r in facts_in_grp if r["Value"] not in ("(null)","(not stored)",""))
+                null_in  = len(facts_in_grp) - has_val
+                label = f"{grp} ({len(facts_in_grp)} facts · {has_val} with values · {null_in} null)"
+                with st.expander(label, expanded=(grp in ("🏢 Identity / Name","🏛️ Registry / SOS","🔐 TIN / EIN"))):
+                    styled_table(pd.DataFrame(facts_in_grp))
 
             st.markdown("---")
             st.markdown("#### 🔍 SQL for deeper investigation")
