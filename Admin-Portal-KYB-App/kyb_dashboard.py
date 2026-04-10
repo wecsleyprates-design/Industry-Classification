@@ -470,15 +470,24 @@ def live_naics(limit):
 
 
 def live_banking(limit):
+    # Query a wide set of possible GIACT fact name variants.
+    # The exact names depend on how integration-service writes them.
     sql = f"""
         SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
-        WHERE name IN ('giact_verify_response_code','giact_auth_response_code',
-                       'giact_account_status','giact_account_name','giact_contact_verification')
+        WHERE name IN (
+            'giact_verify_response_code', 'giact_auth_response_code',
+            'giact_account_status',       'giact_account_name',
+            'giact_contact_verification', 'giact_account_response_code',
+            'giact_response_code',        'account_status',
+            'bank_account_status',        'giact_status'
+        )
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
     raw = run_query(sql)
     if raw is None or raw.empty:
+        # Return a minimal empty DataFrame that won't crash downstream
+        # get_section_data will show the diagnostic SQL to the user
         return None
 
     raw["fact_value"] = raw["value"].apply(
@@ -674,13 +683,45 @@ def get_section_data(section_key, limit):
 
     if df is None:
         err = st.session_state.get("_last_db_error", "Query returned no results")
-        st.error(f"❌ Failed to load {section_key} data from Redshift.\n\n**Error:** {err}")
-        st.info("Try: click **Retry connection** in the sidebar, or check the SQL query.")
+        st.error(f"❌ Failed to load **{section_key}** data from Redshift.")
+        st.code(err, language=None)
+        # Show what fact names actually exist so the user can diagnose
+        st.markdown("**Fact names available in your database for this section:**")
+        fact_names = {
+            "sos":     "('sos_active','sos_match_boolean','sos_match')",
+            "tin":     "('tin_match','tin_match_boolean','tin_submitted')",
+            "naics":   "('naics_code',)",
+            "banking": "('giact_verify_response_code','giact_auth_response_code','giact_account_status','giact_account_name','giact_contact_verification')",
+            "worth":   "('worth_score',)",
+            "kyc":     "('idv_status','idv_passed_boolean','compliance_status','name_match_boolean','address_match_boolean')",
+            "dd":      "('watchlist_hits','adverse_media_hits','sanctions_hits','pep_hits')",
+        }
+        st.code(f"""-- Run this to check which fact names exist in your database:
+SELECT DISTINCT name, COUNT(*) as rows
+FROM rds_warehouse_public.facts
+WHERE name IN {fact_names.get(section_key, '(?)')}
+GROUP BY name ORDER BY rows DESC;""", language="sql")
         st.stop()
 
     if df.empty:
-        st.warning(f"⚠️ Query succeeded but returned 0 rows for `{section_key}`. "
-                   "The table may be empty or the fact name may not exist yet.")
+        st.warning(f"⚠️ Query for **{section_key}** returned 0 rows — "
+                   "these fact names may not exist in your database yet.")
+        fact_sql = {
+            "banking": "giact_verify_response_code, giact_auth_response_code, giact_account_status",
+            "sos":     "sos_active, sos_match_boolean, sos_match",
+            "tin":     "tin_match, tin_match_boolean, tin_submitted",
+            "worth":   "worth_score",
+            "kyc":     "idv_status, idv_passed_boolean, compliance_status",
+            "dd":      "watchlist_hits, sanctions_hits, pep_hits, adverse_media_hits",
+            "naics":   "naics_code",
+        }
+        st.code(f"""-- Check what fact names exist in your database:
+SELECT DISTINCT name, COUNT(*) as rows
+FROM rds_warehouse_public.facts
+WHERE name LIKE '%{section_key.split('_')[0]}%'
+   OR name IN ({', '.join("'" + n + "'" for n in fact_sql.get(section_key,'?').split(', '))})
+GROUP BY name ORDER BY rows DESC
+LIMIT 20;""", language="sql")
         st.stop()
 
     return df
