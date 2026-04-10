@@ -1000,6 +1000,10 @@ GROUP BY name ORDER BY rows DESC LIMIT 50;"""
 # Test connection on every app load — fresh TCP each time, no caching.
 live, _conn_err = test_connection()
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR — 6 consolidated sections
+# ═══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("## 🏦 KYB Dashboard")
     st.markdown("---")
@@ -1016,832 +1020,663 @@ with st.sidebar:
 
     section = st.radio("Navigation", [
         "📋 Overview",
-        "1️⃣  KYB — SOS & Vendors",
-        "2️⃣  TIN Verification",
-        "3️⃣  NAICS / MCC",
-        "4️⃣  Banking (Plaid/GIACT)",
-        "5️⃣  Worth Score",
-        "6️⃣  KYC — Identity",
-        "7️⃣  Due Diligence",
-        "🔬 Data Quality Audit",
-        "🔎 Business ID Lookup",
-        "🔍 Data Lineage",
+        "🏛️ Identity & Registry",
+        "🏭 Classification",
+        "💰 Risk & Score",
+        "🏦 Banking & Ops",
+        "🔎 Business Lookup",
     ])
     st.markdown("---")
-    load_all = st.checkbox("Load ALL records (no limit)", value=False)
+    load_all = st.checkbox("Load ALL records", value=False)
     if load_all:
         record_limit = None
-        st.caption("⚠️ No limit — may be slow on large tables")
+        st.caption("⚠️ No limit — may be slow")
     else:
         record_limit = st.select_slider(
             "Records to load",
-            options=[500,1_000,5_000,10_000,25_000,50_000,100_000],
+            options=[500, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000],
             value=5_000,
         )
         st.caption(f"Up to {record_limit:,} records")
-    st.caption("Source: `rds_warehouse_public.facts`")
-    st.caption("`JSON_EXTRACT_PATH_TEXT(value,'key')`")
+    st.caption("Sources: `rds_warehouse_public.facts`")
+    st.caption("`rds_manual_score_public.business_scores`")
+    st.caption("`rds_integration_data.*`")
+
+
+# ── PID name map ──────────────────────────────────────────────────────────────
+PID = {"16":"Middesk","23":"OC","24":"ZoomInfo","17":"Equifax",
+       "38":"Trulioo","31":"AI","22":"SERP","40":"Plaid","":"Unknown"}
+
+def pid_name(pid): return PID.get(str(pid),"pid="+str(pid))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# OVERVIEW
+# SECTION 1 — EXECUTIVE OVERVIEW
 # ═══════════════════════════════════════════════════════════════════════════════
 if section == "📋 Overview":
-    st.markdown("# 🏦 Admin Portal — KYB Tracking Dashboard")
-    # Load required sections — these will st.stop() if data missing
-    sos   = get_section_data("sos",  record_limit)
-    tin   = get_section_data("tin",  record_limit)
-    dd    = get_section_data("dd",   record_limit)
-    # Optional sections — return None if facts don't exist yet
-    naics = get_section_data("naics",   record_limit)
-    bank  = get_section_data("banking", record_limit)
-    kyc   = get_section_data("kyc",     record_limit)
-    worth = get_section_data("worth",   record_limit)
+    st.markdown("# 🏦 Admin Portal — KYB Intelligence Dashboard")
+    st.markdown("*All KYB fields · vendor match rates · data quality · risk signals · anomaly detection*")
 
-    biz     = tin["business_id"].nunique()
-    sos_act = sos[sos["active"]]["business_id"].nunique()
-    tin_ok  = tin["tin_match_boolean"].mean()*100 if "tin_match_boolean" in tin.columns else 0.0
-    naics_fb= naics["is_fallback"].mean()*100 if naics is not None and "is_fallback" in naics.columns else None
-    idv_ok  = kyc["idv_passed"].mean()*100 if kyc is not None and "idv_passed" in kyc.columns else None
-    wl_hit  = (dd["watchlist_hits"]>0).mean()*100 if "watchlist_hits" in dd.columns else 0.0
-    bank_ok = (bank["account_status"]=="passed").mean()*100 if bank is not None and "account_status" in bank.columns else None
-    high_risk= (kyc["risk_level"]=="high_risk").mean()*100 if kyc is not None and "risk_level" in kyc.columns else None
+    # ── Load all datasets ──────────────────────────────────────────────────────
+    with st.spinner("Loading data from Redshift…"):
+        sos  = get_section_data("sos",   record_limit)
+        tin  = get_section_data("tin",   record_limit)
+        dd   = get_section_data("dd",    record_limit)
+        naics= get_section_data("naics", record_limit)
+        kyc  = get_section_data("kyc",   record_limit)
 
-    c1,c2,c3,c4 = st.columns(4)
-    with c1: kpi("Total Businesses",f"{biz:,}","in scope","#3B82F6")
-    with c2: kpi("SOS Active",f"{sos_act/max(biz,1)*100:.0f}%","have active filing","#22c55e")
-    with c3: kpi("TIN Verified",f"{tin_ok:.0f}%","tin_match_boolean=true","#22c55e")
-    with c4: kpi("NAICS Fallback 561499",f"{naics_fb:.0f}%" if naics_fb is not None else "N/A",
-                 "need review" if naics_fb is not None else "not in this DB","#ef4444")
+    biz = sos["business_id"].nunique()
+    sos_active_pct   = sos["active"].mean()*100
+    sos_matched_pct  = sos["sos_matched"].mean()*100 if "sos_matched" in sos.columns else None
+    tin["tin_match_boolean"] = tin["tin_match_boolean"].astype(bool)
+    tin["tin_submitted"]     = tin["tin_submitted"].astype(bool)
+    tin["tin_match_status"]  = tin["tin_match_status"].astype(str)
+    tin_verified_pct  = tin["tin_match_boolean"].mean()*100
+    tin_submitted_pct = tin["tin_submitted"].mean()*100
+    tin_failed_pct    = (tin["tin_match_status"]=="failure").mean()*100
+    naics_fallback_pct= naics["is_fallback"].mean()*100 if "is_fallback" in naics.columns else None
+    wl_hit_pct        = (dd["watchlist_hits"]>0).mean()*100 if "watchlist_hits" in dd.columns else 0
+    bk_any_pct        = (dd["bk_hits"]>0).mean()*100 if "bk_hits" in dd.columns else 0
+    idv_passed_pct    = kyc["idv_passed"].mean()*100 if kyc is not None and "idv_passed" in kyc.columns else None
+    middesk_match_pct = (sos["middesk_conf"]>0.50).mean()*100
+    oc_match_pct      = (sos["oc_conf"]>0.50).mean()*100
 
-    c5,c6,c7,c8 = st.columns(4)
-    with c5: kpi("IDV Passed",f"{idv_ok:.0f}%" if idv_ok is not None else "N/A",
-                 "identity verified" if idv_ok is not None else "not in this DB","#22c55e")
-    with c6: kpi("High Risk (KYC)",
-                 f"{high_risk:.0f}%" if high_risk is not None else "N/A",
-                 "Trulioo compliance" if high_risk is not None else "not in this DB","#ef4444")
-    with c7: kpi("Banking Passed",
-                 f"{bank_ok:.0f}%" if bank_ok is not None else "N/A",
-                 "gVerify account OK" if bank_ok is not None else "no GIACT facts","#22c55e")
-    with c8: kpi("Watchlist Hits",f"{wl_hit:.0f}%","≥1 hit","#a855f7")
+    # ── Top KPIs ───────────────────────────────────────────────────────────────
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+    with c1: kpi("Businesses",f"{biz:,}","in scope","#3B82F6")
+    with c2: kpi("SOS Active",f"{sos_active_pct:.1f}%",
+                 "✅ Good" if sos_active_pct>95 else "⚠️ Below 95%",
+                 "#22c55e" if sos_active_pct>95 else "#ef4444")
+    with c3: kpi("TIN Verified",f"{tin_verified_pct:.1f}%",
+                 "of submitted TINs","#22c55e" if tin_verified_pct>70 else "#ef4444")
+    with c4: kpi("NAICS Fallback",
+                 f"{naics_fallback_pct:.1f}%" if naics_fallback_pct is not None else "N/A",
+                 "561499","#ef4444" if (naics_fallback_pct or 0)>10 else "#f59e0b")
+    with c5: kpi("Watchlist Hits",f"{wl_hit_pct:.1f}%","≥1 hit","#a855f7")
+    with c6: kpi("IDV Passed",
+                 f"{idv_passed_pct:.1f}%" if idv_passed_pct is not None else "N/A",
+                 "Plaid","#22c55e" if (idv_passed_pct or 0)>65 else "#f59e0b")
 
     st.markdown("---")
-    st.markdown("### 🚨 System-wide Red Flags")
-    system_flags = [
-        ("red",  "Middesk data gap",
-         f"Businesses with OC confidence >0.7 should also have a Middesk record. "
-         f"Check integration_data.request_response WHERE platform_id=16."),
-        ("red",  f"NAICS 561499 fallback: {naics_fb:.0f}% of businesses" if naics_fb is not None else "NAICS facts not in this DB yet",
-         "99% of fallbacks have zero vendor NAICS signals. AI fires with name+address only."),
-        ("amber","Multi-domestic SOS filings detected",
-         "A business should have exactly ONE domestic filing. Multiple = data quality issue."),
-        ("amber","TIN boolean vs status mismatch possible",
-         "tin_match_boolean=true but tin_match.status≠'success' — check Rule: status==='success' only."),
-        ("amber",f"High-risk KYC: {high_risk:.0f}% of businesses flagged high_risk by Trulioo" if high_risk is not None else "KYC compliance_status not in this DB yet",
-         "Cross-check: do these businesses also have watchlist hits or failed IDV?"),
-        ("blue", "GIACT coverage gaps: codes 11,16,17,18 = 'Not yet available'",
-         "These are GIACT coverage gaps, not application errors. Flag for manual review."),
+
+    # ── Data Quality Scorecard ─────────────────────────────────────────────────
+    st.markdown("### 🎯 Data Quality Scorecard")
+    sanity_checks = [
+        ("SOS Active > 95%",       sos_active_pct > 95,   f"{sos_active_pct:.1f}%"),
+        ("SOS Match > 90%",        (sos_matched_pct or 0) > 90, f"{sos_matched_pct:.1f}%" if sos_matched_pct else "N/A"),
+        ("TIN Submission > 90%",   tin_submitted_pct > 90, f"{tin_submitted_pct:.1f}%"),
+        ("TIN Verified > 70%",     tin_verified_pct > 70,  f"{tin_verified_pct:.1f}%"),
+        ("TIN Failure < 20%",      tin_failed_pct < 20,    f"{tin_failed_pct:.1f}%"),
+        ("NAICS Fallback < 10%",   (naics_fallback_pct or 0) < 10, f"{naics_fallback_pct:.1f}%" if naics_fallback_pct else "N/A"),
+        ("Middesk Match > 60%",    middesk_match_pct > 60, f"{middesk_match_pct:.1f}%"),
+        ("OC Match > 50%",         oc_match_pct > 50,      f"{oc_match_pct:.1f}%"),
+        ("Watchlist Hits < 10%",   wl_hit_pct < 10,        f"{wl_hit_pct:.1f}%"),
+        ("IDV Passed > 65%",       (idv_passed_pct or 65) > 65, f"{idv_passed_pct:.1f}%" if idv_passed_pct else "N/A"),
     ]
-    for level, title, desc in system_flags:
-        flag(f"**{title}** — {desc}", level)
+    pass_count = sum(1 for _,ok,_ in sanity_checks if ok)
+    fail_count = len(sanity_checks) - pass_count
+    overall_health = "🟢 HEALTHY" if fail_count==0 else ("🟡 WATCH" if fail_count<=2 else "🔴 ACTION NEEDED")
+    col_health, col_score = st.columns([1,3])
+    with col_health:
+        color = "#22c55e" if fail_count==0 else ("#f59e0b" if fail_count<=2 else "#ef4444")
+        kpi("Overall Health",overall_health,f"{pass_count}/{len(sanity_checks)} checks passing",color)
+    with col_score:
+        rows = []
+        for label,ok,val in sanity_checks:
+            rows.append({"Check":label,"Result":val,
+                         "Status":"✅ PASS" if ok else "❌ FAIL"})
+        styled_table(pd.DataFrame(rows), color_col="Status",
+                     palette={"✅ pass":"#22c55e","❌ fail":"#ef4444"})
 
+    # ── System Red Flags ───────────────────────────────────────────────────────
+    st.markdown("### 🚨 Active Red Flags")
+    flags_found = 0
+    oc_high_mid_low = int(((sos["oc_conf"]>0.70) & (sos["middesk_conf"]<0.40)).sum())
+    both_none       = int(((sos["middesk_conf"]==0) & (sos["oc_conf"]==0)).sum())
+    tin_inconsist   = int((tin["tin_match_boolean"] & (tin["tin_match_status"]!="success")).sum())
+    inactive_biz    = int((~sos["active"]).sum())
+    wl_sanctions    = int((dd["sanctions_hits"]>0).sum()) if "sanctions_hits" in dd.columns else 0
+
+    red_flags = [
+        (oc_high_mid_low>0,   "red",   f"{oc_high_mid_low:,} businesses: OC confidence high but Middesk low — known Middesk data gap. These businesses lack US SOS confirmation."),
+        (both_none>0,         "red",   f"{both_none:,} businesses: NO vendor matched (Middesk conf=0 AND OC conf=0). Entity existence completely unconfirmed. Do not auto-approve."),
+        (tin_inconsist>0,     "red",   f"{tin_inconsist:,} businesses: tin_match_boolean=true but status≠'success'. Boolean derived incorrectly — data integrity issue."),
+        (inactive_biz>0,      "amber", f"{inactive_biz:,} businesses have SOS inactive status. Check for perpetual+inactive combination (underwriting red flag)."),
+        (wl_sanctions>0,      "red",   f"{wl_sanctions:,} businesses have SANCTIONS hits. Hard stop — cannot auto-approve. Route to compliance immediately."),
+        (naics_fallback_pct is not None and naics_fallback_pct>15, "amber",
+         f"NAICS 561499 fallback rate {naics_fallback_pct:.1f}% exceeds 15%. Entity matching degraded or new business segment with weak vendor coverage."),
+        (tin_failed_pct>20,   "amber", f"TIN failure rate {tin_failed_pct:.1f}% exceeds 20%. High rate of EIN-name mismatches — possible data quality or applicant issue."),
+    ]
+    for condition, level, msg in red_flags:
+        if condition:
+            flag(msg, level)
+            flags_found += 1
+    if flags_found == 0:
+        flag("No active red flags detected in this data sample.", "green")
+
+    # ── Cross-analysis overview ────────────────────────────────────────────────
     st.markdown("---")
+    st.markdown("### 🔗 Key Relationship Analysis")
     col_l, col_r = st.columns(2)
     with col_l:
-        st.markdown("### 📊 Health Summary by Section")
-        def _fmt(v, suffix="%"):
-            return f"{v:.0f}{suffix}" if v is not None else "N/A"
-
-        health_data = {
-            "Section":["SOS Filings","TIN Verification","NAICS/MCC","Banking","KYC Identity","Due Diligence"],
-            "Health":["⚠️ Gap","✅ OK",
-                      "🚨 Issue" if naics_fb is not None else "ℹ️ N/A",
-                      "✅ OK" if bank_ok is not None else "ℹ️ N/A",
-                      "⚠️ Risk" if high_risk is not None else "ℹ️ N/A",
-                      "✅ OK"],
-            "Key Metric":[f"{sos_act/max(biz,1)*100:.0f}% active",
-                          f"{tin_ok:.0f}% verified",
-                          _fmt(naics_fb) + " fallback",
-                          _fmt(bank_ok) + " passed",
-                          _fmt(high_risk) + " high risk",
-                          f"{wl_hit:.0f}% hits"],
-            "Priority":["Medium","Low",
-                        "High" if naics_fb is not None else "N/A",
-                        "Low" if bank_ok is not None else "N/A",
-                        "Medium" if high_risk is not None else "N/A",
-                        "Low"],
-        }
-        styled_table(pd.DataFrame(health_data), color_col="Health",
-                     palette={"⚠️ gap":"#f59e0b","✅ ok":"#22c55e","🚨 issue":"#ef4444"})
-
+        # Vendor agreement matrix
+        middesk_h = (sos["middesk_conf"]>0.50)
+        oc_h      = (sos["oc_conf"]>0.50)
+        agree_df = pd.DataFrame({
+            "Scenario":["Both matched","Middesk only","OC only","Neither"],
+            "Count":[(middesk_h&oc_h).sum(),(middesk_h&~oc_h).sum(),(~middesk_h&oc_h).sum(),(~middesk_h&~oc_h).sum()],
+        })
+        agree_df["Meaning"] = ["✅ Healthy","⚠️ New incorporation?","🚨 Middesk gap","❌ Entity unconfirmed"]
+        fig = px.pie(agree_df,names="Scenario",values="Count",
+                     color="Scenario",
+                     color_discrete_map={"Both matched":"#22c55e","Middesk only":"#f59e0b",
+                                          "OC only":"#ef4444","Neither":"#64748b"},
+                     hole=0.45,title="Middesk vs OC Agreement")
+        st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+        styled_table(agree_df)
     with col_r:
-        st.markdown("### 🔗 Key Cross-Field Relationships to Watch")
-        cross_box("OC match ↔ Middesk match", [
-            "If OC confidence >0.7 → Middesk SHOULD also return a filing",
-            "When OC matches but Middesk doesn't: Middesk API may not have been called",
-            "Impact: sos_filings may only have OC source, missing Middesk verification",
-        ])
-        cross_box("NAICS fallback ↔ IDV failure", [
-            "Businesses with NAICS 561499 often also fail entity matching",
-            "Entity matching fails → no vendor NAICS → AI fallback → 561499",
-            "These same businesses frequently have low Worth Scores",
-        ])
-        cross_box("High KYC risk ↔ Watchlist hits", [
-            "High Trulioo compliance_status (high_risk) correlates with watchlist hits",
-            "Trulioo risk_score = hits×10 + highRiskPeople×20 (cap 100)",
-            "Check: businesses with high_risk AND watchlist_hits>0 = highest priority",
-        ])
+        # TIN outcome breakdown
+        tin_outcomes = pd.DataFrame({
+            "Outcome":["✅ Verified","❌ Failed","⏳ Pending/Other","📭 Not submitted"],
+            "Count":[
+                int(tin["tin_match_boolean"].sum()),
+                int((tin["tin_match_status"]=="failure").sum()),
+                int((tin["tin_match_status"].isin(["pending",""])).sum()),
+                int((~tin["tin_submitted"]).sum()),
+            ]
+        })
+        fig2 = px.funnel(tin_outcomes,x="Count",y="Outcome",
+                         color_discrete_sequence=["#22c55e","#ef4444","#f59e0b","#64748b"],
+                         title="TIN Verification Funnel")
+        st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+
+    # ── Anomaly Leaderboard ────────────────────────────────────────────────────
+    st.markdown("### ⚡ Anomaly Leaderboard — Top Issues to Investigate")
+    anomalies = [
+        {"Priority":"🔴 P1","Anomaly":"Entity unconfirmed (no vendor match)",
+         "Count":f"{both_none:,}","% of Total":f"{both_none/max(biz,1)*100:.1f}%",
+         "Action":"Manual underwriting required — do not auto-approve"},
+        {"Priority":"🔴 P1","Anomaly":"Sanctions hit",
+         "Count":f"{wl_sanctions:,}","% of Total":f"{wl_sanctions/max(biz,1)*100:.1f}%",
+         "Action":"Hard stop — route to compliance immediately"},
+        {"Priority":"🔴 P1","Anomaly":"TIN boolean/status inconsistency",
+         "Count":f"{tin_inconsist:,}","% of Total":f"{tin_inconsist/max(biz,1)*100:.1f}%",
+         "Action":"Data integrity bug — investigate kyb/index.ts L488–490"},
+        {"Priority":"🟡 P2","Anomaly":"OC match, no Middesk (gap)",
+         "Count":f"{oc_high_mid_low:,}","% of Total":f"{oc_high_mid_low/max(biz,1)*100:.1f}%",
+         "Action":"Check integration_data.request_response WHERE platform_id=16"},
+        {"Priority":"🟡 P2","Anomaly":"SOS inactive",
+         "Count":f"{inactive_biz:,}","% of Total":f"{inactive_biz/max(biz,1)*100:.1f}%",
+         "Action":"Check for perpetual+inactive combination — underwriting red flag"},
+        {"Priority":"🟡 P2","Anomaly":"TIN failed (EIN-name mismatch)",
+         "Count":f"{int(tin_failed_pct*biz/100):,}","% of Total":f"{tin_failed_pct:.1f}%",
+         "Action":"Review failure messages — wrong EIN, name change, or fraud signal"},
+    ]
+    styled_table(pd.DataFrame(anomalies), color_col="Priority",
+                 palette={"🔴 p1":"#ef4444","🟡 p2":"#f59e0b"})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 1 — KYB SOS & VENDORS
+# SECTION 2 — IDENTITY & REGISTRY
 # ═══════════════════════════════════════════════════════════════════════════════
-elif section == "1️⃣  KYB — SOS & Vendors":
-    sh("KYB — SOS Filings & Vendor Confidence",
-       "sos_active · sos_match_boolean · vendor confidence scores · Middesk gap analysis", "🏛️")
+elif section == "🏛️ Identity & Registry":
+    sh("Identity & Registry",
+       "SOS filings · TIN verification · IDV (Plaid) · vendor match rates · "
+       "Middesk gap · inactive+perpetual · consistency checks", "🏛️")
 
-    flag("Note: the sos_filings fact stores large JSON arrays (>65KB) that exceed the Redshift "
-         "federation VARCHAR limit. This section uses the scalar facts sos_active and "
-         "sos_match_boolean instead, which contain the same signal in a compact format.", "blue")
+    with st.spinner("Loading Identity & Registry data…"):
+        sos = get_section_data("sos",  record_limit)
+        tin = get_section_data("tin",  record_limit)
+        kyc = get_section_data("kyc",  record_limit)
 
-    df = get_section_data("sos", record_limit)
-    biz_total  = df["business_id"].nunique()
-    active_biz = df["active"].sum()
-    matched    = df["sos_matched"].sum() if "sos_matched" in df.columns else 0
-    # Use filing_type column (always 'domestic' from scalar facts)
-    dom = df; frn = df.iloc[0:0]  # no foreign split from scalar facts
-    dom_biz = biz_total; frn_biz = 0
-    dom_active = active_biz; frn_active = 0
-    multi_dom = 0
-    dom_max_conf = df.groupby("business_id")["middesk_conf"].max()
-    frn_max_conf = pd.Series(dtype=float)
+    tin["tin_match_boolean"] = tin["tin_match_boolean"].astype(bool)
+    tin["tin_submitted"]     = tin["tin_submitted"].astype(bool)
+    tin["tin_match_status"]  = tin["tin_match_status"].astype(str).fillna("")
+    tin["middesk_tin_task"]  = tin["middesk_tin_task"].astype(str).fillna("none")
+    biz = sos["business_id"].nunique()
+
+    # ── Top KPIs ───────────────────────────────────────────────────────────────
+    sos_active_rate  = sos["active"].mean()*100
+    sos_matched_rate = sos["sos_matched"].mean()*100 if "sos_matched" in sos.columns else None
+    tin_verified     = int(tin["tin_match_boolean"].sum())
+    tin_failed       = int((tin["tin_match_status"]=="failure").sum())
+    tin_submitted    = int(tin["tin_submitted"].sum())
+    tin_total        = len(tin)
+    middesk_gap      = int(((sos["oc_conf"]>0.70)&(sos["middesk_conf"]<0.40)).sum())
+    both_no_match    = int(((sos["middesk_conf"]==0)&(sos["oc_conf"]==0)).sum())
+    inactive         = int((~sos["active"]).sum())
+    idv_passed       = int(kyc["idv_passed"].sum()) if kyc is not None and "idv_passed" in kyc.columns else None
 
     c1,c2,c3,c4,c5,c6 = st.columns(6)
-    with c1: kpi("Businesses",f"{biz_total:,}","in scope","#3B82F6")
-    with c2: kpi("SOS Active",f"{active_biz:,}",f"{active_biz/max(biz_total,1)*100:.0f}% active","#22c55e")
-    with c3: kpi("SOS Matched",f"{matched:,}",f"{matched/max(biz_total,1)*100:.0f}% name matched","#3B82F6")
-    with c4: kpi("Avg Middesk Conf",f"{df['middesk_conf'].mean():.3f}","0–1 scale","#f59e0b")
-    with c5: kpi("Avg OC Conf",f"{df['oc_conf'].mean():.3f}","0–1 scale","#3B82F6")
-    with c6: kpi("OC High+Middesk Low",
-                 f"{((df['oc_conf']>0.70)&(df['middesk_conf']<0.40)).sum():,}",
-                 "Middesk gap","#ef4444")
+    with c1: kpi("SOS Active",f"{sos_active_rate:.1f}%","registry in good standing",
+                 "#22c55e" if sos_active_rate>95 else "#ef4444")
+    with c2: kpi("SOS Matched",f"{sos_matched_rate:.1f}%" if sos_matched_rate else "N/A",
+                 "name matched registry","#22c55e" if (sos_matched_rate or 0)>90 else "#f59e0b")
+    with c3: kpi("TIN Verified",f"{tin_verified/max(tin_total,1)*100:.1f}%",
+                 f"{tin_verified:,} businesses","#22c55e" if tin_verified/max(tin_total,1)>0.70 else "#ef4444")
+    with c4: kpi("TIN Failed",f"{tin_failed/max(tin_total,1)*100:.1f}%",
+                 "EIN-name mismatch","#ef4444" if tin_failed/max(tin_total,1)>0.20 else "#22c55e")
+    with c5: kpi("Middesk Gap",f"{middesk_gap:,}",
+                 "OC high, Middesk low","#f59e0b")
+    with c6: kpi("IDV Passed",f"{idv_passed:,}" if idv_passed else "N/A",
+                 "Plaid identity verified","#22c55e")
 
-    tab_sos, tab_domestic, tab_vendors, tab_middesk_gap, tab_jur = st.tabs([
-        "📊 SOS Overview", "🔬 Business Status", "📡 Vendor Confidence", "⚠️ Middesk Gap", "🗺️ Jurisdiction"
+    # Red flags
+    if both_no_match>0:
+        flag(f"🚨 {both_no_match:,} businesses: ZERO vendor confirmation (Middesk=0, OC=0). "
+             "Entity existence completely unverified — highest risk segment.", "red")
+    if inactive>0:
+        flag(f"⚠️ {inactive:,} businesses have SOS inactive status. "
+             "Inactive+perpetual = entity cannot legally operate. First red flag in underwriting.", "amber")
+
+    tab_sos, tab_tin, tab_idv, tab_cross, tab_vendors, tab_dq = st.tabs([
+        "🏛️ SOS Registry","🔐 TIN","🪪 IDV (Plaid)","🔗 Cross-Analysis","📡 Vendors","🔬 Quality Checks"
     ])
 
-    # ── TAB: SOS Overview ────────────────────────────────────────────────────
+    # ── SOS ────────────────────────────────────────────────────────────────────
     with tab_sos:
         col_l, col_r = st.columns(2)
         with col_l:
-            act_counts = pd.DataFrame({
-                "Status": ["Active","Inactive"],
-                "Businesses": [active_biz, biz_total-active_biz],
-            })
-            fig = px.pie(act_counts,names="Status",values="Businesses",
-                         color="Status",
+            act_df = pd.DataFrame({"Status":["Active","Inactive"],"Count":[int(sos["active"].sum()),inactive]})
+            fig = px.pie(act_df,names="Status",values="Count",color="Status",
                          color_discrete_map={"Active":"#22c55e","Inactive":"#ef4444"},
-                         hole=0.5,title="SOS Active Status Distribution")
+                         hole=0.5,title="SOS Active Status")
             st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
         with col_r:
-            fig2 = px.histogram(df,x="middesk_conf",nbins=20,
+            fig2 = px.histogram(sos,x="middesk_conf",nbins=20,
                                 color_discrete_sequence=["#f59e0b"],
                                 title="Middesk Confidence Distribution")
-            fig2.add_vline(x=0.70,line_dash="dash",line_color="#22c55e",annotation_text="Good 0.70")
+            fig2.add_vline(x=0.70,line_dash="dash",line_color="#22c55e",annotation_text="Target 0.70")
             fig2.add_vline(x=0.40,line_dash="dash",line_color="#ef4444",annotation_text="Low 0.40")
             st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
 
-        st.markdown("#### 📋 SOS Summary Table")
-        summary_tbl = pd.DataFrame({
-            "Metric":  ["Total Businesses","SOS Active","SOS Inactive","SOS Matched","Active Rate"],
-            "Value":   [f"{biz_total:,}", f"{active_biz:,}",
-                        f"{biz_total-active_biz:,}", f"{matched:,}",
-                        f"{active_biz/max(biz_total,1)*100:.1f}%"],
+        st.markdown("#### 📋 SOS Status Summary")
+        sos_tbl = pd.DataFrame({
+            "Metric":["Total businesses","Active SOS","Inactive SOS","SOS name matched",
+                      "Avg Middesk confidence","Avg OC confidence",
+                      "Middesk gap (OC high, Middesk low)","Neither vendor matched"],
+            "Value":[f"{biz:,}",f"{int(sos['active'].sum()):,} ({sos_active_rate:.1f}%)",
+                     f"{inactive:,} ({inactive/max(biz,1)*100:.1f}%)",
+                     f"{int(sos['sos_matched'].sum()):,} ({sos_matched_rate:.1f}%)" if sos_matched_rate else "N/A",
+                     f"{sos['middesk_conf'].mean():.3f}",f"{sos['oc_conf'].mean():.3f}",
+                     f"{middesk_gap:,} ({middesk_gap/max(biz,1)*100:.1f}%)",
+                     f"{both_no_match:,} ({both_no_match/max(biz,1)*100:.1f}%)"],
+            "Status":["","✅ Good" if sos_active_rate>95 else "❌ Below target",
+                      "⚠️ Review" if inactive>0 else "✅ None",
+                      "✅ Good" if (sos_matched_rate or 0)>90 else "⚠️ Below target","","",
+                      "⚠️ Investigate" if middesk_gap>0 else "✅ None",
+                      "🚨 High risk" if both_no_match>0 else "✅ None"],
         })
-        styled_table(summary_tbl)
+        styled_table(sos_tbl, color_col="Status",
+                     palette={"✅ good":"#22c55e","✅ none":"#22c55e","⚠️ review":"#f59e0b",
+                               "⚠️ investigate":"#f59e0b","⚠️ below target":"#f59e0b",
+                               "🚨 high risk":"#ef4444","❌ below target":"#ef4444"})
 
-        analyst_card("SOS Active Status", [
-            f"{active_biz:,} of {biz_total:,} businesses ({active_biz/max(biz_total,1)*100:.0f}%) have an active SOS filing.",
-            f"{matched:,} businesses have sos_match_boolean=true — the submitted business name matched the SOS registry.",
-            f"{biz_total-active_biz:,} businesses have no active SOS filing — may be inactive, dissolved, or newly formed.",
-            "Source: sos_active (calculated from sos_filings[].active) and sos_match_boolean "
-            "(from Middesk name-match review task). Both facts are scalar and always fit within Redshift's VARCHAR limit.",
+        # Inactive+perpetual analysis via scalar facts
+        st.markdown("#### ⚠️ Inactive + Perpetual Expiration — Live Analysis")
+        inactive_sql = """
+            SELECT business_id,
+                   JSON_EXTRACT_PATH_TEXT(value,'value')               AS is_active,
+                   JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS source_pid,
+                   received_at
+            FROM rds_warehouse_public.facts
+            WHERE name = 'sos_active'
+              AND JSON_EXTRACT_PATH_TEXT(value,'value') = 'false'
+            ORDER BY received_at DESC LIMIT 200
+        """
+        inactive_df = run_query(inactive_sql)
+        if inactive_df is not None and not inactive_df.empty:
+            flag(f"🚨 {len(inactive_df):,} businesses with sos_active=false. "
+                 "Cross-check sos_filings on PostgreSQL RDS (port 5432) to find perpetual expiration dates.", "red")
+            col_a,col_b = st.columns(2)
+            with col_a:
+                src_counts = inactive_df["source_pid"].apply(pid_name).value_counts().reset_index()
+                src_counts.columns = ["Source","Count"]
+                fig3 = px.bar(src_counts,x="Source",y="Count",color_discrete_sequence=["#ef4444"],
+                              title="Inactive SOS by Source Vendor")
+                st.plotly_chart(dark_chart_layout(fig3),use_container_width=True)
+            with col_b:
+                st.markdown("##### Sample inactive businesses:")
+                styled_table(inactive_df[["business_id","is_active","source_pid","received_at"]].head(15))
+
+        analyst_card("SOS Registry Analysis", [
+            f"Active rate {sos_active_rate:.1f}%: {'✅ healthy' if sos_active_rate>95 else '❌ below 95% — investigate inactive entities'}.",
+            f"Inactive+perpetual combination is the #1 underwriting red flag. "
+            "Entity cannot legally operate despite having a perpetual charter. "
+            "Causes: unpaid taxes, missed annual report, administrative dissolution.",
+            f"Middesk gap ({middesk_gap:,} businesses): OC found the entity in global registries "
+            "but Middesk could not match in US SOS. Causes: new incorporation, name mismatch, Middesk API failure.",
+            f"Neither vendor matched ({both_no_match:,}): entity existence completely unverified. "
+            "Route 100% of these to manual underwriting.",
         ])
 
-        sanity_metrics([
-            ("SOS active > 70%", active_biz/max(biz_total,1)>0.70,
-             f"{active_biz/max(biz_total,1)*100:.0f}% active"),
-            ("SOS matched > 60%", matched/max(biz_total,1)>0.60,
-             f"{matched/max(biz_total,1)*100:.0f}% matched"),
-            ("Avg Middesk conf > 0.50", df["middesk_conf"].mean()>0.50,
-             f"Mean: {df['middesk_conf'].mean():.3f}"),
-            ("OC+Middesk gap < 20%", ((df["oc_conf"]>0.70)&(df["middesk_conf"]<0.40)).mean()<0.20,
-             f"{((df['oc_conf']>0.70)&(df['middesk_conf']<0.40)).mean()*100:.0f}% gap"),
-        ])
-
-    # ── TAB: Business Status ─────────────────────────────────────────────────
-    with tab_domestic:
-        st.markdown("#### 🔬 Per-Business SOS Status")
-
-        df["Status"] = df["active"].apply(lambda x: "✅ Active" if x else "❌ No Active Filing")
-        df["Middesk vs OC Gap"] = (df["oc_conf"] - df["middesk_conf"]).round(3)
-        df["🚨 Conf Gap"] = df["Middesk vs OC Gap"].apply(lambda x: "⚠️ YES" if x>0.25 else "✅ OK")
-        dom_summary = df.rename(columns={
-            "middesk_conf":"max_middesk_conf","oc_conf":"max_oc_conf"})
-        dom_summary["active_count"] = dom_summary["active"].astype(int)
-        dom_summary["filing_count"] = 1
-
-        ok  = (dom_summary["Status"]=="✅ Active").sum()
-        noa = (dom_summary["Status"]=="❌ No Active Filing").sum()
-
-        c1,c2,c3 = st.columns(3)
-        with c1: kpi("✅ Active",f"{ok:,}",f"{ok/max(len(dom_summary),1)*100:.0f}%","#22c55e")
-        with c2: kpi("❌ No Active Filing",f"{noa:,}",f"{noa/max(len(dom_summary),1)*100:.0f}%","#ef4444")
-        with c3: kpi("⚠️ OC+Middesk Gap",
-                     f"{(dom_summary['Middesk vs OC Gap']>0.25).sum():,}",
-                     "OC high, Middesk low","#f59e0b")
-
+    # ── TIN ────────────────────────────────────────────────────────────────────
+    with tab_tin:
         col_l,col_r = st.columns(2)
         with col_l:
-            status_counts = dom_summary["Status"].value_counts().reset_index()
-            status_counts.columns = ["Status","Count"]
-            colors = {"✅ Active":"#22c55e","❌ No Active Filing":"#ef4444"}
-            fig = px.pie(status_counts,names="Status",values="Count",
-                         color="Status",color_discrete_map=colors,hole=0.45,
-                         title="Business SOS Status")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            fig2 = px.histogram(dom_summary,x="max_middesk_conf",nbins=20,
-                                color_discrete_sequence=["#f59e0b"],
-                                title="Middesk Confidence Distribution")
-            fig2.add_vline(x=0.70,line_dash="dash",line_color="#22c55e",annotation_text="Good 0.7")
-            fig2.add_vline(x=0.40,line_dash="dash",line_color="#ef4444",annotation_text="Low 0.4")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        st.markdown("#### 📋 Businesses Without Active Filing")
-        problems = dom_summary[dom_summary["Status"]=="❌ No Active Filing"].copy()
-        if len(problems)>0:
-            display_cols = ["business_id","Status","max_middesk_conf","max_oc_conf",
-                            "Middesk vs OC Gap","🚨 Conf Gap"]
-            styled_table(problems[display_cols].head(30).round(3), color_col="Status",
-                         palette={"❌ no active filing":"#ef4444"})
-        else:
-            flag("All businesses have an active SOS filing.", "green")
-
-        gap_count = (dom_summary["Middesk vs OC Gap"]>0.25).sum()
-        anomaly_flags(dom_summary, [
-            (dom_summary["Status"]=="❌ No Active Filing",
-             "Businesses with no active SOS status", "red"),
-            (dom_summary["Middesk vs OC Gap"]>0.25,
-             "OC confidence >0.25 higher than Middesk (Middesk gap)", "amber"),
-            (dom_summary["max_middesk_conf"]<0.30,
-             "Middesk confidence below 0.30 (very low — likely no match)", "red"),
-        ])
-
-        analyst_card("Business SOS Status", [
-            f"{noa} businesses with no active SOS status: may be dissolved, suspended, or revoked.",
-            f"{gap_count} businesses where OC confidence is >0.25 higher than Middesk: "
-            "OC found the entity in global registries but Middesk didn't match in US SOS systems.",
-            "Middesk confidence < 0.40: task formula gives 0.15 base + 0.20 per task. "
-            "Low score = few Middesk review tasks matched.",
-        ])
-
-    # ── TAB: Vendor Confidence ───────────────────────────────────────────────
-    with tab_vendors:
-        st.markdown("#### 📡 Vendor Confidence Comparison")
-        flag("Each vendor computes confidence differently. Compare side-by-side to identify gaps. "
-             "High OC + Low Middesk = known data gap. All vendors should ideally agree.", "blue")
-
-        vendors = {
-            "Middesk":        ("middesk_conf","#f59e0b","pid=16, w=2.0","0.15 base + 0.20 per successful task (name/tin/address/sos). Max=0.95"),
-            "OpenCorporates": ("oc_conf",     "#3B82F6","pid=23, w=0.9","match.index / 55. MAX_CONFIDENCE_INDEX=55"),
-            "ZoomInfo":       ("zi_conf",     "#8B5CF6","pid=24, w=0.8","match.index / 55. From Redshift zoominfo_matches"),
-            "Equifax":        ("efx_conf",    "#22c55e","pid=17, w=0.7","XGBoost prediction OR heuristic index/55"),
-            "Trulioo":        ("trulioo_conf","#ec4899","pid=38, w=0.8","Status-based: success=0.70, pending=0.40, failed=0.20"),
-        }
-
-        # Summary stats table
-        stats = []
-        for name, (col, color, pid, formula) in vendors.items():
-            v = df[col]
-            stats.append({
-                "Vendor":name, "PID/Weight":pid,
-                "Mean":f"{v.mean():.3f}", "Median":f"{v.median():.3f}",
-                "P25":f"{v.quantile(0.25):.3f}", "P75":f"{v.quantile(0.75):.3f}",
-                ">0.70 (%)":f"{(v>0.70).mean()*100:.0f}%",
-                "<0.30 (%)":f"{(v<0.30).mean()*100:.0f}%",
-                "Missing/0 (%)":f"{(v==0).mean()*100:.0f}%",
+            tin_outcomes = pd.DataFrame({
+                "Outcome":["✅ Verified","❌ Failed","⏳ Pending","📭 Not submitted"],
+                "Count":[tin_verified,tin_failed,
+                         int((tin["tin_match_status"]=="pending").sum()),
+                         tin_total-tin_submitted],
             })
-        st.markdown("##### Confidence Statistics by Vendor")
-        styled_table(pd.DataFrame(stats))
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            means = pd.DataFrame({
-                "Vendor": list(vendors.keys()),
-                "Mean Confidence": [df[v[0]].mean() for v in vendors.values()],
-            })
-            fig = px.bar(means, x="Vendor", y="Mean Confidence",
-                         color="Vendor",
-                         color_discrete_sequence=["#f59e0b","#3B82F6","#8B5CF6","#22c55e","#ec4899"],
-                         title="Mean Confidence by Vendor")
-            fig.update_layout(yaxis=dict(range=[0,1]))
-            st.plotly_chart(dark_chart_layout(fig), use_container_width=True)
-        with col_r:
-            fig2 = go.Figure()
-            colors_list = ["#f59e0b","#3B82F6","#8B5CF6","#22c55e","#ec4899"]
-            for (name,(col,color,_,_)), c in zip(vendors.items(), colors_list):
-                fig2.add_trace(go.Box(y=df[col],name=name,marker_color=c,
-                                      line_color=c,fillcolor="rgba(0,0,0,0)"))
-            fig2.update_layout(yaxis=dict(range=[0,1]))
-            st.plotly_chart(dark_chart_layout(fig2,"Confidence Distribution by Vendor"), use_container_width=True)
-
-        # Cross vendor correlation
-        st.markdown("##### 🔗 Cross-Vendor Agreement Analysis")
-        conf_df = df.groupby("business_id").agg(
-            middesk=("middesk_conf","max"), oc=("oc_conf","max"),
-            zi=("zi_conf","max"), efx=("efx_conf","max"), trulioo=("trulioo_conf","max")
-        ).reset_index()
-        conf_df["all_high"]  = ((conf_df[["middesk","oc","zi","efx","trulioo"]]>0.70).sum(axis=1)==5)
-        conf_df["all_low"]   = ((conf_df[["middesk","oc","zi","efx","trulioo"]]<0.40).sum(axis=1)==5)
-        conf_df["oc_high_middesk_low"] = (conf_df["oc"]>0.70)&(conf_df["middesk"]<0.40)
-        conf_df["disagreement"] = conf_df[["middesk","oc","zi","efx","trulioo"]].std(axis=1)
-        high_disagree = (conf_df["disagreement"]>0.25).sum()
-
-        c1,c2,c3,c4 = st.columns(4)
-        with c1: kpi("All Vendors High (>0.70)",f"{conf_df['all_high'].sum():,}","strong agreement","#22c55e")
-        with c2: kpi("All Vendors Low (<0.40)", f"{conf_df['all_low'].sum():,}","no match anywhere","#ef4444")
-        with c3: kpi("OC High + Middesk Low",   f"{conf_df['oc_high_middesk_low'].sum():,}","Middesk gap","#f59e0b")
-        with c4: kpi("High Disagreement (σ>0.25)",f"{high_disagree:,}","vendors disagree","#f97316")
-
-        cross_box("Vendor Agreement Patterns", [
-            f"{conf_df['all_high'].sum()} businesses where ALL 5 vendors have confidence >0.70: "
-            "these are the most reliably matched entities. Fact Engine winner is the highest-weight one.",
-            f"{conf_df['all_low'].sum()} businesses where ALL vendors have confidence <0.40: "
-            "entity matching has essentially failed across the board. AI enrichment is the only fallback.",
-            f"{conf_df['oc_high_middesk_low'].sum()} businesses where OC is high but Middesk is low: "
-            "this is the known Middesk data gap. OC found the entity in global registries but Middesk "
-            "could not match it in US SOS systems. Possible causes: registration not yet in Middesk DB, "
-            "name mismatch, or Middesk API was not called.",
-            f"{high_disagree} businesses where vendor confidence standard deviation >0.25: "
-            "different vendors strongly disagree on whether this is the same entity.",
-        ])
-
-        if conf_df["oc_high_middesk_low"].sum()>0:
-            st.markdown("##### 📋 Businesses with OC High + Middesk Low (Middesk Gap)")
-            gap_biz = conf_df[conf_df["oc_high_middesk_low"]].round(3)
-            styled_table(gap_biz[["business_id","middesk","oc","zi","efx","trulioo","disagreement"]].head(20))
-
-    # ── TAB: Middesk Gap ─────────────────────────────────────────────────────
-    with tab_middesk_gap:
-        st.markdown("#### ⚠️ Middesk Data Gap — Root Cause Analysis")
-        flag("Known production issue: Middesk (pid=16) data is not showing in the Admin Portal "
-             "for businesses where OpenCorporates (pid=23) has a strong match. "
-             "Expected behavior: high OC confidence → Middesk should ALSO return a filing.", "red")
-
-        conf_df = df.groupby("business_id").agg(
-            middesk=("middesk_conf","max"), oc=("oc_conf","max"),
-            zi=("zi_conf","max"), efx=("efx_conf","max"),
-        ).reset_index()
-        conf_df["gap_type"] = conf_df.apply(lambda r:
-            "OC High, Middesk Low" if r.oc>0.70 and r.middesk<0.40
-            else ("Both High" if r.oc>0.70 and r.middesk>0.70
-            else ("Both Low" if r.oc<0.40 and r.middesk<0.40
-            else "Mixed")), axis=1)
-
-        c1,c2,c3,c4 = st.columns(4)
-        for (label, gap_type, color), col in zip([
-            ("OC High, Middesk Low","OC High, Middesk Low","#ef4444"),
-            ("Both High","Both High","#22c55e"),
-            ("Both Low","Both Low","#64748b"),
-            ("Mixed","Mixed","#f59e0b"),
-        ], [c1,c2,c3,c4]):
-            n_type = (conf_df["gap_type"]==gap_type).sum()
-            with col: kpi(label,f"{n_type:,}",f"{n_type/len(conf_df)*100:.0f}%",color)
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            gt_counts = conf_df["gap_type"].value_counts().reset_index()
-            gt_counts.columns = ["Gap Type","Count"]
-            colors_gt = {"OC High, Middesk Low":"#ef4444","Both High":"#22c55e",
-                         "Both Low":"#64748b","Mixed":"#f59e0b"}
-            fig = px.pie(gt_counts,names="Gap Type",values="Count",
-                         color="Gap Type",color_discrete_map=colors_gt,hole=0.45,
-                         title="OC vs Middesk Confidence Relationship")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            sample = conf_df.sample(min(400,len(conf_df)),random_state=42)
-            fig2 = px.scatter(sample,x="oc",y="middesk",color="gap_type",
-                              color_discrete_map=colors_gt,
-                              labels={"oc":"OC Confidence","middesk":"Middesk Confidence"},
-                              title="OC vs Middesk — Gap Scatter")
-            fig2.add_vline(x=0.70,line_dash="dash",line_color="#3B82F6",annotation_text="OC 0.70")
-            fig2.add_hline(y=0.40,line_dash="dash",line_color="#ef4444",annotation_text="Middesk 0.40")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        st.markdown("#### 📋 Gap Detail Table — OC High + Middesk Low businesses")
-        gap_rows = conf_df[conf_df["gap_type"]=="OC High, Middesk Low"].round(3)
-        if len(gap_rows)>0:
-            styled_table(gap_rows[["business_id","oc","middesk","zi","efx"]].head(25))
-        else:
-            flag("No businesses with OC High + Middesk Low in this sample.", "green")
-
-        analyst_card("Middesk Gap Root Causes", [
-            "Cause 1 — Middesk API not triggered: integration-service calls Middesk when it has a business_name + address. "
-            "If those are incomplete, Middesk may be skipped entirely.",
-            "Cause 2 — Middesk database coverage: Middesk specializes in US SOS registries. "
-            "Foreign companies or very new registrations may not be in their system yet.",
-            "Cause 3 — Name mismatch: Middesk matches on legal name. If the submitted name "
-            "differs from the SOS filing name, Middesk returns no match (confidence stays low).",
-            "Cause 4 — API failure: check integration_data.request_response WHERE platform_id=16 "
-            "for HTTP errors or timeout responses for these specific business_ids.",
-            "Impact: sos_filings fact for these businesses will only have OC/ZI source. "
-            "The Fact Engine picks OC as winner. The Admin Portal shows OC data, not Middesk.",
-        ])
-
-        st.markdown("#### 🔍 SQL to investigate Middesk gap in production")
-        st.code("""-- Find businesses where OC has SOS data but Middesk does NOT
-SELECT
-    f.business_id,
-    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS winning_source,
-    JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence') AS confidence,
-    f.received_at
-FROM rds_warehouse_public.facts f
-WHERE f.name = 'sos_filings'
-  AND JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') = '23'  -- OC won
-  AND NOT EXISTS (
-      SELECT 1
-      FROM integration_data.request_response rr
-      WHERE rr.business_id = f.business_id
-        AND rr.platform_id = 16  -- Middesk was never called
-  )
-ORDER BY f.received_at DESC
-LIMIT 100;
-
--- Also check if Middesk was called but returned an error
-SELECT business_id, platform_id, received_at
-FROM integration_data.request_response
-WHERE platform_id = 16
-  AND business_id IN ('YOUR-UUID-1','YOUR-UUID-2')
-ORDER BY received_at DESC;""", language="sql")
-
-    # ── TAB: Jurisdiction ────────────────────────────────────────────────────
-    with tab_jur:
-        st.markdown("#### 🗺️ Jurisdiction / Region")
-        flag("'Region' = sos_filings[n].jurisdiction for domestic filings (format: 'us::ca'). "
-             "Because sos_filings is too large for the Redshift federation VARCHAR limit, "
-             "jurisdiction data is not available from scalar facts. "
-             "To get jurisdiction breakdown, query the source PostgreSQL RDS directly.", "amber")
-
-        st.markdown("##### How to get jurisdiction breakdown")
-        st.info("The `->` / `->>` JSONB operators do not work in Redshift federated queries "
-                "(value column is VARCHAR, not JSONB). "
-                "Connect to PostgreSQL RDS directly (port 5432) where the column is native JSONB.", icon="ℹ️")
-
-        st.code("""-- ✅ Run on PostgreSQL RDS directly (port 5432) — native JSONB, no size limit:
-SELECT
-    business_id,
-    jsonb_array_elements(value->'value') AS filing
-FROM rds_warehouse_public.facts
-WHERE name = 'sos_filings'
-LIMIT 1000;
--- Then in Python: filing['jurisdiction'], filing['foreign_domestic'], filing['active']
-
--- ✅ Alternative: extract first filing only (PostgreSQL):
-SELECT
-    business_id,
-    value->'value'->0->>'jurisdiction'    AS jurisdiction,
-    value->'value'->0->>'foreign_domestic' AS filing_type,
-    (value->'value'->0->>'active')::bool  AS active
-FROM rds_warehouse_public.facts
-WHERE name = 'sos_filings'
-LIMIT 1000;
-
--- ❌ Does NOT work on Redshift (federation endpoint):
--- JSON_EXTRACT_PATH_TEXT also fails on 97KB+ rows due to VARCHAR(65535) limit.
--- Must connect to PostgreSQL RDS (port 5432) directly.""", language="sql")
-
-        st.markdown("##### Python — connect to PostgreSQL RDS directly:")
-        st.code("""import psycopg2, json
-
-# Connect to PostgreSQL RDS (port 5432), NOT Redshift (port 5439)
-conn = psycopg2.connect(
-    host=os.getenv('REDSHIFT_HOST'),  # same host, different port
-    port=5432,
-    dbname='your_pg_dbname',
-    user='your_pg_user',
-    password='your_pg_password',
-    sslmode='require'
-)
-cur = conn.cursor()
-cur.execute(\"\"\"
-    SELECT business_id, value
-    FROM rds_warehouse_public.facts
-    WHERE name = 'sos_filings'
-    LIMIT 1000
-\"\"\")
-rows = []
-for business_id, value_str in cur.fetchall():
-    fact = json.loads(value_str)
-    for filing in (fact.get('value') or []):
-        rows.append({
-            'business_id':    business_id,
-            'jurisdiction':   filing.get('jurisdiction'),
-            'filing_type':    filing.get('foreign_domestic'),
-            'active':         filing.get('active'),
-        })
-import pandas as pd
-df = pd.DataFrame(rows)
-print(df.groupby(['filing_type', 'active']).size())""", language="python")
-
-        analyst_card("Jurisdiction / Region Insights", [
-            "sos_filings stores an array of SOS registrations — each has jurisdiction, active, foreign_domestic.",
-            "Format: 'us::ca', 'us::ny', etc. — state code prefixed with 'us::'.",
-            "Middesk uses registration_state: 'us::' + state.toLowerCase() (kyb/index.ts L746).",
-            "OC uses jurisdiction_code from oc_companies_latest (e.g. 'us_fl', 'gb').",
-            "The sos_filings fact can be 97KB+ per row — it exceeds Redshift's federated VARCHAR limit. "
-            "Access it from PostgreSQL RDS directly for full jurisdiction analysis.",
-        ])
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 2 — TIN VERIFICATION
-# ═══════════════════════════════════════════════════════════════════════════════
-elif section == "2️⃣  TIN Verification":
-    sh("TIN Verification","tin_match · tin_match_boolean · Middesk TIN task · inconsistency analysis","🔐")
-
-    df = get_section_data("tin", record_limit)
-    total = len(df)
-    # Ensure correct dtypes before arithmetic
-    df["tin_match_boolean"] = df["tin_match_boolean"].astype(bool)
-    df["tin_submitted"]     = df["tin_submitted"].astype(bool)
-    df["tin_match_status"]  = df["tin_match_status"].astype(str).fillna("")
-    df["middesk_tin_task"]  = df["middesk_tin_task"].astype(str).fillna("none")
-
-    verified   = int(df["tin_match_boolean"].sum())
-    unverified = int((df["tin_match_status"]=="failure").sum())
-    pending    = int((df["tin_match_status"]=="pending").sum())
-    no_tin     = int((~df["tin_submitted"]).sum())
-    inconsistent = int((df["tin_match_boolean"] & (df["tin_match_status"]!="success")).sum())
-    middesk_none = int((df["middesk_tin_task"]=="none").sum())
-    middesk_ok   = int((df["middesk_tin_task"]=="success").sum())
-    both_fail    = int(((df["middesk_tin_task"]=="failure") & (df["tin_match_status"]=="failure")).sum())
-
-    c1,c2,c3,c4,c5 = st.columns(5)
-    with c1: kpi("✅ TIN Verified",    f"{verified:,}",    f"{verified/total*100:.0f}%","#22c55e")
-    with c2: kpi("❌ TIN Unverified",  f"{unverified:,}",  f"{unverified/total*100:.0f}%","#ef4444")
-    with c3: kpi("⏳ Pending",          f"{pending:,}",    f"{pending/total*100:.0f}%","#f59e0b")
-    with c4: kpi("📭 No TIN Submitted", f"{no_tin:,}",     f"{no_tin/total*100:.0f}%","#64748b")
-    with c5: kpi("⚠️ Inconsistent",    f"{inconsistent:,}","bool≠status","#f97316")
-
-    if inconsistent>0:
-        flag(f"{inconsistent} records: tin_match_boolean=true BUT tin_match.status≠'success'. "
-             "This should never happen. The boolean is derived ONLY from status==='success' "
-             "(integration-service/lib/facts/kyb/index.ts L488–490).", "red")
-
-    tab_dist, tab_middesk, tab_cross, tab_inconsist, tab_lineage = st.tabs([
-        "📊 Status Distribution","🏛️ Middesk TIN Task","🔗 Cross-Analysis","⚠️ Inconsistencies","🔍 Lineage"
-    ])
-
-    with tab_dist:
-        col_l, col_r = st.columns(2)
-        with col_l:
-            sc = df["tin_match_status"].replace("","(empty)").value_counts().reset_index()
-            sc.columns = ["Status","Count"]
-            sc["Pct"] = (sc["Count"]/total*100).round(1)
-            colors = {"success":"#22c55e","failure":"#ef4444","pending":"#f59e0b","(empty)":"#64748b","2":"#3B82F6"}
-            fig = px.pie(sc,names="Status",values="Count",color="Status",
-                         color_discrete_map=colors,hole=0.5,title="tin_match.status Distribution")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            bc = df["tin_match_boolean"].value_counts().reset_index()
-            bc.columns = ["Verified","Count"]
-            bc["Verified"] = bc["Verified"].map({True:"✅ Verified (true)",False:"❌ Not Verified (false)"})
-            fig2 = px.bar(bc,x="Verified",y="Count",color="Verified",
-                          color_discrete_map={"✅ Verified (true)":"#22c55e","❌ Not Verified (false)":"#ef4444"},
-                          title="tin_match_boolean Distribution")
-            fig2.update_layout(showlegend=False)
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        st.markdown("#### 📋 TIN Status Breakdown Table")
-        status_tbl = df.groupby("tin_match_status").agg(
-            count=("business_id","count"),
-            with_middesk=("has_middesk","sum"),
-            middesk_ok=("middesk_tin_task",lambda x:(x=="success").sum()),
-        ).reset_index().rename(columns={"tin_match_status":"Status"})
-        status_tbl["% of Total"] = (status_tbl["count"]/total*100).round(1).astype(str)+"%"
-        status_tbl["Middesk Coverage"] = (status_tbl["with_middesk"]/status_tbl["count"]*100).round(1).astype(str)+"%"
-        status_tbl["Middesk Match Rate"] = (status_tbl["middesk_ok"]/status_tbl["count"]*100).round(1).astype(str)+"%"
-        status_tbl["Status"] = status_tbl["Status"].replace("","(empty)")
-        styled_table(status_tbl, color_col="Status",
-                     palette={"success":"#22c55e","failure":"#ef4444","pending":"#f59e0b","(empty)":"#64748b"})
-
-        analyst_card("TIN Verification Distribution", [
-            f"{verified/total*100:.0f}% of businesses have TIN verified (tin_match_boolean=true). "
-            f"Target: >80%. Currently: {'✅ above target' if verified/total>0.80 else '❌ below target'}.",
-            f"{unverified/total*100:.0f}% outright failure: the EIN submitted does not match the legal name "
-            "per IRS records (verified via Middesk TIN task).",
-            f"{pending/total*100:.0f}% pending: Middesk TIN task was submitted but IRS has not responded yet. "
-            "These should resolve within 24–48 hours.",
-            f"{no_tin/total*100:.0f}% no TIN submitted: applicant skipped the EIN field. "
-            "These businesses will always have tin_match_boolean=false.",
-            "Key rule: tin_match_boolean = (tin_match.status === 'success'). "
-            "Trulioo BusinessRegistrationNumber comparison is the fallback when Middesk has no TIN task.",
-        ])
-
-        sanity_metrics([
-            ("Verified > 70%", verified/total>0.70, f"{verified/total*100:.0f}% verified"),
-            ("No inconsistencies", inconsistent==0, f"{inconsistent} bool/status mismatches"),
-            ("TIN submission > 90%", (total-no_tin)/total>0.90, f"{(total-no_tin)/total*100:.0f}% submitted"),
-            ("Failure < 30%", unverified/total<0.30, f"{unverified/total*100:.0f}% failed"),
-        ])
-
-    with tab_middesk:
-        st.markdown("#### 🏛️ Middesk TIN Task Deep Dive")
-        flag("Middesk runs a 'tin' review task when it matches a business. "
-             "The task result directly feeds tin_match.status. "
-             "If Middesk has no TIN task → Trulioo BusinessRegistrationNumber comparison is the fallback.", "blue")
-
-        task_dist = df.groupby("middesk_tin_task").agg(
-            count=("business_id","count"),
-            tin_verified=("tin_match_boolean","sum"),
-            has_trulioo=("has_trulioo","sum"),
-        ).reset_index()
-        task_dist["% of Total"] = (task_dist["count"]/total*100).round(1).astype(str)+"%"
-        task_dist["TIN Match Rate"] = (task_dist["tin_verified"]/task_dist["count"]*100).round(1).astype(str)+"%"
-        task_dist["Trulioo Fallback %"] = (task_dist["has_trulioo"]/task_dist["count"]*100).round(1).astype(str)+"%"
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            tc = task_dist.copy()
-            tc_colors = {"success":"#22c55e","failure":"#ef4444","pending":"#f59e0b","none":"#64748b"}
-            fig = px.bar(tc,x="middesk_tin_task",y="count",color="middesk_tin_task",
-                         color_discrete_map=tc_colors,title="Middesk TIN Review Task Status")
+            fig = px.bar(tin_outcomes,x="Outcome",y="Count",color="Outcome",
+                         color_discrete_map={"✅ Verified":"#22c55e","❌ Failed":"#ef4444",
+                                              "⏳ Pending":"#f59e0b","📭 Not submitted":"#64748b"},
+                         title="TIN Verification Outcomes")
             fig.update_layout(showlegend=False)
             st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
         with col_r:
-            # Show what happens downstream based on Middesk task result
-            downstream = task_dist.copy()
-            downstream["task"] = downstream["middesk_tin_task"]
-            fig2 = px.bar(downstream,x="task",y="tin_verified",color="task",
-                          color_discrete_map=tc_colors,
-                          title="Businesses with TIN Verified, by Middesk Task Result")
+            funnel_df = pd.DataFrame({
+                "Stage":["All Businesses","TIN Submitted","TIN Verified (IRS Match)"],
+                "Count":[tin_total,tin_submitted,tin_verified],
+            })
+            fig2 = px.funnel(funnel_df,x="Count",y="Stage",title="TIN Funnel")
             st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
 
-        st.markdown("#### 📋 Middesk TIN Task Summary Table")
-        styled_table(task_dist.rename(columns={"middesk_tin_task":"Middesk Task Result","count":"# Businesses"}),
-                     color_col="Middesk Task Result",
+        # Middesk task breakdown
+        st.markdown("#### Middesk TIN Task Results")
+        task_counts = tin["middesk_tin_task"].value_counts().reset_index()
+        task_counts.columns = ["Task","Count"]
+        task_counts["% of Total"] = (task_counts["Count"]/tin_total*100).round(1).astype(str)+"%"
+        task_counts["Meaning"] = task_counts["Task"].map({
+            "success":"✅ EIN matches legal name per IRS",
+            "failure":"❌ EIN does NOT match — review reasons",
+            "pending":"⏳ IRS response pending (normal same-day)",
+            "none":"⚠️ No Middesk TIN task — Trulioo fallback used",
+        }).fillna("Unknown")
+        styled_table(task_counts, color_col="Task",
                      palette={"success":"#22c55e","failure":"#ef4444","pending":"#f59e0b","none":"#64748b"})
 
-        analyst_card("Middesk TIN Task Interpretation", [
-            f"'none' ({middesk_none} businesses, {middesk_none/total*100:.0f}%): Middesk was not called OR "
-            "returned no TIN task. Could be: Middesk not triggered, entity not found, or TIN not submitted.",
-            f"'success' ({middesk_ok} businesses, {middesk_ok/total*100:.0f}%): Middesk confirmed EIN matches "
-            "legal name per IRS records. This is the gold standard verification.",
-            f"'failure' ({(df['middesk_tin_task']=='failure').sum()} businesses): EIN does not match "
-            "legal name. Could be incorrect EIN, name mismatch, or IRS records not yet updated.",
-            f"'pending' ({(df['middesk_tin_task']=='pending').sum()} businesses): IRS response pending. "
-            "This is normal for newly-submitted applications. Should resolve within 24–48h.",
-            "Businesses with Middesk 'none' but Trulioo present: Trulioo BusinessRegistrationNumber "
-            "comparison is used as fallback. Lower confidence than Middesk TIN task.",
+        # Inconsistency detection
+        inconsistent = tin[tin["tin_match_boolean"] & (tin["tin_match_status"]!="success")]
+        if len(inconsistent)>0:
+            flag(f"🚨 {len(inconsistent):,} businesses: tin_match_boolean=true but status≠'success'. "
+                 "Data integrity error — boolean should ONLY be true when status==='success' "
+                 "(integration-service/lib/facts/kyb/index.ts L488–490).", "red")
+            styled_table(inconsistent[["business_id","tin_match_status","tin_match_boolean",
+                                        "middesk_tin_task"]].head(20))
+        else:
+            flag("No TIN boolean/status inconsistencies detected.", "green")
+
+        # Failure reasons table
+        st.markdown("#### TIN Failure Reason Guide")
+        failure_guide = pd.DataFrame({
+            "Middesk Message (from tin_match.message)":[
+                "IRS has a record…combination — Found",
+                "IRS does not have a record…",
+                "TIN associated with a different Business Name",
+                "Duplicate request",
+                "Invalid TIN",
+                "IRS unavailable",
+            ],
+            "Status":["success","failure","failure","failure","failure","failure"],
+            "Risk":["None","HIGH","HIGH","MEDIUM","HIGH","LOW — retry"],
+            "Action":["Verified — no action",
+                      "Wrong EIN or name mismatch — manual review",
+                      "Possible fraud — route to fraud review",
+                      "Re-submit after 24h",
+                      "Correct EIN format and resubmit",
+                      "Auto-retry in 24h"],
+        })
+        styled_table(failure_guide, color_col="Risk",
+                     palette={"HIGH":"#ef4444","MEDIUM":"#f59e0b","LOW — retry":"#3B82F6","None":"#22c55e"})
+
+        analyst_card("TIN Verification Analysis", [
+            f"Submission rate: {tin_submitted/max(tin_total,1)*100:.1f}% — "
+            f"{'good' if tin_submitted/max(tin_total,1)>0.90 else 'LOW — many businesses not providing EIN'}.",
+            f"Verified rate of submitted: {tin_verified/max(tin_submitted,1)*100:.1f}%. "
+            "Target >75%. Track this weekly — declining trend = new applicant quality issue.",
+            f"Failure rate: {tin_failed/max(tin_submitted,1)*100:.1f}% of submitted. "
+            "Failures = EIN-name mismatch per IRS. Primary causes: DBA vs legal name, recent rebranding.",
         ])
 
+    # ── IDV ────────────────────────────────────────────────────────────────────
+    with tab_idv:
+        if kyc is None:
+            st.info("IDV data not available (idv_status fact not found).")
+        else:
+            idv_total = len(kyc)
+            idv_status_counts = kyc["idv_status"].value_counts().reset_index()
+            idv_status_counts.columns = ["Status","Count"]
+            idv_status_counts["% of Total"] = (idv_status_counts["Count"]/idv_total*100).round(1).astype(str)+"%"
+            idv_status_counts["Meaning"] = idv_status_counts["Status"].map({
+                "SUCCESS":"✅ Identity confirmed — government ID + selfie matched",
+                "PENDING":"⏳ Session started, not completed",
+                "FAILED":"❌ ID rejected — mismatch, expired, or liveness fail",
+                "CANCELED":"🚫 User abandoned the IDV flow",
+                "EXPIRED":"⌛ Session expired before completion",
+                "UNKNOWN":"❓ Status unknown",
+            }).fillna("Unknown")
+
+            col_l,col_r = st.columns(2)
+            with col_l:
+                c_map = {"SUCCESS":"#22c55e","PENDING":"#f59e0b","FAILED":"#ef4444",
+                          "CANCELED":"#f97316","EXPIRED":"#64748b","UNKNOWN":"#94a3b8"}
+                fig = px.pie(idv_status_counts,names="Status",values="Count",
+                             color="Status",color_discrete_map=c_map,hole=0.5,
+                             title="IDV Status Distribution (Plaid)")
+                st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+            with col_r:
+                styled_table(idv_status_counts, color_col="Status",
+                             palette={k.lower():v for k,v in c_map.items()})
+
+            # Match results
+            st.markdown("#### Identity Match Results")
+            match_cols = [("name_match","Name"),("address_match","Address"),("tin_match_ok","TIN")]
+            results = []
+            for col,label in match_cols:
+                if col in kyc.columns:
+                    vc = kyc[col].value_counts()
+                    n = len(kyc)
+                    results.append({"Field":label,
+                                    "✅ Success":f"{vc.get('success',0):,} ({vc.get('success',0)/n*100:.0f}%)",
+                                    "❌ Failure":f"{vc.get('failure',0):,} ({vc.get('failure',0)/n*100:.0f}%)",
+                                    "⚫ Missing":f"{vc.get('none',0):,} ({vc.get('none',0)/n*100:.0f}%)"})
+            if results:
+                styled_table(pd.DataFrame(results))
+
+            analyst_card("IDV Analysis", [
+                f"Pass rate: {int(kyc['idv_passed'].sum())/max(idv_total,1)*100:.1f}%. Target >65%.",
+                "FAILED IDV: most common causes are expired document, selfie mismatch, or unsupported ID type.",
+                "PENDING > 48h: follow up — session likely abandoned. Trigger reminder email.",
+                "CANCELED/EXPIRED combined > 15%: user experience issue in the IDV flow.",
+            ])
+
+    # ── Cross-Analysis ─────────────────────────────────────────────────────────
     with tab_cross:
-        st.markdown("#### 🔗 Cross-Field Analysis — TIN vs Entity Type vs State")
+        st.markdown("#### 🔗 SOS × TIN × IDV Cross-Analysis")
+        flag("Cross-analysis reveals combinations that are individually acceptable "
+             "but suspicious together. These patterns require human review.", "blue")
 
-        # TIN by entity type
-        entity_tin = df.groupby("entity_type").agg(
-            total=("business_id","count"),
-            verified=("tin_match_boolean","sum"),
-            failure=("tin_match_status",lambda x:(x=="failure").sum()),
-            no_tin=("tin_submitted",lambda x:(~x).sum()),
-        ).reset_index()
-        entity_tin["Verified %"] = (entity_tin["verified"]/entity_tin["total"]*100).round(1)
-        entity_tin["Failure %"]  = (entity_tin["failure"]/entity_tin["total"]*100).round(1)
-        entity_tin["No TIN %"]   = (entity_tin["no_tin"]/entity_tin["total"]*100).round(1)
+        # Merge sos + tin on business_id
+        merged = sos.merge(tin[["business_id","tin_match_boolean","tin_match_status"]],
+                           on="business_id", how="inner")
 
-        col_l, col_r = st.columns(2)
-        with col_l:
-            fig = px.bar(entity_tin,x="entity_type",y="Verified %",
-                         color="Verified %",color_continuous_scale="RdYlGn",
-                         title="TIN Verified Rate by Entity Type")
-            fig.update_layout(coloraxis_showscale=False)
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            fig2 = px.scatter(entity_tin,x="Failure %",y="No TIN %",
-                              size="total",text="entity_type",color="Verified %",
-                              color_continuous_scale="RdYlGn",
-                              title="Failure % vs No TIN % by Entity Type")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+        # Quadrant analysis
+        merged["SOS Status"] = merged["active"].map({True:"Active",False:"Inactive"})
+        merged["TIN Status"] = merged["tin_match_boolean"].map({True:"Verified",False:"Not Verified"})
+        cross = pd.crosstab(merged["SOS Status"],merged["TIN Status"])
+        fig = go.Figure(go.Heatmap(
+            z=cross.values,x=cross.columns.tolist(),y=cross.index.tolist(),
+            colorscale="Blues",text=cross.values,texttemplate="%{text}",
+            hovertemplate="SOS: %{y}<br>TIN: %{x}<br>Count: %{z}",
+        ))
+        fig.update_layout(title="SOS Active × TIN Verified (Cross-tabulation)")
+        st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
 
-        st.markdown("#### 📋 TIN Performance by Entity Type")
-        styled_table(entity_tin.rename(columns={"entity_type":"Entity Type","total":"# Businesses",
-                                                  "verified":"# Verified","failure":"# Failed"}))
+        # Risk quadrant interpretation
+        try:
+            active_verified = int(cross.loc["Active","Verified"])
+            active_unverif  = int(cross.loc["Active","Not Verified"])
+            inactive_verif  = int(cross.loc["Inactive","Verified"])
+            inactive_unverif= int(cross.loc["Inactive","Not Verified"])
+        except Exception:
+            active_verified=active_unverif=inactive_verif=inactive_unverif=0
 
-        # TIN by state
-        state_tin = df.groupby("state").agg(
-            total=("business_id","count"),
-            verified=("tin_match_boolean","sum"),
-        ).reset_index()
-        state_tin["Verified %"] = (state_tin["verified"]/state_tin["total"]*100).round(1)
-        state_tin = state_tin.sort_values("Verified %")
+        c1,c2,c3,c4 = st.columns(4)
+        with c1: kpi("✅ Active + TIN Verified",f"{active_verified:,}","Cleanest profile","#22c55e")
+        with c2: kpi("⚠️ Active + TIN Unverified",f"{active_unverif:,}","Registry OK, TIN gap","#f59e0b")
+        with c3: kpi("⚠️ Inactive + TIN Verified",f"{inactive_verif:,}","Inactive entity risk","#f97316")
+        with c4: kpi("🚨 Inactive + TIN Unverified",f"{inactive_unverif:,}","Highest risk combination","#ef4444")
 
-        fig3 = px.bar(state_tin,x="state",y="Verified %",color="Verified %",
-                      color_continuous_scale="RdYlGn",
-                      title="TIN Verified Rate by State")
-        fig3.add_hline(y=70,line_dash="dash",line_color="#f59e0b",annotation_text="70% target")
-        st.plotly_chart(dark_chart_layout(fig3),use_container_width=True)
-
-        cross_box("TIN Cross-Analysis", [
-            "If Sole Proprietors have low TIN verification: they often use SSN instead of EIN. "
-            "Middesk may not match SSN-based TINs the same way.",
-            "If Corporations have high failure: may indicate name mismatch between DBA and legal name. "
-            "The TIN (EIN) is registered under the legal name, not the DBA.",
-            "States with low TIN verified %: check if these states have different filing patterns "
-            "or if Middesk's IRS verification coverage varies by state.",
-            "Middesk 'none' + high failure rate = businesses not being verified by ANY source. "
-            "These are the highest-risk unverified businesses.",
+        cross_box("SOS × TIN Cross-Analysis Insights", [
+            f"Inactive + TIN Unverified ({inactive_unverif:,}): entity cannot legally operate AND has no IRS match. "
+            "Strongest combined risk signal in the KYB dataset. Hard stop recommended.",
+            f"Active + TIN Unverified ({active_unverif:,}): registry OK but EIN issue. "
+            "Common causes: DBA name mismatch, SSN submitted instead of EIN, or recently changed name.",
+            f"Inactive + TIN Verified ({inactive_verif:,}): EIN matches but entity is inactive. "
+            "Verify if inactive = grace period (not yet dissolved) or = administratively dissolved.",
         ])
 
-    with tab_inconsist:
-        st.markdown("#### ⚠️ Inconsistency & Anomaly Detection")
+        # Vendor confidence vs TIN outcome
+        merged["Avg Vendor Conf"] = (merged["middesk_conf"]+merged["oc_conf"])/2
+        fig2 = px.box(merged,x="TIN Status",y="Avg Vendor Conf",color="TIN Status",
+                      color_discrete_map={"Verified":"#22c55e","Not Verified":"#ef4444"},
+                      title="Vendor Confidence vs TIN Verification Outcome")
+        fig2.add_hline(y=0.50,line_dash="dash",line_color="#f59e0b",annotation_text="Threshold 0.50")
+        st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
 
-        inc_df = df[(df["tin_match_boolean"]) & (df["tin_match_status"]!="success")]
-        no_tin_verified = df[(~df["tin_submitted"]) & (df["tin_match_boolean"])]
-        middesk_fail_tin_ok = df[(df["middesk_tin_task"]=="failure") & (df["tin_match_boolean"])]
-        no_middesk_high_conf = df[(df["middesk_tin_task"]=="none") & (df["tin_match_boolean"])]
-
-        anomaly_flags(df, [
-            (inc_df, "tin_match_boolean=true but status≠'success'", "red"),
-            (no_tin_verified, "No TIN submitted but tin_match_boolean=true", "red"),
-            (middesk_fail_tin_ok, "Middesk TIN task=failure but tin_match_boolean=true", "amber"),
-            (no_middesk_high_conf, "No Middesk task but TIN verified (Trulioo fallback only)", "amber"),
+        analyst_card("Cross-Analysis Insight", [
+            "Businesses with low vendor confidence AND failed TIN are the strongest combined risk signal.",
+            "High vendor confidence + failed TIN: entity exists (registry confirmed) but EIN is wrong. "
+            "Most likely cause: business submitted incorrect EIN. Low fraud risk, high data quality issue.",
+            "Low vendor confidence + passed TIN: EIN matches but no registry confirmation. "
+            "Could be very new incorporation not yet in bulk data. Wait 4-6 weeks and re-check.",
         ])
 
-        if len(inc_df)>0:
-            st.markdown("##### Records with boolean/status mismatch:")
-            styled_table(inc_df[["business_id","tin_match_boolean","tin_match_status",
-                                   "middesk_tin_task","tin_submitted","entity_type"]].head(20))
+    # ── Vendors ────────────────────────────────────────────────────────────────
+    with tab_vendors:
+        st.markdown("#### 📡 Vendor Match Rate Tracking")
+        flag("Track match rates weekly. Sudden drops signal data freshness issues "
+             "or entity-matching model degradation.", "blue")
 
-        if len(middesk_fail_tin_ok)>0:
-            st.markdown("##### Middesk failed but TIN shown as verified:")
-            st.markdown("*These businesses have Middesk TIN task=failure but tin_match_boolean=true. "
-                        "This means Trulioo BusinessRegistrationNumber comparison returned 'success' "
-                        "and overrode the Middesk failure via the Fact Engine winner rules.*")
-            styled_table(middesk_fail_tin_ok[["business_id","tin_match_status","middesk_tin_task",
-                                               "has_trulioo","entity_type","state"]].head(20))
+        VENDORS = {
+            "Middesk":("middesk_conf","#f59e0b",0.50,"pid=16,w=2.0","US SOS live query"),
+            "OC":     ("oc_conf",     "#3B82F6",0.50,"pid=23,w=0.9","Global registry DB"),
+            "ZoomInfo":("zi_conf",    "#8B5CF6",0.50,"pid=24,w=0.8","Redshift bulk data"),
+            "Equifax": ("efx_conf",   "#22c55e",0.50,"pid=17,w=0.7","Redshift bulk data"),
+            "Trulioo": ("trulioo_conf","#ec4899",0.40,"pid=38,w=0.8","International/PSC"),
+        }
+        stats = []
+        for name,(col,color,thr,pid,src) in VENDORS.items():
+            if col in sos.columns:
+                v = sos[col]
+                mr = (v>thr).mean()*100
+                stats.append({"Vendor":name,"PID/Weight":pid,"Source":src,
+                               "Match Rate %":f"{mr:.1f}%","Avg Conf":f"{v.mean():.3f}",
+                               "Zero (no match) %":f"{(v==0).mean()*100:.1f}%",
+                               "P75 Conf":f"{v.quantile(0.75):.3f}",
+                               "Status":"✅ OK" if mr>60 else ("⚠️ Watch" if mr>40 else "❌ Low")})
+        if stats:
+            sdf = pd.DataFrame(stats)
+            styled_table(sdf,color_col="Status",
+                         palette={"✅ ok":"#22c55e","⚠️ watch":"#f59e0b","❌ low":"#ef4444"})
 
-    with tab_lineage:
-        lrow("tin_submitted","rds_warehouse_public.facts","Middesk BEV / applicant form",
-             "Masked TIN. name='tin_submitted'")
-        lrow("tin","rds_warehouse_public.facts","Middesk BEV / OC / Canada Open",
-             "Unmasked EIN. name='tin'")
-        lrow("tin_match","rds_warehouse_public.facts","Middesk review task 'tin' / Trulioo",
-             "Object {status,message}. status: success/failure/pending")
-        lrow("tin_match_boolean","rds_warehouse_public.facts","Calculated from tin_match",
-             "true IFF tin_match.status === 'success' — L488–490 kyb/index.ts")
-        st.code("""SELECT name,
-       JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,
-       JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS vendor_pid,
-       JSON_EXTRACT_PATH_TEXT(value,'source','confidence')  AS confidence,
-       received_at
-FROM rds_warehouse_public.facts
-WHERE business_id = 'YOUR-UUID'
-  AND name IN ('tin','tin_match','tin_match_boolean','tin_submitted');""", language="sql")
+            col_l,col_r = st.columns(2)
+            with col_l:
+                mr_df = pd.DataFrame([{"Vendor":r["Vendor"],
+                                        "Match Rate":float(r["Match Rate %"].rstrip("%"))}
+                                       for r in stats])
+                fig = px.bar(mr_df,x="Vendor",y="Match Rate",color="Vendor",
+                             color_discrete_sequence=["#f59e0b","#3B82F6","#8B5CF6","#22c55e","#ec4899"],
+                             title="Vendor Match Rates")
+                fig.add_hline(y=60,line_dash="dash",line_color="#f59e0b",annotation_text="60% watch")
+                fig.update_layout(showlegend=False,yaxis=dict(range=[0,100]))
+                st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+            with col_r:
+                fig2 = go.Figure()
+                for name,(col,color,_,_,_) in VENDORS.items():
+                    if col in sos.columns:
+                        fig2.add_trace(go.Box(y=sos[col],name=name,marker_color=color,
+                                              fillcolor="rgba(0,0,0,0)"))
+                st.plotly_chart(dark_chart_layout(fig2,"Vendor Confidence Distribution"),
+                                use_container_width=True)
+
+    # ── Data Quality Checks ────────────────────────────────────────────────────
+    with tab_dq:
+        st.markdown("#### 🔬 Registry & Identity Data Quality Checks")
+        st.markdown("*Systematic, automated checks replacing manual QA processes.*")
+
+        checks = [
+            ("SOS Active rate > 95%",
+             sos_active_rate>95, f"{sos_active_rate:.1f}%",
+             "Check for administratively dissolved entities still applying."),
+            ("SOS Name match rate > 90%",
+             (sos_matched_rate or 0)>90,
+             f"{sos_matched_rate:.1f}%" if sos_matched_rate else "N/A",
+             "Low rate = name normalisation failures between submitted name and registry."),
+            ("No multi-domain SOS coverage gaps (Middesk+OC)",
+             middesk_gap < biz*0.05,
+             f"{middesk_gap:,} ({middesk_gap/max(biz,1)*100:.1f}%)",
+             "OC matches but Middesk doesn't: check platform_id=16 in request_response."),
+            ("TIN submission > 90%",
+             tin_submitted/max(tin_total,1)>0.90,
+             f"{tin_submitted/max(tin_total,1)*100:.1f}%",
+             "Low submission rate: TIN field may not be required or form is skipped."),
+            ("TIN success > 70% of submitted",
+             tin_verified/max(tin_submitted,1)>0.70,
+             f"{tin_verified/max(tin_submitted,1)*100:.1f}%",
+             "Low success: EIN-name mismatch. Check for DBA vs legal name confusion."),
+            ("TIN failure < 20% of submitted",
+             tin_failed/max(tin_submitted,1)<0.20,
+             f"{tin_failed/max(tin_submitted,1)*100:.1f}%",
+             "High failure: wrong EIN format, recent name change, or fraud signal."),
+            ("No TIN boolean/status inconsistency",
+             len(tin[tin["tin_match_boolean"]&(tin["tin_match_status"]!="success")])==0,
+             f"{len(tin[tin['tin_match_boolean']&(tin['tin_match_status']!='success')]):,}",
+             "Any count > 0 is a data integrity bug in kyb/index.ts L488–490."),
+            ("No entity with zero vendor confirmation",
+             both_no_match==0,
+             f"{both_no_match:,}",
+             "Middesk=0 AND OC=0 = completely unconfirmed. Route to manual underwriting."),
+        ]
+        rows = [{"Check":label,"Result":val,"Status":"✅ PASS" if ok else "❌ FAIL","Action":action}
+                for label,ok,val,action in checks]
+        styled_table(pd.DataFrame(rows),color_col="Status",
+                     palette={"✅ pass":"#22c55e","❌ fail":"#ef4444"})
+
+        pass_n = sum(1 for _,ok,_,_ in checks if ok)
+        flag(f"{pass_n}/{len(checks)} identity & registry checks passing. "
+             f"{'✅ All clear' if pass_n==len(checks) else f'❌ {len(checks)-pass_n} checks failed — see actions above.'}",
+             "green" if pass_n==len(checks) else "red")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3 — NAICS / MCC
+# SECTION 3 — CLASSIFICATION
 # ═══════════════════════════════════════════════════════════════════════════════
-elif section == "3️⃣  NAICS / MCC":
+elif section == "🏭 Classification":
     sh("NAICS / MCC Classification",
-       "naics_code · mcc_code · fallback 561499 analysis · vendor source breakdown · consistency","🏭")
+       "naics_code · mcc_code · 561499 fallback · vendor source breakdown · "
+       "entity-type cross-analysis · data quality checks", "🏭")
 
-    df = get_section_data("naics", record_limit)
-    total = len(df); fallbacks = df["is_fallback"].sum(); real = total-fallbacks
-    avg_conf = df[~df["is_fallback"]]["naics_confidence"].mean()
-    top_src  = df.groupby("naics_source").size().idxmax()
-    ai_wins  = (df["naics_source"]=="ai").sum()
+    with st.spinner("Loading NAICS data…"):
+        naics = get_section_data("naics", record_limit)
+
+    total = len(naics); fallbacks = int(naics["is_fallback"].sum()); real = total-fallbacks
+    top_src = naics.groupby("naics_source").size().idxmax() if "naics_source" in naics.columns else "unknown"
+    ai_wins = int((naics["naics_source"]=="ai").sum()) if "naics_source" in naics.columns else 0
 
     c1,c2,c3,c4,c5 = st.columns(5)
     with c1: kpi("Total",f"{total:,}","","#3B82F6")
-    with c2: kpi("Real NAICS",f"{real:,}",f"{real/total*100:.0f}%","#22c55e")
-    with c3: kpi("Fallback 561499 ⚠️",f"{fallbacks:,}",f"{fallbacks/total*100:.0f}%","#ef4444")
-    with c4: kpi("Avg Confidence",f"{avg_conf:.3f}","excl. fallbacks","#f59e0b")
-    with c5: kpi("AI Wins",f"{ai_wins:,}",f"{ai_wins/total*100:.0f}% (last resort)","#f97316")
+    with c2: kpi("Real NAICS",f"{real:,}",f"{real/total*100:.1f}%","#22c55e")
+    with c3: kpi("Fallback 561499",f"{fallbacks:,}",f"{fallbacks/total*100:.1f}%",
+                 "#ef4444" if fallbacks/total>0.10 else "#f59e0b")
+    with c4: kpi("AI Wins",f"{ai_wins:,}",f"{ai_wins/total*100:.1f}% (last resort)","#f97316")
+    with c5: kpi("Top Source",top_src,"winning vendor","#8B5CF6")
 
     if fallbacks/total>0.10:
-        flag(f"{fallbacks/total*100:.0f}% fallback rate exceeds 10% threshold. "
+        flag(f"{fallbacks/total*100:.1f}% NAICS fallback rate > 10%. "
              "Root cause: entity matching failed → AI fires with name+address only → 561499.", "red")
 
-    tab_dist, tab_src, tab_mcc, tab_fb, tab_cross, tab_lineage = st.tabs([
-        "📊 Code Distribution","📡 Source Analysis","💳 MCC","⚠️ 561499 Root Cause","🔗 Cross-Analysis","🔍 Lineage"
+    tab_dist, tab_src, tab_fb, tab_cross, tab_dq = st.tabs([
+        "📊 Code Distribution","📡 Source Analysis","⚠️ 561499 Root Cause","🔗 Cross-Analysis","🔬 Quality"
     ])
 
     with tab_dist:
-        col_l, col_r = st.columns(2)
+        col_l,col_r = st.columns(2)
         with col_l:
-            nc = df.groupby(["naics_code","naics_label"]).size().reset_index(name="Count")
+            nc = naics.groupby(["naics_code","naics_label"]).size().reset_index(name="Count")
             nc["Label"] = nc["naics_code"]+" — "+nc["naics_label"]
             nc["Is Fallback"] = nc["naics_code"]=="561499"
             nc = nc.sort_values("Count",ascending=False).head(12)
@@ -1852,2238 +1687,514 @@ elif section == "3️⃣  NAICS / MCC":
             fig.update_layout(yaxis=dict(autorange="reversed"),height=420)
             st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
         with col_r:
-            fig2 = px.histogram(df[~df["is_fallback"]],x="naics_confidence",nbins=25,
+            fig2 = px.histogram(naics[~naics["is_fallback"]],x="naics_confidence",nbins=25,
                                 color_discrete_sequence=["#3B82F6"],
                                 title="NAICS Confidence (excl. fallbacks)")
-            fig2.add_vline(x=0.50,line_dash="dash",line_color="#f59e0b",annotation_text="Min target 0.50")
+            fig2.add_vline(x=0.50,line_dash="dash",line_color="#f59e0b",annotation_text="Min 0.50")
             fig2.add_vline(x=0.70,line_dash="dash",line_color="#22c55e",annotation_text="Good 0.70")
             st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
 
-        st.markdown("#### 📋 Full NAICS Code Distribution Table")
-        full_nc = df.groupby(["naics_code","naics_label","is_fallback"]).agg(
+        st.markdown("#### 📋 Full Code Distribution")
+        nc_full = naics.groupby(["naics_code","naics_label","is_fallback"]).agg(
             count=("business_id","count"),
-            avg_conf=("naics_confidence","mean"),
-            sources=("naics_source",lambda x:x.value_counts().index[0]),
-        ).reset_index().sort_values("count",ascending=False)
-        full_nc["% of Total"] = (full_nc["count"]/total*100).round(1).astype(str)+"%"
-        full_nc["Avg Conf"] = full_nc["avg_conf"].round(3)
-        full_nc["⚠️ Fallback"] = full_nc["is_fallback"].map({True:"🚨 YES",False:"✅ No"})
-        styled_table(full_nc[["naics_code","naics_label","count","% of Total","Avg Conf","sources","⚠️ Fallback"]],
-                     color_col="⚠️ Fallback",palette={"🚨 yes":"#ef4444","✅ no":"#22c55e"})
-
-        analyst_card("NAICS Code Distribution", [
-            f"561499 (All Other Business Support Services) appears {fallbacks:,} times ({fallbacks/total*100:.0f}%). "
-            "This is the catch-all fallback code used when no specific code can be determined.",
-            f"Top non-fallback code indicates the industry mix of your customer base.",
-            f"Confidence below 0.50 on real codes suggests borderline matches — "
-            "the Fact Engine selected this code but it may be wrong.",
-            "AI as the winning source for non-fallback codes: AI enrichment selected a valid NAICS "
-            "code from GPT analysis. Verify with actual business description.",
-        ])
+            avg_conf=("naics_confidence","mean")).reset_index()
+        nc_full["% of Total"] = (nc_full["count"]/total*100).round(1).astype(str)+"%"
+        nc_full["Avg Conf"] = nc_full["avg_conf"].round(3)
+        nc_full["⚠️"] = nc_full["is_fallback"].map({True:"🚨 Fallback",False:"✅"})
+        styled_table(nc_full[["naics_code","naics_label","count","% of Total","Avg Conf","⚠️"]].sort_values("count",ascending=False),
+                     color_col="⚠️",palette={"🚨 fallback":"#ef4444","✅":"#22c55e"})
 
     with tab_src:
-        src_stats = df.groupby("naics_source").agg(
-            count=("business_id","count"),
-            fallback_count=("is_fallback","sum"),
-            avg_conf=("naics_confidence","mean"),
-            p75_conf=("naics_confidence",lambda x:x.quantile(0.75)),
-        ).reset_index()
-        src_stats["% of Total"]  = (src_stats["count"]/total*100).round(1)
-        src_stats["Fallback %"]  = (src_stats["fallback_count"]/src_stats["count"]*100).round(1)
-        src_stats["Avg Conf"]    = src_stats["avg_conf"].round(3)
-        src_stats["P75 Conf"]    = src_stats["p75_conf"].round(3)
+        if "naics_source" in naics.columns:
+            src = naics.groupby("naics_source").agg(
+                count=("business_id","count"),
+                fallback_pct=("is_fallback","mean"),
+                avg_conf=("naics_confidence","mean")).reset_index()
+            src["Fallback %"] = (src["fallback_pct"]*100).round(1)
+            src["Avg Conf"] = src["avg_conf"].round(3)
+            src["% of Total"] = (src["count"]/total*100).round(1).astype(str)+"%"
 
-        col_l, col_r = st.columns(2)
-        with col_l:
-            fig = px.bar(src_stats,x="naics_source",y="count",color="Fallback %",
-                         color_continuous_scale="RdYlGn_r",
-                         title="Winning Source Frequency (color=fallback %)")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            fig2 = px.scatter(src_stats,x="count",y="Avg Conf",size="count",
-                              text="naics_source",color="Fallback %",
-                              color_continuous_scale="RdYlGn_r",
-                              title="Source Volume vs Avg Confidence")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+            col_l,col_r = st.columns(2)
+            with col_l:
+                fig = px.bar(src,x="naics_source",y="count",color="Fallback %",
+                             color_continuous_scale="RdYlGn_r",
+                             title="Source Frequency (color=fallback%)")
+                st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+            with col_r:
+                fig2 = px.scatter(src,x="count",y="Avg Conf",size="count",
+                                  text="naics_source",color="Fallback %",
+                                  color_continuous_scale="RdYlGn_r",
+                                  title="Source Volume vs Avg Confidence")
+                st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
 
-        st.markdown("#### 📋 Source Performance Table")
-        styled_table(src_stats[["naics_source","count","% of Total","Fallback %","Avg Conf","P75 Conf"]])
+            styled_table(src[["naics_source","count","% of Total","Avg Conf","Fallback %"]])
 
-        st.markdown("#### Source Priority & Weight Reference")
-        weights = [
-            ("equifax",       "pid=17","w=0.7","efx_primnaicscode from warehouse.equifax_us_latest"),
-            ("zoominfo",      "pid=24","w=0.8","zi_c_naics6 from zoominfo.comp_standard_global"),
-            ("opencorporates","pid=23","w=0.9","industry_code_uids → parse 'us_naics-XXXXXX'"),
-            ("trulioo",       "pid=38","w=0.7","extractStandardizedIndustriesFromTruliooResponse"),
-            ("businessDetails","pid=N/A","w=0.2","applicant-submitted naics_code (6-digit validated)"),
-            ("ai",            "pid=31","w=0.1","AINaicsEnrichment.response.naics_code — LAST RESORT"),
-        ]
-        for src, pid, w, desc in weights:
-            color = "#ef4444" if src=="ai" else ("#f59e0b" if src=="businessDetails" else "#3B82F6")
-            st.markdown(f"""<div class="lineage-row">
-              <span class="lk" style="color:{color}">{src}</span>
-              <span style="color:#64748b">{pid} · {w}</span>
-              <span style="color:#94A3B8;font-size:.75rem">{desc}</span>
-            </div>""", unsafe_allow_html=True)
-
-        if ai_wins>0:
-            flag(f"AI is the winning source for {ai_wins:,} businesses ({ai_wins/total*100:.0f}%). "
-                 "AI has weight=0.1 — it should only win when all other vendors have no NAICS signal. "
-                 "High AI win rate = vendor entity matching is failing broadly.", "amber")
-
-    with tab_mcc:
-        mcc_stats = df.groupby("mcc_code").agg(
-            count=("business_id","count"),
-            is_fallback=("is_fallback","max"),
-            naics_codes=("naics_code",lambda x:x.value_counts().index[0]),
-            avg_conf=("naics_confidence","mean"),
-        ).reset_index().sort_values("count",ascending=False)
-        mcc_stats["Is Fallback"] = mcc_stats["mcc_code"]=="5614"
-        mcc_stats["% of Total"] = (mcc_stats["count"]/total*100).round(1).astype(str)+"%"
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            fig = px.bar(mcc_stats.head(12),x="mcc_code",y="count",
-                         color="Is Fallback",
-                         color_discrete_map={True:"#ef4444",False:"#8B5CF6"},
-                         title="Top 12 MCC Codes (5614=fallback)")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            fig2 = px.pie(mcc_stats.head(8),names="mcc_code",values="count",hole=0.45,
-                          title="MCC Code Distribution (top 8)")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        st.markdown("#### 📋 MCC Distribution Table")
-        styled_table(mcc_stats[["mcc_code","count","% of Total","naics_codes","Is Fallback"]].rename(
-            columns={"naics_codes":"Top NAICS Code","count":"# Businesses"}),
-            color_col="Is Fallback",palette={True:"#ef4444",False:"#22c55e"})
-
-        flag("MCC 5614 = fallback when NAICS 561499 is assigned. "
-             "mcc_code = mcc_code_found (from AI direct) ?? mcc_code_from_naics (via rel_naics_mcc lookup). "
-             "Source: businessDetails/index.ts L376–387.", "blue")
+            if ai_wins/total > 0.10:
+                flag(f"AI is the winning source for {ai_wins:,} businesses ({ai_wins/total*100:.0f}%). "
+                     "AI weight=0.1 — only wins when all other vendors have no NAICS. "
+                     "High AI win rate = vendor entity matching is broadly failing.", "amber")
 
     with tab_fb:
-        st.markdown("#### 🚨 561499 Root-Cause Analysis (Production Data)")
+        st.markdown("#### 🚨 561499 Root-Cause Analysis")
         gaps = [
-            ("G1","Entity matching fails (ZI/EFX/OC all null)",
-             f"{int(fallbacks*0.99):,}","Both A & B",
-             "XGBoost entity-matching model finds no vendor record above threshold. "
-             "Likely: new registrations not in bulk data, micro-businesses, ambiguous names, address failures."),
-            ("G2","AI web search not used (no website URL)",
-             f"~{int(fallbacks*0.20):,} est.","Pipeline A only",
-             "web_search in AI prompt only enabled when params.website is set. "
-             "Zero-vendor businesses with no website → AI cannot search → 561499."),
-            ("G3","No name keyword classification in AI prompt",
-             f"~{int(fallbacks*0.30):,} est.","Pipeline A only",
-             "AI prompt: 'return 561499 if no evidence'. Does not check name keywords. "
-             "'Lisa Nail Salon' → should be 812113, gets 561499."),
-            ("G4","AI confidence metadata not stored for fallbacks",
-             f"{fallbacks:,}","Pipeline A",
-             "ai_naics_enrichment_metadata fact never written when AI returns 561499. "
-             "Cannot monitor AI quality for these cases."),
-            ("G5","Fallback MCC description shown to customers",
-             f"{fallbacks:,}","Pipeline A",
-             "mcc_description='Fallback MCC per instructions...' — internal debug text visible in Admin Portal."),
-            ("G6","Pipeline B also null for these businesses",
-             f"{fallbacks:,}","Pipeline B",
-             "zi_match_confidence=0 AND efx_match_confidence=0 → customer_files.primary_naics_code=NULL."),
+            ("G1","Entity matching fails (ZI/EFX/OC all null)",f"{int(fallbacks*0.99):,}","Both A & B",
+             "XGBoost entity-matching finds no vendor record above threshold.","#ef4444"),
+            ("G2","AI web search not used (no website URL)",f"~{int(fallbacks*0.20):,} est.","Pipeline A",
+             "web_search blocked in getPrompt() when params.website is null.","#f59e0b"),
+            ("G3","No name keyword classification in AI prompt",f"~{int(fallbacks*0.30):,} est.","Pipeline A",
+             "AI prompt: 'return 561499 if no evidence'. Doesn't check name keywords.","#f59e0b"),
+            ("G4","AI metadata not stored for fallbacks",f"{fallbacks:,}","Pipeline A",
+             "ai_naics_enrichment_metadata fact never written when AI returns 561499.","#ef4444"),
+            ("G5","Fallback MCC description shown to customers",f"{fallbacks:,}","Pipeline A",
+             "mcc_description='Fallback MCC per instructions…' visible in Admin Portal.","#f97316"),
+            ("G6","Pipeline B also null for same businesses",f"{fallbacks:,}","Pipeline B",
+             "zi_match_confidence=0 AND efx_match_confidence=0 → primary_naics_code=NULL.","#ef4444"),
         ]
-        for gid, title, affected, pipeline, desc in gaps:
-            color = "#ef4444" if gid in ("G1","G4","G5","G6") else "#f59e0b"
+        for gid,title,affected,pipeline,desc,color in gaps:
             st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
                 border-radius:8px;padding:10px 14px;margin:5px 0">
-              <span style="color:{color};font-weight:700">Gap {gid}</span>
-              <span style="color:#E2E8F0;font-weight:600;margin-left:8px">{title}</span>
-              <span style="color:#64748b;font-size:.74rem;margin-left:8px">{affected} · {pipeline}</span>
-              <div style="color:#94A3B8;font-size:.77rem;margin-top:4px">{desc}</div>
+              <span style="color:{color};font-weight:700">Gap {gid}: {title}</span>
+              <span style="color:#64748b;font-size:.73rem;margin-left:8px">{affected} · {pipeline}</span>
+              <div style="color:#94A3B8;font-size:.77rem;margin-top:3px">{desc}</div>
             </div>""", unsafe_allow_html=True)
 
-        rec_data = pd.DataFrame({
-            "Category": ["G3: Name keywords (~30%)","G2: Web search (~20%)","G6: Pipeline B fix",
-                          "G4: Metadata fix","G5: Description fix","Genuinely unclassifiable"],
-            "Est. Recoverable": [int(fallbacks*0.30),int(fallbacks*0.20),0,0,0,int(fallbacks*0.50)],
-            "Action Type": ["AI prompt fix","AI prompt fix","SQL rule fix",
-                            "Code change","Prompt fix","Accept 561499"],
+        rec_df = pd.DataFrame({
+            "Category":["G3: Name keywords","G2: Web search","G6: Pipeline B",
+                         "G4: Metadata fix","G5: Description","Genuinely unclassifiable"],
+            "Est. Recoverable":[int(fallbacks*0.30),int(fallbacks*0.20),0,0,0,int(fallbacks*0.50)],
+            "Action":["Fix AI prompt","Enable web_search","SQL rule fix",
+                       "Code change","Prompt fix","Accept 561499"],
         })
-        fig = px.bar(rec_data,x="Category",y="Est. Recoverable",color="Action Type",
-                     title="Estimated Recovery Potential by Gap")
+        fig = px.bar(rec_df,x="Category",y="Est. Recoverable",color="Action",
+                     title="Estimated Recovery Potential")
         st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
 
     with tab_cross:
-        st.markdown("#### 🔗 NAICS Cross-Analysis — Code vs Entity Type vs State")
-        et_naics = df.groupby(["entity_type","is_fallback"]).size().unstack(fill_value=0)
-        et_naics.columns = ["Real NAICS","Fallback 561499"]
-        et_naics["Fallback %"] = (et_naics["Fallback 561499"]/(et_naics.sum(axis=1))*100).round(1)
-        et_naics = et_naics.reset_index()
+        st.markdown("#### 🔗 NAICS Cross-Analysis")
+        if "entity_type" in naics.columns:
+            et = naics.groupby(["entity_type","is_fallback"]).size().unstack(fill_value=0).reset_index()
+            et.columns = ["Entity Type","Real NAICS","Fallback"]
+            et["Fallback %"] = (et["Fallback"]/(et["Real NAICS"]+et["Fallback"])*100).round(1)
+            col_l,col_r = st.columns(2)
+            with col_l:
+                fig = px.bar(et,x="entity_type",y="Fallback %",color="Fallback %",
+                             color_continuous_scale="RdYlGn_r",title="Fallback Rate by Entity Type")
+                st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+            with col_r:
+                styled_table(et)
 
-        col_l, col_r = st.columns(2)
-        with col_l:
-            fig = px.bar(et_naics,x="entity_type",y="Fallback %",
-                         color="Fallback %",color_continuous_scale="RdYlGn_r",
-                         title="Fallback Rate by Entity Type")
-            fig.add_hline(y=fallbacks/total*100,line_dash="dash",line_color="#3B82F6",
-                          annotation_text=f"Overall {fallbacks/total*100:.0f}%")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            st_naics = df.groupby(["state","is_fallback"]).size().unstack(fill_value=0).reset_index()
-            if True in st_naics.columns:
-                st_naics["Fallback %"] = (st_naics[True]/(st_naics[True]+st_naics.get(False,0))*100).round(1)
-            fig2 = px.bar(st_naics,x="state",y="Fallback %",
-                          color="Fallback %",color_continuous_scale="RdYlGn_r",
-                          title="Fallback Rate by State")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        st.markdown("##### 📋 Entity Type NAICS Performance")
-        styled_table(et_naics.rename(columns={"entity_type":"Entity Type"}))
-
-        cross_box("NAICS Cross-Analysis Insights", [
-            "Sole Proprietors often have higher fallback rates: they are micro-businesses "
-            "not in ZI/EFX bulk databases and may not have a formal web presence.",
-            "High fallback in specific states may indicate Redshift vendor data gaps "
-            "for that state's registry (OC coverage varies by jurisdiction).",
-            "If AI is winning for a non-fallback NAICS code: the AI correctly identified "
-            "the industry from the business name/website despite no vendor match.",
-            "Low-confidence real codes (<0.40) from AI: these should be reviewed. "
-            "The Fact Engine will pick AI if no other source exists (Rule 4: no min threshold).",
+        analyst_card("NAICS Classification Quality", [
+            f"Fallback rate {fallbacks/total*100:.1f}%: any rate above 10% is a concern. "
+            "Root cause is always entity-matching failure in Pipeline A.",
+            "561499 (All Other Business Support Services) is the catch-all when no specific "
+            "industry can be determined. It is a valid NAICS code but indicates data gaps.",
+            "AI winning source > 10% indicates vendor entity matching is failing broadly. "
+            "Check ZI/EFX/OC bulk data freshness in Redshift.",
         ])
 
-    with tab_lineage:
-        lrow("naics_code","rds_warehouse_public.facts","EFX/ZI/OC/SERP/Trulioo/AI",
-             "6-digit code. Fact Engine winner.")
-        lrow("mcc_code","rds_warehouse_public.facts","AI / rel_naics_mcc lookup",
-             "4-digit. From AI direct or NAICS→MCC mapping table.")
-        lrow("industry","rds_warehouse_public.facts","Calculated","2-digit prefix → core_business_industries")
-        lrow("naics_description","rds_warehouse_public.facts","core_naics_code lookup","Human label")
-        st.code("""SELECT name,
-       JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,
-       JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS vendor_pid,
-       JSON_EXTRACT_PATH_TEXT(value,'source','confidence')  AS confidence
-FROM rds_warehouse_public.facts
-WHERE business_id = 'YOUR-UUID'
-  AND name IN ('naics_code','mcc_code','industry','naics_description');""", language="sql")
+    with tab_dq:
+        st.markdown("#### 🔬 NAICS / MCC Quality Checks")
+        low_conf = int((naics["naics_confidence"]<0.40).sum()) if "naics_confidence" in naics.columns else 0
+        dq_checks = [
+            ("Fallback rate < 10%",  fallbacks/total<0.10,f"{fallbacks/total*100:.1f}%",
+             "Above 10%: entity-matching failing broadly"),
+            ("AI win rate < 10%",    ai_wins/total<0.10,  f"{ai_wins/total*100:.1f}%",
+             "AI at weight=0.1 should almost never win"),
+            ("Low conf (<0.40) < 20%",low_conf/total<0.20,f"{low_conf/total*100:.1f}%",
+             "Low confidence codes may be misclassified"),
+            ("No null NAICS codes",  naics["naics_code"].isna().sum()==0,
+             f"{naics['naics_code'].isna().sum()} nulls","Should be 0 — Fact Engine should always produce a value"),
+        ]
+        rows = [{"Check":l,"Result":v,"Status":"✅ PASS" if ok else "❌ FAIL","Action":a}
+                for l,ok,v,a in dq_checks]
+        styled_table(pd.DataFrame(rows),color_col="Status",
+                     palette={"✅ pass":"#22c55e","❌ fail":"#ef4444"})
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 4 — BANKING (GIACT)
+# SECTION 4 — RISK & SCORE
 # ═══════════════════════════════════════════════════════════════════════════════
-elif section == "4️⃣  Banking (Plaid/GIACT)":
-    sh("Banking — Plaid / GIACT",
-       "Source: rds_integration_data.* · Plaid bank accounts · GIACT verification · "
-       "processing volumes","🏦")
+elif section == "💰 Risk & Score":
+    sh("Risk & Score",
+       "Worth Score · score_decision · Due Diligence · watchlist · sanctions · PEP · "
+       "BK/judgments/liens · cross-analysis", "💰")
 
-    flag("Banking data is NOT stored in rds_warehouse_public.facts. "
-         "It is stored in dedicated RDS tables accessed via Redshift Spectrum: "
-         "rds_integration_data.rel_banking_verifications, bank_accounts, banking_balances. "
-         "Source: Plaid API → integration-service → RDS → Redshift Spectrum.", "blue")
+    with st.spinner("Loading Risk & Score data…"):
+        dd    = get_section_data("dd",    record_limit)
+        worth = get_section_data("worth", record_limit)
 
-    df = get_section_data("banking", record_limit)
-    if df is None:
-        # Show what was discovered and what failed
-        discovery = st.session_state.get("_banking_discovery", {})
-        banking_err = st.session_state.get("_banking_error", "")
-        db_err = st.session_state.get("_last_db_error","")
+    # ── Due Diligence KPIs ─────────────────────────────────────────────────────
+    biz_dd = dd["business_id"].nunique() if "business_id" in dd.columns else len(dd)
+    any_wl   = int((dd["watchlist_hits"]>0).sum()) if "watchlist_hits" in dd.columns else 0
+    any_sanc = int((dd["sanctions_hits"]>0).sum()) if "sanctions_hits" in dd.columns else 0
+    any_pep  = int((dd["pep_hits"]>0).sum()) if "pep_hits" in dd.columns else 0
+    any_am   = int((dd["adverse_media"]>0).sum()) if "adverse_media" in dd.columns else 0
+    any_bk   = int((dd["bk_hits"]>0).sum()) if "bk_hits" in dd.columns else 0
+    any_judg = int((dd["judgment_hits"]>0).sum()) if "judgment_hits" in dd.columns else 0
+    any_lien = int((dd["lien_hits"]>0).sum()) if "lien_hits" in dd.columns else 0
 
-        banking_err = st.session_state.get("_banking_error", "")
-        db_err      = st.session_state.get("_last_db_error","")
+    c1,c2,c3,c4,c5,c6,c7 = st.columns(7)
+    with c1: kpi("Watchlist Hits",f"{any_wl:,}",f"{any_wl/max(biz_dd,1)*100:.1f}%","#ef4444" if any_wl>0 else "#22c55e")
+    with c2: kpi("🚨 Sanctions",  f"{any_sanc:,}",f"{any_sanc/max(biz_dd,1)*100:.1f}%","#ef4444")
+    with c3: kpi("PEP Hits",      f"{any_pep:,}", f"{any_pep/max(biz_dd,1)*100:.1f}%","#f97316")
+    with c4: kpi("Adverse Media", f"{any_am:,}",  f"{any_am/max(biz_dd,1)*100:.1f}%","#f59e0b")
+    with c5: kpi("Bankruptcy",    f"{any_bk:,}",  f"{any_bk/max(biz_dd,1)*100:.1f}%","#8B5CF6")
+    with c6: kpi("Judgments",     f"{any_judg:,}",f"{any_judg/max(biz_dd,1)*100:.1f}%","#8B5CF6")
+    with c7: kpi("Liens",         f"{any_lien:,}",f"{any_lien/max(biz_dd,1)*100:.1f}%","#8B5CF6")
 
-        st.error("❌ `rds_integration_data.rel_banking_verifications` is not accessible from this connection.")
-        flag("NOTE: Federated external schemas (rds_*) do NOT appear in "
-             "information_schema.tables on Redshift Serverless. "
-             "They must be queried directly by their known name.", "amber")
-        if banking_err or db_err:
-            with st.expander("Show database error"):
-                st.code(banking_err or db_err, language=None)
+    if any_sanc>0:
+        flag(f"🚨 HARD STOP: {any_sanc:,} businesses have SANCTIONS hits. "
+             "Cannot auto-approve. Route to compliance immediately.", "red")
 
-        # Show what columns were actually discovered
-        verif_cols = st.session_state.get("_banking_verif_cols", [])
-        acct_cols  = st.session_state.get("_banking_acct_cols",  [])
-        if verif_cols:
-            st.success(f"✅ rel_banking_verifications columns: {', '.join(verif_cols)}")
-        if acct_cols:
-            st.success(f"✅ bank_accounts columns: {', '.join(acct_cols)}")
+    # Check if we have audit-only worth data
+    is_audit = worth is not None and "_source" in worth.columns and (worth["_source"]=="audit").all()
+    has_scores = worth is not None and not is_audit and "worth_score_850" in worth.columns
 
-        st.markdown("#### Confirmed working SQL (from your live queries):")
-        st.code("""-- ✅ CONFIRMED WORKING — verification status summary:
-SELECT
-    verification_status,
-    COUNT(*) AS accounts,
-    ROUND(COUNT(*)*100.0/SUM(COUNT(*)) OVER(), 2) AS pct
-FROM rds_integration_data.rel_banking_verifications
-GROUP BY verification_status
-ORDER BY accounts DESC;
--- Result: SUCCESS=23351 (99.94%), ERRORED=13 (0.06%)
-
--- ✅ Discover actual columns in each table (run these first):
-SELECT * FROM rds_integration_data.rel_banking_verifications LIMIT 1;
-SELECT * FROM rds_integration_data.bank_accounts LIMIT 1;
-
--- ⚠️ account_id column does NOT exist in rel_banking_verifications
--- To join, first check what the FK column is actually called:
-SELECT * FROM rds_integration_data.rel_banking_verifications LIMIT 1;
--- Then use the correct FK column name in your join
-
--- Processing history volumes:
-SELECT business_id,
-       JSON_EXTRACT_PATH_TEXT(general_data, 'monthly_volume') AS monthly_volume,
-       JSON_EXTRACT_PATH_TEXT(general_data, 'annual_volume')  AS annual_volume
-FROM rds_integration_data.data_processing_history
-LIMIT 5;
-
--- Average transaction size per business:
-SELECT dbit.business_id, AVG(bat.amount) AS avg_transaction_size
-FROM rds_integration_data.bank_account_transactions bat
-JOIN rds_integration_integrations.data_business_integrations_tasks dbit
-  ON bat.business_integration_task_id = dbit.id
-GROUP BY dbit.business_id
-LIMIT 10;""", language="sql")
-
-        st.markdown("#### Data flow:")
-        st.markdown("""
-```
-Plaid API
-  → integration-service/src/api/v1/modules/banking/banking.ts
-  → RDS (PostgreSQL):
-      integration_data.bank_accounts
-      integration_data.bank_account_transactions
-      integration_data.banking_balances
-      integration_data.rel_banking_verifications
-  → Redshift Spectrum (rds_integration_data schema)
-  → warehouse.worth_score_input_audit (cash flow for scoring)
-  → S3: businesses/{id}/banking/PLAID/asset_report.json
-```
-""")
-        analyst_card("Why GIACT coverage matters", [
-            "GIACT does NOT have complete coverage across America. "
-            "Many checking accounts (especially credit unions and community banks) cannot be verified.",
-            "Unverified accounts are tracked to set underwriter expectations — NOT a fraud signal.",
-            "GIACT response codes 11, 16, 17, 18 = 'Not yet available' = coverage gap.",
-            "When GIACT cannot verify, route to: Plaid balance verification or manual bank statement review.",
-        ])
-        st.stop()
-    total = len(df)
-    passed  = (df["account_status"]=="passed").sum()
-    failed  = (df["account_status"]=="failed").sum()
-    missing = (df["account_status"]=="missing").sum()
-    name_ok = (df["account_name_status"]=="passed").sum()
-    cont_ok = (df["contact_verification"]=="passed").sum()
-    gap_codes= df["verify_response_code"].isin([11,16,17,18]).sum()
-    no_bank = (~df["has_bank_account"]).sum()
-    all_pass= ((df["account_status"]=="passed")&(df["account_name_status"]=="passed")&(df["contact_verification"]=="passed")).sum()
-
-    c1,c2,c3,c4,c5,c6 = st.columns(6)
-    with c1: kpi("Account ✅",f"{passed:,}",f"{passed/total*100:.0f}%","#22c55e")
-    with c2: kpi("Account ❌",f"{failed:,}",f"{failed/total*100:.0f}%","#ef4444")
-    with c3: kpi("Account ⚠️",f"{missing:,}",f"{missing/total*100:.0f}%","#f59e0b")
-    with c4: kpi("Name ✅",   f"{name_ok:,}", f"{name_ok/total*100:.0f}%","#22c55e")
-    with c5: kpi("Contact ✅",f"{cont_ok:,}", f"{cont_ok/total*100:.0f}%","#22c55e")
-    with c6: kpi("All 3 ✅",  f"{all_pass:,}",f"{all_pass/total*100:.0f}%","#3B82F6")
-
-    if gap_codes>0:
-        flag(f"{gap_codes} businesses received GIACT coverage gap codes (11,16,17,18 = 'Not yet available'). "
-             "These are NOT application errors — GIACT simply has no data for these accounts. "
-             "Flag for manual review and consider alternative verification.", "amber")
-
-    tab_acct, tab_name, tab_contact, tab_cross, tab_codes, tab_lineage = st.tabs([
-        "🏦 Account Status","👤 Account Name","📞 Contact Verification",
-        "🔗 Cross-Analysis","📋 Code Reference","🔍 Lineage"
+    tab_dd, tab_risk_combo, tab_score, tab_audit, tab_dq_risk = st.tabs([
+        "🔍 Due Diligence","🔗 Risk Combinations","💰 Worth Score","📊 Score Audit","🔬 Quality"
     ])
 
-    with tab_acct:
-        # Distribution
-        vc_df = df.groupby("verify_response_code").agg(
-            count=("business_id","count"),
-            status=("account_status","first"),
-        ).reset_index()
-        vc_df["tooltip"] = vc_df["verify_response_code"].apply(
-            lambda c: GIACT_ACCOUNT_STATUS.get(c,("","Unknown"))[1])
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            ac = df["account_status"].value_counts().reset_index()
-            ac.columns = ["Status","Count"]
-            ac["Pct"] = (ac["Count"]/total*100).round(1).astype(str)+"%"
-            colors = {"passed":"#22c55e","failed":"#ef4444","missing":"#f59e0b"}
-            fig = px.pie(ac,names="Status",values="Count",color="Status",
-                         color_discrete_map=colors,hole=0.5,
-                         title="Account Status Distribution (gVerify)")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            vc_df["color"] = vc_df["status"].map(colors)
-            fig2 = px.bar(vc_df,x="verify_response_code",y="count",
-                          color="status",color_discrete_map=colors,
-                          hover_data=["tooltip"],
-                          title="verify_response_code Frequency (hover for meaning)")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        st.markdown("#### 📋 Response Code Detail Table")
-        vc_table = vc_df.copy()
-        vc_table["% of Total"] = (vc_table["count"]/total*100).round(1).astype(str)+"%"
-        vc_table["Meaning"] = vc_table["verify_response_code"].apply(
-            lambda c: GIACT_ACCOUNT_STATUS.get(c,("","Unknown"))[1])
-        vc_table = vc_table.rename(columns={"verify_response_code":"Code","count":"# Businesses","status":"Status"})
-        vc_table = vc_table.sort_values("# Businesses",ascending=False)
-        styled_table(vc_table[["Code","# Businesses","% of Total","Status","Meaning"]],
-                     color_col="Status",palette=colors)
-
-        analyst_card("Account Status Interpretation", [
-            f"Code 12 (Open/valid checking) and code 15 (savings) are the ideal outcomes. "
-            f"Combined passed rate: {passed/total*100:.0f}%.",
-            f"Code 6 ({(df['verify_response_code']==6).sum()} businesses): Routing number valid but "
-            "no data on the account. This is a GIACT database coverage issue, not a failed account.",
-            f"Codes 7/8 (risk-based decline/reject): these indicate GIACT's risk model flagged the account. "
-            "High rate = potential fraud signal.",
-            f"Coverage gap codes (11,16,17,18): {gap_codes} businesses. "
-            "GIACT cannot verify these accounts. Alternative: Plaid for direct bank account verification.",
-        ])
-        sanity_metrics([
-            ("Passed > 50%", passed/total>0.50, f"{passed/total*100:.0f}% passed"),
-            ("Coverage gaps < 15%", gap_codes/total<0.15, f"{gap_codes/total*100:.0f}% gap codes"),
-            ("No bank < 10%", no_bank/total<0.10, f"{no_bank/total*100:.0f}% no bank"),
-            ("All 3 checks pass > 40%", all_pass/total>0.40, f"{all_pass/total*100:.0f}% all green"),
-        ])
-
-    with tab_name:
-        ac_df = df.groupby("auth_response_code").agg(
-            count=("business_id","count"),
-            name_status=("account_name_status","first"),
-        ).reset_index()
-        ac_df["name_meaning"] = ac_df["auth_response_code"].apply(
-            lambda c: GIACT_ACCOUNT_NAME.get(c,("","Unknown"))[1])
-        colors = {"passed":"#22c55e","failed":"#ef4444","missing":"#f59e0b"}
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            nc = df["account_name_status"].value_counts().reset_index()
-            nc.columns = ["Status","Count"]
-            fig = px.pie(nc,names="Status",values="Count",color="Status",
-                         color_discrete_map=colors,hole=0.5,
-                         title="Account Name Status Distribution (gAuthenticate)")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            fig2 = px.bar(ac_df,x="auth_response_code",y="count",
-                          color="name_status",color_discrete_map=colors,
-                          hover_data=["name_meaning"],
-                          title="auth_response_code → Account Name Status")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        st.markdown("#### 📋 Account Name Response Code Table")
-        ac_table = ac_df.rename(columns={"auth_response_code":"Code","count":"# Businesses",
-                                          "name_status":"Status","name_meaning":"Meaning"})
-        ac_table["% of Total"] = (ac_table["# Businesses"]/total*100).round(1).astype(str)+"%"
-        styled_table(ac_table[["Code","# Businesses","% of Total","Status","Meaning"]],
-                     color_col="Status",palette=colors)
-
-        flag("IMPORTANT: Codes 4–8 in Account Name are 'passed' (with caveats). "
-             "The same codes in Contact Verification are 'failed'. "
-             "This is intentional — the mapping tables differ (ACCOUNT_NAME_MAP vs CONTACT_VERIFICATION_MAP).", "blue")
-
-        analyst_card("Account Name Interpretation", [
-            "Code 2 = full authentication pass (gAuthenticate) — strongest result.",
-            "Code 0/10 = account active but name verification unavailable — "
-            "GIACT has the bank account but cannot verify the name. Common with business accounts.",
-            "Code 3/12 = name mismatch — the submitted owner name does not match bank records. "
-            "May indicate a sole proprietor using personal account with business name.",
-            "Codes 4–8: PASSED overall but with specific data point mismatches. "
-            "These should be reviewed — the account holder was verified but some data differed.",
-        ])
-
-    with tab_contact:
-        cv_df = df.groupby("auth_response_code").agg(
-            count=("business_id","count"),
-            cv_status=("contact_verification","first"),
-        ).reset_index()
-        cv_df["cv_meaning"] = cv_df["auth_response_code"].apply(
-            lambda c: GIACT_CONTACT_VERIFICATION.get(c,("","Unknown"))[1])
-        colors = {"passed":"#22c55e","failed":"#ef4444","missing":"#f59e0b"}
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            cc = df["contact_verification"].value_counts().reset_index()
-            cc.columns = ["Status","Count"]
-            fig = px.pie(cc,names="Status",values="Count",color="Status",
-                         color_discrete_map=colors,hole=0.5,
-                         title="Contact Verification Distribution")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            fig2 = px.bar(cv_df,x="auth_response_code",y="count",
-                          color="cv_status",color_discrete_map=colors,
-                          hover_data=["cv_meaning"],
-                          title="auth_response_code → Contact Verification Status")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        styled_table(cv_df.rename(columns={"auth_response_code":"Code","count":"# Businesses",
-                                             "cv_status":"Status","cv_meaning":"Meaning"}),
-                     color_col="Status",palette=colors)
-
-    with tab_cross:
-        st.markdown("#### 🔗 GIACT Cross-Analysis — Account vs Name vs Contact Consistency")
-
-        # 3-way consistency matrix
-        df["all_passed"]  = (df["account_status"]=="passed")&(df["account_name_status"]=="passed")&(df["contact_verification"]=="passed")
-        df["acc_ok_name_fail"] = (df["account_status"]=="passed")&(df["account_name_status"]=="failed")
-        df["acc_fail_name_ok"] = (df["account_status"]=="failed")&(df["account_name_status"]=="passed")
-
-        c1,c2,c3 = st.columns(3)
-        with c1: kpi("All 3 Passed",f"{df['all_passed'].sum():,}",f"{df['all_passed'].mean()*100:.0f}%","#22c55e")
-        with c2: kpi("Account ✅ but Name ❌",f"{df['acc_ok_name_fail'].sum():,}",
-                     "weird — account exists but name mismatch","#f59e0b")
-        with c3: kpi("Account ❌ but Name ✅",f"{df['acc_fail_name_ok'].sum():,}",
-                     "unusual — name matches but account failed","#f97316")
-
-        # Heatmap: account_status vs account_name_status
-        cross = pd.crosstab(df["account_status"],df["account_name_status"])
-        fig = go.Figure(go.Heatmap(
-            z=cross.values, x=cross.columns.tolist(), y=cross.index.tolist(),
-            colorscale="Blues", text=cross.values,
-            texttemplate="%{text}",
-            hovertemplate="Account: %{y}<br>Name: %{x}<br>Count: %{z}",
-        ))
-        fig.update_layout(title="Account Status vs Account Name Status (Cross-tabulation)",
-                          xaxis_title="Account Name Status",yaxis_title="Account Status")
-        st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-
-        cross_box("GIACT Consistency Analysis", [
-            f"{df['acc_ok_name_fail'].sum()} businesses: account status=passed but name=failed. "
-            "This means the bank account is valid but the owner name on the account differs from submitted name. "
-            "Could indicate: account under spouse's name, DBA vs legal name, or business account opened with EIN only.",
-            f"{df['acc_fail_name_ok'].sum()} businesses: account failed but name passed. "
-            "Unusual — name authentication succeeded but the account itself failed verification. "
-            "Possible: SSN matched gAuthenticate DB but routing/account number is invalid.",
-            f"Coverage gap businesses (codes 11,16,17,18): GIACT has no data. "
-            "For these, the Admin Portal shows 'missing' for all three checks. "
-            "Consider using Plaid or Stripe Financial Connections as backup.",
-            "High 'missing' rate may indicate GIACT integration is not being triggered for all businesses.",
-        ])
-
-        # By state
-        st_bank = df.groupby("state").agg(
-            total=("business_id","count"),
-            passed=("all_passed","sum"),
-            failed=("account_status",lambda x:(x=="failed").sum()),
-        ).reset_index()
-        st_bank["Pass Rate"] = (st_bank["passed"]/st_bank["total"]*100).round(1)
-        fig3 = px.bar(st_bank,x="state",y="Pass Rate",color="Pass Rate",
-                      color_continuous_scale="RdYlGn",
-                      title="Banking All-Pass Rate by State")
-        fig3.add_hline(y=all_pass/total*100,line_dash="dash",line_color="#3B82F6",
-                       annotation_text=f"Overall {all_pass/total*100:.0f}%")
-        st.plotly_chart(dark_chart_layout(fig3),use_container_width=True)
-
-    with tab_codes:
-        st.markdown("#### Complete GIACT Response Code Reference")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.markdown("**Account Status (gVerify — verify_response_code)**")
-            acct_ref = [{"Code":c,"Status":GIACT_ACCOUNT_STATUS[c][0].upper(),
-                         "Description":GIACT_ACCOUNT_STATUS[c][1]}
-                        for c in sorted(GIACT_ACCOUNT_STATUS.keys())]
-            styled_table(pd.DataFrame(acct_ref),color_col="Status",
-                         palette={"PASSED":"#22c55e","FAILED":"#ef4444","MISSING":"#f59e0b"})
-        with col_b:
-            st.markdown("**Account Name (gAuthenticate — auth_response_code)**")
-            name_ref = [{"Code":c,
-                         "Account Name":GIACT_ACCOUNT_NAME.get(c,("missing",""))[0].upper(),
-                         "Contact Verif":GIACT_CONTACT_VERIFICATION.get(c,("missing",""))[0].upper(),
-                         "Description":GIACT_ACCOUNT_NAME.get(c,("",""))[1]}
-                        for c in sorted(set(list(GIACT_ACCOUNT_NAME)+list(GIACT_CONTACT_VERIFICATION)))]
-            styled_table(pd.DataFrame(name_ref))
-
-    with tab_lineage:
-        lrow("giact_account_status","rds_warehouse_public.facts or case tab values","GIACT gVerify",
-             "passed/failed/missing from verify_response_code")
-        lrow("giact_account_name","case tab values","GIACT gAuthenticate",
-             "passed/failed/missing from auth_response_code via ACCOUNT_NAME_MAP")
-        lrow("giact_contact_verification","case tab values","GIACT gAuthenticate",
-             "Same auth_response_code but CONTACT_VERIFICATION_MAP — different for codes 4–8!")
-        st.code("""-- Note: giact fields may be in case tab values, not rds_warehouse_public.facts
--- Check both locations:
-SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value, received_at
-FROM rds_warehouse_public.facts
-WHERE business_id = 'YOUR-UUID'
-  AND name IN ('giact_account_status','giact_account_name','giact_contact_verification',
-               'giact_verify_response_code','giact_auth_response_code');""", language="sql")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 5 — WORTH SCORE
-# ═══════════════════════════════════════════════════════════════════════════════
-elif section == "5️⃣  Worth Score":
-    sh("Worth Score",
-       "Source: rds_manual_score_public.business_scores · 300–850 scale · risk_level · score_decision","💰")
-
-    flag("Data source: rds_manual_score_public.business_scores (RDS PostgreSQL via Redshift federation). "
-         "Joined through data_current_scores for latest score per business. "
-         "NOT stored in rds_warehouse_public.facts.", "blue")
-
-    df = get_section_data("worth", record_limit)
-    if df is None:
-        st.markdown("**Confirmed working queries (score_status column does NOT exist):**")
-        st.code("""-- business_scores without score_status filter:
-SELECT COUNT(*), AVG(weighted_score_850), MIN(weighted_score_850), MAX(weighted_score_850)
-FROM rds_manual_score_public.business_scores
-WHERE weighted_score_850 IS NOT NULL;
-
--- Latest score per business:
-SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, cs.business_id
-FROM rds_manual_score_public.data_current_scores cs
-JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
-WHERE bs.weighted_score_850 IS NOT NULL
-LIMIT 10;
-
--- Score audit fill rates (Redshift — confirmed working):
-SELECT score_date, rows_per_day, fill_state, fill_naics6, fill_revenue
-FROM warehouse.worth_score_input_audit
-ORDER BY score_date DESC LIMIT 5;""", language="sql")
-        st.stop()
-
-    # Check if we got audit data instead of individual score data
-    is_audit_only = "_source" in df.columns and (df["_source"] == "audit").all()
-
-    if is_audit_only:
-        # ── Audit-only view (warehouse.worth_score_input_audit) ──────────────
-        flag("Individual business scores not accessible via federation. "
-             "Showing aggregate audit data from warehouse.worth_score_input_audit "
-             "— confirmed working with real data.", "amber")
-
-        st.markdown("#### 📊 Worth Score Input Data Fill Rates (warehouse.worth_score_input_audit)")
-        st.markdown("*Tracks what % of input features are populated per scoring day. "
-                    "100% = all businesses had this feature. 0% = feature missing for all.*")
-
-        c1,c2,c3 = st.columns(3)
-        with c1: kpi("Days of Audit Data",f"{len(df):,}","scoring days recorded","#3B82F6")
-        with c2: kpi("Avg Businesses/Day",f"{df['rows_per_day'].mean():.0f}","scored per day","#22c55e")
-        with c3: kpi("Latest Score Date",str(df["score_date"].max()),"","#8B5CF6")
-
-        # Key fill rates chart
-        fill_cols = [c for c in df.columns if c.startswith("fill_")]
-        latest_row = df.iloc[0]
-
-        fill_data = []
-        for col in fill_cols:
-            try:
-                val = float(latest_row[col])
-                fill_data.append({"Feature": col.replace("fill_",""), "Fill %": val})
-            except Exception:
-                pass
-        fill_df = pd.DataFrame(fill_data).sort_values("Fill %", ascending=True)
-
-        # Colour by fill rate
-        fill_df["Status"] = fill_df["Fill %"].apply(
-            lambda v: "Good (>80%)" if v>=80 else ("Medium (30–80%)" if v>=30 else "Low (<30%)"))
-
-        col_l, col_r = st.columns([2,1])
-        with col_l:
-            fig = px.bar(fill_df.tail(30), x="Fill %", y="Feature",
-                         orientation="h", color="Status",
-                         color_discrete_map={"Good (>80%)":"#22c55e",
-                                              "Medium (30–80%)":"#f59e0b",
-                                              "Low (<30%)":"#ef4444"},
-                         title=f"Top 30 Feature Fill Rates (latest: {latest_row['score_date']})")
-            fig.update_layout(height=600)
-            st.plotly_chart(dark_chart_layout(fig), use_container_width=True)
-
-        with col_r:
-            zero_fill  = (fill_df["Fill %"]==0).sum()
-            full_fill  = (fill_df["Fill %"]==100).sum()
-            med_fill   = ((fill_df["Fill %"]>0)&(fill_df["Fill %"]<100)).sum()
-            kpi("Features at 100%", f"{full_fill}", "fully populated","#22c55e")
-            st.markdown("")
-            kpi("Features at 0%",   f"{zero_fill}", "not populated at all","#ef4444")
-            st.markdown("")
-            kpi("Partial features", f"{med_fill}", "partially filled","#f59e0b")
-
-        # Fill rates over time for key features
-        st.markdown("#### Fill Rate Trends Over Time (key features)")
-        key_features = ["fill_state","fill_naics6","fill_revenue","fill_age_bankruptcy",
-                        "fill_count_employees","fill_count_reviews"]
-        avail = [f for f in key_features if f in df.columns]
-        if avail:
-            trend_df = df[["score_date"]+avail].copy()
-            trend_df["score_date"] = pd.to_datetime(trend_df["score_date"])
-            trend_melt = trend_df.melt(id_vars="score_date",var_name="Feature",value_name="Fill %")
-            trend_melt["Feature"] = trend_melt["Feature"].str.replace("fill_","")
-            fig2 = px.line(trend_melt,x="score_date",y="Fill %",color="Feature",
-                           title="Key Feature Fill Rate Trends")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        st.markdown("#### Zero-fill features (need investigation)")
-        zero_features = fill_df[fill_df["Fill %"]==0]["Feature"].tolist()
-        if zero_features:
-            st.markdown(", ".join(f"`{f}`" for f in zero_features))
-            flag(f"{len(zero_features)} features have 0% fill rate on the latest scoring day. "
-                 "These features are not reaching the model — check the data pipeline.", "red")
-
-        st.code("""-- Confirmed working query (warehouse.worth_score_input_audit):
-SELECT score_date, rows_per_day,
-       fill_state, fill_naics6, fill_revenue, fill_age_bankruptcy,
-       fill_count_employees, fill_count_reviews, fill_score_reviews
-FROM warehouse.worth_score_input_audit
-ORDER BY score_date DESC
-LIMIT 10;
-
--- business_scores (score_status column does NOT exist — remove that filter):
-SELECT COUNT(*), AVG(weighted_score_850), MIN(weighted_score_850), MAX(weighted_score_850)
-FROM rds_manual_score_public.business_scores
-WHERE weighted_score_850 IS NOT NULL;
-
--- Latest score per business (no score_status filter):
-SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, cs.business_id
-FROM rds_manual_score_public.data_current_scores cs
-JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
-WHERE bs.weighted_score_850 IS NOT NULL
-LIMIT 10;""", language="sql")
-
-        st.stop()  # Don't render the score distribution tabs below
-
-    # ── Individual score data available ───────────────────────────────────────
-    total = len(df)
-    avg_s = df["worth_score_850"].mean(); med_s = df["worth_score_850"].median()
-    high  = (df["risk_level"]=="HIGH").sum()
-    mod   = (df["risk_level"]=="MODERATE").sum()
-    low   = (df["risk_level"]=="LOW").sum()
-    approved = int((df["score_decision"]=="APPROVE").sum()) if "score_decision" in df.columns else 0
-    review   = int((df["score_decision"]=="FURTHER_REVIEW_NEEDED").sum()) if "score_decision" in df.columns else 0
-    declined = int((df["score_decision"]=="DECLINE").sum()) if "score_decision" in df.columns else 0
-
-    c1,c2,c3,c4 = st.columns(4)
-    with c1: kpi("Avg Score",f"{avg_s:.0f}","300–850 · rds_manual_score_public","#3B82F6")
-    with c2: kpi("🔴 HIGH Risk",f"{high:,}",f"{high/max(total,1)*100:.0f}% (<500)","#ef4444")
-    with c3: kpi("🟡 MODERATE",f"{mod:,}",f"{mod/max(total,1)*100:.0f}% (500–650)","#f59e0b")
-    with c4: kpi("🟢 LOW Risk",f"{low:,}",f"{low/max(total,1)*100:.0f}% (>650)","#22c55e")
-
-    c5,c6,c7 = st.columns(3)
-    with c5: kpi("✅ APPROVE",f"{approved:,}",f"{approved/max(total,1)*100:.0f}%","#22c55e")
-    with c6: kpi("🔍 FURTHER REVIEW",f"{review:,}",f"{review/max(total,1)*100:.0f}%","#f59e0b")
-    with c7: kpi("❌ DECLINE",f"{declined:,}",f"{declined/max(total,1)*100:.0f}%","#ef4444")
-
-    tab_dist, tab_shap, tab_pr, tab_cross, tab_model = st.tabs([
-        "📊 Score Distribution","🧠 SHAP","📜 Public Records","🔗 Cross-Analysis","⚙️ Model"
-    ])
-
-    with tab_dist:
-        col_l, col_r = st.columns(2)
-        with col_l:
-            fig = px.histogram(df,x="worth_score_850",nbins=30,
-                               color_discrete_sequence=["#3B82F6"],
-                               title="Worth Score Distribution (300–850)")
-            fig.add_vline(x=500,line_dash="dash",line_color="#ef4444",annotation_text="HIGH <500")
-            fig.add_vline(x=650,line_dash="dash",line_color="#f59e0b",annotation_text="MODERATE <650")
-            fig.add_vline(x=avg_s,line_dash="dot",line_color="#60a5fa",annotation_text=f"Mean {avg_s:.0f}")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            rl = df["risk_level"].value_counts().reset_index()
-            rl.columns = ["Risk","Count"]
-            fig2 = px.bar(rl,x="Risk",y="Count",color="Risk",
-                          color_discrete_map={"HIGH":"#ef4444","MODERATE":"#f59e0b","LOW":"#22c55e"},
-                          title="Risk Level Distribution")
-            fig2.update_layout(showlegend=False)
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        # Percentile table
-        pcts = [10,25,50,75,90,95]
-        pct_data = pd.DataFrame({
-            "Percentile": [f"P{p}" for p in pcts],
-            "Score": [int(df["worth_score_850"].quantile(p/100)) for p in pcts],
-            "Risk Level": [("HIGH" if df["worth_score_850"].quantile(p/100)<500
-                            else ("MODERATE" if df["worth_score_850"].quantile(p/100)<650 else "LOW"))
-                           for p in pcts],
-        })
-        st.markdown("#### Score Percentile Table")
-        styled_table(pct_data,color_col="Risk Level",
-                     palette={"HIGH":"#ef4444","MODERATE":"#f59e0b","LOW":"#22c55e"})
-
-        # By state
-        st_scores = df.groupby("state").agg(
-            avg_score=("worth_score_850","mean"),
-            high_risk_pct=("risk_level",lambda x:(x=="HIGH").mean()*100),
-        ).reset_index().round(1)
-        fig3 = px.scatter(st_scores,x="avg_score",y="high_risk_pct",
-                          size="high_risk_pct",text="state",
-                          color="avg_score",color_continuous_scale="RdYlGn",
-                          title="State: Avg Score vs High-Risk %",
-                          labels={"avg_score":"Avg Worth Score","high_risk_pct":"% HIGH Risk"})
-        st.plotly_chart(dark_chart_layout(fig3),use_container_width=True)
-
-        analyst_card("Worth Score Distribution", [
-            f"Mean score {avg_s:.0f} (target: >600 for healthy portfolio).",
-            f"{high/total*100:.0f}% HIGH risk (score <500): these businesses have the highest "
-            "probability of fraud/default based on the XGBoost ensemble model.",
-            f"Score formula: prediction × (850−300) + 300, where prediction ∈ [0,1] from calibrated model.",
-            "The model uses 12-step pipeline: firmographic → financial → economic neural net → calibrator.",
-            f"States with highest high-risk %: review those in the scatter chart. "
-            "May indicate regional economic factors or industry concentration.",
-        ])
-
-    with tab_shap:
-        st.markdown("#### 🧠 SHAP — Which Features Drive the Score?")
-        flag("SHAP values show the contribution (in score points) of each feature category "
-             "to each business's score. Positive = increases score. Negative = decreases score. "
-             "Base score = explainer_base_prediction × 550 + 300.", "blue")
-
-        shap_cols = ["shap_public_records","shap_company_profile","shap_financials","shap_banking"]
-        shap_labels = ["Public Records","Company Profile","Financials","Banking"]
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            means_abs = [df[c].abs().mean() for c in shap_cols]
-            fig = px.bar(x=shap_labels,y=means_abs,
-                         color=means_abs,color_continuous_scale="Blues",
-                         title="Mean |SHAP| by Category (impact magnitude)")
-            fig.update_layout(coloraxis_showscale=False,
-                              xaxis_title="Category",yaxis_title="Mean |SHAP| (pts)")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            means_signed = [df[c].mean() for c in shap_cols]
-            colors_shap = ["#22c55e" if v>0 else "#ef4444" for v in means_signed]
-            fig2 = px.bar(x=shap_labels,y=means_signed,color=shap_labels,
-                          color_discrete_sequence=colors_shap,
-                          title="Mean SHAP by Category (signed — positive=helps score)")
-            fig2.add_hline(y=0,line_color="#475569")
-            fig2.update_layout(showlegend=False,xaxis_title="Category",yaxis_title="Mean SHAP (pts)")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        # SHAP distribution
-        shap_df = pd.DataFrame({col: df[col] for col in shap_cols}, )
-        shap_df.columns = shap_labels
-        shap_melt = shap_df.melt(var_name="Category",value_name="SHAP Points")
-        fig3 = px.box(shap_melt,x="Category",y="SHAP Points",color="Category",
-                      title="SHAP Distribution by Category")
-        fig3.add_hline(y=0,line_color="#475569",line_dash="dash")
-        st.plotly_chart(dark_chart_layout(fig3),use_container_width=True)
-
-        # SHAP summary table
-        shap_tbl = pd.DataFrame({
-            "Category": shap_labels,
-            "Mean Impact (pts)": [f"{df[c].mean():+.1f}" for c in shap_cols],
-            "Mean |Impact|": [f"{df[c].abs().mean():.1f}" for c in shap_cols],
-            "Max Positive": [f"+{df[c].max():.1f}" for c in shap_cols],
-            "Max Negative": [f"{df[c].min():.1f}" for c in shap_cols],
-            "% Negative": [f"{(df[c]<0).mean()*100:.0f}%" for c in shap_cols],
-        })
-        st.markdown("#### 📋 SHAP Summary Table")
-        styled_table(shap_tbl)
-
-        analyst_card("SHAP Interpretation", [
-            "Public Records: MOST penalizing category. Bankruptcies, judgments, and liens "
-            "significantly reduce the score. Age matters: recent = more negative impact.",
-            "Company Profile: Usually POSITIVE contributor. Business age, NAICS code, and "
-            "employee count are the key firmographic signals.",
-            "Financials: HIGH variance. Businesses with connected accounting data see "
-            "significant positive impact. Those without (imputed to 0) see neutral impact.",
-            "Banking: Generally positive when account is verified. Low impact vs other categories.",
-            f"Base score ≈ {avg_s-sum([df[c].mean() for c in shap_cols]):.0f} pts "
-            "(the population average before individual features adjust).",
-        ])
-
-    with tab_pr:
-        st.markdown("#### 📜 Public Records — Bankruptcy, Judgments & Liens")
-
-        c1,c2,c3,c4 = st.columns(4)
-        with c1: kpi("Any BK",f"{with_bk:,}",f"{with_bk/total*100:.0f}%","#8B5CF6")
-        with c2: kpi("Any Judgment",f"{with_judg:,}",f"{with_judg/total*100:.0f}%","#8B5CF6")
-        with c3: kpi("Any Lien",f"{with_lien:,}",f"{with_lien/total*100:.0f}%","#8B5CF6")
-        with c4: kpi("All 3",f"{multi_pr:,}",f"{multi_pr/total*100:.0f}% — highest risk","#ef4444")
-
-        pr_tbl = df.groupby("state").agg(
-            bk=("count_bk",lambda x:(x>0).sum()),
-            judg=("count_judgment",lambda x:(x>0).sum()),
-            lien=("count_lien",lambda x:(x>0).sum()),
-            total=("business_id","count"),
-            avg_score=("worth_score_850","mean"),
-        ).reset_index()
-        pr_tbl["BK %"] = (pr_tbl["bk"]/pr_tbl["total"]*100).round(1)
-        pr_tbl["Judg %"] = (pr_tbl["judg"]/pr_tbl["total"]*100).round(1)
-        pr_tbl["Lien %"] = (pr_tbl["lien"]/pr_tbl["total"]*100).round(1)
-        pr_tbl["Avg Score"] = pr_tbl["avg_score"].round(0).astype(int)
-
-        fig = px.bar(pr_tbl,x="state",y=["BK %","Judg %","Lien %"],barmode="group",
-                     color_discrete_sequence=["#8B5CF6","#a855f7","#c084fc"],
-                     title="Public Record Rates by State")
-        st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-
-        st.markdown("#### 📋 Public Records by State")
-        styled_table(pr_tbl[["state","total","bk","BK %","judg","Judg %","lien","Lien %","Avg Score"]])
-
-        cross_box("Public Records → Score Impact", [
-            "Businesses with BK + Judgment + Lien (all 3) receive the largest score penalties. "
-            f"Currently {multi_pr:,} ({multi_pr/total*100:.0f}%) have all three — flag for manual underwriting review.",
-            "BK age is the most important temporal factor: age_bankruptcy < 24 months = highest impact. "
-            "Default imputation = 240 months (20 years) when no BK on file.",
-            "Lien is the most common (highest %). Many liens are tax liens, which can indicate "
-            "payroll tax issues — a key AML/KYB concern.",
-            "States with high lien rates: may correlate with specific industries or economic conditions.",
-        ])
-
-    with tab_cross:
-        st.markdown("#### 🔗 Worth Score Cross-Analysis")
-
-        df["has_any_pr"] = ((df["count_bk"]>0)|(df["count_judgment"]>0)|(df["count_lien"]>0))
-        pr_score = df.groupby("has_any_pr")["worth_score_850"].describe().reset_index()
-        pr_score["has_any_pr"] = pr_score["has_any_pr"].map({True:"Has Public Records",False:"No Public Records"})
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            fig = px.box(df,x="has_any_pr",y="worth_score_850",
-                         color="has_any_pr",
-                         color_discrete_map={True:"#ef4444",False:"#22c55e"},
-                         labels={"has_any_pr":"Has Public Records","worth_score_850":"Worth Score"},
-                         title="Score Distribution: With vs Without Public Records")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            fig2 = px.scatter(df.sample(min(300,total),random_state=42),
-                              x="shap_public_records",y="worth_score_850",
-                              color="risk_level",
-                              color_discrete_map={"HIGH":"#ef4444","MODERATE":"#f59e0b","LOW":"#22c55e"},
-                              title="Public Records SHAP vs Worth Score",
-                              labels={"shap_public_records":"Public Records SHAP (pts)",
-                                      "worth_score_850":"Worth Score"})
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        anomaly_flags(df, [
-            (df["worth_score_850"]<400, "Businesses with score <400 (extreme high risk)", "red"),
-            (df["worth_score_850"]>800, "Businesses with score >800 — verify data completeness", "blue"),
-            ((df["risk_level"]=="HIGH")&(df["count_bk"]==0)&(df["count_judgment"]==0)&(df["count_lien"]==0),
-             "HIGH risk score but no public records — driven by other factors (financials/firmographic)", "amber"),
-            ((df["risk_level"]=="LOW")&(df["count_bk"]>0),
-             "LOW risk score but has bankruptcy — BK may be old (>7 years, low weight)", "blue"),
-        ])
-
-    with tab_model:
-        st.markdown("#### ⚙️ Worth Score Model Architecture (v3.1)")
-        for step, desc in [
-            ("1. preprocessor","Feature encoding: state, bus_struct one-hot + NAICS target encoding"),
-            ("2. missing","Missing value imputation per feature (lookups.py defaults)"),
-            ("3. naics_transformer","NAICS code embedding layer"),
-            ("4. imputer","Final imputation pass"),
-            ("5. encoder","Categorical encoding"),
-            ("6. initial_layer","Firmographic XGBoost sub-model"),
-            ("7. scaler","Feature scaling"),
-            ("8. second_layer","Financial sub-model"),
-            ("9. neural_layer","Economic neural network (PyTorch .pt)"),
-            ("10. quantiler","Quantile calibration"),
-            ("11. ensemble","Ensemble: firmographic + financial + economic"),
-            ("12. calibrator","Final probability calibration → prediction ∈ [0,1]"),
-            ("Output: score","prediction × 550 + 300 → Worth Score (300–850)"),
-        ]:
-            st.markdown(f"""<div class="lineage-row">
-              <span class="lk">{step}</span>
-              <span style="color:#94A3B8">{desc}</span>
-            </div>""", unsafe_allow_html=True)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 6 — KYC IDENTITY
-# ═══════════════════════════════════════════════════════════════════════════════
-elif section == "6️⃣  KYC — Identity":
-    sh("KYC — Identity Verification",
-       "IDV (Plaid) · name/DOB/SSN/address/phone match · synthetic + stolen identity risk","🪪")
-
-    df = get_section_data("kyc", record_limit)
-    if df is None:
-        st.stop()
-    total = len(df)
-    passed   = df["idv_passed"].sum()
-    high_r   = (df["risk_level"]=="high_risk").sum()
-    hi_syn   = (df["synthetic_score"]>0.70).sum()
-    hi_sto   = (df["stolen_score"]>0.70).sum()
-    both_hi  = ((df["synthetic_score"]>0.70)&(df["stolen_score"]>0.70)).sum()
-    name_ok  = (df["name_match"]=="success").sum()
-    all_match= ((df["name_match"]=="success")&(df["dob_match"]=="success")&
-                (df["ssn_match"]=="success")&(df["address_match"]=="success")).sum()
-
-    c1,c2,c3,c4,c5,c6 = st.columns(6)
-    with c1: kpi("IDV Passed",f"{passed:,}",f"{passed/total*100:.0f}%","#22c55e")
-    with c2: kpi("High Risk",f"{high_r:,}",f"{high_r/total*100:.0f}%","#ef4444")
-    with c3: kpi("Synthetic >0.7",f"{hi_syn:,}",f"{hi_syn/total*100:.0f}%","#ef4444")
-    with c4: kpi("Stolen >0.7",f"{hi_sto:,}",f"{hi_sto/total*100:.0f}%","#ef4444")
-    with c5: kpi("Both Fraud Flags",f"{both_hi:,}",f"{both_hi/total*100:.0f}%","#7f1d1d")
-    with c6: kpi("All 4 Matches ✅",f"{all_match:,}",f"{all_match/total*100:.0f}%","#22c55e")
-
-    if both_hi>0:
-        flag(f"🚨 CRITICAL: {both_hi} businesses have BOTH synthetic AND stolen identity risk scores >0.70. "
-             "These are the highest-priority fraud cases. Immediate manual review required.", "red")
-
-    tab_idv, tab_match, tab_risk, tab_cross, tab_lineage = st.tabs([
-        "🪪 IDV Status","✅ Match Results","⚠️ Risk Scores","🔗 Cross-Analysis","🔍 Lineage"
-    ])
-
-    with tab_idv:
-        col_l, col_r = st.columns(2)
-        with col_l:
-            sc = df["idv_status"].value_counts().reset_index()
-            sc.columns = ["Status","Count"]
-            c_map = {"SUCCESS":"#22c55e","PENDING":"#f59e0b","FAILED":"#ef4444",
-                     "CANCELED":"#f97316","EXPIRED":"#64748b"}
-            fig = px.pie(sc,names="Status",values="Count",color="Status",
-                         color_discrete_map=c_map,hole=0.5,title="IDV Status Distribution (Plaid)")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            rl = df["risk_level"].value_counts().reset_index()
-            rl.columns = ["Risk","Count"]
-            fig2 = px.bar(rl,x="Risk",y="Count",color="Risk",
-                          color_discrete_map={"high_risk":"#ef4444","medium_risk":"#f59e0b","low_risk":"#22c55e"},
-                          title="Compliance Risk Level (Trulioo)")
-            fig2.update_layout(showlegend=False)
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        st.markdown("#### 📋 IDV Status Detail Table")
-        idv_tbl = df.groupby("idv_status").agg(
-            count=("business_id","count"),
-            high_risk=("risk_level",lambda x:(x=="high_risk").sum()),
-            hi_synthetic=("synthetic_score",lambda x:(x>0.70).sum()),
-            hi_stolen=("stolen_score",lambda x:(x>0.70).sum()),
-            name_match_ok=("name_match",lambda x:(x=="success").sum()),
-        ).reset_index()
-        idv_tbl["% of Total"] = (idv_tbl["count"]/total*100).round(1).astype(str)+"%"
-        idv_tbl["High Risk %"] = (idv_tbl["high_risk"]/idv_tbl["count"]*100).round(1).astype(str)+"%"
-        idv_tbl["Synthetic >0.7 %"] = (idv_tbl["hi_synthetic"]/idv_tbl["count"]*100).round(1).astype(str)+"%"
-        idv_tbl["Name Match %"] = (idv_tbl["name_match_ok"]/idv_tbl["count"]*100).round(1).astype(str)+"%"
-        styled_table(idv_tbl[["idv_status","count","% of Total","High Risk %",
-                                "Synthetic >0.7 %","Name Match %"]].rename(columns={"idv_status":"IDV Status"}),
-                     color_col="IDV Status",palette={s.lower():c_map.get(s,"#64748b") for s in c_map})
-
-        st.markdown("#### IDV Status Key Explanations")
-        for status, (icon, sid, summary, detail) in IDV_STATUS_MEANINGS.items():
-            n_status = (df["idv_status"]==status).sum()
-            pct = n_status/total*100
-            color = {"SUCCESS":"#22c55e","PENDING":"#f59e0b","FAILED":"#ef4444",
-                     "CANCELED":"#f97316","EXPIRED":"#64748b"}[status]
-            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
-                border-radius:8px;padding:10px 14px;margin:5px 0">
-              <span style="color:{color};font-weight:700">{icon} {status} (id={sid})</span>
-              <span style="color:#94A3B8;font-size:.74rem;margin-left:8px">{n_status:,} businesses ({pct:.0f}%)</span>
-              <div style="color:#E2E8F0;font-size:.80rem;margin-top:4px;font-weight:600">{summary}</div>
-              <div style="color:#94A3B8;font-size:.77rem;margin-top:2px">{detail}</div>
-            </div>""", unsafe_allow_html=True)
-
-        analyst_card("IDV Pass/Fail Analysis", [
-            f"SUCCESS {(df['idv_status']=='SUCCESS').sum()/total*100:.0f}%: Identity confirmed via government ID scan + selfie. "
-            "Plaid checks: document authenticity, facial match, liveness detection.",
-            f"FAILED {(df['idv_status']=='FAILED').sum()/total*100:.0f}%: Most common causes: "
-            "1) ID expired or damaged, 2) Selfie doesn't match ID photo, 3) Document is from unsupported country, "
-            "4) Liveness check failed (possible deepfake attempt).",
-            f"PENDING {(df['idv_status']=='PENDING').sum()/total*100:.0f}%: Business submitted but owner hasn't completed IDV yet. "
-            "Normal for recent applications. Should decrease within 24–72 hours.",
-            f"CANCELED/EXPIRED {(df['idv_status'].isin(['CANCELED','EXPIRED'])).sum()/total*100:.0f}%: "
-            "User abandoned. May need a reminder email trigger.",
-            "idv_passed_boolean = true ONLY when SUCCESS count > 0 (L541–550 kyb/index.ts). "
-            "idv_passed = numeric count of SUCCESS sessions (not boolean).",
-        ])
-
-        sanity_metrics([
-            ("IDV pass > 65%", passed/total>0.65, f"{passed/total*100:.0f}% passed"),
-            ("Failed < 15%", (df["idv_status"]=="FAILED").sum()/total<0.15,
-             f"{(df['idv_status']=='FAILED').sum()/total*100:.0f}% failed"),
-            ("Both fraud flags < 5%", both_hi/total<0.05, f"{both_hi/total*100:.0f}% both high"),
-            ("High risk < 30%", high_r/total<0.30, f"{high_r/total*100:.0f}% high risk"),
-        ])
-
-    with tab_match:
-        st.markdown("#### ✅ Identity Match Results by Field")
-        fields = [("name_match","Name"),("dob_match","Date of Birth"),
-                  ("ssn_match","SSN"),("address_match","Address"),("phone_match","Phone")]
-        results = []
-        for field, label in fields:
-            vc = df[field].value_counts()
-            n_total = vc.sum()
-            results.append({
-                "Field": label,
-                "Fact Name": field,
-                "✅ Success": vc.get("success",0),
-                "% Success": f"{vc.get('success',0)/n_total*100:.0f}%",
-                "❌ Failure": vc.get("failure",0),
-                "% Failure": f"{vc.get('failure',0)/n_total*100:.0f}%",
-                "⏳ Pending": vc.get("pending",0),
-                "⚫ None/Missing": vc.get("none",0),
-                "% Missing": f"{vc.get('none',0)/n_total*100:.0f}%",
-            })
-        results_df = pd.DataFrame(results)
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            match_melt = results_df[["Field","✅ Success","❌ Failure","⏳ Pending","⚫ None/Missing"]].melt(
-                id_vars="Field",var_name="Status",value_name="Count")
-            fig = px.bar(match_melt,x="Field",y="Count",color="Status",barmode="stack",
-                         color_discrete_map={"✅ Success":"#22c55e","❌ Failure":"#ef4444",
-                                             "⏳ Pending":"#f59e0b","⚫ None/Missing":"#64748b"},
-                         title="Match Results by Field")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            # Radar chart of success rates
-            success_rates = [int(r["% Success"].replace("%","")) for r in results]
-            fig2 = go.Figure(go.Scatterpolar(
-                r=success_rates+[success_rates[0]],
-                theta=[r["Field"] for r in results]+[results[0]["Field"]],
-                fill="toself",line_color="#3B82F6",fillcolor="rgba(59,130,246,0.2)",
-                name="Success %"
-            ))
-            fig2.update_layout(polar=dict(bgcolor="#1E293B",
-                radialaxis=dict(visible=True,range=[0,100],gridcolor="#334155",color="#94A3B8"),
-                angularaxis=dict(color="#94A3B8")),
-                showlegend=False,title="Match Success Rates (Radar)")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        st.markdown("#### 📋 Full Match Summary Table")
-        styled_table(results_df)
-
-        # Anomalies
-        for field, label in fields:
-            fail_rate = (df[field]=="failure").mean()
-            miss_rate = (df[field]=="none").mean()
-            if fail_rate>0.30:
-                flag(f"{label}: {fail_rate*100:.0f}% failure rate — above 30% threshold. "
-                     "Investigate: wrong format submitted? Address normalization issue?", "amber")
-            if miss_rate>0.20:
-                flag(f"{label}: {miss_rate*100:.0f}% missing/none — field not submitted for many businesses. "
-                     "Check onboarding form — is this field required?", "amber")
-
-        analyst_card("Identity Match Field Explanations", [
-            "Name match: Middesk/OC/Trulioo compare submitted business name to registry. "
-            "This is BUSINESS name, not owner/person name.",
-            "DOB match: Owner's date of birth vs Trulioo PSC (Person Screening) records. "
-            "Trulioo checks against credit bureau and government ID sources.",
-            "SSN match: Owner's SSN vs Trulioo data. High failure may indicate wrong SSN or "
-            "non-US owner (no SSN). 'none' = SSN not submitted.",
-            "Address match: Business address vs Middesk + SERP data. "
-            "Common failure: suite/unit number mismatch or PO Box vs street address.",
-            "Phone match: Business phone vs SERP/web scraping data. "
-            "High 'none' rate = phone not collected or not verifiable.",
-        ])
-
-    with tab_risk:
-        st.markdown("#### ⚠️ Synthetic & Stolen Identity Risk Scores (0–1 scale)")
-        flag("These scores come from the fraud_report fact (owner_verification). "
-             ">0.70 = HIGH risk threshold. Both scores >0.70 simultaneously = strongest fraud signal.", "blue")
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            fig = px.histogram(df,x="synthetic_score",nbins=25,
-                               color_discrete_sequence=["#8B5CF6"],
-                               title="Synthetic Identity Risk Score Distribution")
-            fig.add_vline(x=0.70,line_dash="dash",line_color="#ef4444",annotation_text="HIGH >0.70")
-            fig.add_vline(x=0.40,line_dash="dash",line_color="#f59e0b",annotation_text="MEDIUM >0.40")
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            fig2 = px.histogram(df,x="stolen_score",nbins=25,
-                                color_discrete_sequence=["#ec4899"],
-                                title="Stolen Identity Risk Score Distribution")
-            fig2.add_vline(x=0.70,line_dash="dash",line_color="#ef4444",annotation_text="HIGH >0.70")
-            fig2.add_vline(x=0.40,line_dash="dash",line_color="#f59e0b",annotation_text="MEDIUM >0.40")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-        # Risk score segments table
-        def risk_bucket(score):
-            if score>=0.70: return "HIGH (>0.70)"
-            if score>=0.40: return "MEDIUM (0.40–0.70)"
-            return "LOW (<0.40)"
-        df["syn_bucket"] = df["synthetic_score"].apply(risk_bucket)
-        df["sto_bucket"] = df["stolen_score"].apply(risk_bucket)
-
-        for label, col, bucket_col in [("Synthetic","synthetic_score","syn_bucket"),
-                                         ("Stolen","stolen_score","sto_bucket")]:
-            seg = df.groupby(bucket_col).agg(
-                count=("business_id","count"),
-                idv_fail=("idv_passed",lambda x:(~x).sum()),
-                high_risk=("risk_level",lambda x:(x=="high_risk").sum()),
-                avg_score=("synthetic_score" if label=="Synthetic" else "stolen_score","mean"),
-            ).reset_index()
-            seg["% of Total"] = (seg["count"]/total*100).round(1).astype(str)+"%"
-            seg["IDV Fail %"] = (seg["idv_fail"]/seg["count"]*100).round(1).astype(str)+"%"
-            seg["High Risk %"] = (seg["high_risk"]/seg["count"]*100).round(1).astype(str)+"%"
-            st.markdown(f"#### 📋 {label} Risk Score Segments")
-            styled_table(seg[[bucket_col,"count","% of Total","IDV Fail %","High Risk %"]].rename(
-                columns={bucket_col:"Risk Bucket"}))
-
-        # Scatter: synthetic vs stolen
-        fig3 = px.scatter(df,x="synthetic_score",y="stolen_score",
-                          color="idv_passed",
-                          color_discrete_map={True:"#22c55e",False:"#ef4444"},
-                          labels={"synthetic_score":"Synthetic Score","stolen_score":"Stolen Score",
-                                  "idv_passed":"IDV Passed"},
-                          title="Synthetic vs Stolen Identity Risk — IDV Pass/Fail")
-        fig3.add_vline(x=0.70,line_dash="dash",line_color="#ef4444")
-        fig3.add_hline(y=0.70,line_dash="dash",line_color="#ef4444")
-        st.plotly_chart(dark_chart_layout(fig3),use_container_width=True)
-
-        analyst_card("Identity Risk Score Interpretation", [
-            "Synthetic identity fraud: a person fabricates an identity by combining a real SSN "
-            "(often a child's, deceased person's, or stolen) with a made-up name and DOB.",
-            "Stolen identity fraud: a person uses someone else's real, complete identity. "
-            "The real person may not know their identity is being used.",
-            f"{both_hi} businesses with BOTH scores >0.70: this pattern strongly suggests "
-            "organized fraud or identity theft rings. Refer to fraud team immediately.",
-            f"Businesses with IDV=PASSED but high synthetic score: IDV checked document "
-            "authenticity but didn't catch synthetic identity if the fraudster has a real document.",
-            "Source: owner_verification → fraud_report → caseTabValuesManager.ts L346–393. "
-            "NOT stored in rds_warehouse_public.facts — comes from the case tab values endpoint.",
-        ])
-
-    with tab_cross:
-        st.markdown("#### 🔗 KYC Cross-Analysis")
-
-        # IDV status vs match fields
-        idv_match = df.groupby("idv_status").agg(
-            count=("business_id","count"),
-            name_ok=("name_match",lambda x:(x=="success").sum()),
-            dob_ok=("dob_match",lambda x:(x=="success").sum()),
-            ssn_ok=("ssn_match",lambda x:(x=="success").sum()),
-            high_syn=("synthetic_score",lambda x:(x>0.70).sum()),
-        ).reset_index()
-        idv_match["Name Match %"] = (idv_match["name_ok"]/idv_match["count"]*100).round(1)
-        idv_match["DOB Match %"]  = (idv_match["dob_ok"]/idv_match["count"]*100).round(1)
-        idv_match["SSN Match %"]  = (idv_match["ssn_ok"]/idv_match["count"]*100).round(1)
-        idv_match["Synthetic >0.7 %"] = (idv_match["high_syn"]/idv_match["count"]*100).round(1)
-
-        fig = px.bar(idv_match,x="idv_status",
-                     y=["Name Match %","DOB Match %","SSN Match %"],
-                     barmode="group",title="Match Rates by IDV Status",
-                     color_discrete_sequence=["#3B82F6","#8B5CF6","#ec4899"])
-        st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-
-        st.markdown("#### 📋 Match Rate vs IDV Status Cross-Table")
-        styled_table(idv_match[["idv_status","count","Name Match %","DOB Match %",
-                                  "SSN Match %","Synthetic >0.7 %"]].rename(columns={"idv_status":"IDV Status"}))
-
-        cross_box("KYC Cross-Analysis Insights", [
-            "FAILED IDV + low name match: consistent — the person failed IDV because "
-            "the submitted name doesn't match the document.",
-            "PASSED IDV + high synthetic score: most concerning combination. "
-            "The document was genuine but the identity may be synthetically constructed.",
-            "PENDING IDV + high fraud scores: these businesses should be prioritized "
-            "for follow-up — don't let high-risk cases remain in pending state.",
-            "Low SSN match + low DOB match + high synthetic score: classic synthetic "
-            "identity pattern — the SSN belongs to someone else.",
-        ])
-
-        anomaly_flags(df, [
-            ((df["idv_passed"])&(df["synthetic_score"]>0.70),
-             "IDV passed but synthetic risk >0.70 — check for sophisticated fraud", "red"),
-            ((~df["idv_passed"])&(df["ssn_match"]=="success")&(df["dob_match"]=="success"),
-             "IDV failed but SSN + DOB both matched — ID document issue only", "amber"),
-            ((df["name_match"]=="failure")&(df["idv_passed"]),
-             "Name match failed but IDV passed — business name vs owner name mismatch expected", "blue"),
-        ])
-
-    with tab_lineage:
-        lrow("idv_status","rds_warehouse_public.facts","Plaid IDV (pid=40)",
-             "Dict of status counts: {SUCCESS:N, PENDING:N, CANCELED:N, EXPIRED:N, FAILED:N}")
-        lrow("idv_passed_boolean","rds_warehouse_public.facts","Calculated",
-             "true iff idv_status.SUCCESS > 0 — L541–550 kyb/index.ts")
-        lrow("name_match_boolean","rds_warehouse_public.facts","Middesk/OC/Trulioo",
-             "Business name match (NOT person name)")
-        lrow("synthetic_identity_risk_score","case tab values","fraud_report",
-             "0–1 from owner_verification → caseTabValuesManager.ts L346–393")
-        lrow("stolen_identity_risk_score","case tab values","fraud_report","0–1 same source")
-        lrow("compliance_status","rds_warehouse_public.facts","Trulioo",
-             "low_risk/medium_risk/high_risk based on risk_score thresholds")
-        st.code("""SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS v, received_at
-FROM rds_warehouse_public.facts
-WHERE business_id = 'YOUR-UUID'
-  AND name IN ('idv_status','idv_passed_boolean','name_match_boolean',
-               'compliance_status','risk_score');
--- Note: synthetic/stolen risk scores are in case tab values endpoint, not facts table""",
-                language="sql")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 7 — DUE DILIGENCE
-# ═══════════════════════════════════════════════════════════════════════════════
-elif section == "7️⃣  Due Diligence":
-    sh("Due Diligence — Watchlist, Sanctions, PEP, Adverse Media, Public Records",
-       "watchlist_hits · sanctions · PEP · adverse_media · BK · Judgments · Liens","🔍")
-
-    df = get_section_data("dd", record_limit)
-    total = len(df)
-    any_wl   = (df["watchlist_hits"]>0).sum()
-    any_sanc = (df["sanctions_hits"]>0).sum()
-    any_pep  = (df["pep_hits"]>0).sum()
-    any_am   = (df["adverse_media"]>0).sum()
-    any_bk   = (df["bk_hits"]>0).sum()
-    any_judg = (df["judgment_hits"]>0).sum()
-    any_lien = (df["lien_hits"]>0).sum()
-    multi_hit= ((df["watchlist_hits"]>0)&(df["sanctions_hits"]>0)).sum()
-    pr_all   = ((df["bk_hits"]>0)&(df["judgment_hits"]>0)&(df["lien_hits"]>0)).sum()
-
-    c1,c2,c3,c4 = st.columns(4)
-    with c1: kpi("Any Watchlist",f"{any_wl:,}",f"{any_wl/total*100:.0f}%","#ef4444")
-    with c2: kpi("Sanctions",f"{any_sanc:,}",f"{any_sanc/total*100:.0f}%","#ef4444")
-    with c3: kpi("PEP",f"{any_pep:,}",f"{any_pep/total*100:.0f}%","#f97316")
-    with c4: kpi("Adverse Media",f"{any_am:,}",f"{any_am/total*100:.0f}%","#f59e0b")
-
-    c5,c6,c7,c8 = st.columns(4)
-    with c5: kpi("Bankruptcy",f"{any_bk:,}",f"{any_bk/total*100:.0f}%","#8B5CF6")
-    with c6: kpi("Judgments",f"{any_judg:,}",f"{any_judg/total*100:.0f}%","#8B5CF6")
-    with c7: kpi("Liens",f"{any_lien:,}",f"{any_lien/total*100:.0f}%","#8B5CF6")
-    with c8: kpi("WL+Sanctions",f"{multi_hit:,}","highest priority","#7f1d1d")
-
-    if multi_hit>0:
-        flag(f"🚨 {multi_hit} businesses have BOTH watchlist hits AND sanctions hits — "
-             "top priority for compliance review.", "red")
-
-    tab_wl, tab_pr, tab_cross, tab_lineage = st.tabs([
-        "⚠️ Watchlist / Sanctions / PEP","📜 Public Records","🔗 Cross-Analysis","🔍 Lineage"
-    ])
-
-    with tab_wl:
-        col_l, col_r = st.columns(2)
+    with tab_dd:
+        col_l,col_r = st.columns(2)
         with col_l:
             hit_data = pd.DataFrame({
-                "Type": ["Watchlist","Sanctions","PEP","Adverse Media"],
-                "Businesses": [any_wl,any_sanc,any_pep,any_am],
-                "% of Total": [any_wl/total*100,any_sanc/total*100,
-                                any_pep/total*100,any_am/total*100],
+                "Type":["Watchlist","Sanctions","PEP","Adverse Media","BK","Judgments","Liens"],
+                "Count":[any_wl,any_sanc,any_pep,any_am,any_bk,any_judg,any_lien],
             })
-            fig = px.bar(hit_data,x="Type",y="Businesses",color="Type",
-                         color_discrete_sequence=["#ef4444","#f97316","#f59e0b","#8B5CF6"],
+            fig = px.bar(hit_data,x="Type",y="Count",color="Type",
+                         color_discrete_sequence=["#ef4444","#7f1d1d","#f97316","#f59e0b","#8B5CF6","#a855f7","#c084fc"],
                          title="Due Diligence Hit Frequency")
             fig.update_layout(showlegend=False)
             st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
         with col_r:
-            wl_dist = df["watchlist_hits"].value_counts().sort_index().reset_index()
-            wl_dist.columns = ["Hit Count","Businesses"]
-            wl_dist["% of Total"] = (wl_dist["Businesses"]/total*100).round(1)
-            fig2 = px.bar(wl_dist,x="Hit Count",y="Businesses",
-                          color="Businesses",color_continuous_scale="Reds",
-                          title="Watchlist Hits per Business Distribution")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+            if "watchlist_hits" in dd.columns:
+                wl_dist = dd["watchlist_hits"].value_counts().sort_index().reset_index()
+                wl_dist.columns = ["Hit Count","Businesses"]
+                fig2 = px.bar(wl_dist,x="Hit Count",y="Businesses",
+                              color_discrete_sequence=["#ef4444"],
+                              title="Watchlist Hits per Business Distribution")
+                st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
 
-        st.markdown("#### 📋 Watchlist Hit Distribution Table")
-        styled_table(wl_dist.rename(columns={"Hit Count":"# Hits","Businesses":"# Businesses"}))
+        # Summary table
+        dd_summary = pd.DataFrame({
+            "Category":["Watchlist Hits","Sanctions Hits","PEP Hits","Adverse Media",
+                         "Bankruptcy","Judgments","Liens","BK+Judg+Lien (all 3)"],
+            "# Businesses":[any_wl,any_sanc,any_pep,any_am,any_bk,any_judg,any_lien,
+                             int(((dd["bk_hits"]>0)&(dd["judgment_hits"]>0)&(dd["lien_hits"]>0)).sum()) if "bk_hits" in dd.columns else 0],
+            "% of Total":[f"{v/max(biz_dd,1)*100:.1f}%" for v in [any_wl,any_sanc,any_pep,any_am,any_bk,any_judg,any_lien,
+                          int(((dd["bk_hits"]>0)&(dd["judgment_hits"]>0)&(dd["lien_hits"]>0)).sum()) if "bk_hits" in dd.columns else 0]],
+            "Severity":["HIGH","CRITICAL","HIGH","MEDIUM","MEDIUM","MEDIUM","LOW","CRITICAL"],
+            "Action":["Review each hit","Hard stop — compliance","Enhanced Due Diligence",
+                       "Manual review","Assess age/count","Assess amount","Assess status",
+                       "Manual underwriting required"],
+        })
+        styled_table(dd_summary,color_col="Severity",
+                     palette={"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b","LOW":"#64748b"})
 
-        # By state
-        state_dd = df.groupby("state").agg(
-            total=("business_id","count"),
-            wl=("watchlist_hits",lambda x:(x>0).sum()),
-            sanc=("sanctions_hits",lambda x:(x>0).sum()),
-            pep=("pep_hits",lambda x:(x>0).sum()),
-            am=("adverse_media",lambda x:(x>0).sum()),
-        ).reset_index()
-        state_dd["WL %"] = (state_dd["wl"]/state_dd["total"]*100).round(1)
-        state_dd["Sanc %"] = (state_dd["sanc"]/state_dd["total"]*100).round(1)
-        state_dd["PEP %"] = (state_dd["pep"]/state_dd["total"]*100).round(1)
-
-        fig3 = px.bar(state_dd,x="state",y=["WL %","Sanc %","PEP %"],barmode="group",
-                      color_discrete_sequence=["#ef4444","#f97316","#f59e0b"],
-                      title="Watchlist / Sanctions / PEP Rate by State")
-        st.plotly_chart(dark_chart_layout(fig3),use_container_width=True)
-
-        st.markdown("#### 📋 State-Level Due Diligence Table")
-        styled_table(state_dd[["state","total","wl","WL %","sanc","Sanc %","pep","PEP %","am"]])
-
-        st.markdown("#### Hit Type Explanations")
-        for icon, color, title, desc in [
+        st.markdown("#### Watchlist Hit Type Explanations")
+        for icon,color,title,desc in [
             ("🔴","#ef4444","SANCTIONS",
-             "Business or UBO on OFAC, UN, EU, HMT or other sanctions list. "
-             "REGULATORY REQUIREMENT: Cannot proceed without compliance approval. "
-             "Source: Trulioo PSC screeningResults where listType='SANCTIONS' (truliooFacts.ts)."),
+             "OFAC/UN/EU/HMT sanctions list. REGULATORY REQUIREMENT — hard stop. "
+             "Source: Trulioo PSC screeningResults where listType='SANCTIONS'."),
             ("🟠","#f97316","PEP (Politically Exposed Person)",
-             "Owner or UBO is a current or former political figure (government official, senior "
-             "party member, or their close family/associates). "
-             "NOT automatically disqualifying but requires Enhanced Due Diligence (EDD). "
+             "Current/former political figure or close associate. NOT disqualifying but requires Enhanced Due Diligence. "
              "Source: Trulioo PSC where listType='PEP'."),
             ("🟡","#f59e0b","ADVERSE MEDIA",
-             "Negative news coverage detected (fraud allegations, criminal investigations, etc.). "
-             "IMPORTANT: Deliberately EXCLUDED from the consolidated watchlist fact "
-             "(filterOutAdverseMedia in consolidatedWatchlist.ts L57). "
-             "Tracked separately in adverse_media_hits fact via adverseMediaDetails records."),
+             "Negative news coverage. Deliberately EXCLUDED from consolidated watchlist fact. "
+             "Tracked separately in adverse_media_hits. Source: adverseMediaDetails."),
         ]:
             st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
                 border-radius:8px;padding:10px 14px;margin:5px 0">
               <span style="color:{color};font-weight:700">{icon} {title}</span>
-              <div style="color:#94A3B8;font-size:.78rem;margin-top:4px">{desc}</div>
+              <div style="color:#94A3B8;font-size:.78rem;margin-top:3px">{desc}</div>
             </div>""", unsafe_allow_html=True)
 
-        analyst_card("Watchlist Interpretation", [
-            f"Consolidated watchlist fact = PEP + SANCTIONS only. Adverse media is separate. "
-            "This is by design in consolidatedWatchlist.ts.",
-            f"Businesses with watchlist_hits > 2 are anomalous: {(df['watchlist_hits']>2).sum()} "
-            "businesses. Multiple hits from different list types or entities.",
-            f"Sanctions hit ({any_sanc/total*100:.0f}%): even 1 sanctions hit is a hard stop in most compliance frameworks.",
-            f"PEP hit ({any_pep/total*100:.0f}%): requires Enhanced Due Diligence but is NOT automatically denied.",
-        ])
+    with tab_risk_combo:
+        st.markdown("#### 🔗 Risk Combination Analysis")
+        if "watchlist_hits" in dd.columns and "bk_hits" in dd.columns:
+            dd["any_wl"]   = dd["watchlist_hits"]>0
+            dd["any_sanc"] = dd["sanctions_hits"]>0 if "sanctions_hits" in dd.columns else False
+            dd["any_pr"]   = (dd["bk_hits"]>0)|(dd["judgment_hits"]>0)|(dd["lien_hits"]>0)
+            dd["risk_combo"] = dd.apply(lambda r:
+                "🚨 WL+Sanc+PR" if r.any_wl and r.any_sanc and r.any_pr
+                else ("🔴 WL+Sanctions" if r.any_wl and r.any_sanc
+                else ("🟠 WL+PR" if r.any_wl and r.any_pr
+                else ("🟡 WL only" if r.any_wl
+                else ("🟣 PR only" if r.any_pr
+                else "✅ Clean")))), axis=1)
+            rc = dd["risk_combo"].value_counts().reset_index()
+            rc.columns = ["Combination","Count"]
+            rc["% of Total"] = (rc["Count"]/max(biz_dd,1)*100).round(1).astype(str)+"%"
+            colors_rc = {"🚨 WL+Sanc+PR":"#7f1d1d","🔴 WL+Sanctions":"#ef4444",
+                          "🟠 WL+PR":"#f97316","🟡 WL only":"#f59e0b",
+                          "🟣 PR only":"#8B5CF6","✅ Clean":"#22c55e"}
+            col_l,col_r = st.columns(2)
+            with col_l:
+                fig = px.pie(rc,names="Combination",values="Count",
+                             color="Combination",color_discrete_map=colors_rc,hole=0.45,
+                             title="Risk Combination Distribution")
+                st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+            with col_r:
+                styled_table(rc,color_col="Combination",palette={k.lower():v for k,v in colors_rc.items()})
 
-    with tab_pr:
-        st.markdown("#### 📜 Public Records — Bankruptcy, Judgments & Liens")
-        col_l, col_r = st.columns(2)
-        with col_l:
-            pr_freq = pd.DataFrame({
-                "Type":["Bankruptcy","Judgment","Lien"],
-                "With Hits":[any_bk,any_judg,any_lien],
-                "% Total":[any_bk/total*100,any_judg/total*100,any_lien/total*100],
-            })
-            fig = px.bar(pr_freq,x="Type",y="With Hits",color="Type",
-                         color_discrete_sequence=["#8B5CF6","#a855f7","#c084fc"],
-                         title="Public Record Frequency")
-            fig.update_layout(showlegend=False)
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            bk_age_df = df[df["bk_age_months"].notna()]
-            if len(bk_age_df)>0:
-                fig2 = px.histogram(bk_age_df,x="bk_age_months",nbins=20,
-                                    color_discrete_sequence=["#8B5CF6"],
-                                    title="Bankruptcy Age Distribution (months)")
-                fig2.add_vline(x=24,line_dash="dash",line_color="#ef4444",annotation_text="2yr")
-                fig2.add_vline(x=84,line_dash="dash",line_color="#f59e0b",annotation_text="7yr")
-                fig2.add_vline(x=120,line_dash="dash",line_color="#22c55e",annotation_text="10yr")
-                st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+            cross_box("Risk Combination Insights",[
+                f"WL+Sanc+PR: {int((dd['risk_combo']=='🚨 WL+Sanc+PR').sum())} businesses — highest risk combination. Immediate compliance referral.",
+                "Clean (no hits): not necessarily low-risk — public records are backward-looking.",
+                "PR only (no watchlist): credit/legal issues but no sanctions. More common, higher recovery potential.",
+            ])
 
-        # Count distribution for each type
-        for pr_type, col_name in [("Bankruptcy","bk_hits"),("Judgment","judgment_hits"),("Lien","lien_hits")]:
-            cnt = df[col_name].value_counts().sort_index().reset_index()
-            cnt.columns = ["Count","# Businesses"]
-            cnt["% of Total"] = (cnt["# Businesses"]/total*100).round(1).astype(str)+"%"
-            cnt = cnt[cnt["Count"]>0]
-            if len(cnt)>0:
-                st.markdown(f"##### {pr_type} Count Distribution")
-                styled_table(cnt)
-
-        state_pr = df.groupby("state").agg(
-            total=("business_id","count"),
-            bk=("bk_hits",lambda x:(x>0).sum()),
-            judg=("judgment_hits",lambda x:(x>0).sum()),
-            lien=("lien_hits",lambda x:(x>0).sum()),
-            all3=("bk_hits",lambda x:((x>0)&(df.loc[x.index,"judgment_hits"]>0)&
-                                       (df.loc[x.index,"lien_hits"]>0)).sum()),
-        ).reset_index()
-        state_pr["BK %"]   = (state_pr["bk"]/state_pr["total"]*100).round(1)
-        state_pr["Judg %"] = (state_pr["judg"]/state_pr["total"]*100).round(1)
-        state_pr["Lien %"] = (state_pr["lien"]/state_pr["total"]*100).round(1)
-        st.markdown("#### 📋 Public Records by State")
-        styled_table(state_pr[["state","total","bk","BK %","judg","Judg %","lien","Lien %"]])
-
-        analyst_card("Public Records Interpretation", [
-            "Bankruptcy age brackets: <2yr = HIGH impact on Worth Score; 2–7yr = MEDIUM; >7yr = LOW. "
-            "Default imputation when no BK: 240 months (20yr) = effectively neutral.",
-            "Tax liens are the most common lien type for small businesses. "
-            "Outstanding federal/state tax liens = payroll tax issues → potential fraud signal.",
-            "Judgment from civil suit: may indicate pattern of non-payment to vendors/suppliers.",
-            f"{pr_all} businesses with ALL THREE (BK+Judgment+Lien): extreme risk profile. "
-            "These businesses have exhausted multiple credit/legal options. "
-            "Manual underwriting is strongly recommended.",
-            "Worth Score model uses: age_bankruptcy, age_judgment, age_lien (months), "
-            "count_bankruptcy, count_judgment, count_lien. Source: ai-score-service/lookups.py.",
-        ])
-
-    with tab_cross:
-        st.markdown("#### 🔗 Due Diligence Cross-Analysis")
-
-        # Watchlist vs Public Records
-        df["any_wl"] = df["watchlist_hits"]>0
-        df["any_sanc"] = df["sanctions_hits"]>0
-        df["any_pr"] = ((df["bk_hits"]>0)|(df["judgment_hits"]>0)|(df["lien_hits"]>0))
-
-        cross_wl_pr = pd.crosstab(df["any_wl"],df["any_pr"],
-                                   rownames=["Has Watchlist Hit"],colnames=["Has Public Record"])
-        fig = go.Figure(go.Heatmap(
-            z=cross_wl_pr.values,
-            x=[f"PR: {c}" for c in cross_wl_pr.columns.tolist()],
-            y=[f"WL: {i}" for i in cross_wl_pr.index.tolist()],
-            colorscale="Blues",text=cross_wl_pr.values,texttemplate="%{text}",
-        ))
-        fig.update_layout(title="Watchlist Hit vs Public Record (Cross-tabulation)")
-        st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-
-        # Risk combinations
-        df["risk_combo"] = df.apply(lambda r:
-            "WL+Sanc+PR" if r.any_wl and r.any_sanc and r.any_pr
-            else ("WL+Sanc" if r.any_wl and r.any_sanc
-            else ("WL+PR" if r.any_wl and r.any_pr
-            else ("WL only" if r.any_wl
-            else ("PR only" if r.any_pr
-            else "Clean")))), axis=1)
-        rc = df["risk_combo"].value_counts().reset_index()
-        rc.columns = ["Risk Combination","Count"]
-        rc["% of Total"] = (rc["Count"]/total*100).round(1).astype(str)+"%"
-        colors_rc = {"WL+Sanc+PR":"#7f1d1d","WL+Sanc":"#ef4444","WL+PR":"#f97316",
-                     "WL only":"#f59e0b","PR only":"#8B5CF6","Clean":"#22c55e"}
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            fig2 = px.pie(rc,names="Risk Combination",values="Count",
-                          color="Risk Combination",color_discrete_map=colors_rc,hole=0.45,
-                          title="Risk Combination Distribution")
-            st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-        with col_r:
-            st.markdown("#### 📋 Risk Combination Summary")
-            styled_table(rc,color_col="Risk Combination",palette=colors_rc)
-
-        cross_box("Due Diligence Cross-Analysis", [
-            "WL+Sanc+PR combination: the highest-risk profile. "
-            f"{(df['risk_combo']=='WL+Sanc+PR').sum()} businesses. Immediate compliance referral.",
-            "Clean (no hits): not necessarily low-risk. Public records are backward-looking; "
-            "a business can be clean historically but engage in fraud today.",
-            "WL only (no PR): watchlist hit without any credit history issues. "
-            "May indicate owner name match on watchlist vs. legitimate business.",
-            "PR only (no WL): credit/legal issues but no watchlist. "
-            "More common, higher recovery potential. Assess severity by BK age.",
-        ])
-
-        anomaly_flags(df,[
-            ((df["sanctions_hits"]>0), "Businesses with sanctions hits — hard stop required","red"),
-            ((df["watchlist_hits"]>3), "Businesses with >3 watchlist hits — unusual, may be false positive","amber"),
-            ((df["pep_hits"]>0)&(df["sanctions_hits"]>0), "PEP + Sanctions simultaneously — very high risk","red"),
-            ((df["bk_hits"]>1), "Multiple bankruptcies on record — serial filing pattern","amber"),
-        ])
-
-    with tab_lineage:
-        lrow("watchlist","rds_warehouse_public.facts","Middesk / Trulioo",
-             "Consolidated: PEP + SANCTIONS only. Adverse media excluded by filterOutAdverseMedia().")
-        lrow("watchlist_hits","rds_warehouse_public.facts","Calculated","Count = watchlist.value.metadata.length")
-        lrow("watchlist_raw","rds_warehouse_public.facts","Middesk task / Trulioo watchlistResults","Pre-consolidation")
-        lrow("adverse_media_hits","rds_warehouse_public.facts","Trulioo + adverseMediaDetails",
-             "listType='adverse_media' hits + adverseMediaDetails.records[0].total_risk_count")
-        lrow("sanctions_hits","rds_warehouse_public.facts","Trulioo PSC","listType='SANCTIONS'")
-        lrow("pep_hits","rds_warehouse_public.facts","Trulioo PSC","listType='PEP'")
-        st.code("""SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS v, received_at
-FROM rds_warehouse_public.facts
-WHERE business_id = 'YOUR-UUID'
-  AND name IN ('watchlist_hits','adverse_media_hits','sanctions_hits','pep_hits','watchlist');
--- watchlist.value is a JSON array — parse with json.loads() in Python""",language="sql")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# DATA LINEAGE
-# ═══════════════════════════════════════════════════════════════════════════════
-elif section == "🔍 Data Lineage":
-    sh("Complete Data Lineage","Every fact → source table → vendor → platform_id → Fact Engine rules","🔍")
-
-    tab_facts, tab_vendors, tab_rules, tab_sql = st.tabs([
-        "📋 All Facts","🏭 Vendor Map","⚙️ Fact Engine Rules","🗄️ SQL Patterns"
-    ])
-
-    with tab_facts:
-        all_facts = [
-            ("sos_filings","KYB","Middesk/OC/Trulioo","pid=16/23/38","Array of SOS registrations with active, jurisdiction, foreign_domestic"),
-            ("sos_match","KYB","Middesk/OC/Trulioo","pid=16/23/38","Boolean: SOS name matched submitted business name"),
-            ("sos_active","KYB","Calculated","N/A","true iff any filing has active=true"),
-            ("tin","KYB","Middesk BEV/OC","pid=16/23","Unmasked EIN from Middesk business_entity_verification"),
-            ("tin_submitted","KYB","Middesk/applicant","pid=16","Masked TIN from applicant form"),
-            ("tin_match","KYB","Middesk task/Trulioo","pid=16/38","Object {status,message}. status: success/failure/pending"),
-            ("tin_match_boolean","KYB","Calculated","N/A","true IFF tin_match.status === 'success' only"),
-            ("naics_code","Industry","EFX/ZI/OC/SERP/Trulioo/AI","pid=17/24/23/22/38/31","6-digit NAICS winner via Fact Engine"),
-            ("mcc_code","Industry","AI/lookup","pid=31","4-digit MCC from AI or rel_naics_mcc lookup"),
-            ("industry","Industry","Calculated","N/A","2-digit NAICS prefix → core_business_industries"),
-            ("idv_status","KYC","Plaid IDV","pid=40","Dict {SUCCESS:N, PENDING:N, CANCELED:N, EXPIRED:N, FAILED:N}"),
-            ("idv_passed_boolean","KYC","Calculated","N/A","true iff idv_status.SUCCESS > 0"),
-            ("name_match_boolean","KYC","Middesk/OC/Trulioo","pid=16/23/38","Business name match boolean"),
-            ("address_match_boolean","KYC","Middesk/SERP","pid=16/22","Address match boolean"),
-            ("watchlist","DD","Middesk/Trulioo","pid=16/38","PEP + SANCTIONS only — adverse media excluded"),
-            ("watchlist_hits","DD","Calculated","N/A","Count = watchlist.value.metadata.length"),
-            ("adverse_media_hits","DD","Trulioo/AdverseMedia","pid=38","listType=adverse_media hits"),
-            ("sanctions_hits","DD","Trulioo PSC","pid=38","Trulioo screeningResults where listType=SANCTIONS"),
-            ("pep_hits","DD","Trulioo PSC","pid=38","Trulioo screeningResults where listType=PEP"),
-            ("worth_score","Score","AI Score Service","N/A","300–850 scale. prediction×550+300"),
-            ("giact_account_status","Banking","GIACT gVerify","N/A","passed/failed/missing from verify_response_code"),
-            ("giact_account_name","Banking","GIACT gAuthenticate","N/A","from auth_response_code via ACCOUNT_NAME_MAP"),
-            ("giact_contact_verification","Banking","GIACT gAuthenticate","N/A","same auth_response_code, CONTACT_VERIFICATION_MAP"),
-            ("synthetic_identity_risk_score","KYC","fraud_report","N/A","0–1 from owner_verification caseTabValuesManager"),
-            ("stolen_identity_risk_score","KYC","fraud_report","N/A","0–1 same source"),
-        ]
-        cat = st.selectbox("Filter category",["All"]+sorted(set(f[1] for f in all_facts)))
-        df_facts = pd.DataFrame(all_facts,columns=["Fact","Category","Sources","Platform IDs","Description"])
-        if cat!="All": df_facts = df_facts[df_facts["Category"]==cat]
-        styled_table(df_facts)
-
-    with tab_vendors:
-        vendors_data = [
-            ("Middesk","16","2.0","0.15 base + 0.20×tasks (max 4 tasks)","KYB primary: SOS, TIN, name, address","pid=16"),
-            ("OpenCorporates","23","0.9","match.index / 55","Global SOS registry, classification codes","pid=23"),
-            ("ZoomInfo","24","0.8","match.index / 55","NAICS, employees, revenue, website. Pre-loaded Redshift","pid=24"),
-            ("Equifax","17","0.7","XGBoost prediction or index/55","NAICS, SIC, employees, revenue. Pre-loaded Redshift","pid=17"),
-            ("Trulioo","38","0.8","Status-based: 0.70/0.40/0.20","Watchlist, PEP, sanctions, IDV, registration","pid=38"),
-            ("Plaid IDV","40","1.0","1.0 when data present","Identity verification: idv_status, fraud scores","pid=40"),
-            ("AI (GPT)","31","0.1","Self-reported HIGH/MED/LOW","NAICS last resort, MCC, descriptions","pid=31"),
-            ("SERP","22","—","Heuristic score","Website info, NAICS from web classification","pid=22"),
-            ("GIACT","N/A","—","response_code based","Banking: account, name, contact verification","N/A"),
-        ]
-        vdf = pd.DataFrame(vendors_data,columns=["Vendor","Platform ID","Weight","Confidence Formula","Coverage","Key"])
-        styled_table(vdf)
-
-    with tab_rules:
-        rules = [
-            ("Rule 1","manualOverride()","ALWAYS first. Analyst override wins over everything. No other rule applies.","#22c55e"),
-            ("Rule 2","factWithHighestConfidence()","Highest confidence wins IF gap to next-best > 5% (WEIGHT_THRESHOLD=0.05).","#3B82F6"),
-            ("Rule 3","weightedFactSelector()","Tie-break: within 5% confidence → higher platform weight wins.","#8B5CF6"),
-            ("Rule 4","NO minimum confidence cutoff","CRITICAL: A source with confidence=0.05 CAN still win. "
-             "This is why AI (w=0.1) sometimes wins → NAICS 561499.","#ef4444"),
-            ("Rule 5","AI safety net","AINaicsEnrichment triggered when <1 non-AI source has naics_code. Last resort.","#f59e0b"),
-            ("Rule 6","removeNaicsCode()","AI code not in core_naics_code table → replaced with 561499. Catches hallucinations.","#f97316"),
-        ]
-        for rid, name, desc, color in rules:
-            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
-                border-radius:8px;padding:10px 14px;margin:5px 0">
-              <span style="color:{color};font-weight:700">{rid}: {name}</span>
-              <div style="color:#94A3B8;font-size:.78rem;margin-top:4px">{desc}</div>
-            </div>""", unsafe_allow_html=True)
-
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.markdown("**Pipeline A** (Integration Service)")
-            st.markdown("""
-- Real-time, per-business, all 6+ vendors
-- All 6 rules applied per fact
-- Output: `rds_warehouse_public.facts` (200+ facts)
-- Customer-facing via Admin Portal
-            """)
-        with col_b:
-            st.markdown("**Pipeline B** (Warehouse Service)")
-            st.markdown("""
-- Batch, Redshift-only, ZI + EFX ONLY
-- Winner: `zi_match_conf > efx_match_conf ? ZI : EFX`
-- OC, Middesk, Trulioo, AI: **IGNORED**
-- Output: `datascience.customer_files`
-- Internal analytics only
-            """)
-
-    with tab_sql:
-        queries = [
-            ("Get any KYB fact", """SELECT name,
-       JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,
-       JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS winning_vendor,
-       JSON_EXTRACT_PATH_TEXT(value,'source','confidence')  AS confidence,
-       received_at
-FROM rds_warehouse_public.facts
-WHERE business_id = 'YOUR-UUID'
-  AND name IN ('naics_code','sos_filings','tin_match_boolean','watchlist_hits');"""),
-            ("NAICS fallback rate", """SELECT
-    JSON_EXTRACT_PATH_TEXT(value,'value') AS naics_code,
-    COUNT(*) AS businesses,
-    ROUND(COUNT(*)*100.0/SUM(COUNT(*)) OVER(),2) AS pct
-FROM rds_warehouse_public.facts
-WHERE name = 'naics_code'
-GROUP BY JSON_EXTRACT_PATH_TEXT(value,'value')
-ORDER BY businesses DESC LIMIT 20;"""),
-            ("TIN verification summary", """SELECT
-    JSON_EXTRACT_PATH_TEXT(value,'value') AS tin_boolean,
-    COUNT(*) AS businesses
-FROM rds_warehouse_public.facts
-WHERE name = 'tin_match_boolean'
-GROUP BY JSON_EXTRACT_PATH_TEXT(value,'value');"""),
-            ("Middesk gap detection", """SELECT DISTINCT f.business_id,
-    JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence') AS oc_confidence
-FROM rds_warehouse_public.facts f
-WHERE f.name = 'sos_filings'
-  AND JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') = '23'
-  AND NOT EXISTS (
-      SELECT 1 FROM integration_data.request_response rr
-      WHERE rr.business_id = f.business_id AND rr.platform_id = 16
-  ) LIMIT 100;"""),
-            ("Watchlist hit distribution", """SELECT
-    JSON_EXTRACT_PATH_TEXT(value,'value') AS hit_count,
-    COUNT(*) AS businesses
-FROM rds_warehouse_public.facts
-WHERE name = 'watchlist_hits'
-GROUP BY JSON_EXTRACT_PATH_TEXT(value,'value')
-ORDER BY CAST(JSON_EXTRACT_PATH_TEXT(value,'value') AS INT) DESC;"""),
-        ]
-        for title, sql in queries:
-            with st.expander(f"📋 {title}"):
-                st.code(sql, language="sql")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# DATA QUALITY AUDIT
-# ═══════════════════════════════════════════════════════════════════════════════
-elif section == "🔬 Data Quality Audit":
-    sh("Data Quality Audit — Systematic Non-Conformance Detection",
-       "Vendor match rates · GIACT coverage gaps · Middesk vs OC discrepancy · "
-       "inactive+perpetual flags · domestic registration success · TIN success rates", "🔬")
-
-    flag("This section replaces manual data quality analysis with systematic, automated checks. "
-         "Each check identifies non-conforming data points, explains the expected behaviour, "
-         "and quantifies the gap.", "blue")
-
-    # ── Load data ──────────────────────────────────────────────────────────────
-    with st.spinner("Running data quality checks against Redshift…"):
-        sos_df  = get_section_data("sos",   record_limit)
-        tin_df  = get_section_data("tin",   record_limit)
-        naics_df= get_section_data("naics", record_limit)
-        dd_df   = get_section_data("dd",    record_limit)
-        bank_df = get_section_data("banking", record_limit)  # may be None
-
-    total_biz = sos_df["business_id"].nunique()
-
-    tab_overview, tab_sos_dq, tab_tin_dq, tab_bank_dq, tab_vendor, tab_inactive = st.tabs([
-        "📊 Quality Overview",
-        "🏛️ SOS / Registry",
-        "🔐 TIN Success Rate",
-        "🏦 Banking Coverage",
-        "📡 Vendor Match Rates",
-        "⚠️ Inactive + Perpetual",
-    ])
-
-    # ── OVERVIEW ───────────────────────────────────────────────────────────────
-    with tab_overview:
-        st.markdown("### What this dashboard tracks")
-        checks_info = [
-            ("🏛️ SOS Domestic Registration Rate",
-             "Does every business have at least 1 domestic SOS filing? "
-             "Expected: 100%. Any gap = entity not found in registry systems.",
-             "sos_active, sos_match_boolean"),
-            ("Middesk finds match but OC does not",
-             "Middesk matched but OC returned no result. "
-             "Should only happen with brand-new incorporations. High rate = OC data lag.",
-             "sos_match (source.platformId comparison)"),
-            ("OC finds match but Middesk does not",
-             "The known Middesk data gap. OC found the entity in global registries "
-             "but Middesk couldn't match in US SOS systems.",
-             "middesk_confidence vs oc_conf"),
-            ("🔐 TIN Success Rate",
-             "Tracks businesses with tin_match_boolean=true (IRS EIN match) vs "
-             "tin_match.status=failure. NOT just fill rate — actual success/failure outcome.",
-             "tin_match_boolean, tin_match_status"),
-            ("🏦 GIACT Banking Coverage Gap",
-             "GIACT does not have complete coverage across America. "
-             "Tracks unverified accounts to set expectations for underwriters.",
-             "rds_integration_data.rel_banking_verifications"),
-            ("⚠️ Inactive + Perpetual Expiration Date",
-             "A business with expiration_date='perpetual' should be active forever. "
-             "If status='inactive', this is a RED FLAG — entity cannot legally operate. "
-             "Cause: unpaid taxes, missed annual report filing.",
-             "sos_filings[].active + expiration_date"),
-            ("📡 Vendor Match Rates",
-             "Tracks match rates for Middesk, Equifax, ZoomInfo, OpenCorporates. "
-             "Low rates signal data freshness issues or entity-matching model degradation.",
-             "middesk_confidence, oc_conf, zi_conf, efx_conf"),
-        ]
-        for title, desc, source in checks_info:
-            st.markdown(f"""<div class="cross-box">
-              <div class="title">🔍 {title}</div>
-              <p>→ {desc}</p>
-              <p style="color:#475569;font-size:.74rem">Facts: <code>{source}</code></p>
-            </div>""", unsafe_allow_html=True)
-
-    # ── SOS / REGISTRY DQ ──────────────────────────────────────────────────────
-    with tab_sos_dq:
-        st.markdown("#### 🏛️ SOS Domestic Registration Quality")
-
-        sos_active_rate  = sos_df["active"].mean()*100
-        sos_matched_rate = sos_df["sos_matched"].mean()*100 if "sos_matched" in sos_df.columns else None
-
-        # Middesk vs OC discrepancy
-        middesk_high = sos_df["middesk_conf"] > 0.50
-        oc_high      = sos_df["oc_conf"]      > 0.50
-        middesk_found_oc_not  = (middesk_high & ~oc_high).sum()
-        oc_found_middesk_not  = (oc_high & ~middesk_high).sum()
-        both_found            = (middesk_high & oc_high).sum()
-        neither_found         = (~middesk_high & ~oc_high).sum()
-
-        c1,c2,c3,c4 = st.columns(4)
-        with c1: kpi("SOS Active Rate",f"{sos_active_rate:.1f}%",
-                     "Target: >95%","#22c55e" if sos_active_rate>95 else "#ef4444")
-        with c2: kpi("SOS Match Rate",
-                     f"{sos_matched_rate:.1f}%" if sos_matched_rate else "N/A",
-                     "Target: >90%","#22c55e" if (sos_matched_rate or 0)>90 else "#f59e0b")
-        with c3: kpi("Middesk ✅ OC ❌",f"{middesk_found_oc_not:,}",
-                     "New incorporations expected","#f59e0b")
-        with c4: kpi("OC ✅ Middesk ❌",f"{oc_found_middesk_not:,}",
-                     "Middesk data gap","#ef4444")
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            match_summary = pd.DataFrame({
-                "Scenario": ["Both matched","Middesk only","OC only","Neither matched"],
-                "Count": [both_found, middesk_found_oc_not, oc_found_middesk_not, neither_found],
-                "Meaning": [
-                    "✅ Healthy — both vendors confirmed entity",
-                    "⚠️ Likely new incorporation — OC lag expected",
-                    "🚨 Middesk gap — investigate (integration-service platform_id=16)",
-                    "❌ Entity not found by either — high risk for underwriting",
-                ]
-            })
-            fig = px.pie(match_summary, names="Scenario", values="Count",
-                         color="Scenario",
-                         color_discrete_map={
-                             "Both matched":"#22c55e",
-                             "Middesk only":"#f59e0b",
-                             "OC only":"#ef4444",
-                             "Neither matched":"#64748b",
-                         }, hole=0.45, title="Middesk vs OC Match Agreement")
-            st.plotly_chart(dark_chart_layout(fig), use_container_width=True)
-
-        with col_r:
-            # Confidence distribution comparison
-            fig2 = go.Figure()
-            fig2.add_trace(go.Histogram(x=sos_df["middesk_conf"],name="Middesk",
-                                        marker_color="#f59e0b",opacity=0.7,nbinsx=20))
-            fig2.add_trace(go.Histogram(x=sos_df["oc_conf"],name="OC",
-                                        marker_color="#3B82F6",opacity=0.7,nbinsx=20))
-            fig2.update_layout(barmode="overlay",title="Confidence Distribution: Middesk vs OC")
-            st.plotly_chart(dark_chart_layout(fig2), use_container_width=True)
-
-        st.markdown("#### 📋 Match Scenario Summary Table")
-        styled_table(match_summary)
-
-        analyst_card("SOS Registry Quality Analysis", [
-            f"SOS Active Rate: {sos_active_rate:.1f}% — "
-            f"{'✅ healthy' if sos_active_rate>95 else '❌ below 95% target — investigate inactive filings'}.",
-            f"Middesk found but OC did not ({middesk_found_oc_not:,}): "
-            "Expected for brand-new incorporations (OC data lag is typically 2–4 weeks after state filing). "
-            "If this count is high for old businesses, OC coverage may have gaps.",
-            f"OC found but Middesk did not ({oc_found_middesk_not:,}): "
-            "This is the known Middesk data gap. OC uses global OpenCorporates database; "
-            "Middesk queries live US SOS systems. Gap may indicate: entity not in Middesk DB, "
-            "name mismatch, or Middesk API call failed.",
-            f"Neither vendor found ({neither_found:,}): "
-            "These businesses have NO registry confirmation from any vendor. "
-            "Highest risk segment — entity existence is unverified.",
-        ])
-
-        cross_box("Middesk vs OC Discrepancy Rules", [
-            "Middesk match but OC no match → EXPECTED for new incorporations "
-            "(< 4 weeks since state filing). Monitor count over time.",
-            "OC match but Middesk no match → UNEXPECTED for established businesses. "
-            "Check integration_data.request_response WHERE platform_id=16 for errors.",
-            "Neither match → RED FLAG. No registry confirmation. "
-            "Do not auto-approve; route to manual underwriting review.",
-        ])
-
-        st.code("""-- Find businesses where OC matched but Middesk did not
--- (confirmed by source.platformId on sos_match fact)
-SELECT business_id, received_at,
-       JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS winning_vendor,
-       JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence
-FROM rds_warehouse_public.facts
-WHERE name = 'sos_match_boolean'
-  AND JSON_EXTRACT_PATH_TEXT(value,'value') = 'true'
-  AND JSON_EXTRACT_PATH_TEXT(value,'source','platformId') = '23'  -- OC won
-ORDER BY received_at DESC LIMIT 100;""", language="sql")
-
-    # ── TIN DQ ─────────────────────────────────────────────────────────────────
-    with tab_tin_dq:
-        st.markdown("#### 🔐 TIN Verification — Success/Failure Rate Tracking")
-        flag("Track OUTCOMES (success/failure) not just fill rates. "
-             "A submitted TIN that FAILS verification is worse than no TIN at all — "
-             "it means the submitted EIN does not match the legal name per IRS records.", "blue")
-
-        tin_df["tin_match_boolean"] = tin_df["tin_match_boolean"].astype(bool)
-        tin_df["tin_submitted"]     = tin_df["tin_submitted"].astype(bool)
-        tin_df["tin_match_status"]  = tin_df["tin_match_status"].astype(str).fillna("")
-
-        total_tin = len(tin_df)
-        submitted   = int(tin_df["tin_submitted"].sum())
-        verified    = int(tin_df["tin_match_boolean"].sum())
-        failed      = int((tin_df["tin_match_status"]=="failure").sum())
-        pending     = int((tin_df["tin_match_status"]=="pending").sum())
-        not_submitted = total_tin - submitted
-        success_of_submitted = verified/max(submitted,1)*100
-        failure_of_submitted = failed/max(submitted,1)*100
-
-        c1,c2,c3,c4,c5 = st.columns(5)
-        with c1: kpi("TIN Submission Rate",f"{submitted/max(total_tin,1)*100:.1f}%",
-                     f"{submitted:,} submitted","#3B82F6")
-        with c2: kpi("✅ Success Rate",f"{success_of_submitted:.1f}%",
-                     "of submitted TINs","#22c55e" if success_of_submitted>70 else "#ef4444")
-        with c3: kpi("❌ Failure Rate",f"{failure_of_submitted:.1f}%",
-                     "of submitted TINs","#ef4444" if failure_of_submitted>20 else "#22c55e")
-        with c4: kpi("⏳ Pending",f"{pending:,}",
-                     "awaiting IRS response","#f59e0b")
-        with c5: kpi("📭 Not Submitted",f"{not_submitted:,}",
-                     "no TIN provided","#64748b")
-
-        col_l, col_r = st.columns(2)
-        with col_l:
-            outcome_df = pd.DataFrame({
-                "Outcome":["✅ Verified","❌ Failed","⏳ Pending","📭 Not Submitted"],
-                "Count":[verified, failed, pending, not_submitted],
-            })
-            fig = px.bar(outcome_df,x="Outcome",y="Count",color="Outcome",
-                         color_discrete_map={"✅ Verified":"#22c55e","❌ Failed":"#ef4444",
-                                              "⏳ Pending":"#f59e0b","📭 Not Submitted":"#64748b"},
-                         title="TIN Verification Outcomes")
-            fig.update_layout(showlegend=False)
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-        with col_r:
-            # Success rate funnel
-            funnel_df = pd.DataFrame({
-                "Stage":["All Businesses","Submitted TIN","TIN Verified"],
-                "Count":[total_tin, submitted, verified],
-            })
-            fig2 = px.funnel(funnel_df,x="Count",y="Stage",
-                             color_discrete_sequence=["#3B82F6"],
-                             title="TIN Verification Funnel")
+            # Heatmap: watchlist vs public records
+            cross_tbl = pd.crosstab(dd["any_wl"],dd["any_pr"],
+                                     rownames=["Has Watchlist"],colnames=["Has Public Record"])
+            fig2 = go.Figure(go.Heatmap(
+                z=cross_tbl.values,
+                x=[f"PR: {c}" for c in cross_tbl.columns.tolist()],
+                y=[f"WL: {i}" for i in cross_tbl.index.tolist()],
+                colorscale="Blues",text=cross_tbl.values,texttemplate="%{text}",
+            ))
+            fig2.update_layout(title="Watchlist × Public Record Cross-tabulation")
             st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
 
-        st.markdown("#### 📋 TIN Failure Analysis — What Failure Means")
-        failure_reasons = pd.DataFrame({
-            "Reason":["EIN doesn't match legal name",
-                      "TIN associated with different business",
-                      "Duplicate EIN request",
-                      "Invalid TIN format",
-                      "IRS unavailable (temporary)"],
-            "Middesk Message":[
-                "The IRS has a record for the submitted TIN and Business Name combination — NOT found",
-                "We believe the submitted TIN is associated with a different Business Name",
-                "Duplicate request",
-                "Invalid TIN",
-                "IRS unavailable"],
-            "Risk":["HIGH","HIGH","MEDIUM","HIGH","LOW"],
-            "Action":["Manual review required","Flag for fraud review",
-                      "Re-submit / check for duplicate","Correct EIN and resubmit",
-                      "Auto-retry in 24h"],
-        })
-        styled_table(failure_reasons, color_col="Risk",
-                     palette={"HIGH":"#ef4444","MEDIUM":"#f59e0b","LOW":"#22c55e"})
-
-        analyst_card("TIN Quality Assessment", [
-            f"Submission rate: {submitted/max(total_tin,1)*100:.1f}% — "
-            f"{'good' if submitted/max(total_tin,1)>0.90 else 'LOW — many businesses not providing EIN'}.",
-            f"Success rate of submitted TINs: {success_of_submitted:.1f}%. "
-            f"{'✅ Healthy' if success_of_submitted>70 else '❌ Below 70% — investigate failure reasons'}. "
-            "Industry benchmark: >75% success rate is expected for US businesses with valid EINs.",
-            f"Failure rate: {failure_of_submitted:.1f}% — "
-            "failures mean the submitted EIN does NOT match the legal name in IRS records. "
-            "Primary causes: wrong EIN, recent name change not updated with IRS, sole prop using SSN.",
-            f"Pending ({pending:,}): IRS response not yet received. "
-            "Normal for same-day submissions. Should resolve within 24–48h.",
-        ])
-
-    # ── BANKING COVERAGE ───────────────────────────────────────────────────────
-    with tab_bank_dq:
-        st.markdown("#### 🏦 GIACT Banking Coverage Gap Analysis")
-        flag("GIACT does NOT have complete coverage across America. "
-             "Many checking accounts cannot be verified — this is expected behavior. "
-             "The dashboard tracks unverified accounts to manage underwriter expectations.", "amber")
-
-        # Always query the confirmed live table directly (regardless of bank_df)
-        verif_summary = run_query("""
-            SELECT verification_status, COUNT(*) AS accounts,
-                   ROUND(COUNT(*)*100.0/SUM(COUNT(*)) OVER(), 2) AS pct
-            FROM rds_integration_data.rel_banking_verifications
-            GROUP BY verification_status ORDER BY accounts DESC
-        """)
-
-        if verif_summary is not None and not verif_summary.empty:
-            # Real data available — confirmed 23,364 total accounts
-            total_accts  = int(verif_summary["accounts"].sum())
-            success_rows = verif_summary[verif_summary["verification_status"]=="SUCCESS"]
-            errored_rows = verif_summary[verif_summary["verification_status"]=="ERRORED"]
-            success_n    = int(success_rows["accounts"].sum()) if not success_rows.empty else 0
-            errored_n    = int(errored_rows["accounts"].sum()) if not errored_rows.empty else 0
-
-            flag("✅ rds_integration_data.rel_banking_verifications confirmed accessible. "
-                 "Showing live data.", "green")
+    with tab_score:
+        if has_scores:
+            score_df = worth
+            total_s = len(score_df); avg_s = score_df["worth_score_850"].mean()
+            high = int((score_df["risk_level"]=="HIGH").sum())
+            mod  = int((score_df["risk_level"]=="MODERATE").sum())
+            low  = int((score_df["risk_level"]=="LOW").sum())
 
             c1,c2,c3,c4 = st.columns(4)
-            with c1: kpi("Total Accounts",f"{total_accts:,}","all verification records","#3B82F6")
-            with c2: kpi("✅ SUCCESS",f"{success_n:,}",
-                         f"{success_n/max(total_accts,1)*100:.2f}%","#22c55e")
-            with c3: kpi("❌ ERRORED",f"{errored_n:,}",
-                         f"{errored_n/max(total_accts,1)*100:.2f}%","#ef4444")
-            with c4: kpi("Coverage Gap",f"{errored_n:,}",
-                         "ERRORED = GIACT could not verify","#f59e0b")
+            with c1: kpi("Avg Score",f"{avg_s:.0f}","300–850","#3B82F6")
+            with c2: kpi("🔴 HIGH Risk",f"{high:,}",f"{high/max(total_s,1)*100:.0f}% (<500)","#ef4444")
+            with c3: kpi("🟡 MODERATE", f"{mod:,}", f"{mod/max(total_s,1)*100:.0f}% (500-650)","#f59e0b")
+            with c4: kpi("🟢 LOW Risk", f"{low:,}", f"{low/max(total_s,1)*100:.0f}% (>650)","#22c55e")
 
-            col_l, col_r = st.columns(2)
+            if "score_decision" in score_df.columns:
+                c5,c6,c7 = st.columns(3)
+                with c5: kpi("✅ APPROVE",f"{int((score_df['score_decision']=='APPROVE').sum()):,}","","#22c55e")
+                with c6: kpi("🔍 FURTHER REVIEW",f"{int((score_df['score_decision']=='FURTHER_REVIEW_NEEDED').sum()):,}","","#f59e0b")
+                with c7: kpi("❌ DECLINE",f"{int((score_df['score_decision']=='DECLINE').sum()):,}","","#ef4444")
+
+            col_l,col_r = st.columns(2)
             with col_l:
-                fig = px.pie(verif_summary, names="verification_status", values="accounts",
+                fig = px.histogram(score_df,x="worth_score_850",nbins=30,
+                                   color_discrete_sequence=["#3B82F6"],
+                                   title="Worth Score Distribution (300–850)")
+                fig.add_vline(x=500,line_dash="dash",line_color="#ef4444",annotation_text="HIGH <500")
+                fig.add_vline(x=650,line_dash="dash",line_color="#f59e0b",annotation_text="MOD <650")
+                st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+            with col_r:
+                rl = score_df["risk_level"].value_counts().reset_index()
+                rl.columns = ["Risk","Count"]
+                fig2 = px.bar(rl,x="Risk",y="Count",color="Risk",
+                              color_discrete_map={"HIGH":"#ef4444","MODERATE":"#f59e0b","LOW":"#22c55e"},
+                              title="Risk Level Distribution")
+                fig2.update_layout(showlegend=False)
+                st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+
+            # Score source info
+            flag("Source: rds_manual_score_public.business_scores via Redshift federation. "
+                 "NOTE: score_status column does not exist in this schema version.", "blue")
+        else:
+            st.info("Individual score data not available from rds_manual_score_public.business_scores. "
+                    "Check the Score Audit tab for aggregate fill-rate data.")
+            st.code("""-- Confirmed working (no score_status filter):
+SELECT COUNT(*), AVG(weighted_score_850), MIN(weighted_score_850), MAX(weighted_score_850)
+FROM rds_manual_score_public.business_scores
+WHERE weighted_score_850 IS NOT NULL;
+
+SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, cs.business_id
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+WHERE bs.weighted_score_850 IS NOT NULL
+LIMIT 10;""", language="sql")
+
+    with tab_audit:
+        if is_audit:
+            audit_df = worth
+            flag("Individual scores not accessible — showing aggregate fill rates from "
+                 "warehouse.worth_score_input_audit.", "amber")
+            c1,c2,c3 = st.columns(3)
+            with c1: kpi("Audit Days",f"{len(audit_df):,}","scoring days","#3B82F6")
+            with c2: kpi("Avg Biz/Day",f"{audit_df['rows_per_day'].mean():.0f}","scored daily","#22c55e")
+            with c3: kpi("Latest Date",str(audit_df["score_date"].max()),"","#8B5CF6")
+
+            fill_cols = [c for c in audit_df.columns if c.startswith("fill_")]
+            latest = audit_df.iloc[0]
+            fill_data = [{"Feature":c.replace("fill_",""),"Fill %":float(latest[c])} for c in fill_cols if c in audit_df.columns]
+            fill_df = pd.DataFrame(fill_data).sort_values("Fill %",ascending=True)
+            fill_df["Status"] = fill_df["Fill %"].apply(
+                lambda v:"Good (>80%)" if v>=80 else("Medium (30-80%)" if v>=30 else"Low (<30%)"))
+            fig = px.bar(fill_df.tail(30),x="Fill %",y="Feature",orientation="h",
+                         color="Status",
+                         color_discrete_map={"Good (>80%)":"#22c55e","Medium (30-80%)":"#f59e0b","Low (<30%)":"#ef4444"},
+                         title=f"Feature Fill Rates (latest: {latest['score_date']})")
+            fig.update_layout(height=600)
+            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+
+            zero_features = fill_df[fill_df["Fill %"]==0]["Feature"].tolist()
+            if zero_features:
+                flag(f"{len(zero_features)} features at 0% fill: {', '.join(zero_features[:10])}. "
+                     "These features are not reaching the model.", "red")
+        else:
+            st.info("Score audit data will appear here when individual scores are also unavailable. "
+                    "Both sources were checked.")
+            st.code("""SELECT score_date, rows_per_day, fill_state, fill_naics6, fill_revenue
+FROM warehouse.worth_score_input_audit
+ORDER BY score_date DESC LIMIT 10;""", language="sql")
+
+    with tab_dq_risk:
+        st.markdown("#### 🔬 Risk & Score Data Quality Checks")
+        pr_all = int(((dd["bk_hits"]>0)&(dd["judgment_hits"]>0)&(dd["lien_hits"]>0)).sum()) if "bk_hits" in dd.columns else 0
+        dq = [
+            ("Sanctions rate < 1%",any_sanc/max(biz_dd,1)<0.01,f"{any_sanc/max(biz_dd,1)*100:.2f}%",
+             "Any sanctions hit must be manually reviewed before approval"),
+            ("Watchlist < 15%",any_wl/max(biz_dd,1)<0.15,f"{any_wl/max(biz_dd,1)*100:.1f}%",
+             "High rate may indicate false positives or name matching issues"),
+            ("BK+Judg+Lien combo < 5%",pr_all/max(biz_dd,1)<0.05,f"{pr_all/max(biz_dd,1)*100:.1f}%",
+             "All three together = worst financial profile"),
+            ("watchlist_hits col exists",  "watchlist_hits"  in dd.columns,str("watchlist_hits"  in dd.columns),"Required column"),
+            ("num_bankruptcies col exists","num_bankruptcies" in dd.columns,str("num_bankruptcies" in dd.columns),"Required column"),
+        ]
+        rows = [{"Check":l,"Result":v,"Status":"✅ PASS" if ok else "❌ FAIL","Action":a} for l,ok,v,a in dq]
+        styled_table(pd.DataFrame(rows),color_col="Status",palette={"✅ pass":"#22c55e","❌ fail":"#ef4444"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 5 — BANKING & OPS
+# ═══════════════════════════════════════════════════════════════════════════════
+elif section == "🏦 Banking & Ops":
+    sh("Banking & Operations",
+       "GIACT verification · rds_integration_data · coverage gaps · "
+       "account status · processing volumes", "🏦")
+
+    flag("Banking data source: rds_integration_data.rel_banking_verifications (Redshift Spectrum). "
+         "Confirmed working. GIACT does NOT have complete US coverage — "
+         "unverified accounts are expected and tracked here.", "blue")
+
+    # Live query — always fresh
+    verif_summary = run_query("""
+        SELECT verification_status, COUNT(*) AS accounts,
+               ROUND(COUNT(*)*100.0/SUM(COUNT(*)) OVER(),2) AS pct
+        FROM rds_integration_data.rel_banking_verifications
+        GROUP BY verification_status ORDER BY accounts DESC
+    """)
+
+    if verif_summary is not None and not verif_summary.empty:
+        total_accts = int(verif_summary["accounts"].sum())
+        success_n   = int(verif_summary[verif_summary["verification_status"]=="SUCCESS"]["accounts"].sum()) if "SUCCESS" in verif_summary["verification_status"].values else 0
+        errored_n   = int(verif_summary[verif_summary["verification_status"]=="ERRORED"]["accounts"].sum()) if "ERRORED" in verif_summary["verification_status"].values else 0
+
+        c1,c2,c3,c4 = st.columns(4)
+        with c1: kpi("Total Accounts",f"{total_accts:,}","all verification records","#3B82F6")
+        with c2: kpi("✅ SUCCESS",f"{success_n:,}",f"{success_n/max(total_accts,1)*100:.2f}%","#22c55e")
+        with c3: kpi("❌ ERRORED",f"{errored_n:,}",f"{errored_n/max(total_accts,1)*100:.2f}%","#ef4444")
+        with c4: kpi("Coverage Gap",f"{errored_n:,}","GIACT has no data for these","#f59e0b")
+
+        tab_verif, tab_discover, tab_sql = st.tabs([
+            "📊 Verification Status","🔍 Discover Table Columns","🗄️ SQL Reference"
+        ])
+
+        with tab_verif:
+            col_l,col_r = st.columns(2)
+            with col_l:
+                fig = px.pie(verif_summary,names="verification_status",values="accounts",
                              color="verification_status",
                              color_discrete_map={"SUCCESS":"#22c55e","ERRORED":"#ef4444"},
-                             hole=0.5, title="GIACT Verification Status Distribution")
-                st.plotly_chart(dark_chart_layout(fig), use_container_width=True)
+                             hole=0.5,title="GIACT Verification Status (Live)")
+                st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
             with col_r:
-                st.markdown("#### 📋 Verification Status Table")
                 styled_table(verif_summary.rename(columns={
                     "verification_status":"Status","accounts":"# Accounts","pct":"% of Total"}))
                 st.markdown("""
-**Status Meanings:**
-- `SUCCESS` — GIACT completed verification (account exists and was checkable)
-- `ERRORED` — GIACT could not verify (coverage gap, invalid routing, or API error)
+**`SUCCESS`** — GIACT completed verification (account is checkable).
+Does NOT mean the account is valid for the business — check `verify_response_code` within SUCCESS records.
 
-**Note:** `SUCCESS` from GIACT ≠ account is valid for the business.
-For business-level pass/fail, check `verify_response_code` within SUCCESS records.
+**`ERRORED`** — GIACT could not verify. Causes:
+- Credit union or community bank not in GIACT database (~15% expected)
+- Invalid routing number
+- API timeout or temporary error
+
+**Action for ERRORED accounts**: route to manual bank statement review or Plaid balance verification.
                 """)
 
-            st.markdown("#### Discover actual table columns (run to fix join):")
-            st.code("""-- Step 1: See all columns in rel_banking_verifications:
+            analyst_card("GIACT Coverage Gap Interpretation",[
+                "99.94% SUCCESS rate in your data — significantly better than the industry average of ~85%. "
+                "This means your applicant base uses mainly large national banks well-covered by GIACT.",
+                "0.06% ERRORED (13 accounts): these are the unverifiable accounts. "
+                "13 unverifiable accounts is very low and expected.",
+                "Track this rate weekly. If ERRORED% rises above 5%, it may indicate: "
+                "(1) shift in customer demographic toward credit unions, "
+                "(2) GIACT API connectivity issues, or "
+                "(3) change in account types being submitted.",
+                "GIACT SUCCESS ≠ account passes underwriting. Within SUCCESS, check verify_response_code "
+                "for codes 7/8 (risk-based decline) and 9 (NSF/negative history).",
+            ])
+
+        with tab_discover:
+            st.markdown("#### Discover actual table schema")
+            col_verif_sql = "SELECT * FROM rds_integration_data.rel_banking_verifications LIMIT 1"
+            col_acct_sql  = "SELECT * FROM rds_integration_data.bank_accounts LIMIT 1"
+            col_v = run_query(col_verif_sql)
+            col_a = run_query(col_acct_sql)
+            if col_v is not None and not col_v.empty:
+                st.success(f"✅ rel_banking_verifications columns ({len(col_v.columns)}):")
+                st.code(", ".join(col_v.columns.tolist()))
+                st.dataframe(col_v, use_container_width=True, hide_index=True)
+            else:
+                st.warning("rel_banking_verifications schema not accessible in this query.")
+            if col_a is not None and not col_a.empty:
+                st.success(f"✅ bank_accounts columns ({len(col_a.columns)}):")
+                st.code(", ".join(col_a.columns.tolist()))
+                st.dataframe(col_a, use_container_width=True, hide_index=True)
+            else:
+                st.warning("bank_accounts schema not accessible in this query.")
+
+        with tab_sql:
+            st.code("""-- ✅ CONFIRMED WORKING — verification status summary:
+SELECT verification_status, COUNT(*) AS accounts,
+       ROUND(COUNT(*)*100.0/SUM(COUNT(*)) OVER(),2) AS pct
+FROM rds_integration_data.rel_banking_verifications
+GROUP BY verification_status ORDER BY accounts DESC;
+
+-- Discover actual FK column for joining (run first):
 SELECT * FROM rds_integration_data.rel_banking_verifications LIMIT 1;
-
--- Step 2: See all columns in bank_accounts:
 SELECT * FROM rds_integration_data.bank_accounts LIMIT 1;
-
--- Step 3: Use the correct FK column (NOT account_id — that doesn't exist):
--- The join column may be 'id', 'bank_account_id', or similar.
--- Once you know it from Step 1+2, use:
-SELECT
-    ba.account_type,
-    bv.verification_status,
-    COUNT(*) AS count
-FROM rds_integration_data.rel_banking_verifications bv
-JOIN rds_integration_data.bank_accounts ba
-  ON ba.id = bv.<CORRECT_FK_COLUMN>   -- replace with actual column name
-GROUP BY ba.account_type, bv.verification_status
-ORDER BY count DESC;
 
 -- Processing volumes per business:
 SELECT business_id,
-       JSON_EXTRACT_PATH_TEXT(general_data, 'monthly_volume') AS monthly_volume,
-       JSON_EXTRACT_PATH_TEXT(general_data, 'annual_volume')  AS annual_volume
-FROM rds_integration_data.data_processing_history
-LIMIT 10;""", language="sql")
-        else:
-            st.info("Banking verification data not accessible. "
-                    "Table rds_integration_data.rel_banking_verifications may require "
-                    "a different connection or permissions.")
-            st.code("""-- Confirmed working query (run in your Redshift console):
-SELECT verification_status, COUNT(*) AS accounts,
-       ROUND(COUNT(*)*100.0/SUM(COUNT(*)) OVER(), 2) AS pct
+       JSON_EXTRACT_PATH_TEXT(general_data,'monthly_volume') AS monthly_volume,
+       JSON_EXTRACT_PATH_TEXT(general_data,'annual_volume')  AS annual_volume
+FROM rds_integration_data.data_processing_history LIMIT 10;
+
+-- Average transaction size:
+SELECT dbit.business_id, AVG(bat.amount) AS avg_transaction_size
+FROM rds_integration_data.bank_account_transactions bat
+JOIN rds_integration_integrations.data_business_integrations_tasks dbit
+  ON bat.business_integration_task_id = dbit.id
+GROUP BY dbit.business_id LIMIT 10;""", language="sql")
+    else:
+        st.error("Could not connect to rds_integration_data.rel_banking_verifications.")
+        err = st.session_state.get("_last_db_error","")
+        if err:
+            with st.expander("Database error"):
+                st.code(err, language=None)
+        st.code("""-- Run in your Redshift console to confirm access:
+SELECT verification_status, COUNT(*) AS accounts
 FROM rds_integration_data.rel_banking_verifications
 GROUP BY verification_status ORDER BY accounts DESC;""", language="sql")
 
-        analyst_card("GIACT Coverage Gap Expectations", [
-            "GIACT gVerify covers ~85% of US bank accounts. The remaining 15% are: "
-            "credit unions, small community banks, and some regional institutions.",
-            "Unverified accounts are NOT necessarily fraudulent — GIACT simply has no data. "
-            "These should be routed to manual bank statement review or Plaid balance verification.",
-            "Track the unverified % over time. If it rises above 20%, it may indicate "
-            "a change in the customer demographic (more credit union users) or a GIACT data issue.",
-            "Response codes 11, 16, 17, 18 = 'Not yet available' — these are coverage gaps, "
-            "not fraud signals. Source: giactDisplayMapper.ts ACCOUNT_STATUS_MAP.",
-        ])
-
-    # ── VENDOR MATCH RATES ─────────────────────────────────────────────────────
-    with tab_vendor:
-        st.markdown("#### 📡 Vendor Match Rate Tracking")
-        flag("Track match rates against Middesk, Equifax, ZoomInfo, and OpenCorporates. "
-             "Low match rates signal data freshness issues or entity-matching model degradation. "
-             "These rates should be monitored weekly.", "blue")
-
-        vendors = {
-            "Middesk":        ("middesk_conf","#f59e0b",0.50,
-                               "Task-based (0.15 base + 0.20×tasks). "
-                               "pid=16, weight=2.0. US SOS live query."),
-            "OpenCorporates": ("oc_conf","#3B82F6",0.50,
-                               "match.index/55. pid=23, weight=0.9. "
-                               "Global registry database."),
-            "ZoomInfo":       ("zi_conf","#8B5CF6",0.50,
-                               "match.index/55. pid=24, weight=0.8. "
-                               "Pre-loaded Redshift bulk data."),
-            "Equifax":        ("efx_conf","#22c55e",0.50,
-                               "XGBoost or index/55. pid=17, weight=0.7. "
-                               "Pre-loaded Redshift bulk data."),
-            "Trulioo":        ("trulioo_conf","#ec4899",0.40,
-                               "Status-based: success=0.70, pending=0.40, failed=0.20. "
-                               "pid=38, weight=0.8."),
-        }
-
-        vendor_stats = []
-        for name, (col, color, threshold, desc) in vendors.items():
-            if col in sos_df.columns:
-                vals = sos_df[col]
-                match_rate = (vals > threshold).mean()*100
-                avg_conf   = vals.mean()
-                zero_pct   = (vals == 0).mean()*100
-                vendor_stats.append({
-                    "Vendor":       name,
-                    "Match Rate":   f"{match_rate:.1f}%",
-                    "Avg Conf":     f"{avg_conf:.3f}",
-                    "Zero (No Match)%": f"{zero_pct:.1f}%",
-                    "Threshold":    f">{threshold}",
-                    "Status":       "✅ OK" if match_rate>60 else ("⚠️ Watch" if match_rate>40 else "❌ Low"),
-                })
-
-        if vendor_stats:
-            vdf = pd.DataFrame(vendor_stats)
-            styled_table(vdf, color_col="Status",
-                         palette={"✅ ok":"#22c55e","⚠️ watch":"#f59e0b","❌ low":"#ef4444"})
-
-            col_l, col_r = st.columns(2)
-            with col_l:
-                mr_df = pd.DataFrame([{"Vendor":r["Vendor"],
-                                        "Match Rate":float(r["Match Rate"].rstrip("%"))}
-                                       for r in vendor_stats])
-                fig = px.bar(mr_df,x="Vendor",y="Match Rate",
-                             color="Vendor",
-                             color_discrete_sequence=["#f59e0b","#3B82F6","#8B5CF6","#22c55e","#ec4899"],
-                             title="Vendor Match Rates (conf > threshold)")
-                fig.add_hline(y=60,line_dash="dash",line_color="#f59e0b",annotation_text="60% watch threshold")
-                fig.update_layout(showlegend=False,yaxis=dict(range=[0,100]))
-                st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-            with col_r:
-                fig2 = go.Figure()
-                for name,(col,color,_,_) in vendors.items():
-                    if col in sos_df.columns:
-                        fig2.add_trace(go.Box(y=sos_df[col],name=name,
-                                              marker_color=color,fillcolor="rgba(0,0,0,0)"))
-                st.plotly_chart(dark_chart_layout(fig2,"Confidence Distribution by Vendor"),
-                                use_container_width=True)
-
-        analyst_card("Vendor Match Rate Benchmarks", [
-            "Middesk target: >70% match rate. Low rate = name normalisation issues or "
-            "very new/micro businesses not yet in SOS databases.",
-            "OpenCorporates target: >60% match rate. Lower than Middesk is expected "
-            "as OC is a global DB with varying coverage by state/country.",
-            "ZoomInfo & Equifax: >50% target. These are bulk data vendors — "
-            "match rate depends on how recently the bulk data was refreshed in Redshift.",
-            "If ZI/EFX match rates fall sharply, check the Redshift data refresh schedule. "
-            "Stale bulk data is a common cause of sudden rate drops.",
-            "Trulioo: expect lower match rate (~40–60%) as it focuses on "
-            "international entities and PSC (person screening) — not US-only SOS.",
-        ])
-
-    # ── INACTIVE + PERPETUAL ───────────────────────────────────────────────────
-    with tab_inactive:
-        st.markdown("#### ⚠️ Inactive Business with Perpetual Expiration Date")
-        flag("🚨 RED FLAG: A business with expiration_date='perpetual' (or NULL expiration) "
-             "has a legal entity that exists FOREVER unless formally dissolved. "
-             "If that same business has SOS status='inactive', it means the entity "
-             "CANNOT legally operate — possibly due to unpaid taxes or missed annual reports. "
-             "This is the FIRST red flag in underwriting.", "red")
-
-        st.markdown("#### What 'Perpetual' means vs 'Inactive' status")
-        col_l, col_r = st.columns(2)
-        with col_l:
-            st.markdown("""<div class="analyst">
-            <div class="hdr">📋 Perpetual Expiration Date</div>
-            <p>• The legal entity was incorporated with NO expiration date</p>
-            <p>• Common for: LLCs, Corporations, LLPs</p>
-            <p>• Meaning: the entity persists until the owners ACTIVELY dissolve it</p>
-            <p>• NOT a risk signal on its own</p>
-            <p>• Source: sos_filings[n].expiration_date = null or 'perpetual'</p>
-            </div>""", unsafe_allow_html=True)
-        with col_r:
-            st.markdown("""<div class="analyst">
-            <div class="hdr">🚨 Inactive Status (with Perpetual Date)</div>
-            <p>• Entity is NOT dissolved, but is NOT in good standing</p>
-            <p>• Common causes: unpaid state taxes, missed annual report, admin dissolution</p>
-            <p>• Entity CANNOT legally conduct business in that jurisdiction</p>
-            <p>• <strong>RED FLAG for underwriting</strong> — do not auto-approve</p>
-            <p>• Source: sos_filings[n].active=false + sos_filings[n].status≠'active'</p>
-            </div>""", unsafe_allow_html=True)
-
-        # Compute from sos_df
-        inactive_count = int((~sos_df["active"]).sum())
-        active_count   = int(sos_df["active"].sum())
-        inactive_pct   = inactive_count/max(len(sos_df),1)*100
-
-        c1,c2,c3 = st.columns(3)
-        with c1: kpi("SOS Inactive",f"{inactive_count:,}",
-                     f"{inactive_pct:.1f}% of businesses","#ef4444")
-        with c2: kpi("SOS Active",f"{active_count:,}",
-                     f"{active_count/max(len(sos_df),1)*100:.1f}%","#22c55e")
-        with c3: kpi("Inactive + Perpetual",
-                     f"{inactive_count:,}",
-                     "⚠️ All inactive with perpetual dates are red flags","#ef4444")
-
-        if inactive_pct > 5:
-            flag(f"{inactive_pct:.1f}% of businesses have inactive SOS status. "
-                 "Above 5% is a concern — review whether these businesses have been "
-                 "administratively dissolved but are still applying.", "red")
-
-        st.markdown("#### SQL to find inactive businesses")
-        flag("rds_warehouse_public is a Redshift FEDERATED external schema — "
-             "the `->` and `->>` JSONB operators do NOT work here (value is VARCHAR). "
-             "sos_filings must be queried from PostgreSQL RDS directly (port 5432) "
-             "where value is native JSONB, OR use the scalar `sos_active` fact on Redshift.", "amber")
-
-        tab_rs, tab_pg = st.tabs(["✅ Redshift (scalar facts)", "✅ PostgreSQL RDS (port 5432)"])
-        with tab_rs:
-            st.markdown("**Use scalar facts on Redshift (works now):**")
-            st.code("""-- ✅ Works on Redshift Serverless — uses scalar sos_active fact
--- Finds all businesses where sos_active = false
-SELECT
-    business_id,
-    JSON_EXTRACT_PATH_TEXT(value, 'value')                 AS is_active,
-    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId')  AS source_vendor,
-    received_at
-FROM rds_warehouse_public.facts
-WHERE name = 'sos_active'
-  AND JSON_EXTRACT_PATH_TEXT(value, 'value') = 'false'
-ORDER BY received_at DESC
-LIMIT 500;
-
--- Count inactive vs active:
-SELECT
-    JSON_EXTRACT_PATH_TEXT(value, 'value') AS is_active,
-    COUNT(*) AS businesses
-FROM rds_warehouse_public.facts
-WHERE name = 'sos_active'
-GROUP BY JSON_EXTRACT_PATH_TEXT(value, 'value');""", language="sql")
-
-        with tab_pg:
-            st.markdown("**Full sos_filings analysis on PostgreSQL RDS (port 5432 — native JSONB):**")
-            st.code("""-- ✅ Connect to PostgreSQL RDS at port 5432 (NOT Redshift port 5439)
--- value column is native JSONB here — -> and ->> operators work
-
--- Find inactive businesses with perpetual (no expiration) entities:
-SELECT
-    f.business_id,
-    filing->>'active'            AS is_active,
-    filing->>'status'            AS filing_status,
-    filing->>'jurisdiction'      AS jurisdiction,
-    filing->>'expiration_date'   AS expiration_date,
-    filing->>'foreign_domestic'  AS entity_type,
-    f.received_at
-FROM rds_warehouse_public.facts f
-CROSS JOIN jsonb_array_elements(f.value->'value') AS filing
-WHERE f.name = 'sos_filings'
-  AND (filing->>'active')::boolean = false
-  AND (
-      filing->>'expiration_date' IS NULL
-      OR filing->>'expiration_date' = 'perpetual'
-      OR filing->>'expiration_date' = ''
-  )
-ORDER BY f.received_at DESC
-LIMIT 500;
-
--- Summary: count inactive by jurisdiction
-SELECT
-    filing->>'jurisdiction'   AS jurisdiction,
-    COUNT(*)                  AS inactive_count
-FROM rds_warehouse_public.facts f
-CROSS JOIN jsonb_array_elements(f.value->'value') AS filing
-WHERE f.name = 'sos_filings'
-  AND (filing->>'active')::boolean = false
-GROUP BY filing->>'jurisdiction'
-ORDER BY inactive_count DESC;""", language="sql")
-
-        # Also run the Redshift-safe query live and show results
-        inactive_sql = """
-            SELECT
-                business_id,
-                JSON_EXTRACT_PATH_TEXT(value,'value')                AS is_active,
-                JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS source_pid,
-                received_at
-            FROM rds_warehouse_public.facts
-            WHERE name = 'sos_active'
-              AND JSON_EXTRACT_PATH_TEXT(value,'value') = 'false'
-            ORDER BY received_at DESC
-            LIMIT 100
-        """
-        inactive_df = run_query(inactive_sql)
-        if inactive_df is not None and not inactive_df.empty:
-            flag(f"✅ Live query found {len(inactive_df):,} businesses with sos_active=false. "
-                 "These are the candidates for inactive+perpetual review.", "amber")
-            st.markdown("##### Sample of inactive businesses (live from Redshift):")
-            styled_table(inactive_df.head(15))
-        else:
-            st.info("Live query for inactive businesses returned no results via Redshift scalar facts.")
-
-        analyst_card("Inactive + Perpetual — Underwriting Impact", [
-            "This combination is the strongest early risk signal available in the KYB data. "
-            "An entity that should exist forever but is not in good standing has a "
-            "compliance failure that the owners have not resolved.",
-            "Root causes: (1) Failure to file annual report with state — most common. "
-            "(2) Unpaid state franchise tax or fees. "
-            "(3) Administrative dissolution by state due to missing officer information.",
-            "Underwriting action: Do NOT auto-approve. Route to manual review. "
-            "Request explanation from applicant. Ask for reinstatement documentation.",
-            "False positives: Some states mark entities as 'inactive' during a grace period "
-            "before formal dissolution. Verify the actual state SOS portal for confirmation.",
-            "Tracking goal: the count should be close to 0 for healthy portfolios. "
-            "Rising count = worsening quality of applicant base or data refresh issues.",
-        ])
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# BUSINESS ID LOOKUP
+# SECTION 6 — BUSINESS LOOKUP
 # ═══════════════════════════════════════════════════════════════════════════════
-elif section == "🔎 Business ID Lookup":
-    sh("Business ID Lookup — Full Data Quality Analysis",
-       "Enter a business UUID to get a complete per-business data quality report "
-       "with red flag detection and data lineage", "🔎")
+elif section == "🔎 Business Lookup":
+    sh("Business ID Lookup — Full Data Quality Report",
+       "Enter a business UUID to get a complete automated analysis: red flags, "
+       "vendor match rates, data lineage, all facts", "🔎")
 
-    flag("This tool replaces the manual analysis process. Enter a business ID to get "
-         "an automated data quality report covering all KYB fields, inconsistencies, "
-         "vendor match rates, and underwriting red flags.", "blue")
+    flag("Replaces manual per-business analysis. Automated detection of data quality issues, "
+         "inconsistencies, and underwriting red flags.", "blue")
 
     business_id = st.text_input(
         "Enter Business UUID",
@@ -4093,27 +2204,24 @@ elif section == "🔎 Business ID Lookup":
 
     if not business_id or len(business_id) < 10:
         st.info("Enter a business UUID above to begin analysis.")
-        st.markdown("#### What this report includes:")
-        report_items = [
-            "✅ SOS filing status (active/inactive, domestic/foreign count)",
-            "✅ TIN verification outcome (success/failure/pending)",
-            "✅ Vendor match rates (Middesk, OC, ZI, EFX, Trulioo confidence)",
-            "✅ NAICS/MCC classification and source",
-            "✅ Watchlist hits (sanctions, PEP, adverse media)",
-            "✅ IDV status (Plaid identity verification)",
-            "✅ Inactive + Perpetual detection (red flag)",
-            "✅ Middesk vs OC discrepancy analysis",
+        for item in [
+            "✅ SOS filing status — active/inactive, Middesk vs OC match",
+            "✅ TIN verification — success/failure/pending + Middesk task result",
+            "✅ Vendor confidence scores — Middesk, OC, ZI, EFX, Trulioo",
+            "✅ NAICS/MCC classification — code, source, confidence",
+            "✅ Watchlist hits — sanctions, PEP, adverse media counts",
+            "✅ IDV status — Plaid identity verification result",
+            "✅ Inactive + Perpetual detection — underwriting red flag",
             "✅ TIN boolean vs status consistency check",
-            "✅ Worth Score and risk level",
-        ]
-        for item in report_items:
+            "✅ Worth Score — if available from rds_manual_score_public",
+            "✅ All facts — complete fact table with values, vendors, confidence",
+        ]:
             st.markdown(f"- {item}")
     else:
         bid = business_id.strip()
-        st.markdown(f"### 🔍 Analysis for business `{bid}`")
+        st.markdown(f"### 🔍 Analysis for `{bid}`")
 
-        # Fetch all facts for this business
-        with st.spinner("Loading all facts for this business…"):
+        with st.spinner("Loading all facts…"):
             facts_sql = f"""
                 SELECT name, value, received_at
                 FROM rds_warehouse_public.facts
@@ -4123,181 +2231,126 @@ elif section == "🔎 Business ID Lookup":
             facts_df = run_query(facts_sql)
 
         if facts_df is None or facts_df.empty:
-            st.error(f"No facts found for business_id = `{bid}`. "
-                     "Check the UUID is correct and the business exists.")
+            st.error(f"No facts found for `{bid}`. Check the UUID is correct.")
             st.stop()
 
         # Parse all facts
-        latest = {}  # name → parsed fact dict
-        for _, row in facts_df.iterrows():
+        latest = {}
+        for _,row in facts_df.iterrows():
             if row["name"] not in latest:
                 latest[row["name"]] = _parse_fact(row["value"])
 
-        def get_val(name, *keys):
-            fact = latest.get(name, {})
-            return _safe_get(fact, "value", *keys, default=None) if not keys else _safe_get(fact, "value", *keys)
+        def gv(name): return latest.get(name,{}).get("value")
+        def gc(name): return float(_safe_get(latest.get(name,{}),"source","confidence",default=0) or 0)
+        def gp(name): return str(_safe_get(latest.get(name,{}),"source","platformId",default=""))
 
-        def get_conf(name):
-            fact = latest.get(name, {})
-            return _safe_get(fact, "source", "confidence", default=0)
+        # ── Red Flags ────────────────────────────────────────────────────────────
+        st.markdown("#### 🚨 Automated Red Flag Detection")
+        red=[];warn=[];ok=[]
 
-        def get_pid(name):
-            fact = latest.get(name, {})
-            return _safe_get(fact, "source", "platformId", default="")
+        sos_act   = gv("sos_active")
+        sos_match = gv("sos_match_boolean")
+        tin_bool  = gv("tin_match_boolean")
+        tin_match = latest.get("tin_match",{}).get("value")
+        tin_status= (json.loads(json.dumps(tin_match)).get("status","") if isinstance(tin_match,dict) else str(tin_match or "")).lower()
+        wl_hits   = int(float(gv("watchlist_hits") or 0))
+        naics_val = gv("naics_code")
+        idv_val   = gv("idv_passed_boolean")
+        mdsk_conf = gc("sos_match")
 
-        pid_names = {"16":"Middesk","23":"OC","24":"ZoomInfo","17":"Equifax",
-                     "38":"Trulioo","31":"AI","22":"SERP","40":"Plaid"}
+        def _flag_check(cond, msg, r_list, w_list, o_list, red_msg, ok_msg):
+            if cond: r_list.append(red_msg)
+            else: o_list.append(ok_msg)
 
-        # ── Red Flag Detection ─────────────────────────────────────────────────
-        st.markdown("#### 🚨 Red Flag Summary")
-        red_flags = []
-        warnings  = []
-        passes    = []
+        if str(sos_act).lower()=="false": red.append("🚨 SOS INACTIVE — entity cannot legally operate")
+        elif str(sos_act).lower()=="true": ok.append("✅ SOS Active — entity in good standing")
+        else: warn.append("⚠️ SOS active status not found")
 
-        sos_active_val = get_val("sos_active")
-        tin_bool_val   = get_val("tin_match_boolean")
-        tin_match_val  = latest.get("tin_match", {}).get("value")
-        wl_hits_val    = get_val("watchlist_hits")
-        naics_val      = get_val("naics_code")
-        sos_matched    = get_val("sos_match_boolean")
-        middesk_conf   = float(get_conf("sos_match") or 0)
-        idv_val        = get_val("idv_passed_boolean")
+        if str(sos_match).lower()=="true": ok.append(f"✅ SOS name matched (vendor: {pid_name(gp('sos_match_boolean'))})")
+        elif sos_match is not None: red.append("🚨 SOS name NOT matched — submitted name ≠ registry")
+        else: warn.append("⚠️ No SOS match result found")
 
-        # SOS checks
-        if sos_active_val is not None:
-            if str(sos_active_val).lower() in ("false","0"):
-                red_flags.append("🚨 SOS INACTIVE — entity cannot legally operate. "
-                                  "Possible: unpaid taxes, missed annual report.")
-            else:
-                passes.append("✅ SOS Active — entity is in good standing")
-        else:
-            warnings.append("⚠️ No SOS active fact found — registry status unknown")
+        if str(tin_bool).lower()=="true": ok.append("✅ TIN Verified — EIN matches legal name per IRS")
+        elif tin_status=="failure": red.append(f"🚨 TIN FAILED — EIN does not match legal name. Status: failure")
+        elif tin_status=="pending": warn.append("⚠️ TIN Pending — IRS response not yet received")
+        else: warn.append("⚠️ TIN not verified")
 
-        # SOS match
-        if sos_matched is not None:
-            if str(sos_matched).lower() == "true":
-                passes.append(f"✅ SOS Name Matched (winning source: {pid_names.get(get_pid('sos_match'),'Unknown')})")
-            else:
-                red_flags.append("🚨 SOS Name NOT matched — business name does not match registry")
-        else:
-            warnings.append("⚠️ No SOS match result found")
+        if str(tin_bool).lower()=="true" and tin_status not in ("success",""):
+            red.append(f"🚨 DATA INTEGRITY: tin_match_boolean=true but status='{tin_status}' — inconsistency detected")
 
-        # TIN checks
-        if tin_bool_val is not None:
-            if str(tin_bool_val).lower() == "true":
-                passes.append("✅ TIN Verified — EIN matches legal name per IRS")
-            else:
-                tin_status = ""
-                if isinstance(tin_match_val, dict):
-                    tin_status = tin_match_val.get("status","")
-                elif tin_match_val:
-                    try:
-                        tin_status = json.loads(str(tin_match_val)).get("status","")
-                    except Exception:
-                        tin_status = str(tin_match_val)
-                if tin_status == "failure":
-                    red_flags.append(f"🚨 TIN FAILED — EIN does not match legal name per IRS. "
-                                     f"Message: {tin_match_val.get('message','') if isinstance(tin_match_val,dict) else ''}")
-                elif tin_status == "pending":
-                    warnings.append("⚠️ TIN Pending — IRS response not yet received")
-                else:
-                    warnings.append("⚠️ TIN not verified (no IRS match result)")
+        if naics_val=="561499": warn.append(f"⚠️ NAICS 561499 fallback — industry unclassified (source: {pid_name(gp('naics_code'))})")
+        elif naics_val: ok.append(f"✅ NAICS {naics_val} (source: {pid_name(gp('naics_code'))}, conf: {gc('naics_code'):.3f})")
 
-        # NAICS fallback
-        if naics_val == "561499":
-            warnings.append(f"⚠️ NAICS 561499 (fallback) — could not classify industry. "
-                            f"Source: {pid_names.get(get_pid('naics_code'),'Unknown')}")
-        elif naics_val:
-            passes.append(f"✅ NAICS classified: {naics_val} (source: {pid_names.get(get_pid('naics_code'),'Unknown')})")
+        if wl_hits>0: red.append(f"🚨 WATCHLIST: {wl_hits} hit(s) — check for sanctions/PEP")
+        else: ok.append("✅ No watchlist hits")
 
-        # Watchlist
-        try:
-            wl_count = int(float(wl_hits_val or 0))
-        except Exception:
-            wl_count = 0
-        if wl_count > 0:
-            red_flags.append(f"🚨 WATCHLIST HITS: {wl_count} hit(s) found (PEP/Sanctions/Other)")
-        else:
-            passes.append("✅ No watchlist hits")
+        if str(idv_val).lower()=="true": ok.append("✅ IDV Passed (Plaid)")
+        elif idv_val is not None: warn.append("⚠️ IDV Not Passed")
 
-        # IDV
-        if idv_val is not None:
-            if str(idv_val).lower() == "true":
-                passes.append("✅ IDV Passed — identity verified via Plaid")
-            else:
-                warnings.append("⚠️ IDV Not Passed")
+        if mdsk_conf>0.70: ok.append(f"✅ Middesk confidence {mdsk_conf:.3f} — strong match")
+        elif mdsk_conf>0.40: warn.append(f"⚠️ Middesk confidence {mdsk_conf:.3f} — moderate")
+        elif mdsk_conf>0: red.append(f"🚨 Middesk confidence {mdsk_conf:.3f} — weak match, entity may be unconfirmed")
+        else: warn.append("⚠️ No Middesk confidence score found")
 
-        # Middesk confidence
-        if middesk_conf > 0.70:
-            passes.append(f"✅ Middesk confidence: {middesk_conf:.3f} (strong match)")
-        elif middesk_conf > 0.40:
-            warnings.append(f"⚠️ Middesk confidence: {middesk_conf:.3f} (moderate match)")
-        elif middesk_conf > 0:
-            red_flags.append(f"🚨 Middesk confidence: {middesk_conf:.3f} (weak match — entity may not be confirmed)")
-        else:
-            warnings.append("⚠️ No Middesk confidence score (Middesk may not have matched)")
+        col_l,col_m,col_r = st.columns(3)
+        with col_l:
+            kpi("🚨 Red Flags",str(len(red)),"require action","#ef4444" if red else "#22c55e")
+        with col_m:
+            kpi("⚠️ Warnings",str(len(warn)),"review recommended","#f59e0b" if warn else "#22c55e")
+        with col_r:
+            kpi("✅ Passed",str(len(ok)),"checks","#22c55e")
 
-        # Display flags
-        for rf in red_flags:
-            flag(rf, "red")
-        for w in warnings:
-            flag(w, "amber")
-        for p in passes:
-            flag(p, "green")
+        for r in red:   flag(r,"red")
+        for w in warn:  flag(w,"amber")
+        for o in ok:    flag(o,"green")
 
-        if not red_flags and not warnings:
-            flag("All checks passed — no red flags detected for this business.", "green")
-
-        # ── Fact Details ───────────────────────────────────────────────────────
+        # ── Facts Table ─────────────────────────────────────────────────────────
         st.markdown("---")
-        st.markdown("#### 📋 All Facts for This Business")
+        st.markdown("#### 📋 All Stored Facts")
+        rows=[]
+        for _,row in facts_df.drop_duplicates("name").iterrows():
+            f = _parse_fact(row["value"])
+            v = f.get("value")
+            if isinstance(v,(dict,list)): dv = f"[{type(v).__name__} — expand below]"
+            else: dv = str(v)[:80] if v is not None else "(null)"
+            rows.append({"Fact":row["name"],"Value":dv,
+                          "Vendor":pid_name(str(_safe_get(f,"source","platformId",default=""))),
+                          "Confidence":f"{float(_safe_get(f,'source','confidence',default=0) or 0):.3f}",
+                          "Updated":str(row["received_at"])[:16]})
+        styled_table(pd.DataFrame(rows))
 
-        fact_rows = []
-        for _, row in facts_df.drop_duplicates("name").iterrows():
-            fact = _parse_fact(row["value"])
-            raw_val = fact.get("value")
-            if isinstance(raw_val, (dict, list)):
-                display_val = f"[complex — {type(raw_val).__name__}]"
-            else:
-                display_val = str(raw_val)[:80] if raw_val is not None else "(null)"
-            fact_rows.append({
-                "Fact Name":    row["name"],
-                "Value":        display_val,
-                "Winning Vendor": pid_names.get(str(_safe_get(fact,"source","platformId",default="")),
-                                                f"pid={_safe_get(fact,'source','platformId',default='?')}"),
-                "Confidence":   f"{float(_safe_get(fact,'source','confidence',default=0) or 0):.3f}",
-                "Updated":      str(row["received_at"])[:16] if row["received_at"] else "",
-            })
-
-        styled_table(pd.DataFrame(fact_rows))
-
-        # ── SQL to dig deeper ──────────────────────────────────────────────────
+        # ── SQL panel ────────────────────────────────────────────────────────────
         st.markdown("---")
-        st.markdown("#### 🔍 SQL to investigate this business further")
-        st.code(f"""-- All facts for this business:
+        st.markdown("#### 🔍 SQL for deeper investigation")
+        st.code(f"""-- All facts:
 SELECT name, value, received_at
 FROM rds_warehouse_public.facts
 WHERE business_id = '{bid}'
 ORDER BY name;
 
 -- Worth Score:
-SELECT weighted_score_850, risk_level, score_decision, created_at
-FROM rds_manual_score_public.business_scores bs
-JOIN rds_manual_score_public.data_current_scores cs ON cs.score_id = bs.id
+SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, bs.created_at
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
 WHERE cs.business_id = '{bid}'
 ORDER BY bs.created_at DESC LIMIT 1;
 
--- Vendor raw responses (all API calls):
+-- All vendor API calls:
 SELECT platform_id, received_at
 FROM integration_data.request_response
 WHERE business_id = '{bid}'
-ORDER BY received_at DESC;""", language="sql")
+ORDER BY received_at DESC;
 
-# ── Footer ─────────────────────────────────────────────────────────────────────
+-- Banking verification:
+SELECT * FROM rds_integration_data.rel_banking_verifications
+WHERE business_id = '{bid}';""", language="sql")
+
+
+# ── Footer ──────────────────────────────────────────────────────────────────────
 st.markdown("---")
 st.markdown(
     f'<div style="color:#475569;font-size:.70rem;text-align:center">'
-    f'Admin Portal KYB Dashboard v2 · rds_warehouse_public.facts · '
-    f'integration-service/lib/facts/kyb/ · ai-score-service · giactDisplayMapper.ts · '
-    f'{datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}</div>',
-    unsafe_allow_html=True)
+    f'Admin Portal KYB Dashboard v3 · 6 consolidated sections · '
+    f'rds_warehouse_public.facts · rds_manual_score_public · rds_integration_data · '
+    f'{datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}'
+    f'</div>', unsafe_allow_html=True)
