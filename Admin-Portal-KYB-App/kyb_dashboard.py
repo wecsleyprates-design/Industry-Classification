@@ -525,7 +525,8 @@ def live_tin(limit):
     pivoted["middesk_tin_task"] = pivoted["middesk_tin_task"].fillna("none")
 
     pivoted["has_middesk"] = pivoted["middesk_tin_task"] != "none"
-    pivoted["has_trulioo"] = raw[raw["platform_id"]=="38"]["business_id"].isin(pivoted["business_id"]).values[:len(pivoted)] if not raw.empty else False
+    trulioo_biz = set(raw.loc[raw["platform_id"]=="38", "business_id"])
+    pivoted["has_trulioo"] = pivoted["business_id"].isin(trulioo_biz)
     pivoted["entity_type"] = "Unknown"
     pivoted["state"]       = "Unknown"
     return pivoted
@@ -605,7 +606,7 @@ def live_banking(limit):
             lambda c: GIACT_ACCOUNT_STATUS.get(c, ("missing",""))[0] if c is not None else "missing")
     else:
         pivoted["verify_response_code"] = None
-        pivoted["account_status"] = pivoted.get("giact_account_status","missing")
+        pivoted["account_status"] = pivoted["giact_account_status"] if "giact_account_status" in pivoted.columns else "missing"
 
     if "giact_auth_response_code" in pivoted.columns:
         pivoted["auth_response_code"] = pivoted["giact_auth_response_code"].apply(safe_int)
@@ -615,8 +616,8 @@ def live_banking(limit):
             lambda c: GIACT_CONTACT_VERIFICATION.get(c, ("missing",""))[0] if c is not None else "missing")
     else:
         pivoted["auth_response_code"]  = None
-        pivoted["account_name_status"] = pivoted.get("giact_account_name","missing")
-        pivoted["contact_verification"]= pivoted.get("giact_contact_verification","missing")
+        pivoted["account_name_status"] = pivoted["giact_account_name"] if "giact_account_name" in pivoted.columns else "missing"
+        pivoted["contact_verification"]= pivoted["giact_contact_verification"] if "giact_contact_verification" in pivoted.columns else "missing"
 
     pivoted["has_bank_account"] = pivoted["account_status"] != "missing"
     pivoted["state"]            = "Unknown"
@@ -694,8 +695,11 @@ def live_kyc(limit):
         except Exception:
             return str(v).upper()
 
-    pivoted["idv_status"]  = pivoted.get("idv_status", pd.Series(["UNKNOWN"]*len(pivoted), index=pivoted.index)).apply(parse_idv)
-    pivoted["idv_passed"]  = pivoted["idv_status"] == "SUCCESS"
+    if "idv_status" in pivoted.columns:
+        pivoted["idv_status"] = pivoted["idv_status"].apply(parse_idv)
+    else:
+        pivoted["idv_status"] = "UNKNOWN"
+    pivoted["idv_passed"] = pivoted["idv_status"] == "SUCCESS"
 
     def parse_compliance(v):
         if v is None: return "unknown"
@@ -705,7 +709,10 @@ def live_kyc(limit):
         if "low" in s: return "low_risk"
         return "unknown"
 
-    pivoted["risk_level"]  = pivoted.get("compliance_status", pd.Series([None]*len(pivoted), index=pivoted.index)).apply(parse_compliance)
+    if "compliance_status" in pivoted.columns:
+        pivoted["risk_level"] = pivoted["compliance_status"].apply(parse_compliance)
+    else:
+        pivoted["risk_level"] = "unknown"
 
     def bool_to_match(v):
         s = str(v).lower() if v is not None else ""
@@ -713,8 +720,8 @@ def live_kyc(limit):
         if s in ("false","failure","0"): return "failure"
         return "none"
 
-    pivoted["name_match"]    = pivoted.get("name_match_boolean",    pd.Series([None]*len(pivoted), index=pivoted.index)).apply(bool_to_match)
-    pivoted["address_match"] = pivoted.get("address_match_boolean", pd.Series([None]*len(pivoted), index=pivoted.index)).apply(bool_to_match)
+    pivoted["name_match"]    = pivoted["name_match_boolean"].apply(bool_to_match) if "name_match_boolean" in pivoted.columns else "none"
+    pivoted["address_match"] = pivoted["address_match_boolean"].apply(bool_to_match) if "address_match_boolean" in pivoted.columns else "none"
     pivoted["dob_match"]     = "none"
     pivoted["ssn_match"]     = "none"
     pivoted["phone_match"]   = "none"
@@ -750,9 +757,11 @@ def live_dd(limit):
     ).reset_index()
     pivoted.columns.name = None
 
-    for col, default in [("watchlist_hits","0"),("adverse_media_hits","0"),
-                          ("sanctions_hits","0"),("pep_hits","0")]:
-        pivoted[col] = pivoted.get(col, pd.Series([default]*len(pivoted),index=pivoted.index)).apply(safe_int)
+    for col in ["watchlist_hits","adverse_media_hits","sanctions_hits","pep_hits"]:
+        if col in pivoted.columns:
+            pivoted[col] = pivoted[col].apply(safe_int)
+        else:
+            pivoted[col] = 0
 
     pivoted["bk_hits"]       = 0
     pivoted["judgment_hits"] = 0
