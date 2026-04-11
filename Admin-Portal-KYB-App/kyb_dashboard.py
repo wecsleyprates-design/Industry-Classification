@@ -1640,13 +1640,27 @@ Cross-reference with the "Neither matched" count — they should be similar popu
 
     # ── TIN ────────────────────────────────────────────────────────────────────
     with tab_tin:
+        # ── Summary KPIs with inline explanations ─────────────────────────────
+        c1,c2,c3,c4,c5 = st.columns(5)
+        tin_pending = int((tin["tin_match_status"]=="pending").sum())
+        with c1: kpi("Total Businesses",f"{tin_total:,}","in scope","#3B82F6")
+        with c2: kpi("✅ TIN Submitted",f"{tin_submitted:,}",
+                     f"{tin_submitted/max(tin_total,1)*100:.1f}% submitted EIN",
+                     "#22c55e" if tin_submitted/max(tin_total,1)>0.90 else "#ef4444")
+        with c3: kpi("✅ Verified (IRS Match)",f"{tin_verified:,}",
+                     f"{tin_verified/max(tin_submitted,1)*100:.1f}% of submitted",
+                     "#22c55e" if tin_verified/max(tin_submitted,1)>0.70 else "#ef4444")
+        with c4: kpi("❌ Failed",f"{tin_failed:,}",
+                     f"{tin_failed/max(tin_submitted,1)*100:.1f}% of submitted",
+                     "#ef4444" if tin_failed/max(tin_submitted,1)>0.20 else "#22c55e")
+        with c5: kpi("⏳ Pending",f"{tin_pending:,}",
+                     f"{tin_pending/max(tin_total,1)*100:.1f}%","#f59e0b")
+
         col_l,col_r = st.columns(2)
         with col_l:
             tin_outcomes = pd.DataFrame({
                 "Outcome":["✅ Verified","❌ Failed","⏳ Pending","📭 Not submitted"],
-                "Count":[tin_verified,tin_failed,
-                         int((tin["tin_match_status"]=="pending").sum()),
-                         tin_total-tin_submitted],
+                "Count":[tin_verified,tin_failed,tin_pending,tin_total-tin_submitted],
             })
             fig = px.bar(tin_outcomes,x="Outcome",y="Count",color="Outcome",
                          color_discrete_map={"✅ Verified":"#22c55e","❌ Failed":"#ef4444",
@@ -1654,6 +1668,18 @@ Cross-reference with the "Neither matched" count — they should be similar popu
                          title="TIN Verification Outcomes")
             fig.update_layout(showlegend=False)
             st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+            st.markdown(f"""
+**What each bar means:**
+
+| Outcome | Count | What it means |
+|---|---|---|
+| **✅ Verified** | {tin_verified:,} | IRS confirmed: this EIN matches this exact legal business name. This is the gold-standard verification. |
+| **❌ Failed** | {tin_failed:,} | IRS has no record of this EIN + legal name combination. The two facts contradict each other. |
+| **⏳ Pending** | {tin_pending:,} | Middesk sent the TIN check to IRS but IRS has not responded yet. Normal for same-day submissions. |
+| **📭 Not submitted** | {tin_total-tin_submitted:,} | The applicant did not provide an EIN at all in the onboarding form. |
+
+*Source: `tin_match_boolean` (boolean), `tin_match.status` (string), `tin_submitted` facts from `rds_warehouse_public.facts`.*
+            """)
         with col_r:
             funnel_df = pd.DataFrame({
                 "Stage":["All Businesses","TIN Submitted","TIN Verified (IRS Match)"],
@@ -1661,63 +1687,146 @@ Cross-reference with the "Neither matched" count — they should be similar popu
             })
             fig2 = px.funnel(funnel_df,x="Count",y="Stage",title="TIN Funnel")
             st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+            st.markdown(f"""
+**How to read the TIN Funnel:**
 
-        # Middesk task breakdown
-        st.markdown("#### Middesk TIN Task Results")
+The funnel shows how many businesses make it through each stage of the TIN verification process.
+
+Each step narrows the population:
+
+**All Businesses ({tin_total:,})** → starting point, every business in scope.
+
+**TIN Submitted ({tin_submitted:,}, {tin_submitted/max(tin_total,1)*100:.1f}%)** → businesses that provided an EIN.
+The gap from the top ({tin_total-tin_submitted:,} businesses) skipped TIN entirely.
+*This is a data collection gap, not a verification failure.*
+
+**TIN Verified ({tin_verified:,}, {tin_verified/max(tin_total,1)*100:.1f}% of all, {tin_verified/max(tin_submitted,1)*100:.1f}% of submitted)** → businesses where IRS confirmed the EIN matches the legal name.
+
+**The two important rates to track:**
+- Submission rate: {tin_submitted/max(tin_total,1)*100:.1f}% (target: >90%)
+- Verification rate of submitted: {tin_verified/max(tin_submitted,1)*100:.1f}% (target: >75%)
+            """)
+
+        analyst_card("TIN Verification — Analyst Interpretation", [
+            f"Submission rate: {tin_submitted/max(tin_total,1)*100:.1f}% — "
+            f"{'✅ above 90% target' if tin_submitted/max(tin_total,1)>0.90 else '❌ below 90% target — the EIN field may not be required in the onboarding form or applicants are skipping it'}.",
+            f"Verification rate of submitted: {tin_verified/max(tin_submitted,1)*100:.1f}% — "
+            f"{'✅ above 75% target' if tin_verified/max(tin_submitted,1)>0.75 else '❌ below 75% — EIN-name mismatches are high. Primary cause: applicants submitting DBA name instead of the legal name registered with the IRS'}.",
+            f"Failure rate: {tin_failed/max(tin_submitted,1)*100:.1f}% of submitted TINs fail IRS matching. "
+            "Failures mean the EIN exists in IRS records but is registered under a DIFFERENT business name than what was submitted. "
+            "This is not a typo — it is a structural mismatch between the trading name and legal name.",
+            f"Pending: {tin_pending:,} businesses ({tin_pending/max(tin_total,1)*100:.1f}%) are awaiting IRS response. "
+            "Normal for same-day submissions (IRS response time: 24–48h). "
+            "If pending > 72h, investigate Middesk API connectivity.",
+            f"Not submitted: {tin_total-tin_submitted:,} businesses ({(tin_total-tin_submitted)/max(tin_total,1)*100:.1f}%) "
+            "provided no EIN. These cannot pass TIN verification by definition. "
+            "Consider making EIN a required field in the onboarding form.",
+        ])
+
+        # ── Middesk task breakdown ─────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 🏛️ Middesk TIN Task Results")
+        st.markdown(
+            "Middesk runs a dedicated `'tin'` review task that directly queries the IRS. "
+            "This is the authoritative source for TIN verification — more reliable than name-matching alone. "
+            "When Middesk has no TIN task, Trulioo BusinessRegistrationNumber comparison is used as fallback."
+        )
         task_counts = tin["middesk_tin_task"].value_counts().reset_index()
         task_counts.columns = ["Task","Count"]
         task_counts["% of Total"] = (task_counts["Count"]/tin_total*100).round(1).astype(str)+"%"
         task_counts["Meaning"] = task_counts["Task"].map({
-            "success":"✅ EIN matches legal name per IRS",
-            "failure":"❌ EIN does NOT match — review reasons",
-            "pending":"⏳ IRS response pending (normal same-day)",
-            "none":"⚠️ No Middesk TIN task — Trulioo fallback used",
+            "success":"✅ EIN matches legal name per IRS — highest confidence",
+            "failure":"❌ EIN does NOT match IRS record — review failure reasons below",
+            "pending":"⏳ IRS response pending — normal for same-day (allow 24–48h)",
+            "none":"⚠️ No Middesk TIN task — Trulioo fallback used instead",
+            "warning":"⚠️ IRS found a record but with caveats — check sublabel",
         }).fillna("Unknown")
         styled_table(task_counts, color_col="Task",
-                     palette={"success":"#22c55e","failure":"#ef4444","pending":"#f59e0b","none":"#64748b"})
+                     palette={"success":"#22c55e","failure":"#ef4444","pending":"#f59e0b",
+                               "none":"#64748b","warning":"#f97316"})
 
-        # Inconsistency detection
+        middesk_none_count = int((tin["middesk_tin_task"]=="none").sum())
+        middesk_fail_count = int((tin["middesk_tin_task"]=="failure").sum())
+        if middesk_none_count > tin_total * 0.50:
+            flag(f"⚠️ {middesk_none_count:,} businesses ({middesk_none_count/max(tin_total,1)*100:.1f}%) "
+                 "have NO Middesk TIN task. This means Middesk was not called for these businesses, "
+                 "or was called but did not run the TIN review task. "
+                 "Trulioo BusinessRegistrationNumber comparison is used as fallback — "
+                 "lower confidence than IRS direct query.", "amber")
+        if middesk_fail_count > 0:
+            flag(f"{middesk_fail_count:,} Middesk TIN task failures. "
+                 "Each failure has a specific reason from Middesk (see failure guide below). "
+                 "Pull the tin_match.message field for each business to see the exact IRS response.", "amber")
+
+        analyst_card("Middesk TIN Task — What 'none' means and what to do", [
+            f"'none' ({middesk_none_count:,} businesses, {middesk_none_count/max(tin_total,1)*100:.1f}%): "
+            "Middesk did not run a TIN review task for these businesses. "
+            "This happens when: (1) Middesk did not match the entity (low confidence), "
+            "(2) The business does not have a TIN in Middesk's records, "
+            "or (3) Middesk was not called at all (check platform_id=16 in request_response).",
+            f"'success' ({int((tin['middesk_tin_task']=='success').sum()):,} businesses): "
+            "These are the best-quality verifications. Middesk called IRS directly and got a positive match. "
+            "When you see tin_match_boolean=true AND middesk_tin_task=success, this is the strongest possible TIN confirmation.",
+            f"'failure' ({middesk_fail_count:,} businesses): "
+            "Middesk called IRS and IRS said the EIN does NOT match this legal name. "
+            "This is a definitive failure, not a 'try again' — the EIN and name are genuinely mismatched.",
+            "'pending' businesses: Middesk sent the request but IRS hasn't responded. "
+            "If pending > 3 days, check Middesk API status and consider re-triggering the verification.",
+        ])
+
+        # ── Inconsistency detection ─────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### ⚠️ TIN Data Integrity Check")
         inconsistent = tin[tin["tin_match_boolean"] & (tin["tin_match_status"]!="success")]
         if len(inconsistent)>0:
             flag(f"🚨 {len(inconsistent):,} businesses: tin_match_boolean=true but status≠'success'. "
-                 "Data integrity error — boolean should ONLY be true when status==='success' "
-                 "(integration-service/lib/facts/kyb/index.ts L488–490).", "red")
+                 "Data integrity error — the boolean is derived ONLY from status==='success' "
+                 "(integration-service/lib/facts/kyb/index.ts L488–490). "
+                 "Any divergence means the derivation logic broke.", "red")
             styled_table(inconsistent[["business_id","tin_match_status","tin_match_boolean",
                                         "middesk_tin_task"]].head(20))
         else:
-            flag("No TIN boolean/status inconsistencies detected.", "green")
+            flag("✅ No TIN boolean/status inconsistencies detected. "
+                 "Every business where tin_match_boolean=true also has tin_match.status='success'. "
+                 "The derivation logic is working correctly.", "green")
 
-        # Failure reasons table
-        st.markdown("#### TIN Failure Reason Guide")
+        # ── Failure reasons table ────────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 📋 TIN Failure Reason Guide — What Each Middesk Message Means")
+        st.markdown(
+            "When `tin_match.status='failure'`, Middesk provides a specific message explaining why. "
+            "Read `tin_match.message` for each failed business to understand the exact cause."
+        )
         failure_guide = pd.DataFrame({
-            "Middesk Message (from tin_match.message)":[
-                "IRS has a record…combination — Found",
-                "IRS does not have a record…",
-                "TIN associated with a different Business Name",
+            "Middesk Message (tin_match.message)":[
+                "The IRS has a record for the submitted TIN and Business Name combination",
+                "The IRS does not have a record for the submitted TIN and Business Name combination",
+                "We believe the submitted TIN is associated with a different Business Name",
                 "Duplicate request",
                 "Invalid TIN",
                 "IRS unavailable",
             ],
             "Status":["success","failure","failure","failure","failure","failure"],
             "Risk":["None","HIGH","HIGH","MEDIUM","HIGH","LOW — retry"],
-            "Action":["Verified — no action",
-                      "Wrong EIN or name mismatch — manual review",
-                      "Possible fraud — route to fraud review",
-                      "Re-submit after 24h",
-                      "Correct EIN format and resubmit",
-                      "Auto-retry in 24h"],
+            "What it means":[
+                "✅ EIN + legal name confirmed by IRS. Perfect result.",
+                "❌ IRS has no EIN registered under this exact legal name. Wrong EIN or name doesn't match IRS records.",
+                "⚠️ The EIN exists but is registered under a DIFFERENT business name. Possible fraud or EIN reuse.",
+                "Re-submit needed. Middesk received a duplicate request within a short window.",
+                "❌ The EIN format is invalid (wrong length, non-numeric, etc.).",
+                "IRS system was temporarily unavailable. Auto-retry. Not a business data issue.",
+            ],
+            "Action":[
+                "No action — approved",
+                "Ask applicant: exact legal name on EIN certificate, confirm no recent name change",
+                "🚨 HIGH RISK — check for EIN reuse or fraudulent application. Route to fraud review.",
+                "Wait 24h and re-submit automatically",
+                "Ask applicant to check their EIN certificate — 9-digit number, no dashes required",
+                "Auto-retry in 24h — if persistent, check IRS e-verify system status",
+            ],
         })
         styled_table(failure_guide, color_col="Risk",
                      palette={"HIGH":"#ef4444","MEDIUM":"#f59e0b","LOW — retry":"#3B82F6","None":"#22c55e"})
-
-        analyst_card("TIN Verification Analysis", [
-            f"Submission rate: {tin_submitted/max(tin_total,1)*100:.1f}% — "
-            f"{'good' if tin_submitted/max(tin_total,1)>0.90 else 'LOW — many businesses not providing EIN'}.",
-            f"Verified rate of submitted: {tin_verified/max(tin_submitted,1)*100:.1f}%. "
-            "Target >75%. Track this weekly — declining trend = new applicant quality issue.",
-            f"Failure rate: {tin_failed/max(tin_submitted,1)*100:.1f}% of submitted. "
-            "Failures = EIN-name mismatch per IRS. Primary causes: DBA vs legal name, recent rebranding.",
-        ])
 
     # ── IDV ────────────────────────────────────────────────────────────────────
     with tab_idv:
@@ -2195,14 +2304,29 @@ elif section == "🏭 Classification":
             fig2.add_vline(x=0.70,line_dash="dash",line_color="#22c55e",annotation_text="Good 0.70")
             st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
 
-        st.markdown("#### 📋 Full Code Distribution")
+        st.markdown("#### 📋 Full Code Distribution (15 per page)")
         nc_full = naics.groupby(["naics_code","naics_label","is_fallback"]).agg(
             count=("business_id","count"),
             avg_conf=("naics_confidence","mean")).reset_index()
         nc_full["% of Total"] = (nc_full["count"]/total*100).round(1).astype(str)+"%"
         nc_full["Avg Conf"] = nc_full["avg_conf"].round(3)
         nc_full["⚠️"] = nc_full["is_fallback"].map({True:"🚨 Fallback",False:"✅"})
-        styled_table(nc_full[["naics_code","naics_label","count","% of Total","Avg Conf","⚠️"]].sort_values("count",ascending=False),
+        nc_display = nc_full[["naics_code","naics_label","count","% of Total","Avg Conf","⚠️"]].sort_values("count",ascending=False).reset_index(drop=True)
+
+        # Pagination
+        PAGE_SIZE = 15
+        n_pages = max(1, math.ceil(len(nc_display)/PAGE_SIZE))
+        if n_pages > 1:
+            col_pg1, col_pg2 = st.columns([3,1])
+            with col_pg2:
+                page_num = st.number_input("Page", min_value=1, max_value=n_pages, value=1, step=1,
+                                           key="naics_dist_page")
+            with col_pg1:
+                st.caption(f"Showing page {page_num} of {n_pages} ({len(nc_display)} NAICS codes total)")
+        else:
+            page_num = 1
+        start = (page_num-1)*PAGE_SIZE
+        styled_table(nc_display.iloc[start:start+PAGE_SIZE],
                      color_col="⚠️",palette={"🚨 fallback":"#ef4444","✅":"#22c55e"})
 
     with tab_src:
@@ -2237,27 +2361,128 @@ elif section == "🏭 Classification":
 
     with tab_fb:
         st.markdown("#### 🚨 561499 Root-Cause Analysis")
+        st.markdown(
+            f"**{fallbacks:,} businesses** ({fallbacks/max(total,1)*100:.1f}%) received NAICS 561499 "
+            f"(All Other Business Support Services). This section explains the 6 root-cause gaps "
+            "identified through diagnostic analysis of production data."
+        )
+
+        # Per-gap expanded explanations
+        GAP_DETAIL = {
+            "G1": {
+                "why": f"This affects ~99% of fallback businesses (~{int(fallbacks*0.99):,}). "
+                       "The entity-matching model (XGBoost, `entity_matching_20250127 v1`) could not find "
+                       "a matching record in any of the three vendor databases: ZoomInfo, Equifax, or OpenCorporates.",
+                "causes": [
+                    "Business is too new (<2 weeks): vendor bulk data hasn't captured it yet",
+                    "Micro-business: sole proprietors with no commercial database presence",
+                    "Name too generic or too unique: 'ABC LLC' (too common) or unusual names (too rare)",
+                    "Address mismatch: submitted address differs from the registered address",
+                    "International entity with no US bulk data footprint",
+                ],
+                "impact": "Without a vendor match, the AI enrichment fires as a last resort. "
+                          "With only name+address, it often cannot classify and returns 561499.",
+                "fix": "Improve entity-matching model coverage; for micro-businesses, use name-keyword classification (see G3).",
+            },
+            "G2": {
+                "why": f"Estimated ~{int(fallbacks*0.20):,} businesses (20% of fallbacks). "
+                       "These businesses have a website URL stored in the system, but the AI enrichment "
+                       "function (aiNaicsEnrichment.ts) did NOT use it for web_search.",
+                "causes": [
+                    "params.website was null/empty when passed to the AI function",
+                    "Website URL was found by SERP but not stored before AI enrichment ran",
+                    "Pipeline order issue: AI enrichment ran before SERP stored the website fact",
+                ],
+                "impact": f"~{int(fallbacks*0.20):,} businesses that COULD have been classified from their website got 561499 instead.",
+                "fix": "In aiNaicsEnrichment.ts getPrompt(): ensure params.website is populated before the function runs. "
+                       "The website URL is available from the website fact — pass it explicitly.",
+            },
+            "G3": {
+                "why": f"Estimated ~{int(fallbacks*0.30):,} businesses (30% of fallbacks). "
+                       "The AI prompt instructs: 'If there is no evidence, return naics_code 561499'. "
+                       "It does NOT instruct the AI to check business name keywords before giving up.",
+                "causes": [
+                    "'Lisa's Nail Salon' → should be 812113 (Nail Salons) but gets 561499",
+                    "'Smith Dental Associates' → should be 621210 (Dentist Offices) but gets 561499",
+                    "'ABC Plumbing LLC' → should be 238220 (Plumbing) but gets 561499",
+                    "Any business with a descriptive name that indicates the industry clearly",
+                ],
+                "impact": "The most fixable category. No infrastructure change needed — just a prompt update.",
+                "fix": "Add keyword classification to the AI prompt: check 80+ industry keywords in the business name "
+                       "before defaulting to 561499. Already mapped in consensus.py detect_name_keywords().",
+            },
+            "G4": {
+                "why": f"Affects all {fallbacks:,} fallback businesses. "
+                       "When AI returns 561499, the `ai_naics_enrichment_metadata` fact is never written. "
+                       "This means: what website did AI find? what was its confidence? why did it give up? — all lost.",
+                "causes": [
+                    "The metadata fact is only written when AI returns a non-fallback NAICS code",
+                    "The pipeline assumes 561499 = 'nothing to record'",
+                    "No quality monitoring is possible for fallback cases",
+                ],
+                "impact": "Cannot measure AI quality for the cases that matter most. "
+                          "Cannot distinguish 'AI tried but couldn't classify' from 'AI was never called'.",
+                "fix": "Always write ai_naics_enrichment_metadata fact, even for 561499. "
+                       "Include: ai_confidence, ai_website_summary, ai_reasoning, ai_website_url.",
+            },
+            "G5": {
+                "why": f"Affects all {fallbacks:,} fallback businesses. "
+                       "When AI returns MCC 5614 (the fallback), it also writes mcc_description = "
+                       "'Fallback MCC per instructions (no industry evidence to determine canonical MCC description)'. "
+                       "This internal debug text is visible to customers in the Admin Portal KYB tab.",
+                "causes": [
+                    "The AI system prompt was written for internal debugging, not for customer-facing display",
+                    "No sanitization layer between AI output and customer-visible fact storage",
+                ],
+                "impact": "Customers see internal system messages. Reduces trust and appears unprofessional.",
+                "fix": "Update the AI system prompt: replace fallback description with "
+                       "'Industry classification pending — our team is reviewing this business.'",
+            },
+            "G6": {
+                "why": f"Affects all {fallbacks:,} businesses in Pipeline B (datascience.customer_files). "
+                       "Pipeline B uses winner-takes-all: WHEN zi_match_confidence > efx_match_confidence THEN ZI ELSE EFX. "
+                       "For these businesses, BOTH zi_match_confidence=0 AND efx_match_confidence=0.",
+                "causes": [
+                    "Same root cause as G1: entity matching failed for ZoomInfo and Equifax",
+                    "Pipeline B ignores OC, Middesk, Trulioo, AI — only ZI vs EFX",
+                ],
+                "impact": "primary_naics_code=NULL in datascience.customer_files for all fallback businesses. "
+                          "Analytics, risk models, and reports that use Pipeline B have no NAICS for these businesses.",
+                "fix": "Pipeline B fix: add OC as a fallback when both ZI and EFX are confidence=0.",
+            },
+        }
+
         gaps = [
-            ("G1","Entity matching fails (ZI/EFX/OC all null)",f"{int(fallbacks*0.99):,}","Both A & B",
-             "XGBoost entity-matching finds no vendor record above threshold.","#ef4444"),
-            ("G2","AI web search not used (no website URL)",f"~{int(fallbacks*0.20):,} est.","Pipeline A",
-             "web_search blocked in getPrompt() when params.website is null.","#f59e0b"),
-            ("G3","No name keyword classification in AI prompt",f"~{int(fallbacks*0.30):,} est.","Pipeline A",
-             "AI prompt: 'return 561499 if no evidence'. Doesn't check name keywords.","#f59e0b"),
-            ("G4","AI metadata not stored for fallbacks",f"{fallbacks:,}","Pipeline A",
-             "ai_naics_enrichment_metadata fact never written when AI returns 561499.","#ef4444"),
-            ("G5","Fallback MCC description shown to customers",f"{fallbacks:,}","Pipeline A",
-             "mcc_description='Fallback MCC per instructions…' visible in Admin Portal.","#f97316"),
-            ("G6","Pipeline B also null for same businesses",f"{fallbacks:,}","Pipeline B",
-             "zi_match_confidence=0 AND efx_match_confidence=0 → primary_naics_code=NULL.","#ef4444"),
+            ("G1","Entity matching fails (ZI/EFX/OC all null)",f"{int(fallbacks*0.99):,}","Both A & B","#ef4444"),
+            ("G2","AI web search not used (no website URL)",f"~{int(fallbacks*0.20):,} est.","Pipeline A","#f59e0b"),
+            ("G3","No name keyword classification in AI prompt",f"~{int(fallbacks*0.30):,} est.","Pipeline A","#f59e0b"),
+            ("G4","AI metadata not stored for fallbacks",f"{fallbacks:,}","Pipeline A","#ef4444"),
+            ("G5","Fallback MCC description shown to customers",f"{fallbacks:,}","Pipeline A","#f97316"),
+            ("G6","Pipeline B also null for same businesses",f"{fallbacks:,}","Pipeline B","#ef4444"),
         ]
-        for gid,title,affected,pipeline,desc,color in gaps:
-            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
-                border-radius:8px;padding:10px 14px;margin:5px 0">
-              <span style="color:{color};font-weight:700">Gap {gid}: {title}</span>
-              <span style="color:#64748b;font-size:.73rem;margin-left:8px">{affected} · {pipeline}</span>
-              <div style="color:#94A3B8;font-size:.77rem;margin-top:3px">{desc}</div>
-            </div>""", unsafe_allow_html=True)
+        for gid,title,affected,pipeline,color in gaps:
+            detail = GAP_DETAIL.get(gid, {})
+            with st.expander(f"{'🔴' if color=='#ef4444' else '🟡'} Gap {gid}: {title} — {affected} · {pipeline}", expanded=(gid=="G1")):
+                if detail:
+                    st.markdown(f"**Why this happens:** {detail['why']}")
+                    if detail.get("causes"):
+                        st.markdown("**Specific causes:**")
+                        for c in detail["causes"]:
+                            st.markdown(f"  - {c}")
+                    st.markdown(f"**Business impact:** {detail['impact']}")
+                    st.markdown(f"**Recommended fix:** {detail['fix']}")
+
+        analyst_card("561499 Root-Cause — Summary for Leadership", [
+            f"Total fallback businesses: {fallbacks:,} ({fallbacks/max(total,1)*100:.1f}%). "
+            "Root cause 99% of the time: the entity-matching model could not find this business in any vendor database.",
+            "G1 is the primary driver. G2 and G3 are the most actionable — they can be fixed without infrastructure changes.",
+            "G2 (website not used): ~20% of fallbacks could be classified if the AI used the available website URL.",
+            "G3 (name keywords): ~30% of fallbacks could be classified from the business name alone. "
+            "A single prompt change in aiNaicsEnrichment.ts would recover these.",
+            "G4 and G5 are quality-of-life fixes — they don't reduce fallback count but "
+            "improve monitoring capability (G4) and customer experience (G5).",
+            "G6 affects Pipeline B analytics only — customer-facing data (Pipeline A) already handles this via AI fallback.",
+        ])
 
         rec_df = pd.DataFrame({
             "Category":["G3: Name keywords","G2: Web search","G6: Pipeline B",
@@ -3439,8 +3664,14 @@ elif section == "🔎 Business Lookup":
     else:
         bid = business_id.strip()
 
-        biz_cache_key = f"_biz_{bid}"
-        if biz_cache_key not in st.session_state:
+        biz_cache_key    = f"_biz_{bid}"
+        biz_ts_key       = f"_biz_ts_{bid}"
+
+        # Force reload if the user clicked the Refresh button
+        # (clear_data_cache() removes _biz_* keys)
+        need_load = biz_cache_key not in st.session_state
+
+        if need_load:
             with st.spinner(f"Loading all KYB data for {bid}…"):
                 facts_sql = f"""
                     SELECT name, value, received_at
@@ -3448,16 +3679,36 @@ elif section == "🔎 Business Lookup":
                     WHERE business_id = '{bid}'
                     ORDER BY name, received_at DESC
                 """
-                st.session_state[biz_cache_key] = run_query(facts_sql)
-                st.session_state[f"_biz_ts_{bid}"] = datetime.now(timezone.utc)
+                result = run_query(facts_sql)
+                st.session_state[biz_cache_key] = result
+                st.session_state[biz_ts_key]    = datetime.now(timezone.utc)
         else:
-            biz_age = int((datetime.now(timezone.utc) - st.session_state[f"_biz_ts_{bid}"]).total_seconds())
-            st.caption(f"📦 Using cached data for this business (loaded {biz_age}s ago) — "
-                       f"[clear]({bid}) or change UUID to reload.")
-        facts_df = st.session_state[biz_cache_key]
+            # Show cache age — guard against missing ts key
+            if biz_ts_key in st.session_state:
+                biz_age = int((datetime.now(timezone.utc) - st.session_state[biz_ts_key]).total_seconds())
+                st.caption(f"📦 Cached data (loaded {biz_age}s ago). Click **🔄 Refresh All Data** in sidebar to reload.")
 
-        if facts_df is None or facts_df.empty:
-            st.error(f"No facts found for business_id = `{bid}`. Check UUID and connection.")
+        facts_df = st.session_state.get(biz_cache_key)
+
+        # Provide a manual reload button in case of empty cache
+        if facts_df is None or (hasattr(facts_df,"empty") and facts_df.empty):
+            col_retry, _ = st.columns([1,3])
+            with col_retry:
+                if st.button("🔄 Reload this business", type="primary"):
+                    if biz_cache_key in st.session_state:
+                        del st.session_state[biz_cache_key]
+                    if biz_ts_key in st.session_state:
+                        del st.session_state[biz_ts_key]
+                    st.rerun()
+            st.error(
+                f"No facts found for `{bid}`. "
+                "Possible causes:\n"
+                "1. UUID is incorrect — copy it from the Admin Portal URL\n"
+                "2. VPN is not connected — Redshift unreachable\n"
+                "3. This business has no facts yet (very new)\n\n"
+                "Try clicking **🔄 Reload this business** above, or verify the UUID by running:\n"
+            )
+            st.code(f"""SELECT COUNT(*) FROM rds_warehouse_public.facts WHERE business_id = '{bid}';""", language="sql")
             st.stop()
 
         # ── Parse all facts into structured dict ─────────────────────────────
