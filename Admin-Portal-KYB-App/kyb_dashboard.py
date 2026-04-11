@@ -921,97 +921,133 @@ def live_dd(limit):
     else:
         pivoted = None
 
-    # Step 2: try clients.customer_table for richer watchlist data
-    cust_sql = f"""
-        SELECT business_id,
-               watchlist_verification,
-               watchlist_count
-        FROM clients.customer_table
-        WHERE watchlist_count IS NOT NULL
-        ORDER BY watchlist_count DESC{_limit_clause(limit)}
-    """
-    cust = run_query(cust_sql)
+    # Step 2: clients.customer_table — try multiple possible column name variants
+    # The watchlist column may be named watchlist_count, watchlist_hits, or watchlists
+    cust = None
+    for wl_col in ["watchlist_count", "watchlists", "watchlist_hits", "watchlist_count_total"]:
+        cust_sql = f"""
+            SELECT business_id, {wl_col} AS watchlist_count
+            FROM clients.customer_table
+            WHERE {wl_col} IS NOT NULL
+              AND {wl_col} > 0
+            ORDER BY {wl_col} DESC{_limit_clause(limit)}
+        """
+        cust = run_query(cust_sql)
+        if cust is not None and not cust.empty:
+            st.session_state["_watchlist_col_found"] = wl_col  # remember which worked
+            break
+        st.session_state.pop("_last_db_error", None)  # clear error so next try is clean
+
+    # Also try the verification_results table which is the intermediate step
+    if cust is None or cust.empty:
+        cust_sql2 = f"""
+            SELECT business_id,
+                   watchlist_count,
+                   watchlist_verification
+            FROM clients.verification_results
+            WHERE watchlist_count IS NOT NULL{_limit_clause(limit)}
+        """
+        cust = run_query(cust_sql2)
 
     # Step 3: try rds_integration_data.business_entity_review_task
+    # This is the ground-truth source (directly from the vendor hit data)
+    bert = None
     bert_sql = f"""
         SELECT bev.business_id,
-               bert.key,
                bert.status,
-               bert.sublabel,
-               bert.message
+               bert.sublabel
         FROM rds_integration_data.business_entity_review_task bert
         JOIN rds_integration_data.business_entity_verification bev
           ON bev.id = bert.business_entity_verification_id
         WHERE bert.key = 'watchlist'
-        ORDER BY bev.business_id DESC{_limit_clause(limit)}
+        ORDER BY bev.business_id{_limit_clause(limit)}
     """
     bert = run_query(bert_sql)
+
+    # BERT is also the most reliable source for watchlist_count
+    # If BERT loaded, count hits per business from it directly
+    if bert is not None and not bert.empty:
+        bert_hits = bert.groupby("business_id").agg(
+            watchlist_hits_bert=("status","count"),
+            watchlist_status=("status","first"),
+            watchlist_sublabel=("sublabel","first"),
+        ).reset_index()
+        # 'warning' status = hits found, 'success' = no hits
+        bert_hits["watchlist_hits_bert"] = bert_hits["watchlist_status"].apply(
+            lambda s: 1 if str(s).lower()=="warning" else 0)
+        # Sum actual hits
+        bert_hits["watchlist_hits_bert"] = bert.groupby("business_id").apply(
+            lambda g: int((g["status"].str.lower()=="warning").sum())
+        ).reset_index(drop=True)
+    else:
+        bert_hits = None
 
     # ── Priority merge: clients.customer_table is the most reliable source ──────
     # clients.customer_table.watchlist_count = confirmed field from the spreadsheet
     # It counts hits from business_entity_review_task (BERT) via verification_results.sql
     # This is the same field shown in the Admin Portal and in the export spreadsheet.
 
-    if cust is not None and not cust.empty:
-        # customer_table is primary — it has the correct watchlist_count
+    # ── Build the final DataFrame — priority order ────────────────────────────
+    # 1st: BERT (ground truth — actual vendor hit records)
+    # 2nd: clients.customer_table (derived, but confirmed in spreadsheet)
+    # 3rd: rds_warehouse_public.facts watchlist_hits (often 0)
+
+    if bert_hits is not None and not bert_hits.empty:
+        df = bert_hits.rename(columns={"watchlist_hits_bert":"watchlist_hits"}).copy()
+        df.attrs["watchlist_source"] = "rds_integration_data.business_entity_review_task (BERT)"
+    elif cust is not None and not cust.empty:
         df = cust.rename(columns={"watchlist_count":"watchlist_hits"}).copy()
-        df["watchlist_hits"] = df["watchlist_hits"].apply(safe_int)
-
-        # Merge num_* facts from the facts table if available
-        if pivoted is not None and not pivoted.empty:
-            for fact_col, target_col in [
-                ("num_bankruptcies","bk_hits"),
-                ("num_judgements","judgment_hits"),
-                ("num_liens","lien_hits"),
-                ("adverse_media_hits","adverse_media_hits"),
-            ]:
-                if fact_col in pivoted.columns:
-                    subset = pivoted[["business_id",fact_col]].copy()
-                    subset[fact_col] = subset[fact_col].apply(safe_int)
-                    df = df.merge(subset.rename(columns={fact_col:target_col}),
-                                  on="business_id", how="left")
-                    df[target_col] = df[target_col].fillna(0).astype(int)
-                else:
-                    df[target_col] = 0
-        else:
-            df["bk_hits"]          = 0
-            df["judgment_hits"]     = 0
-            df["lien_hits"]        = 0
-            df["adverse_media_hits"] = 0
-
+        df.attrs["watchlist_source"] = f"clients.customer_table (col={st.session_state.get('_watchlist_col_found','watchlist_count')})"
     elif pivoted is not None and not pivoted.empty:
-        # Fallback: facts table only
         df = pivoted.copy()
-        for col in ["watchlist_hits","adverse_media_hits"]:
-            df[col] = df[col].apply(safe_int) if col in df.columns else 0
-        df["bk_hits"]       = df["num_bankruptcies"].apply(safe_int) if "num_bankruptcies" in df.columns else 0
-        df["judgment_hits"] = df["num_judgements"].apply(safe_int)   if "num_judgements"   in df.columns else 0
-        df["lien_hits"]     = df["num_liens"].apply(safe_int)        if "num_liens"        in df.columns else 0
+        df.attrs["watchlist_source"] = "rds_warehouse_public.facts (watchlist_hits)"
     else:
         return None
 
-    # Merge BERT detail (status, sublabel) if available
-    if bert is not None and not bert.empty:
-        bert_agg = bert.groupby("business_id").agg(
+    # ── Ensure watchlist_hits is numeric ─────────────────────────────────────
+    if "watchlist_hits" not in df.columns:
+        df["watchlist_hits"] = 0
+    df["watchlist_hits"] = df["watchlist_hits"].apply(safe_int)
+
+    # ── Merge BK/Judgment/Lien from facts table ───────────────────────────────
+    if pivoted is not None and not pivoted.empty and "business_id" in df.columns:
+        for fact_col, target_col in [
+            ("num_bankruptcies","bk_hits"),
+            ("num_judgements","judgment_hits"),
+            ("num_liens","lien_hits"),
+            ("adverse_media_hits","adverse_media_hits"),
+        ]:
+            if fact_col in pivoted.columns:
+                subset = pivoted[["business_id",fact_col]].copy()
+                subset[fact_col] = subset[fact_col].apply(safe_int)
+                df = df.merge(subset.rename(columns={fact_col:target_col}),
+                              on="business_id", how="left")
+                df[target_col] = df[target_col].fillna(0).astype(int)
+            elif target_col not in df.columns:
+                df[target_col] = 0
+    else:
+        for col in ["bk_hits","judgment_hits","lien_hits","adverse_media_hits"]:
+            if col not in df.columns:
+                df[col] = 0
+
+    # ── Merge BERT status/sublabel ────────────────────────────────────────────
+    if bert is not None and not bert.empty and "business_id" in df.columns:
+        bert_status = bert.groupby("business_id").agg(
             watchlist_status=("status","first"),
             watchlist_sublabel=("sublabel","first"),
         ).reset_index()
-        df = df.merge(bert_agg, on="business_id", how="left")
+        df = df.merge(bert_status, on="business_id", how="left")
     else:
         df["watchlist_status"]   = None
         df["watchlist_sublabel"] = None
 
-    # Merge customer_table verification flag if not already the primary source
-    if cust is not None and not cust.empty and "watchlist_verification" not in df.columns:
-        df = df.merge(
-            cust[["business_id","watchlist_verification","watchlist_count"]],
-            on="business_id", how="left"
-        )
-
-    # Store data source info for the UI to explain
-    df.attrs["has_facts"]    = pivoted is not None and not pivoted.empty
-    df.attrs["has_cust"]     = cust is not None and not cust.empty
-    df.attrs["has_bert"]     = bert is not None and not bert.empty
+    # ── Store data source metadata ────────────────────────────────────────────
+    df.attrs["has_facts"]     = pivoted is not None and not pivoted.empty
+    df.attrs["has_cust"]      = cust is not None and not cust.empty
+    df.attrs["has_bert"]      = bert is not None and not bert.empty
+    df.attrs["has_bert_hits"] = bert_hits is not None and not bert_hits.empty
+    if "watchlist_source" not in df.attrs:
+        df.attrs["watchlist_source"] = "rds_warehouse_public.facts"
 
     # Defaults for missing columns
     for col in ["sanctions_hits","pep_hits"]:
@@ -3843,25 +3879,66 @@ elif section == "🔎 Business Lookup":
 
         if need_load:
             with st.spinner(f"Loading all KYB data for {bid}…"):
-                # Exclude large-array facts that exceed Redshift federation VARCHAR(65535) limit.
-                # sos_filings, watchlist, bankruptcies, judgements, liens can be 97KB+ per row.
-                # We query the scalar/small facts only, then add excluded list to the UI.
-                EXCLUDED_LARGE_FACTS = (
-                    "'sos_filings'","'watchlist'","'watchlist_raw'",
-                    "'bankruptcies'","'judgements'","'liens'",
-                    "'people'","'addresses'","'internal_platform_matches_combined'",
-                )
-                excluded_clause = ", ".join(EXCLUDED_LARGE_FACTS)
-                facts_sql = f"""
-                    SELECT name, value, received_at
+                # Step 1: get all fact names for this business (no value, always safe)
+                names_sql = f"""
+                    SELECT DISTINCT name, MAX(received_at) AS received_at
                     FROM rds_warehouse_public.facts
                     WHERE business_id = '{bid}'
-                      AND name NOT IN ({excluded_clause})
-                    ORDER BY name, received_at DESC
+                    GROUP BY name
+                    ORDER BY name
                 """
-                result = run_query(facts_sql)
-                st.session_state[biz_cache_key] = result
-                st.session_state[biz_ts_key]    = datetime.now(timezone.utc)
+                names_df = run_query(names_sql)
+
+                if names_df is None or names_df.empty:
+                    st.session_state[biz_cache_key] = None
+                    st.session_state[biz_ts_key]    = datetime.now(timezone.utc)
+                else:
+                    # Step 2: fetch value for each fact individually
+                    # Skip any fact whose value exceeds the VARCHAR(65535) federation limit
+                    KNOWN_LARGE = {
+                        "sos_filings","watchlist","watchlist_raw","bankruptcies",
+                        "judgements","liens","people","addresses",
+                        "internal_platform_matches_combined","sos_match",
+                        "adverse_media","adverse_media_articles",
+                    }
+                    all_rows = []
+                    prog = st.progress(0, text="Fetching facts…")
+                    fact_names = names_df["name"].tolist()
+                    for i, fact_name in enumerate(fact_names):
+                        prog.progress((i+1)/len(fact_names), text=f"Loading {fact_name}…")
+                        if fact_name in KNOWN_LARGE:
+                            # Add a placeholder row — value too large to fetch via federation
+                            all_rows.append({
+                                "name": fact_name,
+                                "value": '{"value":"[too large — query PostgreSQL RDS directly]"}',
+                                "received_at": names_df[names_df["name"]==fact_name]["received_at"].iloc[0],
+                            })
+                            continue
+                        row_sql = f"""
+                            SELECT name, value, received_at
+                            FROM rds_warehouse_public.facts
+                            WHERE business_id = '{bid}'
+                              AND name = '{fact_name}'
+                            ORDER BY received_at DESC
+                            LIMIT 1
+                        """
+                        row = run_query(row_sql)
+                        if row is not None and not row.empty:
+                            all_rows.append(row.iloc[0].to_dict())
+                        else:
+                            # Likely hit VARCHAR limit — add placeholder
+                            all_rows.append({
+                                "name": fact_name,
+                                "value": '{"value":"[too large — query PostgreSQL RDS directly]"}',
+                                "received_at": names_df[names_df["name"]==fact_name]["received_at"].iloc[0],
+                            })
+                        # Clear any error from oversized fact
+                        st.session_state.pop("_last_db_error", None)
+                    prog.empty()
+
+                    result = pd.DataFrame(all_rows) if all_rows else None
+                    st.session_state[biz_cache_key] = result
+                    st.session_state[biz_ts_key]    = datetime.now(timezone.utc)
         else:
             # Show cache age — guard against missing ts key
             if biz_ts_key in st.session_state:
