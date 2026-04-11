@@ -924,21 +924,23 @@ def live_dd(limit):
     # Step 2: clients.customer_table — try multiple possible column name variants
     # The watchlist column may be named watchlist_count, watchlist_hits, or watchlists
     cust = None
+    # Try multiple possible column name variants — include all rows for proper stats
     for wl_col in ["watchlist_count", "watchlists", "watchlist_hits", "watchlist_count_total"]:
         cust_sql = f"""
-            SELECT business_id, {wl_col} AS watchlist_count
+            SELECT business_id,
+                   {wl_col}                AS watchlist_count,
+                   watchlist_verification  AS watchlist_verification
             FROM clients.customer_table
             WHERE {wl_col} IS NOT NULL
-              AND {wl_col} > 0
             ORDER BY {wl_col} DESC{_limit_clause(limit)}
         """
         cust = run_query(cust_sql)
         if cust is not None and not cust.empty:
-            st.session_state["_watchlist_col_found"] = wl_col  # remember which worked
+            st.session_state["_watchlist_col_found"] = wl_col
             break
-        st.session_state.pop("_last_db_error", None)  # clear error so next try is clean
+        st.session_state.pop("_last_db_error", None)
 
-    # Also try the verification_results table which is the intermediate step
+    # Also try the verification_results table
     if cust is None or cust.empty:
         cust_sql2 = f"""
             SELECT business_id,
@@ -948,6 +950,25 @@ def live_dd(limit):
             WHERE watchlist_count IS NOT NULL{_limit_clause(limit)}
         """
         cust = run_query(cust_sql2)
+
+    # Also try sanctions separately using the BERT metadata
+    # Sanctions are a listType within the watchlist — filter by type='sanctions' in Python
+    sanctions_sql = f"""
+        SELECT bev.business_id,
+               COUNT(*) AS sanctions_bert_count
+        FROM rds_integration_data.business_entity_review_task bert
+        JOIN rds_integration_data.business_entity_verification bev
+          ON bev.id = bert.business_entity_verification_id
+        WHERE bert.key = 'watchlist'
+          AND LOWER(bert.status) = 'warning'
+        GROUP BY bev.business_id
+        HAVING COUNT(*) > 0{_limit_clause(limit)}
+    """
+    # Note: true sanctions vs PEP split requires parsing metadata JSONB
+    # which exceeds federation VARCHAR limit. We use watchlist_status='warning'
+    # as a proxy — all warning rows potentially include sanctions.
+    # sanctions_hits and pep_hits facts from rds_warehouse_public.facts are the
+    # pre-computed split (if stored).
 
     # Step 3: try rds_integration_data.business_entity_review_task
     # This is the ground-truth source (directly from the vendor hit data)
@@ -964,21 +985,25 @@ def live_dd(limit):
     """
     bert = run_query(bert_sql)
 
-    # BERT is also the most reliable source for watchlist_count
-    # If BERT loaded, count hits per business from it directly
-    if bert is not None and not bert.empty:
-        bert_hits = bert.groupby("business_id").agg(
-            watchlist_hits_bert=("status","count"),
-            watchlist_status=("status","first"),
-            watchlist_sublabel=("sublabel","first"),
-        ).reset_index()
-        # 'warning' status = hits found, 'success' = no hits
-        bert_hits["watchlist_hits_bert"] = bert_hits["watchlist_status"].apply(
-            lambda s: 1 if str(s).lower()=="warning" else 0)
-        # Sum actual hits
-        bert_hits["watchlist_hits_bert"] = bert.groupby("business_id").apply(
-            lambda g: int((g["status"].str.lower()=="warning").sum())
-        ).reset_index(drop=True)
+    # BERT — count warning-status rows per business (each warning = a hit)
+    # Use a separate aggregated query to get correct counts without the record limit
+    bert_hits = None
+    bert_count_sql = f"""
+        SELECT bev.business_id,
+               SUM(CASE WHEN LOWER(bert.status) = 'warning' THEN 1 ELSE 0 END) AS watchlist_hits_bert,
+               MAX(bert.status)   AS watchlist_status,
+               MAX(bert.sublabel) AS watchlist_sublabel
+        FROM rds_integration_data.business_entity_review_task bert
+        JOIN rds_integration_data.business_entity_verification bev
+          ON bev.id = bert.business_entity_verification_id
+        WHERE bert.key = 'watchlist'
+        GROUP BY bev.business_id
+        HAVING SUM(CASE WHEN LOWER(bert.status) = 'warning' THEN 1 ELSE 0 END) > 0
+        ORDER BY watchlist_hits_bert DESC{_limit_clause(limit)}
+    """
+    bert_hits = run_query(bert_count_sql)
+    if bert_hits is not None and not bert_hits.empty:
+        bert_hits["watchlist_hits_bert"] = bert_hits["watchlist_hits_bert"].apply(safe_int)
     else:
         bert_hits = None
 
@@ -3159,13 +3184,21 @@ elif section == "💰 Risk & Score":
         has_cust  = dd.attrs.get("has_cust",  False)
         has_bert  = dd.attrs.get("has_bert",  False)
 
+        has_bert_hits = dd.attrs.get("has_bert_hits", False)
+        wl_src = dd.attrs.get("watchlist_source","unknown")
         src_lines = []
-        if has_facts: src_lines.append("✅ `rds_warehouse_public.facts` — watchlist_hits, num_bankruptcies, num_judgements, num_liens")
-        if has_cust:  src_lines.append("✅ `clients.customer_table` — watchlist_verification, watchlist_count")
-        if has_bert:  src_lines.append("✅ `rds_integration_data.business_entity_review_task` — hit detail (status, sublabel, metadata)")
-        if not any([has_facts, has_cust, has_bert]):
-            src_lines.append("⚠️ Using facts table only — some watchlist detail tables not accessible")
-        flag("Data sources: " + " · ".join(src_lines), "blue")
+        if has_bert_hits: src_lines.append(f"✅ Watchlist hits from `rds_integration_data.business_entity_review_task` (BERT) — most accurate")
+        if has_cust:      src_lines.append(f"✅ `clients.customer_table` ({st.session_state.get('_watchlist_col_found','watchlist_count')} column)")
+        if has_facts:     src_lines.append("✅ `rds_warehouse_public.facts` — num_bankruptcies, num_judgements, num_liens")
+        if has_bert:      src_lines.append("✅ `rds_integration_data.business_entity_review_task` — status/sublabel detail")
+        if not any([has_bert_hits, has_cust, has_facts]):
+            src_lines.append("⚠️ No watchlist source accessible — check connection and table permissions")
+        flag("**Watchlist data source:** " + " · ".join(src_lines) +
+             "\n\n**Sanctions note:** Sanctions are stored as a listType WITHIN watchlist hits "
+             "(type='sanctions' inside metadata JSONB). The BERT table only stores the consolidated status ('warning'/'success'). "
+             "To get the sanctions vs PEP breakdown, the `sanctions_hits` and `pep_hits` facts "
+             "from `rds_warehouse_public.facts` are used — if those facts are 0, "
+             "the sanctions split is not pre-computed for this population.", "blue")
 
         # ── Why all zeros? Diagnostic ──────────────────────────────────────────
         all_zero = (any_wl + any_sanc + any_pep + any_am + any_bk + any_judg + any_lien) == 0
@@ -3976,13 +4009,31 @@ elif section == "🔎 Business Lookup":
                 latest[row["name"]] = _parse_fact(row["value"])
 
         def gv(name, *path):
-            """Get the inner value from a fact, optionally traversing sub-keys."""
+            """Get the inner value from a fact, optionally traversing sub-keys.
+            Always returns a scalar (str/int/float/bool/None) — never a list or dict
+            when no path is specified, so float(gv(...)) never crashes."""
             fact = latest.get(name, {})
             v = fact.get("value")
             if path and isinstance(v, dict):
                 for k in path:
                     v = v.get(k) if isinstance(v, dict) else None
+            # If value is a list or dict (complex fact), return None for scalar use
+            # The caller can check isinstance(v, list) if they need array data
+            if isinstance(v, (list, dict)) and not path:
+                return None
             return v
+
+        def gv_scalar(name, default=None):
+            """Safe scalar extraction — converts to string for int/float operations."""
+            v = gv(name)
+            if v is None:
+                return default
+            if isinstance(v, (list, dict)):
+                return default
+            try:
+                return v
+            except Exception:
+                return default
 
         def gc(name): return float(_safe_get(latest.get(name,{}),"source","confidence",default=0) or 0)
         def gp(name): return pid_name(str(_safe_get(latest.get(name,{}),"source","platformId",default="")))
@@ -4354,12 +4405,17 @@ The fact exists and has a value, but the `source.platformId` field in the JSON i
             ]
             styled_table(pd.DataFrame(risk_facts))
 
-            # Risk scorecard
-            wl_hits_n  = int(float(gv("watchlist_hits") or 0))
-            am_hits_n  = int(float(gv("adverse_media_hits") or 0))
-            bk_n       = int(float(gv("num_bankruptcies") or 0))
-            judg_n     = int(float(gv("num_judgements") or 0))
-            lien_n     = int(float(gv("num_liens") or 0))
+            # Risk scorecard — use gv_scalar to avoid list/dict crash
+            def _safe_count(name):
+                v = gv_scalar(name, 0)
+                try: return int(float(str(v) or "0"))
+                except Exception: return 0
+
+            wl_hits_n  = _safe_count("watchlist_hits")
+            am_hits_n  = _safe_count("adverse_media_hits")
+            bk_n       = _safe_count("num_bankruptcies")
+            judg_n     = _safe_count("num_judgements")
+            lien_n     = _safe_count("num_liens")
 
             c1,c2,c3,c4,c5 = st.columns(5)
             with c1: kpi("Watchlist",str(wl_hits_n),"hits","#ef4444" if wl_hits_n>0 else "#22c55e")
