@@ -947,30 +947,50 @@ def live_dd(limit):
     """
     bert = run_query(bert_sql)
 
-    # Merge all sources into a unified DataFrame
-    if pivoted is not None and not pivoted.empty:
+    # ── Priority merge: clients.customer_table is the most reliable source ──────
+    # clients.customer_table.watchlist_count = confirmed field from the spreadsheet
+    # It counts hits from business_entity_review_task (BERT) via verification_results.sql
+    # This is the same field shown in the Admin Portal and in the export spreadsheet.
+
+    if cust is not None and not cust.empty:
+        # customer_table is primary — it has the correct watchlist_count
+        df = cust.rename(columns={"watchlist_count":"watchlist_hits"}).copy()
+        df["watchlist_hits"] = df["watchlist_hits"].apply(safe_int)
+
+        # Merge num_* facts from the facts table if available
+        if pivoted is not None and not pivoted.empty:
+            for fact_col, target_col in [
+                ("num_bankruptcies","bk_hits"),
+                ("num_judgements","judgment_hits"),
+                ("num_liens","lien_hits"),
+                ("adverse_media_hits","adverse_media_hits"),
+            ]:
+                if fact_col in pivoted.columns:
+                    subset = pivoted[["business_id",fact_col]].copy()
+                    subset[fact_col] = subset[fact_col].apply(safe_int)
+                    df = df.merge(subset.rename(columns={fact_col:target_col}),
+                                  on="business_id", how="left")
+                    df[target_col] = df[target_col].fillna(0).astype(int)
+                else:
+                    df[target_col] = 0
+        else:
+            df["bk_hits"]          = 0
+            df["judgment_hits"]     = 0
+            df["lien_hits"]        = 0
+            df["adverse_media_hits"] = 0
+
+    elif pivoted is not None and not pivoted.empty:
+        # Fallback: facts table only
         df = pivoted.copy()
-    elif cust is not None and not cust.empty:
-        # Build from customer_table if facts unavailable
-        df = cust.rename(columns={
-            "watchlist_count":"watchlist_hits",
-        }).copy()
+        for col in ["watchlist_hits","adverse_media_hits"]:
+            df[col] = df[col].apply(safe_int) if col in df.columns else 0
+        df["bk_hits"]       = df["num_bankruptcies"].apply(safe_int) if "num_bankruptcies" in df.columns else 0
+        df["judgment_hits"] = df["num_judgements"].apply(safe_int)   if "num_judgements"   in df.columns else 0
+        df["lien_hits"]     = df["num_liens"].apply(safe_int)        if "num_liens"        in df.columns else 0
     else:
         return None
 
-    # Apply safe_int to all numeric fact columns
-    for col in ["watchlist_hits","adverse_media_hits"]:
-        if col in df.columns:
-            df[col] = df[col].apply(safe_int)
-        else:
-            df[col] = 0
-
-    # Map num_* facts to *_hits columns (confirmed scalar facts)
-    df["bk_hits"]       = df["num_bankruptcies"].apply(safe_int) if "num_bankruptcies" in df.columns else 0
-    df["judgment_hits"] = df["num_judgements"].apply(safe_int)   if "num_judgements"   in df.columns else 0
-    df["lien_hits"]     = df["num_liens"].apply(safe_int)        if "num_liens"        in df.columns else 0
-
-    # Merge bert (detailed watchlist hits) if available
+    # Merge BERT detail (status, sublabel) if available
     if bert is not None and not bert.empty:
         bert_agg = bert.groupby("business_id").agg(
             watchlist_status=("status","first"),
@@ -981,8 +1001,8 @@ def live_dd(limit):
         df["watchlist_status"]   = None
         df["watchlist_sublabel"] = None
 
-    # Merge customer_table verification flag if available
-    if cust is not None and not cust.empty:
+    # Merge customer_table verification flag if not already the primary source
+    if cust is not None and not cust.empty and "watchlist_verification" not in df.columns:
         df = df.merge(
             cust[["business_id","watchlist_verification","watchlist_count"]],
             on="business_id", how="left"
@@ -2303,6 +2323,32 @@ elif section == "🏭 Classification":
             fig2.add_vline(x=0.50,line_dash="dash",line_color="#f59e0b",annotation_text="Min 0.50")
             fig2.add_vline(x=0.70,line_dash="dash",line_color="#22c55e",annotation_text="Good 0.70")
             st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+            st.markdown("""
+**What is `naics_confidence`?**
+
+This is the **Fact Engine's winning vendor confidence score** — it is the confidence value
+of the single vendor that WON the NAICS fact selection for each business.
+
+**It is NOT an average across all sources.** Each business has exactly one winning vendor,
+and this chart shows how confident THAT vendor was.
+
+**How each vendor calculates confidence:**
+
+| Source | Confidence formula | Typical range |
+|---|---|---|
+| Middesk (pid=16) | 0.15 base + 0.20 × number of successful review tasks (max 4) | 0.15–0.95 |
+| OC / ZI / EFX (pid=23/24/17) | `match.index ÷ 55` where 55 = MAX_CONFIDENCE_INDEX | 0.0–1.0 |
+| Trulioo (pid=38) | Status-based: success=0.70, pending=0.40, failed=0.20 | Fixed values |
+| AI (pid=31) | Self-reported: HIGH≈0.70, MED≈0.50, LOW≈0.20 | Variable |
+
+**How to read this histogram:**
+- **Spike at 0.0–0.2**: AI-sourced codes with very low confidence. AI reports LOW confidence when it had no website, no vendor match, and the name alone was ambiguous.
+- **Bars at 0.3–0.5**: Trulioo status-based or partial Middesk matches.
+- **Spike near 1.0**: ZoomInfo or OC matches where `match.index = 54` or `55` (max). These are the most reliable classifications.
+- **Businesses excluded** from this chart: NAICS 561499 fallbacks (their confidence is already meaningless since the code is wrong).
+
+**Target:** the spike near 1.0 should be the tallest bar. A large bar at 0.0–0.2 means many AI-sourced codes with low reliability.
+            """)
 
         st.markdown("#### 📋 Full Code Distribution (15 per page)")
         nc_full = naics.groupby(["naics_code","naics_label","is_fallback"]).agg(
@@ -2345,19 +2391,91 @@ elif section == "🏭 Classification":
                              color_continuous_scale="RdYlGn_r",
                              title="Source Frequency (color=fallback%)")
                 st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+                st.markdown("""
+**How to read this bar chart:**
+
+Each bar = one NAICS source that WON the Fact Engine selection for those businesses.
+The bar **height** = how many businesses that source won.
+The bar **color** = what % of that source's wins ended up as 561499 fallback:
+- 🟢 Green = low fallback % (source is reliable — when it wins, it assigns real codes)
+- 🔴 Red = high fallback % (source often wins but still returns 561499)
+
+**What the sources mean:**
+
+| Source | pid | Weight | What it is |
+|---|---|---|---|
+| `ai` | 31 | 0.1 | GPT AI enrichment — last resort when all vendors fail |
+| `equifax` | 17 | 0.7 | Equifax firmographic bulk data (Redshift) |
+| `opencorporates` | 23 | 0.9 | Global corporate registry database |
+| `serp` | 22 | 0.3 | Google/SERP web scraping of business website |
+| `zoominfo` | 24 | 0.8 | ZoomInfo firmographic bulk data (Redshift) |
+| `other` | varies | varies | Trulioo, Middesk, businessDetails, or unknown |
+
+**Key insight:** If `ai` is tallest with a red color → entity matching is failing broadly.
+                """)
             with col_r:
                 fig2 = px.scatter(src,x="count",y="Avg Conf",size="count",
                                   text="naics_source",color="Fallback %",
                                   color_continuous_scale="RdYlGn_r",
                                   title="Source Volume vs Avg Confidence")
                 st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+                st.markdown("""
+**How to read this scatter plot:**
 
+- **X-axis (count)**: how many businesses this source won
+- **Y-axis (Avg Conf)**: average confidence score when this source won
+- **Bubble size**: also represents count (larger = more wins)
+- **Color**: fallback % (green=low, red=high)
+
+**The ideal source** sits in the **top-right corner** (high volume + high confidence).
+
+**What you want to see:**
+- `zoominfo` and `opencorporates` top-right: reliable, high-confidence
+- `equifax` mid-right: reliable but lower volume
+- `ai` bottom-left: low confidence, high fallback — AI is a last resort, not a good classifier
+
+**What "Avg Conf = 0.145" for AI means:**
+AI reports its own confidence. When AI returns 561499 (fallback), it often reports
+LOW confidence (~0.20). When AI returns a real code from a website, confidence is ~0.70.
+The 0.145 average means most AI wins are low-confidence fallbacks.
+                """)
+
+            st.markdown("#### 📋 Source Performance Table")
             styled_table(src[["naics_source","count","% of Total","Avg Conf","Fallback %"]])
+            st.markdown("""
+**Column meanings:**
+
+| Column | What it means |
+|---|---|
+| `naics_source` | The vendor/source that WON the NAICS fact for those businesses |
+| `count` | Number of businesses where this source won the Fact Engine selection |
+| `% of Total` | Share of all businesses |
+| `Avg Conf` | Average confidence score of this source across all its wins (0–1) |
+| `Fallback %` | % of this source's wins that resulted in NAICS 561499 (fallback) |
+
+**The Fact Engine winner selection rule:** The source with the highest confidence wins,
+provided the confidence gap to the next source is > 5% (WEIGHT_THRESHOLD=0.05).
+If within 5%, the source with the higher platform weight wins. No minimum confidence cutoff.
+            """)
 
             if ai_wins/total > 0.10:
                 flag(f"AI is the winning source for {ai_wins:,} businesses ({ai_wins/total*100:.0f}%). "
                      "AI weight=0.1 — only wins when all other vendors have no NAICS. "
                      "High AI win rate = vendor entity matching is broadly failing.", "amber")
+
+            analyst_card("Source Analysis — Causal Interpretation", [
+                f"'{top_src}' is the most common winning source ({src[src['naics_source']==top_src]['count'].sum() if top_src in src['naics_source'].values else 0:,} businesses). "
+                f"This tells you which vendor has the widest coverage for your applicant base.",
+                f"AI winning {ai_wins:,} businesses ({ai_wins/total*100:.1f}%): "
+                "this is the Fact Engine's last resort — AI only wins when ZI, EFX, OC, SERP, Middesk, and Trulioo all failed to return a NAICS code. "
+                "A high AI win rate is the most actionable signal of entity-matching failure.",
+                f"'other' source winning {src[src['naics_source']=='other']['count'].sum() if 'other' in src['naics_source'].values else 0:,} businesses: "
+                "this includes Trulioo, Middesk, businessDetails (applicant-submitted), and unknown sources. "
+                "High 'other' count with low fallback % = Trulioo/Middesk are working well for some segment.",
+                "Fallback % per source: a source with 0% fallback (like SERP=0.0%) means when SERP wins, "
+                "it always assigns a real NAICS code — it never falls back to 561499. "
+                "This is the ideal behavior. AI at 34.8% fallback means AI assigns 561499 for 1 in 3 businesses it wins.",
+            ])
 
     with tab_fb:
         st.markdown("#### 🚨 561499 Root-Cause Analysis")
@@ -2662,11 +2780,48 @@ elif section == "🏭 Classification":
                     else:
                         flag("All NAICS and MCC codes appear concordant.", "green")
 
-                # Sample mismatches
+                # ── What "Potential mismatch" means ─────────────────────────────
+                st.markdown("#### ❓ What does '⚠️ Potential mismatch' mean?")
+                st.markdown("""
+**⚠️ Potential mismatch** means the NAICS 6-digit code and the MCC 4-digit code come from
+**different industry sectors** — they should be describing the same type of business,
+but the sector mapping suggests they might not be.
+
+**How the check works:**
+Each NAICS 2-digit prefix (sector) maps to an expected set of MCC code families.
+For example:
+- NAICS sector `72` (Accommodation & Food Service) → expected MCC families: 5812, 5813, 7011, 7012
+- NAICS sector `54` (Professional Services) → expected MCC families: 7372, 7374, 8000
+
+If the actual MCC code falls outside the expected family for the NAICS sector,
+the row is flagged as "⚠️ Potential mismatch".
+
+**Why mismatches happen:**
+
+| Reason | How common | Severity |
+|---|---|---|
+| **Different vendors won each fact** — Fact Engine selects naics_code and mcc_code independently. ZoomInfo might win NAICS (restaurant), while AI wins MCC (tech services). | Most common | HIGH |
+| **AI hallucination** — AI selected an MCC from a different industry than the vendor-selected NAICS. | Common | HIGH |
+| **Legitimate multi-industry** — some businesses genuinely operate across sectors (restaurant with catering, gym with retail). | Rare | LOW |
+| **NAICS or MCC is 561499/5614** — fallback codes have no meaningful sector, so any concordance check is N/A. | Expected | None |
+
+**What to do with mismatches:**
+1. Check `source.platformId` on both facts — if different vendors won each, that's the cause.
+2. Look at the actual business description to see which code is more accurate.
+3. Consider using an analyst override (manual correction) for high-value accounts.
+
+**Important caveat:** This is a heuristic check using a simplified sector map.
+Some codes genuinely cross sectors. A "potential mismatch" is a signal to investigate,
+not an automatic error.
+                """)
+
+                # Sample mismatches with enriched explanation
                 mismatches = pivot_c[pivot_c["concordance"]=="⚠️ Potential mismatch"][
                     ["business_id","naics_code","mcc_code","concordance"]].head(20)
                 if not mismatches.empty:
-                    st.markdown("##### Sample NAICS↔MCC mismatches:")
+                    st.markdown("##### Sample NAICS↔MCC mismatches (investigate these):")
+                    st.markdown("*For each row: check if the NAICS and MCC describe the same type of business. "
+                                "If they don't, one of the two facts needs correction via analyst override.*")
                     styled_table(mismatches)
 
             # ── 2. NAICS ↔ Description Concordance ───────────────────────────
@@ -3673,10 +3828,20 @@ elif section == "🔎 Business Lookup":
 
         if need_load:
             with st.spinner(f"Loading all KYB data for {bid}…"):
+                # Exclude large-array facts that exceed Redshift federation VARCHAR(65535) limit.
+                # sos_filings, watchlist, bankruptcies, judgements, liens can be 97KB+ per row.
+                # We query the scalar/small facts only, then add excluded list to the UI.
+                EXCLUDED_LARGE_FACTS = (
+                    "'sos_filings'","'watchlist'","'watchlist_raw'",
+                    "'bankruptcies'","'judgements'","'liens'",
+                    "'people'","'addresses'","'internal_platform_matches_combined'",
+                )
+                excluded_clause = ", ".join(EXCLUDED_LARGE_FACTS)
                 facts_sql = f"""
                     SELECT name, value, received_at
                     FROM rds_warehouse_public.facts
                     WHERE business_id = '{bid}'
+                      AND name NOT IN ({excluded_clause})
                     ORDER BY name, received_at DESC
                 """
                 result = run_query(facts_sql)
@@ -3690,25 +3855,26 @@ elif section == "🔎 Business Lookup":
 
         facts_df = st.session_state.get(biz_cache_key)
 
-        # Provide a manual reload button in case of empty cache
+        # Provide a manual reload button in case of empty/None cache
         if facts_df is None or (hasattr(facts_df,"empty") and facts_df.empty):
             col_retry, _ = st.columns([1,3])
             with col_retry:
                 if st.button("🔄 Reload this business", type="primary"):
-                    if biz_cache_key in st.session_state:
-                        del st.session_state[biz_cache_key]
-                    if biz_ts_key in st.session_state:
-                        del st.session_state[biz_ts_key]
+                    for k in [biz_cache_key, biz_ts_key]:
+                        if k in st.session_state:
+                            del st.session_state[k]
                     st.rerun()
             st.error(
                 f"No facts found for `{bid}`. "
                 "Possible causes:\n"
                 "1. UUID is incorrect — copy it from the Admin Portal URL\n"
                 "2. VPN is not connected — Redshift unreachable\n"
-                "3. This business has no facts yet (very new)\n\n"
-                "Try clicking **🔄 Reload this business** above, or verify the UUID by running:\n"
+                "3. Previous cached result was empty — click 🔄 Reload above\n\n"
+                "Verify the UUID by running this in Redshift:\n"
             )
-            st.code(f"""SELECT COUNT(*) FROM rds_warehouse_public.facts WHERE business_id = '{bid}';""", language="sql")
+            st.code(f"SELECT COUNT(*) FROM rds_warehouse_public.facts WHERE business_id = '{bid}';", language="sql")
+            st.info("If the query above returns > 0, click **🔄 Reload this business** to force a fresh query. "
+                    "The previous result may have been cached from when VPN was disconnected.")
             st.stop()
 
         # ── Parse all facts into structured dict ─────────────────────────────
