@@ -3418,13 +3418,28 @@ elif section == "🏦 Banking & Ops":
          "Confirmed working. GIACT does NOT have complete US coverage — "
          "unverified accounts are expected and tracked here.", "blue")
 
-    # Live query — always fresh
-    verif_summary = run_query("""
-        SELECT verification_status, COUNT(*) AS accounts,
-               ROUND(COUNT(*)*100.0/SUM(COUNT(*)) OVER(),2) AS pct
-        FROM rds_integration_data.rel_banking_verifications
-        GROUP BY verification_status ORDER BY accounts DESC
-    """)
+    # Query with session_state caching so the sidebar shows ✅ Banking — Xm Xs ago
+    _bank_cache_key = _cache_key("banking", record_limit)
+    _bank_ts_key    = _cache_ts_key("banking", record_limit)
+
+    if _bank_cache_key not in st.session_state:
+        with st.spinner("Loading Banking data from rds_integration_data…"):
+            _verif = run_query(f"""
+                SELECT verification_status, COUNT(*) AS accounts,
+                       ROUND(COUNT(*)*100.0/SUM(COUNT(*)) OVER(),2) AS pct
+                FROM rds_integration_data.rel_banking_verifications
+                GROUP BY verification_status ORDER BY accounts DESC
+            """)
+            # Store in session_state so sidebar cache indicator shows ✅
+            st.session_state[_bank_cache_key] = _verif
+            st.session_state[_bank_ts_key]    = datetime.now(timezone.utc)
+    else:
+        _bank_age = get_cache_age("banking", record_limit)
+        if _bank_age is not None:
+            st.caption(f"📦 Banking data cached ({_bank_age//60}m {_bank_age%60}s ago) — "
+                       "click 🔄 Refresh All Data in sidebar to reload.")
+
+    verif_summary = st.session_state.get(_bank_cache_key)
 
     if verif_summary is not None and not verif_summary.empty:
         total_accts = int(verif_summary["accounts"].sum())
