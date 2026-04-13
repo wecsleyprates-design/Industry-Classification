@@ -139,29 +139,28 @@ def run_query(sql):
         return None
 
 
-def query_fact(fact_name, limit, extra_cols=""):
+def query_fact(fact_name, limit, extra_cols="", date_from=None, date_to=None):
     """
-    Query a SINGLE fact name.  If the value column exceeds the Redshift
-    federation VARCHAR(65535) limit for ANY row, the whole query fails.
-    By querying one fact at a time we can skip the offending ones and
-    still return data for the others.
-    extra_cols: additional SQL expressions to add to the SELECT list.
+    Query a SINGLE fact name with optional date range on received_at.
+    If the value column exceeds the Redshift federation VARCHAR(65535) limit
+    for ANY row, the whole query fails.
     """
     cols = f"business_id, '{fact_name}' AS name, value, received_at"
     if extra_cols:
         cols += f", {extra_cols}"
+    dc = _date_clause("received_at", date_from, date_to)
     sql = f"""
         SELECT {cols}
         FROM rds_warehouse_public.facts
-        WHERE name = '{fact_name}'
+        WHERE name = '{fact_name}'{dc}
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
     return run_query(sql)
 
 
-def query_facts_safe(fact_names, limit):
+def query_facts_safe(fact_names, limit, date_from=None, date_to=None):
     """
-    Query multiple fact names one at a time.
+    Query multiple fact names one at a time with optional date filter.
     Silently skips any fact whose value column exceeds the 65535-byte
     Redshift federation VARCHAR limit.
     Returns a combined DataFrame of all facts that succeeded, or None.
@@ -169,7 +168,7 @@ def query_facts_safe(fact_names, limit):
     frames = []
     skipped = []
     for name in fact_names:
-        df = query_fact(name, limit)
+        df = query_fact(name, limit, date_from=date_from, date_to=date_to)
         if df is not None and not df.empty:
             frames.append(df)
         else:
@@ -201,6 +200,18 @@ def test_connection():
 
 def _limit_clause(limit):
     return f" LIMIT {limit}" if limit is not None else ""
+
+def _date_clause(col, date_from, date_to):
+    """Returns a SQL AND clause filtering col between date_from and date_to.
+    date_from / date_to are datetime.date objects or None."""
+    if date_from is None and date_to is None:
+        return ""
+    parts = []
+    if date_from is not None:
+        parts.append(f"{col} >= '{date_from}'")
+    if date_to is not None:
+        parts.append(f"{col} <= '{date_to} 23:59:59'")
+    return " AND " + " AND ".join(parts)
 
 def kpi(label, value, sub="", color="#3B82F6"):
     st.markdown(f"""<div class="kpi" style="border-left-color:{color}">
@@ -343,20 +354,9 @@ def _safe_get(d, *keys, default=""):
     return cur if cur is not None else default
 
 
-def live_sos(limit):
-    """
-    rds_warehouse_public is a Redshift FEDERATED external schema pointing to RDS PostgreSQL.
-    The federation layer hard-caps VARCHAR at 65535 bytes — sos_filings inner arrays can be
-    97KB+, so selecting that fact crashes regardless of SQL transformation used.
-
-    Solution: use the small scalar SOS facts instead:
-      - sos_active          → boolean (is any filing active?)
-      - sos_match_boolean   → boolean (did SOS name match?)
-      - sos_match           → small object {status, confidence, source}
-
-    These are always small scalar values and never hit the 65535 limit.
-    We derive per-vendor confidence from source.platformId in these facts.
-    """
+def live_sos(limit, date_from=None, date_to=None):
+    """SOS scalar facts with optional date filter on received_at."""
+    _dc = _date_clause("received_at", date_from, date_to)
     raw = query_facts_safe(
         ['sos_active', 'sos_match_boolean', 'sos_match', 'middesk_confidence'],
         limit)
@@ -409,7 +409,7 @@ def live_sos(limit):
     return df
 
 
-def live_tin(limit):
+def live_tin(limit, date_from=None, date_to=None):
     sql = f"""
         SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
@@ -495,10 +495,10 @@ def live_tin(limit):
     return pivoted
 
 
-def live_naics(limit):
+def live_naics(limit, date_from=None, date_to=None):
     # CONFIRMED from top-100: naics_code ✅ 69,949 · mcc_code ✅ 69,681
     # naics_description ✅ 69,681 · mcc_description ✅ 69,681 · industry ✅ 69,681
-    raw = query_fact("naics_code", limit)
+    raw = query_fact("naics_code", limit, date_from=date_from, date_to=date_to)
     if raw is None or raw.empty:
         return None
 
@@ -524,7 +524,7 @@ def live_naics(limit):
     raw["naics_label"]   = raw["naics_code"].apply(
         lambda c: "Fallback (Other Business Support)" if c=="561499" else c)
 
-    mcc = query_fact("mcc_code", limit)
+    mcc = query_fact("mcc_code", limit, date_from=date_from, date_to=date_to)
     if mcc is not None and not mcc.empty:
         mcc["mcc_code"] = mcc["value"].apply(
             lambda v: str(_parse_fact(v).get("value","")) if v else "")
@@ -552,7 +552,7 @@ def _discover_fact_names(pattern_list):
     return []
 
 
-def live_banking(limit):
+def live_banking(limit, date_from=None, date_to=None):
     """
     Banking data lives in rds_integration_data (Redshift federated external schema).
 
@@ -686,7 +686,7 @@ def live_banking(limit):
     return df
 
 
-def live_worth(limit):
+def live_worth(limit, date_from=None, date_to=None):
     """
     Worth Score sources (confirmed from schema inspection):
 
@@ -715,7 +715,7 @@ def live_worth(limit):
         FROM rds_manual_score_public.data_current_scores cs
         JOIN rds_manual_score_public.business_scores bs
           ON bs.id = cs.score_id
-        WHERE bs.weighted_score_850 IS NOT NULL
+        WHERE bs.weighted_score_850 IS NOT NULL{_date_clause("bs.created_at", date_from, date_to)}
         ORDER BY bs.created_at DESC{_limit_clause(limit)}
     """
     raw = run_query(sql_primary)
@@ -731,7 +731,7 @@ def live_worth(limit):
                 score_decision,
                 created_at       AS scored_at
             FROM rds_manual_score_public.business_scores
-            WHERE weighted_score_850 IS NOT NULL
+            WHERE weighted_score_850 IS NOT NULL{_date_clause("created_at", date_from, date_to)}
             ORDER BY created_at DESC{_limit_clause(limit)}
         """
         raw = run_query(sql_fallback)
@@ -808,7 +808,7 @@ def live_worth(limit):
     return raw
 
 
-def live_kyc(limit):
+def live_kyc(limit, date_from=None, date_to=None):
     # CONFIRMED fact names from top-100 query:
     #   name_match_boolean       ✅ 73K
     #   address_match_boolean    ✅ 73K
@@ -824,7 +824,7 @@ def live_kyc(limit):
         'idv_status', 'idv_passed_boolean', 'idv_passed',
         'is_sole_prop', 'verification_status',
         'compliance_status', 'risk_score',
-    ], limit)
+    ], limit, date_from=date_from, date_to=date_to)
     if raw is None or raw.empty:
         return None
 
@@ -882,7 +882,7 @@ def live_kyc(limit):
     return pivoted
 
 
-def live_dd(limit):
+def live_dd(limit, date_from=None, date_to=None):
     """
     Due Diligence data from multiple sources:
 
@@ -909,7 +909,7 @@ def live_dd(limit):
     raw = query_facts_safe([
         'watchlist_hits', 'adverse_media_hits',
         'num_bankruptcies', 'num_judgements', 'num_liens',
-    ], limit)
+    ], limit, date_from=date_from, date_to=date_to)
 
     if raw is not None and not raw.empty:
         raw["fact_value"] = raw["value"].apply(
@@ -1089,12 +1089,23 @@ OPTIONAL_SECTIONS = {"banking", "kyc", "worth"}
 
 # ── Session-state cache helpers ────────────────────────────────────────────────
 def _cache_key(section_key, limit):
-    """Unique key for session_state cache — includes limit so changing the
-    slider correctly invalidates the cached data."""
+    """Unique key for session_state cache — includes limit AND date range so
+    changing the slider or date filter correctly invalidates cached data."""
     return f"_data_{section_key}_{limit}"
 
 def _cache_ts_key(section_key, limit):
     return f"_ts_{section_key}_{limit}"
+
+def _cache_key_dated(section_key, limit, date_from, date_to):
+    """Cache key that includes date range — different dates = different cache entry."""
+    df_str = str(date_from) if date_from else "any"
+    dt_str = str(date_to)   if date_to   else "any"
+    return f"_data_{section_key}_{limit}_{df_str}_{dt_str}"
+
+def _cache_ts_key_dated(section_key, limit, date_from, date_to):
+    df_str = str(date_from) if date_from else "any"
+    dt_str = str(date_to)   if date_to   else "any"
+    return f"_ts_{section_key}_{limit}_{df_str}_{dt_str}"
 
 def clear_data_cache():
     """Remove all cached DataFrames from session_state.
@@ -1105,26 +1116,18 @@ def clear_data_cache():
     for k in keys_to_del:
         del st.session_state[k]
 
-def get_cache_age(section_key, limit):
+def get_cache_age(section_key, limit, date_from=None, date_to=None):
     """Return how many seconds ago this dataset was loaded, or None if not cached."""
-    ts = st.session_state.get(_cache_ts_key(section_key, limit))
+    ts = st.session_state.get(_cache_ts_key_dated(section_key, limit, date_from, date_to))
     if ts is None:
         return None
     return int((datetime.now(timezone.utc) - ts).total_seconds())
 
-def get_section_data(section_key, limit):
+def get_section_data(section_key, limit, date_from=None, date_to=None):
     """
     Load data with session_state caching.
-
-    Flow:
-      1. Check session_state for a cached DataFrame under (section_key, limit).
-      2. If found → return immediately (no Redshift query).
-      3. If not found → query Redshift, store result in session_state, return.
-
-    Cache is invalidated when:
-      - User clicks '🔄 Refresh All Data' in the sidebar (calls clear_data_cache())
-      - The 'Records to load' slider value changes (different limit = different key)
-      - The Streamlit server restarts (session_state is process-local)
+    date_from / date_to are datetime.date objects or None.
+    Different date ranges produce different cache keys.
     """
     loaders = {
         "sos":     live_sos,
@@ -1137,12 +1140,12 @@ def get_section_data(section_key, limit):
     }
     live_fn    = loaders[section_key]
     is_optional = section_key in OPTIONAL_SECTIONS
-    cache_key  = _cache_key(section_key, limit)
+    cache_key  = _cache_key_dated(section_key, limit, date_from, date_to)
+    ts_key     = _cache_ts_key_dated(section_key, limit, date_from, date_to)
 
     # ── Step 1: return cached data if available ────────────────────────────────
     if cache_key in st.session_state:
         cached = st.session_state[cache_key]
-        # None is a valid cached value (optional section returned no data)
         if cached is None and is_optional:
             return None
         if cached is not None and not (hasattr(cached,"empty") and cached.empty):
@@ -1153,12 +1156,18 @@ def get_section_data(section_key, limit):
         st.error("🔴 Not connected to Redshift. Connect VPN and click **Retry connection** in the sidebar.")
         st.stop()
 
-    with st.spinner(f"⏳ Loading {section_key} data from Redshift… (will cache for this session)"):
-        df = live_fn(limit)
+    date_label = (f" ({date_from} → {date_to})" if (date_from or date_to) else "")
+    with st.spinner(f"⏳ Loading {section_key} data{date_label}…"):
+        # Pass date filter to loaders that support it
+        try:
+            df = live_fn(limit, date_from=date_from, date_to=date_to)
+        except TypeError:
+            # Older loaders don't accept date args — call without
+            df = live_fn(limit)
 
-    # Store in session_state regardless of success/failure (None = no data available)
+    # Store in session_state
     st.session_state[cache_key] = df
-    st.session_state[_cache_ts_key(section_key, limit)] = datetime.now(timezone.utc)
+    st.session_state[ts_key]    = datetime.now(timezone.utc)
 
     if df is None or (hasattr(df, 'empty') and df.empty):
         err = st.session_state.get("_last_db_error", "")
@@ -1514,6 +1523,31 @@ with st.sidebar:
         )
         st.caption(f"Up to {record_limit:,} records")
 
+    # ── Date range filter ──────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("**📅 Date Range**")
+    use_date_filter = st.toggle("Filter by date", value=False,
+                                help="Filter all data to a specific time period (received_at / created_at)")
+    if use_date_filter:
+        today = datetime.now(timezone.utc).date()
+        col_fd, col_td = st.columns(2)
+        with col_fd:
+            date_from = st.date_input("From", value=today - pd.Timedelta(days=90),
+                                      max_value=today, label_visibility="collapsed")
+            st.caption(f"From: {date_from}")
+        with col_td:
+            date_to = st.date_input("To", value=today,
+                                    max_value=today, label_visibility="collapsed")
+            st.caption(f"To: {date_to}")
+        if date_from > date_to:
+            st.error("'From' date must be before 'To' date.")
+            date_from = date_to
+        st.caption(f"📅 Showing data from **{date_from}** to **{date_to}**")
+    else:
+        date_from = None
+        date_to   = None
+        st.caption("No date filter — showing latest N records.")
+
     # ── Cache status & refresh ─────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("**📦 Data Cache**")
@@ -1525,7 +1559,7 @@ with st.sidebar:
     }
     any_cached = False
     for sk in ALL_SECTIONS:
-        age = get_cache_age(sk, record_limit)
+        age = get_cache_age(sk, record_limit, date_from, date_to)
         if age is not None:
             any_cached = True
             mins = age // 60
@@ -1570,11 +1604,11 @@ if section == "📋 Overview":
     st.markdown("*All KYB fields · vendor match rates · data quality · risk signals · anomaly detection*")
 
     # ── Load all datasets (served from session_state cache on repeat visits) ──
-    sos   = get_section_data("sos",   record_limit)
-    tin   = get_section_data("tin",   record_limit)
-    dd    = get_section_data("dd",    record_limit)
-    naics = get_section_data("naics", record_limit)
-    kyc   = get_section_data("kyc",   record_limit)
+    sos   = get_section_data("sos", record_limit, date_from, date_to)
+    tin   = get_section_data("tin", record_limit, date_from, date_to)
+    dd    = get_section_data("dd", record_limit, date_from, date_to)
+    naics = get_section_data("naics", record_limit, date_from, date_to)
+    kyc   = get_section_data("kyc", record_limit, date_from, date_to)
 
     biz = sos["business_id"].nunique()
     sos_active_pct   = sos["active"].mean()*100
@@ -1797,9 +1831,9 @@ elif section == "🏛️ Identity & Registry":
        "SOS filings · TIN verification · IDV (Plaid) · vendor match rates · "
        "Middesk gap · inactive+perpetual · consistency checks", "🏛️")
 
-    sos = get_section_data("sos",  record_limit)
-    tin = get_section_data("tin",  record_limit)
-    kyc = get_section_data("kyc",  record_limit)
+    sos = get_section_data("sos", record_limit, date_from, date_to)
+    tin = get_section_data("tin", record_limit, date_from, date_to)
+    kyc = get_section_data("kyc", record_limit, date_from, date_to)
 
     tin["tin_match_boolean"] = tin["tin_match_boolean"].astype(bool)
     tin["tin_submitted"]     = tin["tin_submitted"].astype(bool)
@@ -2971,7 +3005,7 @@ elif section == "🏭 Classification":
        "naics_code · mcc_code · 561499 fallback · vendor source breakdown · "
        "entity-type cross-analysis · data quality checks", "🏭")
 
-    naics = get_section_data("naics", record_limit)
+    naics = get_section_data("naics", record_limit, date_from, date_to)
 
     total = len(naics); fallbacks = int(naics["is_fallback"].sum()); real = total-fallbacks
     top_src = naics.groupby("naics_source").size().idxmax() if "naics_source" in naics.columns else "unknown"
@@ -3775,8 +3809,8 @@ elif section == "💰 Risk & Score":
        "Worth Score · score_decision · Due Diligence · watchlist · sanctions · PEP · "
        "BK/judgments/liens · cross-analysis", "💰")
 
-    dd    = get_section_data("dd",    record_limit)
-    worth = get_section_data("worth", record_limit)
+    dd    = get_section_data("dd", record_limit, date_from, date_to)
+    worth = get_section_data("worth", record_limit, date_from, date_to)
 
     # ── Due Diligence KPIs ─────────────────────────────────────────────────────
     biz_dd = dd["business_id"].nunique() if "business_id" in dd.columns else len(dd)
@@ -4176,8 +4210,8 @@ built from available fact data. Exact SHAP values are in `business_score_factors
                      "These are optional joins — if no match, the score is still shown.", "blue")
 
                 # Try to join score with naics/state from facts
-                naics_for_join = get_section_data("naics", record_limit)
-                sos_for_join   = get_section_data("sos",   record_limit)
+                naics_for_join = get_section_data("naics", record_limit, date_from, date_to)
+                sos_for_join   = get_section_data("sos", record_limit, date_from, date_to)
 
                 score_enriched = score_df.copy()
                 if naics_for_join is not None and "naics_code" in naics_for_join.columns and "business_id" in score_enriched.columns:
@@ -5222,8 +5256,37 @@ elif section == "🔎 Business Lookup":
     else:
         bid = business_id.strip()
 
-        biz_cache_key    = f"_biz_{bid}"
-        biz_ts_key       = f"_biz_ts_{bid}"
+        # ── Per-business date range ────────────────────────────────────────────
+        st.markdown("---")
+        with st.expander("📅 Historical snapshot — filter facts by date", expanded=False):
+            st.markdown(
+                "By default this shows the **latest** facts for this business. "
+                "Use this filter to see a **historical snapshot** — what did this business's "
+                "facts look like in a specific period? Useful for auditing past decisions."
+            )
+            col_bd1, col_bd2 = st.columns(2)
+            today_biz = datetime.now(timezone.utc).date()
+            with col_bd1:
+                biz_date_from = st.date_input("Facts from", value=None,
+                                               max_value=today_biz, key="biz_date_from",
+                                               label_visibility="visible")
+            with col_bd2:
+                biz_date_to = st.date_input("Facts to", value=None,
+                                             max_value=today_biz, key="biz_date_to",
+                                             label_visibility="visible")
+            if biz_date_from and biz_date_to and biz_date_from > biz_date_to:
+                st.error("'From' must be before 'To'")
+                biz_date_from = None
+            if biz_date_from or biz_date_to:
+                flag(f"Showing facts between {biz_date_from or 'any'} and {biz_date_to or 'today'} for this business.", "blue")
+
+        biz_dc = _date_clause("received_at", biz_date_from if (biz_date_from or biz_date_to) else None,
+                               biz_date_to   if (biz_date_from or biz_date_to) else None)
+
+        # Cache key includes date range so historical queries are separately cached
+        biz_date_suffix  = f"_{biz_date_from}_{biz_date_to}" if (biz_date_from or biz_date_to) else ""
+        biz_cache_key    = f"_biz_{bid}{biz_date_suffix}"
+        biz_ts_key       = f"_biz_ts_{bid}{biz_date_suffix}"
 
         # Force reload if the user clicked the Refresh button
         # (clear_data_cache() removes _biz_* keys)
@@ -5235,7 +5298,7 @@ elif section == "🔎 Business Lookup":
                 names_sql = f"""
                     SELECT DISTINCT name, MAX(received_at) AS received_at
                     FROM rds_warehouse_public.facts
-                    WHERE business_id = '{bid}'
+                    WHERE business_id = '{bid}'{biz_dc}
                     GROUP BY name
                     ORDER BY name
                 """
@@ -5270,7 +5333,7 @@ elif section == "🔎 Business Lookup":
                             SELECT name, value, received_at
                             FROM rds_warehouse_public.facts
                             WHERE business_id = '{bid}'
-                              AND name = '{fact_name}'
+                              AND name = '{fact_name}'{biz_dc}
                             ORDER BY received_at DESC
                             LIMIT 1
                         """
@@ -6015,7 +6078,7 @@ The fact exists and has a value, but the `source.platformId` field in the JSON i
                        bs.created_at
                 FROM rds_manual_score_public.data_current_scores cs
                 JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
-                WHERE cs.business_id = '{bid}'
+                WHERE cs.business_id = '{bid}'{_date_clause("bs.created_at", biz_date_from if (biz_date_from or biz_date_to) else None, biz_date_to if (biz_date_from or biz_date_to) else None)}
                 ORDER BY bs.created_at DESC LIMIT 1
             """
             worth_df = run_query(worth_sql)
