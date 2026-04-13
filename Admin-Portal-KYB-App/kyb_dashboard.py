@@ -5667,6 +5667,42 @@ elif section == "🔎 Business Lookup":
             try: return int(float(str(v)))
             except Exception: return 0
 
+        # FACT_SOURCE_KNOWLEDGE must be defined before fact_row/diag_card use it
+        FACT_SOURCE_KNOWLEDGE = {
+            "business_name":"Applicant form / ZI / EFX","legal_name":"Middesk BEV / OC",
+            "dba_found":"Middesk review tasks / OC","names":"ZI / EFX / Middesk",
+            "names_found":"ZI / EFX / OC (merged)","names_submitted":"Applicant form",
+            "people":"Middesk / OC / Trulioo (too large)","customer_ids":"System internal",
+            "external_id":"System internal","kyb_submitted":"System flag",
+            "sos_filings":"Middesk (primary) / OC (fallback) — too large",
+            "sos_match":"Middesk / OC — too large","sos_match_boolean":"Middesk / OC",
+            "sos_active":"Calculated from sos_filings","formation_state":"Middesk / OC",
+            "formation_date":"Middesk / OC / EFX","year_established":"EFX / ZI / Middesk",
+            "corporation":"Middesk / OC","middesk_confidence":"Middesk confidence score",
+            "middesk_id":"Middesk internal ID","tin":"Middesk BEV / OC / applicant",
+            "tin_submitted":"Applicant form","tin_match":"Middesk TIN task / Trulioo",
+            "tin_match_boolean":"Calculated from tin_match.status",
+            "idv_status":"Plaid IDV","idv_passed":"Calculated from idv_status.SUCCESS",
+            "idv_passed_boolean":"Calculated: true iff idv_passed > 0",
+            "is_sole_prop":"Calculated from tin + idv_status",
+            "name_match":"Middesk / OC / Trulioo","name_match_boolean":"Calculated",
+            "address_match":"Middesk / SERP","address_match_boolean":"Calculated",
+            "address_verification":"Middesk","address_verification_boolean":"Calculated",
+            "addresses_deliverable":"USPS via Middesk","addresses":"ZI / EFX / OC / Middesk",
+            "addresses_found":"ZI / EFX / OC / Middesk","addresses_submitted":"Applicant form",
+            "primary_address":"Applicant form / ZI / EFX","address_registered_agent":"Middesk / OC",
+            "naics_code":"EFX/ZI/OC/SERP/Trulioo/AI","mcc_code":"AI / rel_naics_mcc lookup",
+            "industry":"Calculated from naics_code","naics_description":"core_naics_code lookup",
+            "mcc_description":"AI / core_mcc_code lookup","website":"SERP / ZI / AI",
+            "website_found":"SERP","watchlist":"Middesk + Trulioo PSC (too large)",
+            "watchlist_hits":"Calculated from watchlist","adverse_media_hits":"Trulioo",
+            "num_bankruptcies":"Public records (Middesk/Verdata)",
+            "num_judgements":"Public records (Middesk/Verdata)",
+            "num_liens":"Public records (Middesk/Verdata)",
+            "worth_score":"ai-score-service","revenue":"ZI / EFX / Plaid",
+            "num_employees":"ZI / EFX",
+        }
+
         def fact_row(name, label=None):
             """Build a display row for a single fact with rich source attribution."""
             v = gv(name)
@@ -5731,17 +5767,21 @@ elif section == "🔎 Business Lookup":
 
         # ── Diagnostic card renderer ──────────────────────────────────────────
         def diag_card(title, badge, badge_color, reason, detail, all_states, source_hint):
-            """Renders a rich diagnostic card with badge, causal reason, and all possible states."""
+            """Renders a focused diagnostic card showing only THIS result's meaning.
+            all_states is kept as a parameter for compatibility but NOT rendered as
+            an expander — we show only the result relevant to this specific business."""
             st.markdown(f"""<div style="background:#1E293B;border-radius:10px;
                 padding:14px 16px;border-left:4px solid {badge_color};margin-bottom:6px">
               <div style="color:#94A3B8;font-size:.70rem;text-transform:uppercase;letter-spacing:.05em">{title}</div>
               <div style="color:{badge_color};font-size:1.15rem;font-weight:700;margin:4px 0">{badge}</div>
-              <div style="color:#CBD5E1;font-size:.78rem;margin-top:4px"><strong>Why:</strong> {reason}</div>
-              <div style="color:#94A3B8;font-size:.73rem;margin-top:4px">{detail}</div>
-              <div style="color:#475569;font-size:.70rem;margin-top:6px">Source: {source_hint}</div>
+              <div style="color:#CBD5E1;font-size:.78rem;margin-top:6px">
+                <strong>Why this result:</strong> {reason}</div>
+              <div style="color:#94A3B8;font-size:.74rem;margin-top:4px">{detail}</div>
+              <div style="color:#475569;font-size:.68rem;margin-top:8px;border-top:1px solid #334155;padding-top:4px">
+                Source: {source_hint}</div>
             </div>""", unsafe_allow_html=True)
-            with st.expander(f"All possible states for '{title}'"):
-                st.markdown(all_states)
+            # No expander — only show what's relevant for this specific business.
+            # For a reference guide of all possible states, see the KYB Dashboard docs.
 
         c1,c2,c3,c4,c5 = st.columns(5)
 
@@ -7151,67 +7191,8 @@ The following 20 relationship checks were evaluated. All passed for this busines
 
             # ── Source lookup from api-docs knowledge ─────────────────────────
             # Every fact in rds_warehouse_public.facts has a source.platformId
+            # FACT_SOURCE_KNOWLEDGE is defined earlier (before fact_row) — reuse it here.
             # indicating which vendor WON the Fact Engine selection.
-            # pid="" or pid missing = applicant-submitted or system default.
-            FACT_SOURCE_KNOWLEDGE = {
-                # Facts that come from a specific known vendor always
-                "business_name":        "Applicant form / ZI / EFX",
-                "legal_name":           "Middesk BEV / OC",
-                "dba_found":            "Middesk review tasks / OC",
-                "names":                "ZI / EFX / Middesk",
-                "names_found":          "ZI / EFX / OC (merged)",
-                "names_submitted":      "Applicant form",
-                "people":               "Middesk / OC / Trulioo (too large for Redshift)",
-                "customer_ids":         "System internal (case management)",
-                "external_id":          "System internal (case management)",
-                "kyb_submitted":        "System flag — true when any vendor matched",
-                "sos_filings":          "Middesk (primary) / OC (fallback) — too large for Redshift",
-                "sos_match":            "Middesk / OC — too large for Redshift",
-                "sos_match_boolean":    "Middesk / OC",
-                "sos_active":           "Calculated from sos_filings array",
-                "formation_state":      "Middesk / OC (jurisdiction_code)",
-                "formation_date":       "Middesk / OC / EFX",
-                "year_established":     "EFX (yrest) / ZI (year_founded) / Middesk",
-                "corporation":          "Middesk (company_type) / OC",
-                "middesk_confidence":   "Middesk — task-based confidence score",
-                "middesk_id":           "Middesk internal entity ID",
-                "tin":                  "Middesk BEV (decrypted) / OC / applicant",
-                "tin_submitted":        "Applicant form",
-                "tin_match":            "Middesk TIN review task / Trulioo",
-                "tin_match_boolean":    "Calculated from tin_match.status",
-                "idv_status":           "Plaid IDV (dict of status counts per session)",
-                "idv_passed":           "Calculated from idv_status.SUCCESS count",
-                "idv_passed_boolean":   "Calculated: true iff idv_passed > 0",
-                "is_sole_prop":         "Calculated from tin_submitted + idv_status",
-                "name_match":           "Middesk / OC / Trulioo review tasks",
-                "name_match_boolean":   "Calculated from name_match.status",
-                "address_match":        "Middesk / SERP / Google",
-                "address_match_boolean":"Calculated from address_match.status",
-                "address_verification": "Middesk address review task",
-                "address_verification_boolean": "Calculated from address_verification.status",
-                "addresses_deliverable":"USPS/postal check via Middesk",
-                "addresses":            "ZI / EFX / OC / Middesk (merged list)",
-                "addresses_found":      "ZI / EFX / OC / Middesk",
-                "addresses_submitted":  "Applicant form",
-                "primary_address":      "Applicant form / ZI / EFX",
-                "address_registered_agent": "Middesk / OC",
-                "naics_code":           "EFX/ZI/OC/SERP/Trulioo/AI (Fact Engine winner)",
-                "mcc_code":             "AI enrichment / rel_naics_mcc lookup",
-                "industry":             "Calculated from naics_code 2-digit prefix",
-                "naics_description":    "core_naics_code lookup table",
-                "mcc_description":      "AI enrichment / core_mcc_code lookup",
-                "website":              "SERP / ZI / AI",
-                "website_found":        "SERP (Google search)",
-                "watchlist":            "Middesk + Trulioo PSC (consolidated, too large)",
-                "watchlist_hits":       "Calculated from watchlist.metadata.length",
-                "adverse_media_hits":   "Trulioo / adverseMediaDetails records",
-                "num_bankruptcies":     "Public records (Middesk / Verdata)",
-                "num_judgements":       "Public records (Middesk / Verdata)",
-                "num_liens":            "Public records (Middesk / Verdata)",
-                "worth_score":          "ai-score-service → rds_manual_score_public",
-                "revenue":              "ZI / EFX / Plaid / accounting integration",
-                "num_employees":        "ZI (zi_c_employees) / EFX (corpempcnt)",
-            }
 
             def _format_value_expandable(fact_name, v, raw_value_str):
                 """Format a value for display. Lists/dicts get expandable content."""
