@@ -4078,9 +4078,9 @@ elif section == "🔎 Business Lookup":
                      "Plaid","#22c55e" if idv_val=="true" else "#f59e0b")
 
         # ── Tab structure mirroring Admin Portal ─────────────────────────────
-        tab_bg, tab_reg, tab_ident, tab_class, tab_risk, tab_anomaly, tab_all = st.tabs([
+        tab_bg, tab_reg, tab_ident, tab_class, tab_risk, tab_worth, tab_anomaly, tab_all = st.tabs([
             "🏢 Background","🏛️ Registry","🪪 Identity","🏭 Classification",
-            "⚠️ Risk","🔗 Cross-Field Anomalies","📋 All Facts"
+            "⚠️ Risk","💰 Worth Score","🔗 Cross-Field Anomalies","📋 All Facts"
         ])
 
         # ──────────────────────────────────────────────────────────────────────
@@ -4438,6 +4438,331 @@ The fact exists and has a value, but the `source.platformId` field in the JSON i
                 flag(r, level)
 
         # ──────────────────────────────────────────────────────────────────────
+        with tab_worth:
+            st.markdown("#### 💰 Worth Score Deep Dive")
+            st.markdown(
+                "A full causal analysis of this business's Worth Score — "
+                "which factors drive it up or down, what combinations of facts create risk signals, "
+                "and what the analyst should focus on to understand the score."
+            )
+
+            # ── Step 1: Fetch Worth Score from rds_manual_score_public ────────
+            worth_sql = f"""
+                SELECT bs.weighted_score_850  AS score_850,
+                       bs.weighted_score_100  AS score_100,
+                       bs.risk_level,
+                       bs.score_decision,
+                       bs.created_at
+                FROM rds_manual_score_public.data_current_scores cs
+                JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+                WHERE cs.business_id = '{bid}'
+                ORDER BY bs.created_at DESC LIMIT 1
+            """
+            worth_df = run_query(worth_sql)
+
+            # ── Step 2: Display score and context ─────────────────────────────
+            if worth_df is not None and not worth_df.empty:
+                score   = float(worth_df.iloc[0].get("score_850") or 0)
+                score_100 = float(worth_df.iloc[0].get("score_100") or 0)
+                risk_level = str(worth_df.iloc[0].get("risk_level") or "")
+                decision   = str(worth_df.iloc[0].get("score_decision") or "")
+                scored_at  = str(worth_df.iloc[0].get("created_at",""))[:16]
+
+                risk_color = {"HIGH":"#ef4444","MODERATE":"#f59e0b","MEDIUM":"#f59e0b","LOW":"#22c55e"}.get(
+                    risk_level.upper(), "#64748b")
+                dec_color  = {"APPROVE":"#22c55e","FURTHER_REVIEW_NEEDED":"#f59e0b","DECLINE":"#ef4444"}.get(
+                    decision, "#64748b")
+
+                c1,c2,c3,c4 = st.columns(4)
+                with c1: kpi("Worth Score (300–850)", f"{score:.0f}","Higher = less risk",
+                             "#22c55e" if score>=650 else ("#f59e0b" if score>=500 else "#ef4444"))
+                with c2: kpi("Score (0–100)",    f"{score_100:.0f}","Alternative scale",risk_color)
+                with c3: kpi("Risk Level",        risk_level or "Unknown","",risk_color)
+                with c4: kpi("Decision",          decision or "Unknown","",dec_color)
+
+                st.caption(f"Scored at: {scored_at} · Source: `rds_manual_score_public.business_scores`")
+
+                # Risk level badge meaning
+                risk_badges = {
+                    "LOW":      ("🟢","Score 650–850","Entity presents low financial risk. "
+                                 "Public records clean, strong financials, established business.","✅ Standard approval flow"),
+                    "MODERATE": ("🟡","Score 500–649","Moderate risk — some factors require attention. "
+                                 "May have minor public records, thin financials, or newer business.","⚠️ Review flagged items before approving"),
+                    "MEDIUM":   ("🟡","Score 500–649","Same as MODERATE.","⚠️ Review flagged items"),
+                    "HIGH":     ("🔴","Score 300–499","High financial risk. "
+                                 "May have bankruptcies, judgments, poor revenue, or other negative signals.","🚨 Manual underwriting required"),
+                }
+                badge_info = risk_badges.get(risk_level.upper(), ("⚫","Unknown","Score not yet computed or risk level not set.","Check scoring pipeline"))
+                st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {risk_color};
+                    border-radius:10px;padding:16px 20px;margin:10px 0">
+                  <div style="font-size:1.2rem;font-weight:700;color:{risk_color}">{badge_info[0]} {risk_level} RISK — {badge_info[1]}</div>
+                  <div style="color:#CBD5E1;font-size:.85rem;margin-top:8px">{badge_info[2]}</div>
+                  <div style="color:#60A5FA;font-size:.80rem;margin-top:6px"><strong>Underwriting action:</strong> {badge_info[3]}</div>
+                </div>""", unsafe_allow_html=True)
+
+                decision_info = {
+                    "APPROVE": ("✅","Approved","The Worth Score model determined this business meets the risk threshold for approval. "
+                                "All major factors (public records, financials, entity confirmation) are within acceptable ranges."),
+                    "FURTHER_REVIEW_NEEDED": ("🔍","Further Review Required","The model identified factors that require human review before a decision. "
+                                "This is NOT a decline — it means the automated model is uncertain and a human analyst should evaluate the specific factors."),
+                    "DECLINE": ("❌","Declined","The Worth Score model determined this business exceeds the risk threshold. "
+                                "Significant negative signals (public records, financials, or entity confirmation failures) drove this decision."),
+                }
+                if decision in decision_info:
+                    di = decision_info[decision]
+                    st.markdown(f"**Score Decision: {di[0]} {di[1]}** — {di[2]}")
+
+            else:
+                flag(f"No Worth Score found for business `{bid}`. "
+                     "This means either: (1) the business hasn't been scored yet, "
+                     "(2) the score is in a different schema, or "
+                     "(3) rds_manual_score_public is not accessible.", "amber")
+                st.code(f"""-- Check directly in Redshift:
+SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, bs.created_at
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+WHERE cs.business_id = '{bid}'
+ORDER BY bs.created_at DESC LIMIT 5;""", language="sql")
+                score = None
+
+            # ── Step 3: Factor Analysis from facts ───────────────────────────
+            st.markdown("---")
+            st.markdown("#### 🔬 Score Factor Analysis — What Drives This Score")
+            st.markdown(
+                "The Worth Score (v3.1) is an ensemble ML model using 100+ features across 5 categories. "
+                "Below is a per-category analysis of the known factors for this business based on stored facts."
+            )
+
+            # Category 1: Public Records
+            st.markdown("##### 📜 Public Records (most penalizing category)")
+            bk_n   = _safe_int_gv("num_bankruptcies")
+            judg_n = _safe_int_gv("num_judgements")
+            lien_n = _safe_int_gv("num_liens")
+            pr_checks = [
+                ("# Bankruptcies",   bk_n,   bk_n==0,  "0 is ideal",
+                 "Each bankruptcy reduces the score significantly. Age matters: BK < 2 years = highest penalty. "
+                 "Model feature: `count_bankruptcy`, `age_bankruptcy` (months since filing)."),
+                ("# Judgments",      judg_n, judg_n==0,"0 is ideal",
+                 "Civil judgments indicate unpaid obligations. Recent judgments (< 1 year) have the highest impact. "
+                 "Model feature: `count_judgment`, `age_judgment`."),
+                ("# Liens",          lien_n, lien_n==0,"0 is ideal",
+                 "Tax and financial liens. Federal tax liens (IRS) are the most severe. "
+                 "Model feature: `count_lien`, `age_lien`."),
+            ]
+            pr_score = "🟢 Clean" if bk_n==0 and judg_n==0 and lien_n==0 else "🔴 Has Public Records"
+            pr_color = "#22c55e" if bk_n==0 and judg_n==0 and lien_n==0 else "#ef4444"
+            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {pr_color};
+                border-radius:8px;padding:12px 16px;margin:6px 0">
+              <span style="color:{pr_color};font-weight:700">{pr_score}</span>
+              <span style="color:#94A3B8;font-size:.78rem;margin-left:10px">
+                BK: {bk_n} · Judgments: {judg_n} · Liens: {lien_n}</span>
+            </div>""", unsafe_allow_html=True)
+            for label,val,good,target,explanation in pr_checks:
+                color = "#22c55e" if good else "#ef4444"
+                icon  = "✅" if good else "❌"
+                st.markdown(f"""<div style="background:#0F172A;border-left:3px solid {color};
+                    border-radius:6px;padding:8px 14px;margin:3px 0;font-size:.80rem">
+                  <span style="color:{color};font-weight:600">{icon} {label}: {val}</span>
+                  <span style="color:#64748b;margin-left:8px">Target: {target}</span>
+                  <div style="color:#94A3B8;margin-top:4px">{explanation}</div>
+                </div>""", unsafe_allow_html=True)
+
+            # Category 2: Company Profile / Firmographic
+            st.markdown("##### 🏢 Company Profile (positive contributor when complete)")
+            form_date_v = str(gv("formation_date") or "")
+            yr_est_v    = str(gv("year_established") or "")
+            num_emp_v   = gv("num_employees")
+            naics_v     = str(gv("naics_code") or "")
+            corp_v      = str(gv("corporation") or "")
+
+            try: age_years = datetime.now(timezone.utc).year - int(str(form_date_v)[:4])
+            except Exception: age_years = None
+
+            profile_rows = []
+            if age_years is not None:
+                profile_rows.append(("Business Age", f"{age_years} years",
+                    age_years>=2, "≥ 2 years",
+                    f"Older businesses score higher. Model feature: `age_business` (months). "
+                    f"{'✅ Established business — positive signal.' if age_years>=2 else '⚠️ Very new business — model penalizes for lack of track record.'}"))
+            if naics_v:
+                profile_rows.append(("NAICS Code", naics_v,
+                    naics_v!="561499", "Real classification (not 561499)",
+                    "NAICS drives the `naics6` model feature. Specific codes are better than 561499 (fallback). "
+                    "Some NAICS codes carry higher inherent risk (e.g. cash-intensive businesses)."))
+            if corp_v:
+                profile_rows.append(("Entity Type", corp_v,
+                    corp_v.lower() not in ("sole_prop","sole proprietorship"), "LLC/Corp preferred",
+                    "Model feature: `bus_struct`. Corporations and LLCs score slightly better than sole proprietors "
+                    "due to higher default legal protections and financial separation."))
+            if num_emp_v and str(num_emp_v) not in ("","None","[too large"):
+                try:
+                    emp = int(float(str(num_emp_v)))
+                    profile_rows.append(("# Employees", str(emp),
+                        emp>=1, "≥ 1 employee",
+                        f"Model feature: `count_employees`. "
+                        f"{'Sole proprietor / no employees — less track record.' if emp==0 else 'Has employees — positive signal.'}"))
+                except Exception:
+                    pass
+
+            for label,val,good,target,explanation in profile_rows:
+                color = "#22c55e" if good else "#f59e0b"
+                icon  = "✅" if good else "⚠️"
+                st.markdown(f"""<div style="background:#0F172A;border-left:3px solid {color};
+                    border-radius:6px;padding:8px 14px;margin:3px 0;font-size:.80rem">
+                  <span style="color:{color};font-weight:600">{icon} {label}: {val}</span>
+                  <span style="color:#64748b;margin-left:8px">Target: {target}</span>
+                  <div style="color:#94A3B8;margin-top:4px">{explanation}</div>
+                </div>""", unsafe_allow_html=True)
+
+            # Category 3: Identity & Registry verification
+            st.markdown("##### 🏛️ Identity & Registry (trust signals)")
+            sos_act_v = str(gv("sos_active") or "").lower()
+            tin_ok_v  = str(gv("tin_match_boolean") or "").lower()
+            wl_hits_v = _safe_int_gv("watchlist_hits")
+
+            identity_rows = [
+                ("SOS Active", "Yes" if sos_act_v=="true" else "No",
+                 sos_act_v=="true", "Active",
+                 "Active SOS status = entity is in good legal standing with the state. "
+                 "Inactive entities (missed annual reports, unpaid taxes) are penalized. "
+                 "This is the #1 underwriting red flag when combined with a perpetual charter."),
+                ("TIN Verified (IRS match)", "Yes" if tin_ok_v=="true" else "No",
+                 tin_ok_v=="true", "Verified",
+                 "IRS EIN match confirms the legal entity identity. "
+                 "Unverified TIN indicates name/EIN mismatch — common source of underwriting concern."),
+                ("Watchlist Hits", str(wl_hits_v),
+                 wl_hits_v==0, "0 hits",
+                 f"{'✅ No watchlist hits.' if wl_hits_v==0 else '🚨 ' + str(wl_hits_v) + ' watchlist hit(s). Sanctions/PEP hits directly penalize the score.'}"),
+            ]
+            for label,val,good,target,explanation in identity_rows:
+                color = "#22c55e" if good else "#ef4444"
+                icon  = "✅" if good else ("🚨" if not good and "hit" in label.lower() else "⚠️")
+                st.markdown(f"""<div style="background:#0F172A;border-left:3px solid {color};
+                    border-radius:6px;padding:8px 14px;margin:3px 0;font-size:.80rem">
+                  <span style="color:{color};font-weight:600">{icon} {label}: {val}</span>
+                  <span style="color:#64748b;margin-left:8px">Target: {target}</span>
+                  <div style="color:#94A3B8;margin-top:4px">{explanation}</div>
+                </div>""", unsafe_allow_html=True)
+
+            # Category 4: Financial Signals
+            st.markdown("##### 💵 Financial Signals (from Plaid / accounting data)")
+            rev_v = gv("revenue")
+            flag("Financial model features (revenue, cash flow, financial ratios) come from Plaid-connected "
+                 "bank accounts and accounting integrations. If the business did not connect Plaid, these features "
+                 "are imputed to 0 in the model — which is neutral, not penalizing.", "blue")
+
+            if rev_v and str(rev_v) not in ("","None","[too large"):
+                try:
+                    rev = float(str(rev_v).replace(",",""))
+                    color = "#22c55e" if rev>50000 else ("#f59e0b" if rev>10000 else "#ef4444")
+                    st.markdown(f"""<div style="background:#0F172A;border-left:3px solid {color};
+                        border-radius:6px;padding:8px 14px;margin:3px 0;font-size:.80rem">
+                      <span style="color:{color};font-weight:600">💵 Revenue: ${rev:,.0f}</span>
+                      <div style="color:#94A3B8;margin-top:4px">Model feature: `revenue`. Higher revenue = higher score capacity. 
+                      Ratios (gross margin, debt/equity, return on assets) are derived from revenue + financial statements.</div>
+                    </div>""", unsafe_allow_html=True)
+                except Exception:
+                    st.caption("Revenue: could not parse value")
+            else:
+                st.markdown("""<div style="background:#0F172A;border-left:3px solid #64748b;
+                    border-radius:6px;padding:8px 14px;margin:3px 0;font-size:.80rem">
+                  <span style="color:#64748b;font-weight:600">💵 Revenue: Not available</span>
+                  <div style="color:#94A3B8;margin-top:4px">No revenue data found. Model uses imputed value (0). 
+                  This is neutral — the model was trained on businesses without connected financials. 
+                  Connecting Plaid or accounting data could improve the score if financials are strong.</div>
+                </div>""", unsafe_allow_html=True)
+
+            # Category 5: Score Improvement Opportunities
+            st.markdown("---")
+            st.markdown("#### 💡 Score Improvement Opportunities")
+            st.markdown("*Based on the facts available for this business, these are the highest-leverage changes:*")
+
+            improvements = []
+
+            if sos_act_v=="false":
+                improvements.append(("🔴 CRITICAL","Reinstate SOS filing",
+                    "SOS inactive status is the strongest negative signal in the model. "
+                    "Reinstating the entity with the state (filing missing annual reports, paying fees) "
+                    "would remove this penalty immediately.","Contact state SOS to reinstate"))
+
+            if tin_ok_v!="true":
+                improvements.append(("🔴 HIGH","Fix TIN verification",
+                    "TIN failure (EIN-name mismatch) signals identity uncertainty to the model. "
+                    "Correcting the submitted EIN or legal name to match IRS records would resolve this.","Resubmit with correct EIN and exact legal name"))
+
+            if wl_hits_v>0:
+                improvements.append(("🔴 HIGH","Resolve watchlist hits",
+                    f"{wl_hits_v} watchlist hit(s) are penalizing the score. "
+                    "Review each hit to determine if it's a false positive (name collision) or true match.","Request watchlist review — pull metadata for each hit"))
+
+            if bk_n>0:
+                improvements.append(("🟡 MEDIUM",f"Address {bk_n} bankruptcy filing(s)",
+                    "Bankruptcies reduce the score proportionally to count and recency. "
+                    "Filed >7 years ago: impact is minimal. Filed <2 years: significant penalty.","No immediate fix — score improves as bankruptcy ages"))
+
+            if naics_v=="561499":
+                improvements.append(("🟡 MEDIUM","Correct NAICS classification",
+                    "NAICS 561499 (fallback) suggests the industry couldn't be determined. "
+                    "A correct NAICS code allows the model to use industry-specific benchmarks.","Request an analyst NAICS override with the correct 6-digit code"))
+
+            if improvements:
+                for priority, title, explanation, action in improvements:
+                    color = "#ef4444" if "CRITICAL" in priority or "HIGH" in priority else "#f59e0b"
+                    st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
+                        border-radius:8px;padding:12px 16px;margin:8px 0">
+                      <div style="color:{color};font-weight:700;font-size:.88rem">{priority} — {title}</div>
+                      <div style="color:#CBD5E1;font-size:.80rem;margin-top:6px">{explanation}</div>
+                      <div style="color:#60A5FA;font-size:.77rem;margin-top:6px"><strong>Action:</strong> {action}</div>
+                    </div>""", unsafe_allow_html=True)
+            else:
+                flag("✅ No obvious score improvement opportunities identified based on available facts. "
+                     "If the score is lower than expected, financial data (Plaid connection) "
+                     "or economic indicators may be the primary driver.", "green")
+
+            # Causal Analysis Summary
+            analyst_card("Worth Score — Causal Analysis Summary", [
+                "The Worth Score (300–850) is built by an ensemble of 3 sub-models: "
+                "(1) Firmographic XGBoost (entity age, NAICS, structure, size), "
+                "(2) Financial neural network (revenue, cash flow, ratios from Plaid), "
+                "(3) Economic model (macro indicators: Fed rates, unemployment, VIX, GDP). "
+                "The three are combined via an ensemble layer and calibrated to 300–850.",
+                "Public records (BK/Judgment/Lien) are the MOST penalizing category. "
+                "A single recent bankruptcy can reduce the score by 50–150 points. "
+                "The model uses both count AND age — older records have less impact.",
+                "SOS inactive + TIN failed combination is the #1 identity risk signal. "
+                "If both are present, the score is typically <500 (HIGH risk). "
+                "These are binary flags — fixing one removes its full penalty immediately.",
+                "Missing financial data (no Plaid connection) is imputed to 0 — NEUTRAL. "
+                "It does not directly penalize the score, but it means the model cannot "
+                "use positive financial signals (strong revenue, healthy cash flow) to improve it.",
+                "The score_decision (APPROVE/FURTHER_REVIEW/DECLINE) is set by a calibrated "
+                "threshold on the raw model probability. These thresholds are customer-configurable "
+                "and represent the risk appetite of the underwriter.",
+                "Worth Score source: `rds_manual_score_public.business_scores` (RDS PostgreSQL). "
+                "Joined via `data_current_scores` for the latest score per business. "
+                "`score_status` column does not exist in this schema version.",
+            ])
+
+            st.code(f"""-- Get full score history for this business:
+SELECT bs.weighted_score_850, bs.weighted_score_100, bs.risk_level,
+       bs.score_decision, bs.created_at
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+WHERE cs.business_id = '{bid}'
+ORDER BY bs.created_at DESC LIMIT 10;
+
+-- Get score factor contributions (SHAP-equivalent):
+SELECT * FROM rds_manual_score_public.business_score_factors
+WHERE score_id IN (
+    SELECT score_id FROM rds_manual_score_public.data_current_scores
+    WHERE business_id = '{bid}'
+) LIMIT 50;
+
+-- Score audit fill rates (what data was available for scoring):
+SELECT * FROM warehouse.worth_score_input_audit
+ORDER BY score_date DESC LIMIT 3;""", language="sql")
+
+        # ──────────────────────────────────────────────────────────────────────
         with tab_anomaly:
             st.markdown("#### 🔗 Cross-Field Anomaly Detection")
             st.markdown(
@@ -4716,9 +5041,15 @@ The fact exists and has a value, but the `source.platformId` field in the JSON i
                     "tin_submitted=false, tin_match_boolean=true"))
 
             # ── 18. Watchlist hits but no sanctions ───────────────────────────
+            def _safe_int_gv(name):
+                v = gv(name)
+                if v is None: return 0
+                try: return int(float(str(v)))
+                except Exception: return 0
+
             if wl_hits>0:
-                sanctions_val = int(float(gv("sanctions_hits") or 0))
-                pep_val       = int(float(gv("pep_hits") or 0))
+                sanctions_val = _safe_int_gv("sanctions_hits")
+                pep_val       = _safe_int_gv("pep_hits")
                 if sanctions_val==0 and pep_val==0:
                     anomalies.append(("🟠 NOTICE","Watchlist hits but no sanctions or PEP flags",
                         f"{wl_hits} watchlist hit(s) found, but none are classified as SANCTIONS or PEP. "
