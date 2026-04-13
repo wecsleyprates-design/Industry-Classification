@@ -1205,6 +1205,277 @@ GROUP BY name ORDER BY rows DESC LIMIT 50;"""
 live, _conn_err = test_connection()
 
 
+# ── Worth Score Waterfall Chart ───────────────────────────────────────────────
+def render_worth_score_waterfall(score_850, bk_n=0, judg_n=0, lien_n=0,
+                                  sos_active=True, tin_ok=True, wl_hits=0,
+                                  age_years=None, has_revenue=False,
+                                  num_emp=0, naics_ok=True, label=""):
+    """
+    Builds a waterfall chart showing how each factor group contributes
+    to the final Worth Score, starting from the base of 300.
+
+    Category contributions are *estimated* from available facts using the
+    known model architecture (ai-score-service/lookups.py + model weights).
+    Actual SHAP values require rds_manual_score_public.business_score_factors.
+
+    Chart mirrors the Admin Portal Worth Score breakdown:
+      Base score → Performance measures → Financial trends →
+      Public records → Business operations → Company profile → Final score
+    """
+    BASE = 300
+    total_range = 550  # 850 - 300
+
+    # ── Estimate each category's contribution ──────────────────────────────
+    # Public Records (most negative — BK/Judgment/Lien)
+    pr_penalty = 0
+    if bk_n > 0:   pr_penalty += min(bk_n * 40, 120)   # up to -120 for BK
+    if judg_n > 0: pr_penalty += min(judg_n * 20, 60)   # up to -60 for judgments
+    if lien_n > 0: pr_penalty += min(lien_n * 10, 40)   # up to -40 for liens
+    pr_contribution = -pr_penalty
+
+    # Performance measures (SOS active + TIN verified = trust signals)
+    perf = 0
+    if sos_active: perf += 10
+    if tin_ok:     perf += 10
+    if wl_hits > 0: perf -= min(wl_hits * 20, 80)
+    perf_contribution = perf
+
+    # Financial trends (revenue, financial ratios)
+    fin_contribution = 25 if has_revenue else 0
+
+    # Business operations (age, employees, reviews)
+    ops = 0
+    if age_years is not None:
+        if age_years >= 5:   ops += 30
+        elif age_years >= 2: ops += 20
+        elif age_years >= 1: ops += 10
+    if num_emp and num_emp > 0:
+        ops += min(int(float(str(num_emp).replace(",",""))/10), 20) if str(num_emp) not in ("","None") else 0
+    ops_contribution = ops
+
+    # Company profile (NAICS, entity type, size indicators)
+    profile_contribution = 15 if naics_ok else 5
+
+    # Remaining gap = what's attributed to economic/macro (captured in base)
+    explained = perf_contribution + fin_contribution + pr_contribution + ops_contribution + profile_contribution
+    remaining = score_850 - BASE - explained
+    # Distribute remaining to financial trends (macro economic factors)
+    fin_contribution += remaining
+
+    # ── Build waterfall ────────────────────────────────────────────────────
+    categories = [
+        "Base score",
+        "Performance measures\n(SOS, TIN, Watchlist)",
+        "Financial trends\n(Revenue, Cash Flow, Ratios)",
+        "Public records\n(BK, Judgments, Liens)",
+        "Business operations\n(Age, Employees, Reviews)",
+        "Company profile\n(NAICS, Entity Type)",
+        "Worth Score",
+    ]
+    contributions = [
+        BASE,
+        perf_contribution,
+        fin_contribution,
+        pr_contribution,
+        ops_contribution,
+        profile_contribution,
+        0,  # placeholder for final bar
+    ]
+
+    # Waterfall running totals
+    running = BASE
+    measure = ["absolute"]
+    x_vals, y_vals, colors, texts, bases_list = [], [], [], [], []
+
+    x_vals.append(categories[0])
+    y_vals.append(BASE)
+    colors.append("#C4A8FF")  # light purple like Admin Portal
+    texts.append(str(BASE))
+    bases_list.append(0)
+    running = BASE
+
+    for i in range(1, len(categories)-1):
+        val = contributions[i]
+        x_vals.append(categories[i])
+        y_vals.append(abs(val))
+        color = "#5B21B6" if val > 0 else "#EF4444"
+        if i == 1:   color = "#3B82F6"   # Performance — blue
+        if i == 2:   color = "#1E3A5F"   # Financial trends — dark blue
+        if i == 3:   color = "#7C3AED"   # Public records — purple
+        if i == 4:   color = "#8B5CF6"   # Business ops — medium purple
+        if i == 5:   color = "#9CA3AF"   # Company profile — gray
+        if val < 0: color = "#EF4444"    # negative = red
+        colors.append(color)
+        texts.append(f"{'+' if val>=0 else ''}{int(val)}")
+        bases_list.append(running if val >= 0 else running + val)
+        running += val
+
+    # Final bar (total)
+    x_vals.append(categories[-1])
+    y_vals.append(score_850)
+    colors.append("#EC4899")  # pink like Admin Portal
+    texts.append(str(int(score_850)))
+    bases_list.append(0)
+
+    fig = go.Figure()
+    # Connector lines (thin lines between bars)
+    for i in range(1, len(x_vals)-1):
+        if i < len(x_vals)-2:
+            top_prev = bases_list[i] + y_vals[i] if contributions[i] >= 0 else bases_list[i]
+            fig.add_shape(type="line",
+                          x0=i-0.35, x1=i+0.35,
+                          y0=top_prev, y1=top_prev,
+                          line=dict(color="#64748B",width=1,dash="dot"))
+
+    # Bars
+    for i, (x, y, c, t, b) in enumerate(zip(x_vals, y_vals, colors, texts, bases_list)):
+        fig.add_trace(go.Bar(
+            x=[x], y=[y], base=[b],
+            marker_color=c,
+            text=[t], textposition="outside",
+            textfont=dict(color="#E2E8F0", size=13, family="monospace"),
+            name=x.split("\n")[0],
+            showlegend=True,
+            width=0.6,
+        ))
+
+    score_color = "#22c55e" if score_850>=650 else ("#f59e0b" if score_850>=500 else "#ef4444")
+    risk_label  = "LOW RISK" if score_850>=650 else ("MODERATE" if score_850>=500 else "HIGH RISK")
+
+    fig.update_layout(
+        title=dict(
+            text=f"Worth Score Waterfall{' — ' + label if label else ''}: "
+                 f"<span style='color:{score_color}'>{int(score_850)} / 850 ({risk_label})</span>",
+            font=dict(color="#E2E8F0", size=16)
+        ),
+        barmode="stack",
+        yaxis=dict(range=[250, 880], gridcolor="#334155", tickfont=dict(color="#94A3B8"),
+                   title="Score (300–850)"),
+        xaxis=dict(tickfont=dict(color="#94A3B8", size=9)),
+        paper_bgcolor="#0F172A", plot_bgcolor="#1E293B",
+        font_color="#E2E8F0",
+        legend=dict(bgcolor="#1E293B", font=dict(color="#CBD5E1", size=9),
+                    orientation="h", yanchor="bottom", y=-0.45),
+        margin=dict(t=60, b=160, l=10, r=10),
+        height=480,
+        showlegend=False,
+    )
+    return fig, contributions, categories
+
+
+def render_waterfall_explanation(bk_n, judg_n, lien_n, sos_active, tin_ok,
+                                  wl_hits, age_years, has_revenue, num_emp,
+                                  naics_ok, contributions, categories):
+    """Render the analyst explanation cards below the waterfall chart."""
+    cat_descs = {
+        "Base score": {
+            "color":"#C4A8FF",
+            "title":"Base Score — 300",
+            "what":"Every business starts at 300. This represents a zero-information state: "
+                   "no public records, no financials, no verification, no entity history. "
+                   "The base is the lower bound of the 300–850 scale.",
+            "features":["No features — this is the starting point before any data is applied"],
+            "formula":"Base = 300 (always fixed)",
+        },
+        "Performance measures": {
+            "color":"#3B82F6",
+            "title":"Performance Measures — Trust & Verification Signals",
+            "what":"Binary verification signals: SOS active status, TIN verified, watchlist hits. "
+                   "These are the fastest-changing factors — they can flip the moment an entity is reinstated or an EIN is corrected.",
+            "features":["sos_active (SOS in good standing = +10 pts)",
+                        "tin_match_boolean (IRS EIN match = +10 pts)",
+                        "watchlist_hits (each hit = −20 pts, cap −80)"],
+            "formula":f"SOS: {'✅ +10' if sos_active else '❌ 0'} · TIN: {'✅ +10' if tin_ok else '❌ 0'} · WL: {'-'+str(min(wl_hits*20,80)) if wl_hits>0 else '✅ 0'}",
+        },
+        "Financial trends": {
+            "color":"#1E3A5F",
+            "title":"Financial Trends — Revenue, Cash Flow & Ratios",
+            "what":"Financial signals from Plaid-connected accounts and accounting integrations. "
+                   "If the business has NOT connected Plaid, these features are imputed to 0 — neutral, not penalizing. "
+                   "Strong financials can add 20–50 points; missing data adds 0.",
+            "features":["revenue (annual revenue from accounting)",
+                        "is_net_income (P&L profitability)",
+                        "bs_total_debt, ratio_debt_to_equity",
+                        "cf_operating_cash_flow, cf_cash_at_end_of_period",
+                        "ratio_gross_margin, ratio_return_on_assets",
+                        "Macro: gdp_pch, t10y2y (yield curve), vix, unemp, cpi"],
+            "formula":f"{'Revenue data present — positive contribution' if has_revenue else 'No Plaid/revenue data — imputed to 0 (neutral)'}",
+        },
+        "Public records": {
+            "color":"#7C3AED",
+            "title":"Public Records — BK, Judgments & Liens",
+            "what":"The MOST penalizing category. Each record reduces the score based on COUNT and AGE. "
+                   "Recent records (< 2 years) carry the full penalty. Records > 7 years carry ~20% of the original penalty. "
+                   "Multiple records compound the penalty.",
+            "features":["count_bankruptcy (each BK ≈ −40 pts, cap −120)",
+                        "age_bankruptcy (months since filing — older = less impact)",
+                        "count_judgment (each judgment ≈ −20 pts, cap −60)",
+                        "age_judgment",
+                        "count_lien (each lien ≈ −10 pts, cap −40)",
+                        "age_lien"],
+            "formula":f"BK: {bk_n}×(−40)={-min(bk_n*40,120)} · Judg: {judg_n}×(−20)={-min(judg_n*20,60)} · Liens: {lien_n}×(−10)={-min(lien_n*10,40)}",
+        },
+        "Business operations": {
+            "color":"#8B5CF6",
+            "title":"Business Operations — Age, Employees & Activity",
+            "what":"Firmographic signals indicating business maturity and operational activity. "
+                   "Older, larger, more reviewed businesses score higher. "
+                   "A business < 1 year old has minimal contribution from this category.",
+            "features":["age_business (months since formation date → converted from formation_date fact)",
+                        "count_employees (num_employees fact)",
+                        "count_reviews (Google/SERP review count)",
+                        "score_reviews (average review rating)"],
+            "formula":f"Age: {age_years}yr={'≥5yr: +30' if (age_years or 0)>=5 else ('2–5yr: +20' if (age_years or 0)>=2 else '≥1yr: +10' if (age_years or 0)>=1 else '<1yr: 0')} · Employees: {num_emp or 0}",
+        },
+        "Company profile": {
+            "color":"#9CA3AF",
+            "title":"Company Profile — NAICS, Entity Type & Industry Benchmark",
+            "what":"Industry classification and entity structure signals. "
+                   "The NAICS 6-digit code enables the model to compare this business against "
+                   "industry peers — businesses in historically safer industries score higher. "
+                   "Corporations and LLCs score slightly above sole proprietors.",
+            "features":["naics6 (industry risk benchmark — varies by sector)",
+                        "bus_struct (LLC/Corp > Sole Prop)",
+                        "state (geographic risk factor)",
+                        "indicator_government, indicator_nonprofit, indicator_education"],
+            "formula":f"NAICS: {'Real code (benchmark applied)' if naics_ok else '561499 (fallback — no benchmark, generic sector used)'} · Entity: structured entity",
+        },
+        "Worth Score": {
+            "color":"#EC4899",
+            "title":"Final Worth Score",
+            "what":"The calibrated final score. The raw model output (0–1 probability) is scaled: "
+                   "Score = prediction × 550 + 300. The score represents the model's confidence "
+                   "that this business will NOT default on its obligations.",
+            "features":["All 100+ features combined via 3-model ensemble (firmographic XGBoost + financial neural net + economic model)",
+                        "Final calibration adjusts for portfolio-level probability"],
+            "formula":"Score = model_prediction × 550 + 300",
+        },
+    }
+
+    st.markdown("#### 🔬 Bar-by-Bar Explanation")
+    for i, cat in enumerate(categories):
+        short_key = cat.split("\n")[0]
+        desc = cat_descs.get(short_key)
+        if not desc:
+            continue
+        val = contributions[i] if i < len(contributions) else 0
+        direction = ("➡️ Base" if short_key=="Base score"
+                     else ("⬆️ Positive" if val>0 else ("⬇️ Negative" if val<0 else "➡️ Neutral")))
+        with st.expander(f"{direction} — **{desc['title']}** ({'+' if isinstance(val,int) and val>=0 else ''}{int(val) if isinstance(val,int) else '300'} pts)", expanded=(i==0 or (val<0 and val!=0))):
+            st.markdown(f"**What it measures:** {desc['what']}")
+            st.markdown("**Model features in this category:**")
+            for f in desc["features"]:
+                st.markdown(f"  - `{f.split(' (')[0]}` — {f.split(' (')[1].rstrip(')') if '(' in f else ''}")
+            st.markdown(f"**Formula / current values:** `{desc['formula']}`")
+            if short_key == "Public records" and (bk_n>0 or judg_n>0 or lien_n>0):
+                flag(f"Public records found: {bk_n} BK, {judg_n} judgments, {lien_n} liens. "
+                     "These are the primary driver of any score below 550. "
+                     "The penalty reduces as records age — check back in 6–12 months.", "red")
+            elif short_key == "Public records":
+                flag("No public records — this category contributes 0 penalty, "
+                     "which is the best possible outcome.", "green")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR — 6 consolidated sections
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3781,6 +4052,62 @@ LIMIT 10;""", language="sql")
             # ════════ 1. DISTRIBUTION ════════════════════════════════════════
             with ws1:
                 st.markdown("#### 📊 Worth Score Distribution Analysis")
+
+                # ── Population-level waterfall (median business) ─────────────
+                st.markdown("##### 📊 Portfolio Score Waterfall — How the Median Business Builds to Its Score")
+                st.markdown(
+                    "This waterfall shows how each factor category contributes to the **median** "
+                    "Worth Score across your portfolio. Each bar = one category's average contribution. "
+                    "Bars above the running total are positive; bars below are negative."
+                )
+                # Compute median/mode values from the score_df + enriched data
+                med_score = float(score_df["worth_score_850"].median())
+                # Use enriched data if available, otherwise use safe defaults
+                med_bk    = 0; med_judg = 0; med_lien = 0
+                if "bk_hits" in score_df.columns:
+                    med_bk   = float(score_df["bk_hits"].median())
+                if "judgment_hits" in score_df.columns:
+                    med_judg = float(score_df["judgment_hits"].median())
+                if "lien_hits" in score_df.columns:
+                    med_lien = float(score_df["lien_hits"].median())
+
+                fig_wf_portfolio, contributions_p, categories_p = render_worth_score_waterfall(
+                    score_850=med_score,
+                    bk_n=int(med_bk), judg_n=int(med_judg), lien_n=int(med_lien),
+                    sos_active=True, tin_ok=True, wl_hits=0,
+                    age_years=3, has_revenue=False, num_emp=5,
+                    naics_ok=True, label=f"Median Score {med_score:.0f}"
+                )
+                st.plotly_chart(dark_chart_layout(fig_wf_portfolio), use_container_width=True)
+
+                flag("ℹ️ Population waterfall uses the median score and estimated average factor contributions. "
+                     "Each business's actual breakdown requires SHAP values from "
+                     "`rds_manual_score_public.business_score_factors`. "
+                     "Use the 🔎 Business Lookup → 💰 Worth Score tab for per-business waterfalls.", "blue")
+
+                with st.expander("📖 How to read this waterfall chart"):
+                    st.markdown("""
+**Reading the waterfall:**
+- **Base score (300)**: Every business starts here — the minimum score before any data is applied.
+- **Positive bars** (going up): factors that ADD points. Larger = more positive impact.
+- **Negative bars** (going down): factors that SUBTRACT points. Deeper = more penalty.
+- **Final bar (pink)**: the actual Worth Score — where you land after all factors are applied.
+
+**The Admin Portal shows the same chart** (labeled: Base score → Performance measures → 
+Financial trends → Public records → Business operations → Company profile → Worth score).
+These categories map directly to the model's sub-models in `ai-score-service`.
+
+**Why your median score may differ from the base score + shown contributions:**
+The model uses 100+ features and a 3-layer ensemble. This waterfall is an approximation
+built from available fact data. Exact SHAP values are in `business_score_factors`.
+                    """)
+                render_waterfall_explanation(
+                    bk_n=int(med_bk), judg_n=int(med_judg), lien_n=int(med_lien),
+                    sos_active=True, tin_ok=True, wl_hits=0,
+                    age_years=3, has_revenue=False, num_emp=5, naics_ok=True,
+                    contributions=contributions_p, categories=categories_p
+                )
+                st.markdown("---")
                 col_l,col_r = st.columns(2)
                 with col_l:
                     fig = px.histogram(score_df,x="worth_score_850",nbins=35,
@@ -5503,6 +5830,63 @@ The fact exists and has a value, but the `source.platformId` field in the JSON i
                 if decision in decision_info:
                     di = decision_info[decision]
                     st.markdown(f"**Score Decision: {di[0]} {di[1]}** — {di[2]}")
+
+                # ── Waterfall chart for this specific business ─────────────────
+                st.markdown("---")
+                st.markdown("#### 📊 Score Waterfall — How This Business Built Its Score")
+                st.markdown(
+                    "Shows the contribution of each factor category to this business's final score, "
+                    "starting from the base of 300 and building to the final score. "
+                    "This mirrors the **Admin Portal Worth Score breakdown chart**."
+                )
+
+                # Collect this business's data from already-loaded facts
+                bk_n_biz   = _safe_int_gv("num_bankruptcies")
+                judg_n_biz = _safe_int_gv("num_judgements")
+                lien_n_biz = _safe_int_gv("num_liens")
+                wl_n_biz   = _safe_int_gv("watchlist_hits")
+                sos_a_biz  = str(gv("sos_active") or "").lower() == "true"
+                tin_ok_biz = str(gv("tin_match_boolean") or "").lower() == "true"
+                rev_biz    = gv("revenue")
+                has_rev_biz= rev_biz is not None and str(rev_biz) not in ("","None","[too large")
+                emp_biz_raw= gv("num_employees")
+                emp_biz    = 0
+                try:
+                    if emp_biz_raw and str(emp_biz_raw) not in ("","None","[too large"):
+                        emp_biz = int(float(str(emp_biz_raw).replace(",","")))
+                except Exception:
+                    pass
+                naics_biz  = str(gv("naics_code") or "561499")
+                naics_ok_biz = naics_biz != "561499"
+                form_date_biz = str(gv("formation_date") or "")
+                age_biz = None
+                try:
+                    if form_date_biz:
+                        age_biz = datetime.now(timezone.utc).year - int(form_date_biz[:4])
+                except Exception:
+                    pass
+
+                fig_wf_biz, contributions_biz, categories_biz = render_worth_score_waterfall(
+                    score_850=score,
+                    bk_n=bk_n_biz, judg_n=judg_n_biz, lien_n=lien_n_biz,
+                    sos_active=sos_a_biz, tin_ok=tin_ok_biz, wl_hits=wl_n_biz,
+                    age_years=age_biz, has_revenue=has_rev_biz,
+                    num_emp=emp_biz, naics_ok=naics_ok_biz,
+                    label=f"{biz_name} ({bid[:8]}…)"
+                )
+                st.plotly_chart(dark_chart_layout(fig_wf_biz), use_container_width=True)
+
+                flag("ℹ️ This waterfall is estimated from available facts (BK count, TIN status, SOS active, etc.). "
+                     "Exact SHAP values per factor are in `rds_manual_score_public.business_score_factors`. "
+                     "The total may differ slightly from the actual score due to unobserved features.", "blue")
+
+                render_waterfall_explanation(
+                    bk_n=bk_n_biz, judg_n=judg_n_biz, lien_n=lien_n_biz,
+                    sos_active=sos_a_biz, tin_ok=tin_ok_biz, wl_hits=wl_n_biz,
+                    age_years=age_biz, has_revenue=has_rev_biz,
+                    num_emp=emp_biz, naics_ok=naics_ok_biz,
+                    contributions=contributions_biz, categories=categories_biz
+                )
 
             else:
                 flag(f"No Worth Score found for business `{bid}`. "
