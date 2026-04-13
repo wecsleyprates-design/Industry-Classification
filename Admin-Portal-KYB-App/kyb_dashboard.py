@@ -3945,14 +3945,20 @@ The exact thresholds are customer-configurable and represent underwriter risk ap
                     if state_df is not None and not state_df.empty:
                         state_df = state_df.drop_duplicates("business_id")
                         score_w_state = score_enriched.merge(state_df,on="business_id",how="left")
-                        state_stats = score_w_state.groupby("state")["worth_score_850"].agg(
-                            count="count",mean="mean").reset_index()
-                        state_stats = state_stats[state_stats["count"]>=10].sort_values("mean",ascending=False)
-                        state_stats["Avg Score"] = state_stats["mean"].round(1)
-                        fig_state = px.bar(state_stats.head(20),x="state",y="Avg Score",
-                                           color="Avg Score",color_continuous_scale="RdYlGn",
-                                           title="Avg Worth Score by State (top 20, ≥10 businesses)")
-                        st.plotly_chart(dark_chart_layout(fig_state),use_container_width=True)
+                        # Guard: only proceed if the state column has real values
+                        if "state" in score_w_state.columns and score_w_state["state"].notna().sum() >= 10:
+                            score_w_state_clean = score_w_state.dropna(subset=["state"])
+                            state_stats = score_w_state_clean.groupby("state")["worth_score_850"].agg(
+                                count="count",mean="mean").reset_index()
+                            state_stats = state_stats[state_stats["count"]>=10].sort_values("mean",ascending=False)
+                            state_stats["Avg Score"] = state_stats["mean"].round(1)
+                            fig_state = px.bar(state_stats.head(20),x="state",y="Avg Score",
+                                               color="Avg Score",color_continuous_scale="RdYlGn",
+                                               title="Avg Worth Score by State (top 20, ≥10 businesses)")
+                            st.plotly_chart(dark_chart_layout(fig_state),use_container_width=True)
+                        else:
+                            flag("State join returned no matching rows — the primary_address fact "
+                                 "may store state differently in this environment.", "amber")
                     else:
                         flag("State data requires primary_address fact — querying live. "
                              "If this appears empty, the join may not have found matches.", "amber")
@@ -4871,6 +4877,11 @@ elif section == "🔎 Business Lookup":
                                    "AI vs vendor NAICS comparison"],
             "⚠️ Risk & Watchlist": ["Sanctions/PEP/adverse media", "Bankruptcy age and count",
                                      "Judgment and lien status", "Vendor confidence aggregate risk score"],
+            "💰 Worth Score": ["Live score from rds_manual_score_public.business_scores",
+                                "Risk level (HIGH/MODERATE/LOW) with underwriting action",
+                                "Score decision (APPROVE/FURTHER_REVIEW/DECLINE)",
+                                "Factor analysis: public records, firmographic, identity, financials",
+                                "Score improvement opportunities with specific actions"],
             "🔗 Cross-Field Anomalies": ["Entity type vs NAICS sector (e.g. sole prop + manufacturing)",
                                           "State of formation vs operating jurisdiction",
                                           "Website found but NAICS 561499",
@@ -4878,7 +4889,7 @@ elif section == "🔎 Business Lookup":
                                           "High vendor conf but no NAICS"],
         }
         for cat, checks in categories.items():
-            with st.expander(cat):
+            with st.expander(cat, expanded=(cat == "💰 Worth Score")):
                 for c in checks:
                     st.markdown(f"  - {c}")
     else:
