@@ -1511,17 +1511,9 @@ with st.sidebar:
         "🔎 Business Lookup",
     ])
     st.markdown("---")
-    load_all = st.checkbox("Load ALL records", value=False)
-    if load_all:
-        record_limit = None
-        st.caption("⚠️ No limit — may be slow")
-    else:
-        record_limit = st.select_slider(
-            "Records to load",
-            options=[500, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000],
-            value=5_000,
-        )
-        st.caption(f"Up to {record_limit:,} records")
+    # Record limit: use date filter when active (natural scope),
+    # otherwise load all records. No manual slider needed.
+    record_limit = None  # always load all — date range is the scoping mechanism
 
     # ── Date range filter ──────────────────────────────────────────────────────
     st.markdown("---")
