@@ -4890,38 +4890,160 @@ Admin Portal + KYB Dashboard
                 styled_table(lineage_tbl)
 
     with tab_audit:
-        if is_audit:
-            audit_df = worth
-            flag("Individual scores not accessible — showing aggregate fill rates from "
-                 "warehouse.worth_score_input_audit.", "amber")
-            c1,c2,c3 = st.columns(3)
-            with c1: kpi("Audit Days",f"{len(audit_df):,}","scoring days","#3B82F6")
-            with c2: kpi("Avg Biz/Day",f"{audit_df['rows_per_day'].mean():.0f}","scored daily","#22c55e")
-            with c3: kpi("Latest Date",str(audit_df["score_date"].max()),"","#8B5CF6")
+        st.markdown("#### 📊 Score Audit — Model Input Data Quality Tracking")
+        flag("Source: `warehouse.worth_score_input_audit` — a Redshift table tracking what % of "
+             "model input features were populated on each scoring day. "
+             "This tab **always loads independently**, regardless of whether individual score data is available.", "blue")
 
-            fill_cols = [c for c in audit_df.columns if c.startswith("fill_")]
-            latest = audit_df.iloc[0]
-            fill_data = [{"Feature":c.replace("fill_",""),"Fill %":float(latest[c])} for c in fill_cols if c in audit_df.columns]
-            fill_df = pd.DataFrame(fill_data).sort_values("Fill %",ascending=True)
-            fill_df["Status"] = fill_df["Fill %"].apply(
-                lambda v:"Good (>80%)" if v>=80 else("Medium (30-80%)" if v>=30 else"Low (<30%)"))
-            fig = px.bar(fill_df.tail(30),x="Fill %",y="Feature",orientation="h",
-                         color="Status",
-                         color_discrete_map={"Good (>80%)":"#22c55e","Medium (30-80%)":"#f59e0b","Low (<30%)":"#ef4444"},
-                         title=f"Feature Fill Rates (latest: {latest['score_date']})")
-            fig.update_layout(height=600)
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+        with st.expander("ℹ️ What is Score Audit? Why does it matter?"):
+            st.markdown("""
+**The Worth Score model uses 100+ input features.** For each feature, the model either gets
+a real value or uses an **imputed default** (e.g. 0 for revenue if Plaid is not connected).
 
-            zero_features = fill_df[fill_df["Fill %"]==0]["Feature"].tolist()
-            if zero_features:
-                flag(f"{len(zero_features)} features at 0% fill: {', '.join(zero_features[:10])}. "
-                     "These features are not reaching the model.", "red")
-        else:
-            st.info("Score audit data will appear here when individual scores are also unavailable. "
-                    "Both sources were checked.")
-            st.code("""SELECT score_date, rows_per_day, fill_state, fill_naics6, fill_revenue
+**The Score Audit table tracks fill rates per scoring day:**
+- `fill_revenue = 90` → 90% of businesses scored that day had real revenue data
+- `fill_naics6 = 85` → 85% had a specific NAICS code (15% got the 561499 fallback)
+- `fill_age_bankruptcy = 0` → 0% had bankruptcy age data (expected — most businesses have no BK)
+
+**Why this matters:**
+- A sudden **drop in fill rate** = a data pipeline problem (Plaid disconnected, ZI data stale)
+- Consistent **0% fill** for a non-public-record feature = data source not feeding the model
+- **100% fill** for macro indicators (GDP, VIX, CPI) is expected — live daily data
+
+**Data flow:**
+```
+Vendors → integration-service → RDS
+  → warehouse-service: sp_worth_score_auditing_refresh.sql
+  → warehouse.worth_score_input_audit (Redshift)
+  → This tab
+```
+            """)
+
+        # Always load audit data directly — independent of whether scores loaded
+        _audit_cache_key = f"_audit_direct_{date_from}_{date_to}"
+        if _audit_cache_key not in st.session_state:
+            with st.spinner("Loading score audit data from warehouse.worth_score_input_audit…"):
+                _dc_audit = _date_clause("score_date", date_from, date_to)
+                audit_sql = f"""
+                    SELECT *
+                    FROM warehouse.worth_score_input_audit
+                    WHERE 1=1{_dc_audit}
+                    ORDER BY score_date DESC
+                    LIMIT 90
+                """
+                st.session_state[_audit_cache_key] = run_query(audit_sql)
+
+        audit_df = st.session_state[_audit_cache_key]
+
+        if audit_df is None or audit_df.empty:
+            flag("No audit data returned. The table may not exist yet or require different permissions.", "amber")
+            st.code("""SELECT score_date, rows_per_day, fill_state, fill_naics6, fill_revenue,
+       fill_count_employees, fill_age_bankruptcy
 FROM warehouse.worth_score_input_audit
 ORDER BY score_date DESC LIMIT 10;""", language="sql")
+        else:
+            c1,c2,c3,c4 = st.columns(4)
+            with c1: kpi("Audit Days",f"{len(audit_df):,}","days with data","#3B82F6")
+            with c2: kpi("Avg Businesses/Day",f"{audit_df['rows_per_day'].mean():.0f}","scored per day","#22c55e")
+            with c3: kpi("Latest Date",str(audit_df["score_date"].max()),"","#8B5CF6")
+            with c4: kpi("Earliest Date",str(audit_df["score_date"].min()),"","#64748b")
+
+            fill_cols = [c for c in audit_df.columns if c.startswith("fill_")]
+            if fill_cols:
+                latest_row = audit_df.iloc[0]
+                fill_data = [{"Feature":c.replace("fill_",""),"Fill %":float(latest_row[c])}
+                              for c in fill_cols if c in audit_df.columns]
+                fill_df = pd.DataFrame(fill_data).sort_values("Fill %",ascending=True)
+                fill_df["Status"] = fill_df["Fill %"].apply(
+                    lambda v: "✅ Good (>80%)" if v>=80 else ("⚠️ Medium (30-80%)" if v>=30 else "❌ Low (<30%)"))
+
+                zero_features    = fill_df[fill_df["Fill %"]==0]["Feature"].tolist()
+                partial_features = fill_df[(fill_df["Fill %"]>0)&(fill_df["Fill %"]<30)]["Feature"].tolist()
+
+                c5,c6,c7 = st.columns(3)
+                with c5: kpi("Features at 100%",f"{(fill_df['Fill %']==100).sum()}","fully populated","#22c55e")
+                with c6: kpi("Features at 0%",f"{len(zero_features)}","zero fill (many expected)","#64748b")
+                with c7: kpi("Features < 30%",f"{len(partial_features)}","low fill — investigate",
+                             "#ef4444" if len(partial_features)>5 else "#f59e0b")
+
+                st.markdown(f"#### Feature Fill Rates — {latest_row['score_date']} (latest day)")
+                col_l,col_r = st.columns([2,1])
+                with col_l:
+                    fig_fill = px.bar(fill_df.tail(35),x="Fill %",y="Feature",orientation="h",
+                                      color="Status",
+                                      color_discrete_map={"✅ Good (>80%)":"#22c55e",
+                                                           "⚠️ Medium (30-80%)":"#f59e0b",
+                                                           "❌ Low (<30%)":"#ef4444"},
+                                      title=f"Feature Fill Rates (latest: {latest_row['score_date']})")
+                    fig_fill.update_layout(height=650,showlegend=True)
+                    st.plotly_chart(dark_chart_layout(fig_fill),use_container_width=True)
+                with col_r:
+                    st.markdown("**Expected fill rates by category:**")
+                    st.markdown("""
+| Feature category | Expected fill | Why |
+|---|---|---|
+| Macro indicators (GDP, VIX, CPI) | 100% | Live daily data always available |
+| State, city, NAICS | 85–95% | High vendor coverage |
+| Revenue, cash flow | 40–80% | Depends on Plaid connections |
+| Public records (BK/Judgment age) | 0–20% | 0% = no records = good |
+| Reviews | 70–90% | Google/SERP coverage |
+                    """)
+
+                # Trend over time
+                KEY_FEATURES = ["fill_naics6","fill_revenue","fill_state",
+                                 "fill_count_employees","fill_count_reviews","fill_age_bankruptcy"]
+                avail_trend = [f for f in KEY_FEATURES if f in audit_df.columns]
+                if avail_trend:
+                    st.markdown("#### Fill Rate Trends Over Time")
+                    trend_df = audit_df[["score_date"]+avail_trend].copy()
+                    trend_df["score_date"] = pd.to_datetime(trend_df["score_date"])
+                    trend_melt = trend_df.melt(id_vars="score_date",var_name="Feature",value_name="Fill %")
+                    trend_melt["Feature"] = trend_melt["Feature"].str.replace("fill_","")
+                    fig_trend = px.line(trend_melt,x="score_date",y="Fill %",color="Feature",
+                                        title="Key Feature Fill Rates Over Time")
+                    fig_trend.add_hline(y=80,line_dash="dash",line_color="#f59e0b",annotation_text="80% target")
+                    st.plotly_chart(dark_chart_layout(fig_trend),use_container_width=True)
+
+                # Volume over time
+                if "rows_per_day" in audit_df.columns:
+                    st.markdown("#### Scoring Volume Per Day")
+                    vol_df = audit_df[["score_date","rows_per_day"]].copy()
+                    vol_df["score_date"] = pd.to_datetime(vol_df["score_date"])
+                    fig_vol = px.bar(vol_df.sort_values("score_date"),x="score_date",y="rows_per_day",
+                                     color_discrete_sequence=["#3B82F6"],
+                                     title="Businesses Scored Per Day")
+                    st.plotly_chart(dark_chart_layout(fig_vol),use_container_width=True)
+                    st.caption("Spikes = batch scoring. Gaps = pipeline issues or low application volume.")
+
+                # Alerts
+                EXPECTED_ZERO = {"age_bankruptcy","age_judgment","age_lien",
+                                  "count_bankruptcy","count_judgment","count_lien",
+                                  "flag_equity_negative","flag_net_income_negative","flag_total_liabilities_over_assets"}
+                unexpected_zero = [f for f in zero_features if f not in EXPECTED_ZERO]
+                if unexpected_zero:
+                    flag(f"🚨 {len(unexpected_zero)} features at 0% fill that SHOULD have data: "
+                         f"{', '.join(unexpected_zero[:8])}. Investigate the data pipeline.", "red")
+                expected_zero_found = [f for f in zero_features if f in EXPECTED_ZERO]
+                if expected_zero_found:
+                    flag(f"✅ {len(expected_zero_found)} features at 0% are EXPECTED (public records — "
+                         "most businesses have no BK/judgments/liens): "
+                         f"{', '.join(expected_zero_found[:6])}", "green")
+
+                analyst_card("Score Audit — How to Monitor and When to Act", [
+                    "`fill_naics6` dropping below 80%: NAICS fallback rate is increasing. "
+                    "Check the entity-matching pipeline — ZI/EFX/OC bulk data may be stale.",
+                    "`fill_revenue` dropping: fewer businesses are connecting Plaid. "
+                    "The financial model runs on imputed 0 values, reducing score accuracy for those businesses.",
+                    "Macro indicators (GDP, VIX, CPI, Fed rates) should ALWAYS be 100%. "
+                    "If any is below 100%, the economic data pipeline is broken — contact warehouse-service.",
+                    "Public record fill rates at 0% are NORMAL and GOOD — it means most businesses have no BK/judgments. "
+                    "These become non-zero only when actual public records exist.",
+                    "`rows_per_day` consistent at 0 for multiple days = scoring pipeline stopped. "
+                    "Check the ai-score-service Celery workers and Kafka consumers.",
+                    "This table is updated by warehouse-service task `perform_worth_score_audit.py` "
+                    "calling `sp_worth_score_auditing_refresh.sql`. "
+                    "If this Celery task fails, the audit table stops updating silently.",
+                ])
 
     with tab_dq_risk:
         st.markdown("#### 🔬 Risk & Score Data Quality Checks")
