@@ -4224,25 +4224,130 @@ built from available fact data. Exact SHAP values are in `business_score_factors
                 # ── Slice by Score Decision ──────────────────────────────────
                 if "score_decision" in score_df.columns:
                     st.markdown("##### Score Distribution by Decision")
-                    fig_dec = px.box(score_df,x="score_decision",y="worth_score_850",
-                                     color="score_decision",
-                                     color_discrete_map={"APPROVE":"#22c55e",
-                                                          "FURTHER_REVIEW_NEEDED":"#f59e0b",
-                                                          "DECLINE":"#ef4444"},
-                                     title="Score Range per Decision")
-                    fig_dec.update_layout(showlegend=False)
-                    st.plotly_chart(dark_chart_layout(fig_dec),use_container_width=True)
+                    st.markdown(
+                        "**What is being approved or declined?** The Worth Score model evaluates "
+                        "whether a business is creditworthy enough to receive a **payment processing "
+                        "limit, a line of credit, or access to a financial product** offered by "
+                        "Worth AI's customers (e.g. VizyPay, AMEX GCS, Team Branch). "
+                        "The decision is not about the business itself being 'good' or 'bad' — "
+                        "it is about whether the business's risk profile meets the underwriter's "
+                        "acceptance threshold for that specific product."
+                    )
+
+                    col_l, col_r = st.columns(2)
+                    with col_l:
+                        fig_dec = px.box(score_df, x="score_decision", y="worth_score_850",
+                                         color="score_decision",
+                                         color_discrete_map={"APPROVE":"#22c55e",
+                                                              "FURTHER_REVIEW_NEEDED":"#f59e0b",
+                                                              "DECLINE":"#ef4444"},
+                                         title="Score Range per Decision")
+                        fig_dec.update_layout(showlegend=False)
+                        st.plotly_chart(dark_chart_layout(fig_dec), use_container_width=True)
+
+                    with col_r:
+                        # Decision distribution
+                        dec_counts = score_df["score_decision"].value_counts().reset_index()
+                        dec_counts.columns = ["Decision","Count"]
+                        dec_counts["% of Total"] = (dec_counts["Count"]/len(score_df)*100).round(1)
+                        dec_counts["Avg Score"] = dec_counts["Decision"].map(
+                            score_df.groupby("score_decision")["worth_score_850"].mean().round(0).to_dict())
+                        styled_table(dec_counts, color_col="Decision",
+                                     palette={"approve":"#22c55e","further_review_needed":"#f59e0b","decline":"#ef4444"})
+
+                    # What the box plot shows
                     st.markdown("""
-**What each decision means:**
-- **APPROVE**: Model probability above the approval threshold. Score typically >575.
-- **FURTHER REVIEW**: Model is uncertain — score near a threshold boundary. Human analyst reviews.
-- **DECLINE**: Model probability below the decline threshold. Score typically <450.
-The exact thresholds are customer-configurable and represent underwriter risk appetite.
+**How to read the box plot:**
+Each box shows the range of Worth Scores for businesses that received that decision.
+- **Box** = middle 50% of scores (P25–P75)
+- **Line inside box** = median score
+- **Whiskers** = range (excluding outliers)
+- **Dots** = outliers (unusually low or high scores for that decision)
+
+A healthy model shows clear separation: APPROVE box clearly higher than DECLINE box,
+with FURTHER_REVIEW in between. Overlap means the threshold is in a dense region of the distribution.
                     """)
+
+                    # Full causal explanation per decision
+                    st.markdown("##### What each decision means — and what caused it")
+
+                    decision_details = {
+                        "APPROVE": {
+                            "color":"#22c55e","icon":"✅",
+                            "what":"The business was **approved** for the financial product offered by the customer (e.g. merchant cash advance, payment processing account, line of credit).",
+                            "means":"The Worth Score model determined that the probability of this business defaulting on its obligations is **below the customer's acceptance threshold**.",
+                            "typical_score":"Score typically > 575–600 (varies by customer configuration).",
+                            "common_profile":[
+                                "No public records (or old/minor ones)",
+                                "SOS active in good standing",
+                                "TIN verified (EIN matches legal name per IRS)",
+                                "No watchlist hits",
+                                "Established business (> 2 years)",
+                                "Revenue data available (Plaid connected) showing stable cash flow",
+                            ],
+                            "action":"Business can proceed. If Plaid is connected, the processing limit is set based on the financial model's outputs.",
+                        },
+                        "FURTHER_REVIEW_NEEDED": {
+                            "color":"#f59e0b","icon":"🔍",
+                            "what":"The business was **not auto-approved or auto-declined** — a human underwriter must review it before a final decision.",
+                            "means":"The model's probability estimate falls in an **uncertain zone** near the threshold boundary. The model is not confident enough to auto-decide.",
+                            "typical_score":"Score typically 500–575 (the 'gray zone' between thresholds).",
+                            "common_profile":[
+                                "Some risk signals present but not disqualifying (e.g. 1 old judgment, no current watchlist hits)",
+                                "Entity is relatively new (< 1 year) with limited track record",
+                                "TIN failed or pending (name/EIN mismatch needs explanation)",
+                                "NAICS 561499 fallback — industry risk unknown",
+                                "Missing financial data (no Plaid connection) — model imputes 0",
+                            ],
+                            "action":"Route to underwriting queue. An analyst reviews: TIN failure reason, business age, public records age, revenue documentation. Decision may flip to APPROVE or DECLINE.",
+                        },
+                        "DECLINE": {
+                            "color":"#ef4444","icon":"❌",
+                            "what":"The business was **declined** for the financial product.",
+                            "means":"The Worth Score model determined that the probability of this business defaulting is **above the customer's maximum acceptable risk threshold**.",
+                            "typical_score":"Score typically < 450–500 (varies by customer configuration).",
+                            "common_profile":[
+                                "Recent bankruptcy (< 2 years) — single strongest decline signal",
+                                "Multiple public records (BK + judgment + lien)",
+                                "SOS inactive (entity cannot legally operate)",
+                                "Sanctions/watchlist hit — hard stop",
+                                "Very low credit indicators across all data sources",
+                                "High debt-to-equity or negative equity (if Plaid connected)",
+                            ],
+                            "action":"Business is not approved for this product at this time. Some customers allow re-application after 6–12 months if the disqualifying factors resolve.",
+                        },
+                    }
+
+                    for dec, info in decision_details.items():
+                        n_biz = int((score_df["score_decision"]==dec).sum())
+                        if n_biz == 0:
+                            continue
+                        pct = n_biz/len(score_df)*100
+                        avg_s = score_df[score_df["score_decision"]==dec]["worth_score_850"].mean()
+                        st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {info['color']};
+                            border-radius:10px;padding:16px 20px;margin:10px 0">
+                          <div style="font-size:1.05rem;font-weight:700;color:{info['color']}">
+                            {info['icon']} {dec.replace('_',' ')} — {n_biz:,} businesses ({pct:.1f}%) · avg score {avg_s:.0f}</div>
+                          <div style="color:#CBD5E1;font-size:.82rem;margin-top:8px">
+                            <strong>What was {dec.split('_')[0].lower()}d:</strong> {info['what']}</div>
+                          <div style="color:#94A3B8;font-size:.79rem;margin-top:6px">
+                            <strong>What this means:</strong> {info['means']}</div>
+                          <div style="color:#64748b;font-size:.75rem;margin-top:4px">
+                            <em>{info['typical_score']}</em></div>
+                          <div style="color:#94A3B8;font-size:.78rem;margin-top:8px">
+                            <strong>Typical profile for this decision:</strong>
+                            <ul style="margin:4px 0 0 16px">{''.join(f'<li>{p}</li>' for p in info['common_profile'])}</ul>
+                          </div>
+                          <div style="color:#60A5FA;font-size:.77rem;margin-top:6px">
+                            <strong>What happens next:</strong> {info['action']}</div>
+                        </div>""", unsafe_allow_html=True)
 
                 # ── Slice by NAICS Sector ─────────────────────────────────────
                 if "naics_sector" in score_enriched.columns and score_enriched["naics_sector"].notna().sum()>0:
                     st.markdown("##### Score Distribution by NAICS 2-Digit Sector")
+
+                    # Map 2-digit codes to sector names — codes 31/32/33 all = Manufacturing,
+                    # 44/45 all = Retail. Map FIRST then group by name to avoid double bars.
                     NAICS_SECTOR_NAMES = {
                         "11":"Agriculture","21":"Mining","22":"Utilities","23":"Construction",
                         "31":"Manufacturing","32":"Manufacturing","33":"Manufacturing",
@@ -4250,13 +4355,17 @@ The exact thresholds are customer-configurable and represent underwriter risk ap
                         "51":"Information","52":"Finance","53":"Real Estate",
                         "54":"Professional Svcs","56":"Admin/Support","61":"Education",
                         "62":"Healthcare","71":"Arts/Entertainment","72":"Food/Lodging",
-                        "81":"Other Services","92":"Government","561499":"Fallback"
+                        "81":"Other Services","92":"Government","561499":"Fallback (unclassified)"
                     }
-                    sector_stats = score_enriched.groupby("naics_sector")["worth_score_850"].agg(
-                        count="count",mean="mean").reset_index()
-                    sector_stats["Sector Name"] = sector_stats["naics_sector"].map(NAICS_SECTOR_NAMES).fillna("Unknown")
-                    sector_stats = sector_stats[sector_stats["count"]>=5].sort_values("mean",ascending=False)
-                    sector_stats.columns = ["Sector Code","Count","Avg Score","Sector Name"]
+                    # Apply sector name BEFORE grouping so 31/32/33 → "Manufacturing" merge into one bar
+                    score_enriched["sector_name"] = score_enriched["naics_sector"].map(
+                        NAICS_SECTOR_NAMES).fillna("Unknown")
+
+                    # Group by sector_name (not raw code) — fixes double-bar issue
+                    sector_stats = score_enriched.groupby("sector_name")["worth_score_850"].agg(
+                        count="count", mean="mean").reset_index()
+                    sector_stats.columns = ["Sector Name","Count","Avg Score"]
+                    sector_stats = sector_stats[sector_stats["Count"]>=5].sort_values("Avg Score",ascending=False)
                     sector_stats["Avg Score"] = sector_stats["Avg Score"].round(1)
 
                     col_l,col_r = st.columns(2)
@@ -4268,18 +4377,34 @@ The exact thresholds are customer-configurable and represent underwriter risk ap
                         fig_sec.update_layout(height=450,coloraxis_showscale=False)
                         st.plotly_chart(dark_chart_layout(fig_sec),use_container_width=True)
                     with col_r:
-                        styled_table(sector_stats[["Sector Name","Sector Code","Count","Avg Score"]])
+                        styled_table(sector_stats[["Sector Name","Count","Avg Score"]])
+
+                    st.markdown("""
+**Why did Retail and Manufacturing previously show two bars each?**
+NAICS codes `31`, `32`, `33` all belong to Manufacturing, and `44`, `45` both belong to Retail.
+The previous chart grouped by the 2-digit code (giving 3 separate Manufacturing bars and 2 Retail bars),
+then plotted them all with the label "Manufacturing" or "Retail" — producing stacked/overlapping bars.
+**Fixed:** The chart now groups by sector name first, so all Manufacturing codes merge into one bar.
+                    """)
 
                     analyst_card("NAICS Sector Score Differences — Why They Exist", [
-                        "Different NAICS sectors have inherently different risk profiles because the model was "
-                        "trained on historical data where sector predicted default likelihood.",
-                        "Sectors like Finance (52), Real Estate (53), and cash-intensive businesses typically "
-                        "score lower due to higher historical default rates in those industries.",
-                        "Sectors like Healthcare (62), Professional Services (54), and Education (61) typically "
-                        "score higher due to more stable revenue and lower default rates.",
-                        "The NAICS 6-digit code is a model feature (`naics6`). A wrong NAICS code "
-                        "can mis-classify a business into the wrong risk bucket — this is one reason "
-                        "the 561499 fallback is problematic beyond just data completeness.",
+                        "Different NAICS sectors score differently because the Worth Score model was "
+                        "trained on historical data where industry type predicted default likelihood. "
+                        "The model uses `naics6` as a feature — the 6-digit NAICS code enables "
+                        "industry-specific risk benchmarking.",
+                        "Arts/Entertainment (71) and Healthcare (62) scoring lower is counterintuitive. "
+                        "Possible causes: (1) these industries have high proportions of new small businesses "
+                        "with limited financial history, (2) more public records in these sectors historically, "
+                        "or (3) higher representation of sole proprietors (lower firmographic score).",
+                        "Retail (44/45) and Manufacturing (31/32/33) show the widest score ranges — "
+                        "these sectors have the most diverse business profiles, from tiny sole-prop shops "
+                        "to established multi-employee companies.",
+                        "'Fallback (unclassified)' businesses (NAICS 561499) have lower scores on average "
+                        "because the model cannot apply industry benchmarks — it uses a generic sector average. "
+                        "This is another reason the 561499 fallback hurts beyond data quality.",
+                        "A sector with unexpectedly low average score is worth investigating: "
+                        "it may indicate a data quality issue (wrong NAICS assigned) or a genuine "
+                        "risk concentration in that industry within your customer base.",
                     ])
 
                 # ── Is score different by state? ──────────────────────────────
