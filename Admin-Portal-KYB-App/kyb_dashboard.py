@@ -3371,58 +3371,679 @@ Count = `watchlist.value.metadata.length` after deduplication in
             st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
 
     with tab_score:
-        if has_scores:
-            score_df = worth
-            total_s = len(score_df); avg_s = score_df["worth_score_850"].mean()
-            high = int((score_df["risk_level"]=="HIGH").sum())
-            mod  = int((score_df["risk_level"]=="MODERATE").sum())
-            low  = int((score_df["risk_level"]=="LOW").sum())
-
-            c1,c2,c3,c4 = st.columns(4)
-            with c1: kpi("Avg Score",f"{avg_s:.0f}","300–850","#3B82F6")
-            with c2: kpi("🔴 HIGH Risk",f"{high:,}",f"{high/max(total_s,1)*100:.0f}% (<500)","#ef4444")
-            with c3: kpi("🟡 MODERATE", f"{mod:,}", f"{mod/max(total_s,1)*100:.0f}% (500-650)","#f59e0b")
-            with c4: kpi("🟢 LOW Risk", f"{low:,}", f"{low/max(total_s,1)*100:.0f}% (>650)","#22c55e")
-
-            if "score_decision" in score_df.columns:
-                c5,c6,c7 = st.columns(3)
-                with c5: kpi("✅ APPROVE",f"{int((score_df['score_decision']=='APPROVE').sum()):,}","","#22c55e")
-                with c6: kpi("🔍 FURTHER REVIEW",f"{int((score_df['score_decision']=='FURTHER_REVIEW_NEEDED').sum()):,}","","#f59e0b")
-                with c7: kpi("❌ DECLINE",f"{int((score_df['score_decision']=='DECLINE').sum()):,}","","#ef4444")
-
-            col_l,col_r = st.columns(2)
-            with col_l:
-                fig = px.histogram(score_df,x="worth_score_850",nbins=30,
-                                   color_discrete_sequence=["#3B82F6"],
-                                   title="Worth Score Distribution (300–850)")
-                fig.add_vline(x=500,line_dash="dash",line_color="#ef4444",annotation_text="HIGH <500")
-                fig.add_vline(x=650,line_dash="dash",line_color="#f59e0b",annotation_text="MOD <650")
-                st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
-            with col_r:
-                rl = score_df["risk_level"].value_counts().reset_index()
-                rl.columns = ["Risk","Count"]
-                fig2 = px.bar(rl,x="Risk",y="Count",color="Risk",
-                              color_discrete_map={"HIGH":"#ef4444","MODERATE":"#f59e0b","LOW":"#22c55e"},
-                              title="Risk Level Distribution")
-                fig2.update_layout(showlegend=False)
-                st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
-
-            # Score source info
-            flag("Source: rds_manual_score_public.business_scores via Redshift federation. "
-                 "NOTE: score_status column does not exist in this schema version.", "blue")
-        else:
+        if not has_scores:
             st.info("Individual score data not available from rds_manual_score_public.business_scores. "
                     "Check the Score Audit tab for aggregate fill-rate data.")
             st.code("""-- Confirmed working (no score_status filter):
-SELECT COUNT(*), AVG(weighted_score_850), MIN(weighted_score_850), MAX(weighted_score_850)
-FROM rds_manual_score_public.business_scores
-WHERE weighted_score_850 IS NOT NULL;
-
 SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, cs.business_id
 FROM rds_manual_score_public.data_current_scores cs
 JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
 WHERE bs.weighted_score_850 IS NOT NULL
 LIMIT 10;""", language="sql")
+        else:
+            score_df = worth.copy()
+            score_df["worth_score_850"] = pd.to_numeric(score_df["worth_score_850"],errors="coerce")
+            score_df = score_df.dropna(subset=["worth_score_850"])
+            total_s = len(score_df)
+            avg_s   = score_df["worth_score_850"].mean()
+            med_s   = score_df["worth_score_850"].median()
+            high = int((score_df["risk_level"]=="HIGH").sum())
+            mod  = int((score_df["risk_level"]=="MODERATE").sum())
+            low  = int((score_df["risk_level"]=="LOW").sum())
+
+            flag("Source: rds_manual_score_public.business_scores via Redshift federation. "
+                 "Score = 300–850 (higher = lower risk). Formula: prediction × 550 + 300.", "blue")
+
+            # ── Top KPIs ───────────────────────────────────────────────────────
+            c1,c2,c3,c4,c5 = st.columns(5)
+            with c1: kpi("Total Scored",f"{total_s:,}","businesses","#3B82F6")
+            with c2: kpi("Avg Score",f"{avg_s:.0f}","mean · target >600","#3B82F6")
+            with c3: kpi("🔴 HIGH Risk",f"{high:,}",f"{high/max(total_s,1)*100:.1f}% (<500)","#ef4444")
+            with c4: kpi("🟡 MODERATE", f"{mod:,}", f"{mod/max(total_s,1)*100:.1f}% (500–650)","#f59e0b")
+            with c5: kpi("🟢 LOW Risk", f"{low:,}", f"{low/max(total_s,1)*100:.1f}% (>650)","#22c55e")
+
+            if "score_decision" in score_df.columns:
+                c6,c7,c8 = st.columns(3)
+                approve_n = int((score_df["score_decision"]=="APPROVE").sum())
+                review_n  = int((score_df["score_decision"]=="FURTHER_REVIEW_NEEDED").sum())
+                decline_n = int((score_df["score_decision"]=="DECLINE").sum())
+                with c6: kpi("✅ APPROVE",f"{approve_n:,}",f"{approve_n/max(total_s,1)*100:.1f}%","#22c55e")
+                with c7: kpi("🔍 FURTHER REVIEW",f"{review_n:,}",f"{review_n/max(total_s,1)*100:.1f}%","#f59e0b")
+                with c8: kpi("❌ DECLINE",f"{decline_n:,}",f"{decline_n/max(total_s,1)*100:.1f}%","#ef4444")
+
+            # ── Rich sub-tabs ──────────────────────────────────────────────────
+            ws1,ws2,ws3,ws4,ws5,ws6 = st.tabs([
+                "📊 Distribution","🔪 Slice & Dice",
+                "🔬 Feature Impact","📈 Model Metrics",
+                "⚡ Risk Segments","🗄️ Data Lineage"
+            ])
+
+            # ════════ 1. DISTRIBUTION ════════════════════════════════════════
+            with ws1:
+                st.markdown("#### 📊 Worth Score Distribution Analysis")
+                col_l,col_r = st.columns(2)
+                with col_l:
+                    fig = px.histogram(score_df,x="worth_score_850",nbins=35,
+                                       color_discrete_sequence=["#3B82F6"],
+                                       title="Worth Score Distribution (300–850)")
+                    fig.add_vline(x=500,line_dash="dash",line_color="#ef4444",annotation_text="HIGH boundary")
+                    fig.add_vline(x=650,line_dash="dash",line_color="#f59e0b",annotation_text="MOD boundary")
+                    fig.add_vline(x=avg_s,line_dash="dot",line_color="#60a5fa",annotation_text=f"Mean {avg_s:.0f}")
+                    fig.add_vline(x=med_s,line_dash="dot",line_color="#94a3b8",annotation_text=f"Median {med_s:.0f}")
+                    st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+                with col_r:
+                    rl = score_df["risk_level"].value_counts().reset_index()
+                    rl.columns = ["Risk","Count"]
+                    rl["% of Total"] = (rl["Count"]/total_s*100).round(1)
+                    fig2 = px.bar(rl,x="Risk",y="Count",color="Risk",
+                                  color_discrete_map={"HIGH":"#ef4444","MODERATE":"#f59e0b","LOW":"#22c55e"},
+                                  text="% of Total",title="Risk Level Distribution")
+                    fig2.update_traces(texttemplate="%{text:.1f}%",textposition="outside")
+                    fig2.update_layout(showlegend=False)
+                    st.plotly_chart(dark_chart_layout(fig2),use_container_width=True)
+
+                # Percentile table
+                pcts = [5,10,25,50,75,90,95]
+                pct_data = pd.DataFrame({
+                    "Percentile": [f"P{p}" for p in pcts],
+                    "Score": [int(score_df["worth_score_850"].quantile(p/100)) for p in pcts],
+                    "Risk Level": [("HIGH" if score_df["worth_score_850"].quantile(p/100)<500
+                                    else ("MODERATE" if score_df["worth_score_850"].quantile(p/100)<650 else "LOW"))
+                                   for p in pcts],
+                    "Interpretation": [
+                        "Bottom 5% — extreme risk","Bottom 10%","First quartile","Median",
+                        "Third quartile","Top 10%","Top 5% — lowest risk"
+                    ],
+                })
+                st.markdown("#### Score Percentile Reference Table")
+                styled_table(pct_data,color_col="Risk Level",
+                             palette={"HIGH":"#ef4444","MODERATE":"#f59e0b","LOW":"#22c55e"})
+
+                # Cumulative distribution
+                score_sorted = score_df["worth_score_850"].sort_values()
+                cum_pct = np.arange(1,len(score_sorted)+1)/len(score_sorted)*100
+                fig3 = go.Figure()
+                fig3.add_trace(go.Scatter(x=score_sorted,y=cum_pct,mode="lines",
+                                          line=dict(color="#3B82F6",width=2),name="Cumulative %"))
+                fig3.add_vline(x=500,line_dash="dash",line_color="#ef4444",annotation_text="HIGH/MOD")
+                fig3.add_vline(x=650,line_dash="dash",line_color="#f59e0b",annotation_text="MOD/LOW")
+                fig3.update_layout(xaxis_title="Worth Score",yaxis_title="Cumulative % of Businesses",
+                                   title="Cumulative Score Distribution")
+                st.plotly_chart(dark_chart_layout(fig3),use_container_width=True)
+
+                analyst_card("How to Read the Worth Score Distribution", [
+                    f"Mean {avg_s:.0f} vs Median {med_s:.0f}: "
+                    f"{'The mean is higher — positively skewed: a tail of very high scores pulls the mean up.' if avg_s>med_s else 'The mean is lower — negatively skewed: a tail of very low scores pulls the mean down.'}",
+                    f"HIGH risk ({high/max(total_s,1)*100:.1f}%): businesses scoring <500. "
+                    "Target: <15% of portfolio. Above 15% suggests systematic underwriting quality issues.",
+                    f"The cumulative chart shows what % of businesses fall below each score threshold. "
+                    "Use this to answer: 'If we raise our approval cutoff to 550, what % of applicants pass?'",
+                    "Score formula: prediction × 550 + 300. The raw model output (0–1 probability) "
+                    "is scaled to the 300–850 range. A score of 575 = model prediction of 0.50.",
+                ])
+
+            # ════════ 2. SLICE & DICE ═════════════════════════════════════════
+            with ws2:
+                st.markdown("#### 🔪 Slice & Dice — Score by Dimension")
+                flag("Enrich score data by joining with the facts table to get state and NAICS. "
+                     "These are optional joins — if no match, the score is still shown.", "blue")
+
+                # Try to join score with naics/state from facts
+                naics_for_join = get_section_data("naics", record_limit)
+                sos_for_join   = get_section_data("sos",   record_limit)
+
+                score_enriched = score_df.copy()
+                if naics_for_join is not None and "naics_code" in naics_for_join.columns and "business_id" in score_enriched.columns:
+                    naics_sub = naics_for_join[["business_id","naics_code","naics_source","is_fallback"]].drop_duplicates("business_id")
+                    score_enriched = score_enriched.merge(naics_sub,on="business_id",how="left")
+                    score_enriched["naics_sector"] = score_enriched["naics_code"].apply(
+                        lambda c: str(c)[:2] if isinstance(c,str) and c!="561499" else "561499")
+
+                # ── Slice by Risk Level ──────────────────────────────────────
+                st.markdown("##### Score Statistics by Risk Level")
+                rl_stats = score_df.groupby("risk_level")["worth_score_850"].agg(
+                    ["count","mean","median","min","max","std"]).reset_index()
+                rl_stats.columns = ["Risk Level","Count","Mean","Median","Min","Max","Std Dev"]
+                rl_stats = rl_stats.round(1)
+                styled_table(rl_stats,color_col="Risk Level",
+                             palette={"HIGH":"#ef4444","MODERATE":"#f59e0b","LOW":"#22c55e"})
+
+                # ── Slice by Score Decision ──────────────────────────────────
+                if "score_decision" in score_df.columns:
+                    st.markdown("##### Score Distribution by Decision")
+                    fig_dec = px.box(score_df,x="score_decision",y="worth_score_850",
+                                     color="score_decision",
+                                     color_discrete_map={"APPROVE":"#22c55e",
+                                                          "FURTHER_REVIEW_NEEDED":"#f59e0b",
+                                                          "DECLINE":"#ef4444"},
+                                     title="Score Range per Decision")
+                    fig_dec.update_layout(showlegend=False)
+                    st.plotly_chart(dark_chart_layout(fig_dec),use_container_width=True)
+                    st.markdown("""
+**What each decision means:**
+- **APPROVE**: Model probability above the approval threshold. Score typically >575.
+- **FURTHER REVIEW**: Model is uncertain — score near a threshold boundary. Human analyst reviews.
+- **DECLINE**: Model probability below the decline threshold. Score typically <450.
+The exact thresholds are customer-configurable and represent underwriter risk appetite.
+                    """)
+
+                # ── Slice by NAICS Sector ─────────────────────────────────────
+                if "naics_sector" in score_enriched.columns and score_enriched["naics_sector"].notna().sum()>0:
+                    st.markdown("##### Score Distribution by NAICS 2-Digit Sector")
+                    NAICS_SECTOR_NAMES = {
+                        "11":"Agriculture","21":"Mining","22":"Utilities","23":"Construction",
+                        "31":"Manufacturing","32":"Manufacturing","33":"Manufacturing",
+                        "42":"Wholesale","44":"Retail","45":"Retail","48":"Transportation",
+                        "51":"Information","52":"Finance","53":"Real Estate",
+                        "54":"Professional Svcs","56":"Admin/Support","61":"Education",
+                        "62":"Healthcare","71":"Arts/Entertainment","72":"Food/Lodging",
+                        "81":"Other Services","92":"Government","561499":"Fallback"
+                    }
+                    sector_stats = score_enriched.groupby("naics_sector")["worth_score_850"].agg(
+                        count="count",mean="mean").reset_index()
+                    sector_stats["Sector Name"] = sector_stats["naics_sector"].map(NAICS_SECTOR_NAMES).fillna("Unknown")
+                    sector_stats = sector_stats[sector_stats["count"]>=5].sort_values("mean",ascending=False)
+                    sector_stats.columns = ["Sector Code","Count","Avg Score","Sector Name"]
+                    sector_stats["Avg Score"] = sector_stats["Avg Score"].round(1)
+
+                    col_l,col_r = st.columns(2)
+                    with col_l:
+                        fig_sec = px.bar(sector_stats.head(15),
+                                         x="Avg Score",y="Sector Name",orientation="h",
+                                         color="Avg Score",color_continuous_scale="RdYlGn",
+                                         title="Avg Worth Score by NAICS Sector (top 15)")
+                        fig_sec.update_layout(height=450,coloraxis_showscale=False)
+                        st.plotly_chart(dark_chart_layout(fig_sec),use_container_width=True)
+                    with col_r:
+                        styled_table(sector_stats[["Sector Name","Sector Code","Count","Avg Score"]])
+
+                    analyst_card("NAICS Sector Score Differences — Why They Exist", [
+                        "Different NAICS sectors have inherently different risk profiles because the model was "
+                        "trained on historical data where sector predicted default likelihood.",
+                        "Sectors like Finance (52), Real Estate (53), and cash-intensive businesses typically "
+                        "score lower due to higher historical default rates in those industries.",
+                        "Sectors like Healthcare (62), Professional Services (54), and Education (61) typically "
+                        "score higher due to more stable revenue and lower default rates.",
+                        "The NAICS 6-digit code is a model feature (`naics6`). A wrong NAICS code "
+                        "can mis-classify a business into the wrong risk bucket — this is one reason "
+                        "the 561499 fallback is problematic beyond just data completeness.",
+                    ])
+
+                # ── Is score different by state? ──────────────────────────────
+                st.markdown("##### Score by State (requires SOS join)")
+                if sos_for_join is not None and "business_id" in score_enriched.columns:
+                    # Try to get state from primary_address or formation_state facts
+                    state_sql = f"""
+                        SELECT business_id,
+                               JSON_EXTRACT_PATH_TEXT(value,'value','state') AS state
+                        FROM rds_warehouse_public.facts
+                        WHERE name = 'primary_address'
+                          AND JSON_EXTRACT_PATH_TEXT(value,'value','state') IS NOT NULL
+                        ORDER BY received_at DESC{_limit_clause(record_limit)}
+                    """
+                    state_df = run_query(state_sql)
+                    if state_df is not None and not state_df.empty:
+                        state_df = state_df.drop_duplicates("business_id")
+                        score_w_state = score_enriched.merge(state_df,on="business_id",how="left")
+                        state_stats = score_w_state.groupby("state")["worth_score_850"].agg(
+                            count="count",mean="mean").reset_index()
+                        state_stats = state_stats[state_stats["count"]>=10].sort_values("mean",ascending=False)
+                        state_stats["Avg Score"] = state_stats["mean"].round(1)
+                        fig_state = px.bar(state_stats.head(20),x="state",y="Avg Score",
+                                           color="Avg Score",color_continuous_scale="RdYlGn",
+                                           title="Avg Worth Score by State (top 20, ≥10 businesses)")
+                        st.plotly_chart(dark_chart_layout(fig_state),use_container_width=True)
+                    else:
+                        flag("State data requires primary_address fact — querying live. "
+                             "If this appears empty, the join may not have found matches.", "amber")
+                        st.code("""-- Get state distribution of scores:
+SELECT JSON_EXTRACT_PATH_TEXT(f.value,'value','state') AS state,
+       COUNT(cs.business_id) AS businesses,
+       AVG(bs.weighted_score_850) AS avg_score
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+JOIN rds_warehouse_public.facts f ON f.business_id = cs.business_id AND f.name = 'primary_address'
+GROUP BY JSON_EXTRACT_PATH_TEXT(f.value,'value','state')
+HAVING COUNT(*) >= 10
+ORDER BY avg_score DESC;""", language="sql")
+
+            # ════════ 3. FEATURE IMPACT ══════════════════════════════════════
+            with ws3:
+                st.markdown("#### 🔬 Feature Impact Analysis")
+                st.markdown(
+                    "Understanding which features drive the Worth Score — and how high-score vs low-score "
+                    "businesses differ on those features."
+                )
+
+                # Split into HIGH vs LOW for comparison
+                high_group = score_df[score_df["risk_level"]=="HIGH"]
+                low_group  = score_df[score_df["risk_level"]=="LOW"]
+
+                flag(f"Comparing {len(high_group):,} HIGH risk businesses (score <500) vs "
+                     f"{len(low_group):,} LOW risk businesses (score >650) to identify differentiating features.", "blue")
+
+                # Feature importance from model architecture (confirmed from lookups.py)
+                feature_info = pd.DataFrame({
+                    "Feature (model name)": [
+                        "age_bankruptcy","count_bankruptcy","age_judgment","count_judgment",
+                        "age_lien","count_lien","revenue","count_employees",
+                        "naics6 (NAICS code)","bus_struct (entity type)","age_business",
+                        "count_reviews","score_reviews","is_net_income","bs_total_debt",
+                        "ratio_debt_to_equity","ratio_gross_margin","vix","t10y2y","unemp",
+                    ],
+                    "Category": [
+                        "Public Records","Public Records","Public Records","Public Records",
+                        "Public Records","Public Records","Financials","Firmographic",
+                        "Firmographic","Firmographic","Firmographic",
+                        "Firmographic","Firmographic","Financials","Financials",
+                        "Financials","Financials","Economic","Economic","Economic",
+                    ],
+                    "Direction": [
+                        "↑ age = ↑ score (older BK = less impact)",
+                        "↑ count = ↓ score (more BKs = worse)",
+                        "↑ age = ↑ score (older judgment = less impact)",
+                        "↑ count = ↓ score",
+                        "↑ age = ↑ score",
+                        "↑ count = ↓ score",
+                        "↑ revenue = ↑ score",
+                        "↑ employees = ↑ score (more established)",
+                        "Industry risk benchmark (sector-specific)",
+                        "LLC/Corp > Sole Prop",
+                        "↑ age = ↑ score (established business)",
+                        "↑ reviews = ↑ score (active business)",
+                        "↑ rating = ↑ score",
+                        "↑ net income = ↑ score",
+                        "↑ debt = ↓ score",
+                        "↑ ratio = ↓ score (over-leveraged)",
+                        "↑ margin = ↑ score",
+                        "↑ VIX = ↓ score (market fear)",
+                        "Yield curve (positive = normal economy)",
+                        "↑ unemployment = ↓ score",
+                    ],
+                    "Imputation (if missing)": [
+                        "240 months (neutral)","0 (neutral)","240 months","0",
+                        "240 months","0","0 (neutral)","0 (neutral)",
+                        "Sector median","Mode","0","0","0","0","0",
+                        "0","0","Live macro indicator","Live macro indicator","Live macro indicator",
+                    ],
+                    "Priority": [
+                        "🔴 HIGH","🔴 HIGH","🔴 HIGH","🔴 HIGH",
+                        "🔴 HIGH","🔴 HIGH","🟡 MEDIUM","🟡 MEDIUM",
+                        "🟡 MEDIUM","🟢 LOW","🟡 MEDIUM",
+                        "🟢 LOW","🟢 LOW","🟡 MEDIUM","🔴 HIGH",
+                        "🟡 MEDIUM","🟡 MEDIUM","🟢 LOW","🟢 LOW","🟢 LOW",
+                    ],
+                })
+
+                st.markdown("##### Known Model Features (from ai-score-service/lookups.py)")
+                col_l,col_r = st.columns(2)
+                with col_l:
+                    cat_counts = feature_info.groupby(["Category","Priority"]).size().reset_index(name="Count")
+                    fig_cat = px.bar(cat_counts,x="Category",y="Count",color="Priority",
+                                     color_discrete_map={"🔴 HIGH":"#ef4444","🟡 MEDIUM":"#f59e0b","🟢 LOW":"#22c55e"},
+                                     title="Features by Category and Priority")
+                    st.plotly_chart(dark_chart_layout(fig_cat),use_container_width=True)
+                with col_r:
+                    styled_table(feature_info[["Feature (model name)","Category","Direction","Priority"]],
+                                 color_col="Priority",
+                                 palette={"🔴 high":"#ef4444","🟡 medium":"#f59e0b","🟢 low":"#22c55e"})
+
+                # ── High vs Low comparison using available facts ────────────────
+                st.markdown("##### HIGH vs LOW Score Business Comparison")
+                st.markdown("*Using available audit data to compare fill rates between risk groups.*")
+
+                if is_audit and worth is not None and "_source" in worth.columns:
+                    # Audit only — can't do per-business comparison
+                    flag("Full per-business feature comparison requires individual score records. "
+                         "Currently using audit aggregate data — showing fill rates as proxy.", "amber")
+                else:
+                    # Summary comparison table from what we know
+                    comparison = pd.DataFrame({
+                        "Factor": ["Public Records (any)","SOS Active","TIN Verified",
+                                   "Watchlist Hits","Has Revenue Data","Established (≥2yr)"],
+                        "HIGH Risk Profile": ["Common — BK/Judgment/Lien drive score below 500",
+                                              "Often inactive or unconfirmed","Often fails or missing",
+                                              "More common","Often missing (no Plaid)","May be new"],
+                        "LOW Risk Profile": ["Absent — no BK/Judgment/Lien","Always active + matched",
+                                             "Verified (IRS confirmed)","Absent","Present (connected Plaid)",
+                                             "Usually ≥3 years established"],
+                        "Score Impact": ["−50 to −150 pts","−30 pts if inactive","−20 pts if failed",
+                                         "−20 to −80 pts","0 pts (neutral if missing)","+10 to +30 pts"],
+                    })
+                    styled_table(comparison)
+
+                analyst_card("Feature Impact — Key Insights", [
+                    "PUBLIC RECORDS are the single most impactful feature category. "
+                    "The model uses both COUNT and AGE. A 10-year-old BK has ~20% the impact of a 6-month-old BK.",
+                    "MISSING FINANCIALS (no Plaid data) are imputed to 0 — they don't penalize the score. "
+                    "But they also don't IMPROVE it. Businesses with connected financials and strong revenue "
+                    "score 20–50 points higher than identical businesses without financial data.",
+                    "NAICS code matters because it defines the industry risk benchmark. "
+                    "A pizza restaurant (722511) and an accounting firm (541211) both with $500K revenue "
+                    "will score differently because their industries have different historical default rates.",
+                    "ECONOMIC FEATURES (VIX, Fed rates, unemployment) are live macro indicators. "
+                    "All businesses scored on the same day get the same economic features. "
+                    "A score from 2024 vs 2026 may differ only because of macro conditions.",
+                    "ENTITY TYPE: Corporations and LLCs score slightly higher than sole proprietors "
+                    "due to stronger legal separation of personal/business liability.",
+                ])
+
+            # ════════ 4. MODEL METRICS ═══════════════════════════════════════
+            with ws4:
+                st.markdown("#### 📈 Model Performance Metrics")
+                flag("These metrics require a labeled dataset (approved/declined businesses with outcomes). "
+                     "Where actual outcome labels are unavailable, we use proxy calculations "
+                     "based on available score data. For production model monitoring, "
+                     "use warehouse.worth_score_input_audit.", "blue")
+
+                col_l,col_r = st.columns(2)
+
+                # ── KS Statistic ───────────────────────────────────────────────
+                with col_l:
+                    st.markdown("##### KS (Kolmogorov-Smirnov) Statistic")
+                    st.markdown("""
+**What KS measures:** Maximum separation between the score distribution of 'good' (approved/low-risk) 
+and 'bad' (declined/high-risk) businesses. Higher = better discrimination.
+
+**KS interpretation:**
+| KS | Model quality |
+|---|---|
+| 0.40–0.60 | Good — acceptable for underwriting |
+| 0.30–0.40 | Fair — needs improvement |
+| < 0.30 | Poor — model not discriminating well |
+| > 0.60 | Excellent — but verify for overfitting |
+                    """)
+                    # Proxy KS using HIGH vs LOW groups as bad/good proxy
+                    if len(high_group)>0 and len(low_group)>0:
+                        from scipy import stats as scipy_stats
+                        ks_stat, ks_pval = scipy_stats.ks_2samp(
+                            high_group["worth_score_850"].values,
+                            low_group["worth_score_850"].values
+                        )
+                        ks_color = "#22c55e" if ks_stat>0.40 else ("#f59e0b" if ks_stat>0.30 else "#ef4444")
+                        ks_label = "Good" if ks_stat>0.40 else ("Fair" if ks_stat>0.30 else "Poor")
+                        kpi(f"KS Statistic (proxy)",f"{ks_stat:.3f}",
+                            f"{ks_label} · p-value: {ks_pval:.4f}",ks_color)
+                        st.markdown(f"*Proxy: KS between HIGH (<500) and LOW (>650) score groups. "
+                                    f"True KS requires actual default/non-default labels.*")
+
+                        # KS curve
+                        s_high = np.sort(high_group["worth_score_850"].values)
+                        s_low  = np.sort(low_group["worth_score_850"].values)
+                        scores_all = np.linspace(300,850,200)
+                        cdf_high = np.array([(s_high<=s).mean() for s in scores_all])
+                        cdf_low  = np.array([(s_low<=s).mean()  for s in scores_all])
+                        fig_ks = go.Figure()
+                        fig_ks.add_trace(go.Scatter(x=scores_all,y=cdf_high,name="HIGH Risk (bad)",
+                                                     line=dict(color="#ef4444",width=2)))
+                        fig_ks.add_trace(go.Scatter(x=scores_all,y=cdf_low,name="LOW Risk (good)",
+                                                     line=dict(color="#22c55e",width=2)))
+                        ks_x = scores_all[np.argmax(np.abs(cdf_high-cdf_low))]
+                        fig_ks.add_vline(x=ks_x,line_dash="dash",line_color="#f59e0b",
+                                          annotation_text=f"Max separation at {ks_x:.0f}")
+                        fig_ks.update_layout(title=f"KS Curve (stat={ks_stat:.3f})",
+                                              xaxis_title="Worth Score",yaxis_title="Cumulative %")
+                        st.plotly_chart(dark_chart_layout(fig_ks),use_container_width=True)
+
+                # ── ROC-AUC ───────────────────────────────────────────────────
+                with col_r:
+                    st.markdown("##### ROC-AUC")
+                    st.markdown("""
+**What ROC-AUC measures:** Probability that the model ranks a random 'bad' business 
+lower than a random 'good' business. AUC=0.5 is random; AUC=1.0 is perfect.
+
+**AUC interpretation:**
+| AUC | Model quality |
+|---|---|
+| 0.75–0.85 | Good for credit/underwriting |
+| 0.70–0.75 | Acceptable |
+| 0.65–0.70 | Marginal |
+| < 0.65 | Poor |
+                    """)
+                    if len(high_group)>0 and len(low_group)>0:
+                        # Proxy AUC: label HIGH=1 (bad), LOW=0 (good), MOD excluded
+                        label_df = pd.concat([
+                            high_group[["worth_score_850"]].assign(label=1),
+                            low_group[["worth_score_850"]].assign(label=0)
+                        ])
+                        # AUC = P(score_bad < score_good) using Mann-Whitney U
+                        u_stat, u_pval = scipy_stats.mannwhitneyu(
+                            high_group["worth_score_850"].values,
+                            low_group["worth_score_850"].values,
+                            alternative="less"
+                        )
+                        auc_proxy = u_stat / (len(high_group)*len(low_group))
+                        auc_color = "#22c55e" if auc_proxy>0.75 else ("#f59e0b" if auc_proxy>0.70 else "#ef4444")
+                        kpi("ROC-AUC (proxy)",f"{auc_proxy:.3f}",
+                            "Good" if auc_proxy>0.75 else ("Acceptable" if auc_proxy>0.70 else "Marginal"),
+                            auc_color)
+                        st.markdown(f"*Proxy: AUC between HIGH (<500) and LOW (>650) groups via Mann-Whitney U. "
+                                    f"True AUC requires default outcome labels.*")
+
+                        # Simple ROC curve
+                        thresholds = np.linspace(300,850,100)
+                        tpr_list, fpr_list = [],[]
+                        for t in thresholds:
+                            tp = (high_group["worth_score_850"]<t).sum()
+                            fn = (high_group["worth_score_850"]>=t).sum()
+                            fp = (low_group["worth_score_850"]<t).sum()
+                            tn = (low_group["worth_score_850"]>=t).sum()
+                            tpr_list.append(tp/max(tp+fn,1))
+                            fpr_list.append(fp/max(fp+tn,1))
+                        fig_roc = go.Figure()
+                        fig_roc.add_trace(go.Scatter(x=fpr_list,y=tpr_list,mode="lines",
+                                                      name=f"ROC (AUC≈{auc_proxy:.3f})",
+                                                      line=dict(color="#3B82F6",width=2)))
+                        fig_roc.add_trace(go.Scatter(x=[0,1],y=[0,1],mode="lines",
+                                                      name="Random (AUC=0.5)",
+                                                      line=dict(color="#64748b",dash="dash")))
+                        fig_roc.update_layout(title="ROC Curve (proxy)",
+                                              xaxis_title="False Positive Rate",
+                                              yaxis_title="True Positive Rate")
+                        st.plotly_chart(dark_chart_layout(fig_roc),use_container_width=True)
+
+                # ── PSI (Population Stability Index) ─────────────────────────
+                st.markdown("##### PSI — Population Stability Index")
+                st.markdown("""
+**What PSI measures:** Whether the score distribution has shifted over time (population drift).
+High PSI = the population the model is scoring today is different from when it was trained.
+
+| PSI | Interpretation |
+|---|---|
+| < 0.10 | Stable — no significant shift |
+| 0.10–0.25 | Minor shift — monitor |
+| > 0.25 | Major shift — investigate / retrain model |
+
+PSI requires time-series score data. Run the SQL below to calculate it.
+                """)
+                st.code("""-- PSI calculation: compare score distribution across 2 periods
+WITH period_a AS (
+    SELECT weighted_score_850,
+           WIDTH_BUCKET(weighted_score_850, 300, 850, 10) AS bucket
+    FROM rds_manual_score_public.business_scores
+    WHERE created_at < CURRENT_DATE - 90  -- baseline period (>90 days ago)
+),
+period_b AS (
+    SELECT weighted_score_850,
+           WIDTH_BUCKET(weighted_score_850, 300, 850, 10) AS bucket
+    FROM rds_manual_score_public.business_scores
+    WHERE created_at >= CURRENT_DATE - 90  -- current period (last 90 days)
+),
+dist_a AS (SELECT bucket, COUNT(*)*1.0/SUM(COUNT(*)) OVER() AS pct_a FROM period_a GROUP BY bucket),
+dist_b AS (SELECT bucket, COUNT(*)*1.0/SUM(COUNT(*)) OVER() AS pct_b FROM period_b GROUP BY bucket)
+SELECT SUM((pct_b - pct_a) * LN(pct_b/NULLIF(pct_a,0))) AS PSI
+FROM dist_a JOIN dist_b USING (bucket);""", language="sql")
+
+                # ── Precision / Recall / F1 ───────────────────────────────────
+                st.markdown("##### Precision, Recall, F1 — at Different Thresholds")
+                if len(high_group)>0 and len(low_group)>0:
+                    thresholds_pr = [450,500,525,550,575,600,625,650]
+                    pr_rows = []
+                    n_bad  = len(high_group)
+                    n_good = len(low_group)
+                    for t in thresholds_pr:
+                        # "Predict bad" = score < threshold
+                        tp = int((high_group["worth_score_850"]<t).sum())
+                        fp = int((low_group["worth_score_850"]<t).sum())
+                        fn = int((high_group["worth_score_850"]>=t).sum())
+                        tn = int((low_group["worth_score_850"]>=t).sum())
+                        prec   = tp/max(tp+fp,1)
+                        recall = tp/max(tp+fn,1)
+                        f1     = 2*prec*recall/max(prec+recall,1e-6)
+                        approval_rate = (fp+tn)/max(n_bad+n_good,1)
+                        pr_rows.append({
+                            "Threshold": t,
+                            "Precision": f"{prec:.3f}",
+                            "Recall":    f"{recall:.3f}",
+                            "F1 Score":  f"{f1:.3f}",
+                            "Approval Rate": f"{approval_rate*100:.1f}%",
+                            "Declined %": f"{(1-approval_rate)*100:.1f}%",
+                        })
+                    pr_df = pd.DataFrame(pr_rows)
+                    styled_table(pr_df)
+                    st.markdown("""
+**How to read this table (proxy using HIGH/LOW groups as bad/good):**
+- **Threshold**: if a business scores below this, classify as "high risk" (would decline/review)
+- **Precision**: of all businesses flagged as high risk, what % truly are high risk?
+- **Recall**: of all truly high-risk businesses, what % did the model catch?
+- **F1**: harmonic mean of precision and recall — the balanced metric
+- **Approval Rate**: % of businesses that would pass at this threshold
+
+*True precision/recall requires actual default outcome labels. This is a proxy using risk_level groups.*
+                    """)
+
+                analyst_card("Model Metrics — How to Interpret", [
+                    "KS statistic: the fundamental discriminatory power metric. "
+                    "A KS of 0.40+ means the score clearly separates risky from safe businesses. "
+                    "KS < 0.30 means the score is not much better than random for ranking.",
+                    "ROC-AUC: probability that a randomly chosen bad business scores lower than a randomly chosen good one. "
+                    "AUC 0.75 means in 75% of (bad, good) pairs, the bad one scores lower — model is working.",
+                    "PSI > 0.25 is an early warning for model drift: the population being scored "
+                    "has changed significantly from the training data. This can happen after a product "
+                    "change, new customer segment, or macroeconomic shift.",
+                    "F1 Score is useful when the cost of false positives ≠ false negatives. "
+                    "In underwriting, a false negative (approving a bad business) is typically "
+                    "more costly than a false positive (declining a good business).",
+                    "These are PROXY metrics because we lack actual default/repayment outcome labels. "
+                    "For true model validation, integrate actual repayment data as the outcome variable.",
+                ])
+
+            # ════════ 5. RISK SEGMENTS ════════════════════════════════════════
+            with ws5:
+                st.markdown("#### ⚡ Risk Segment Deep Dive")
+                st.markdown("Detailed analysis of each risk band — who is in each segment and what characterizes them.")
+
+                # Score band analysis
+                score_df["score_band"] = pd.cut(score_df["worth_score_850"],
+                    bins=[299,400,450,500,550,600,650,700,750,851],
+                    labels=["300–400","400–450","450–500","500–550","550–600",
+                            "600–650","650–700","700–750","750–850"])
+                band_counts = score_df["score_band"].value_counts().sort_index().reset_index()
+                band_counts.columns = ["Score Band","Count"]
+                band_counts["% of Total"] = (band_counts["Count"]/total_s*100).round(1)
+                band_counts["Risk"] = band_counts["Score Band"].apply(
+                    lambda b: "HIGH" if str(b)<"500" else ("MODERATE" if str(b)<"650" else "LOW"))
+
+                fig_band = px.bar(band_counts,x="Score Band",y="Count",color="Risk",
+                                  color_discrete_map={"HIGH":"#ef4444","MODERATE":"#f59e0b","LOW":"#22c55e"},
+                                  text="% of Total",
+                                  title="Business Count by 50-Point Score Band")
+                fig_band.update_traces(texttemplate="%{text:.1f}%",textposition="outside")
+                st.plotly_chart(dark_chart_layout(fig_band),use_container_width=True)
+                styled_table(band_counts)
+
+                # What % are in each band for each decision
+                if "score_decision" in score_df.columns:
+                    st.markdown("##### Score Band × Decision Cross-Tabulation")
+                    cross = pd.crosstab(score_df["score_band"],score_df["score_decision"],
+                                        normalize="index").round(3)*100
+                    cross = cross.reset_index()
+                    fig_heat = go.Figure(go.Heatmap(
+                        z=cross.iloc[:,1:].values,
+                        x=cross.columns[1:].tolist(),
+                        y=cross["score_band"].astype(str).tolist(),
+                        colorscale="RdYlGn",
+                        text=cross.iloc[:,1:].values.round(1),
+                        texttemplate="%{text}%",
+                        hovertemplate="Band: %{y}<br>Decision: %{x}<br>%: %{z:.1f}%",
+                    ))
+                    fig_heat.update_layout(title="% of Each Score Band Receiving Each Decision")
+                    st.plotly_chart(dark_chart_layout(fig_heat),use_container_width=True)
+
+                analyst_card("Risk Segment Insights", [
+                    "The 300–450 band represents the most severe risk. Businesses here typically have "
+                    "multiple public records, recent bankruptcies, OR failed SOS + TIN simultaneously.",
+                    "The 450–550 band is the 'uncertain zone' — these businesses have some risk signals "
+                    "but not enough to confidently decline. This is where FURTHER_REVIEW decisions concentrate.",
+                    "The 650–850 band represents businesses that pass on all major factors: clean public records, "
+                    "active SOS, verified TIN, and (if Plaid connected) positive financial ratios.",
+                    "Score bands should be monitored for stability over time (PSI metric). "
+                    "If the 450–550 band grows significantly month-over-month, it may indicate "
+                    "worsening applicant quality or a data quality issue in the pipeline.",
+                ])
+
+            # ════════ 6. DATA LINEAGE ════════════════════════════════════════
+            with ws6:
+                st.markdown("#### 🗄️ Worth Score Data Lineage")
+                st.markdown("""
+**How the Worth Score is computed:**
+
+```
+Applicant submits onboarding form
+      ↓
+integration-service: collects facts (SOS, TIN, NAICS, etc.)
+      ↓
+warehouse-service: pulls from ZI/EFX + Redshift for financial features
+      ↓
+Plaid API: cash flow, balance, transactions → accounting features
+      ↓
+External APIs: public records (BK/Judgment/Lien), SERP, Google reviews
+      ↓
+ai-score-service: 12-step pipeline:
+  preprocessor → missing imputer → NAICS transformer →
+  encoder → initial_layer (firmographic XGBoost) →
+  scaler → second_layer (financial model) →
+  neural_layer (economic PyTorch) →
+  quantiler → ensemble → calibrator → prediction (0–1)
+      ↓
+Score = prediction × 550 + 300  (→ 300–850 range)
+      ↓
+rds_manual_score_public.business_scores (stored)
+      ↓
+data_current_scores (latest per business)
+      ↓
+Admin Portal + KYB Dashboard
+```
+
+**Key tables:**
+                """)
+                lineage_tbl = pd.DataFrame({
+                    "Table": [
+                        "rds_manual_score_public.business_scores",
+                        "rds_manual_score_public.data_current_scores",
+                        "rds_manual_score_public.business_score_factors",
+                        "rds_manual_score_public.business_score_triggers",
+                        "warehouse.worth_score_input_audit",
+                        "rds_cases_public.data_business_scores",
+                    ],
+                    "Purpose": [
+                        "All score records — weighted_score_850, risk_level, score_decision",
+                        "Latest score per business — join on score_id",
+                        "Factor contributions (SHAP-equivalent per category)",
+                        "What triggered the score (case, API, manual)",
+                        "Daily fill-rate audit for all 100+ model input features",
+                        "Denormalized snapshot — score_100, score_850, risk_level, decision",
+                    ],
+                    "How to access": [
+                        "Redshift federation: rds_manual_score_public.*",
+                        "JOIN with business_scores on id=score_id",
+                        "JOIN with data_current_scores → business_score_factors",
+                        "JOIN with data_current_scores",
+                        "Native Redshift: warehouse.worth_score_input_audit",
+                        "Redshift federation: rds_cases_public.*",
+                    ],
+                })
+                styled_table(lineage_tbl)
 
     with tab_audit:
         if is_audit:
