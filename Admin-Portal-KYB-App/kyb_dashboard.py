@@ -5385,23 +5385,257 @@ elif section == "🔎 Business Lookup":
         idv_val   = str(gv("idv_passed_boolean") or "").lower()
 
         st.markdown(f"### 🔍 KYB Investigation — `{biz_name}` (`{bid}`)")
+
+        # ── Pre-load facts needed for causal analysis ─────────────────────────
+        tin_match_obj  = latest.get("tin_match",{}).get("value")
+        tin_status_str = ""
+        tin_message    = ""
+        if isinstance(tin_match_obj, dict):
+            tin_status_str = tin_match_obj.get("status","").lower()
+            tin_message    = tin_match_obj.get("message","")
+        elif tin_match_obj and str(tin_match_obj) not in ("[too large","None",""):
+            try:
+                _tm = json.loads(str(tin_match_obj))
+                tin_status_str = _tm.get("status","").lower()
+                tin_message    = _tm.get("message","")
+            except Exception:
+                pass
+
+        middesk_tin_task = str(latest.get("middesk_tin_task",{}).get("value","none") or "none").lower()
+        tin_submitted_v  = str(gv("tin_submitted") or "").lower()
+        oc_conf_v        = gc("sos_match")
+        middesk_conf_v   = gc("middesk_confidence") if "middesk_confidence" in latest else gc("sos_match")
+        idv_status_raw   = gv("idv_status")
+        name_match_v     = str(gv("name_match_boolean") or "").lower()
+
+        # ── Diagnostic card renderer ──────────────────────────────────────────
+        def diag_card(title, badge, badge_color, reason, detail, all_states, source_hint):
+            """Renders a rich diagnostic card with badge, causal reason, and all possible states."""
+            st.markdown(f"""<div style="background:#1E293B;border-radius:10px;
+                padding:14px 16px;border-left:4px solid {badge_color};margin-bottom:6px">
+              <div style="color:#94A3B8;font-size:.70rem;text-transform:uppercase;letter-spacing:.05em">{title}</div>
+              <div style="color:{badge_color};font-size:1.15rem;font-weight:700;margin:4px 0">{badge}</div>
+              <div style="color:#CBD5E1;font-size:.78rem;margin-top:4px"><strong>Why:</strong> {reason}</div>
+              <div style="color:#94A3B8;font-size:.73rem;margin-top:4px">{detail}</div>
+              <div style="color:#475569;font-size:.70rem;margin-top:6px">Source: {source_hint}</div>
+            </div>""", unsafe_allow_html=True)
+            with st.expander(f"All possible states for '{title}'"):
+                st.markdown(all_states)
+
         c1,c2,c3,c4,c5 = st.columns(5)
-        with c1: kpi("SOS",
-                     "✅ Active" if sos_act=="true" else ("🚨 Inactive" if sos_act=="false" else "⚠️ Unknown"),
-                     "registry","#22c55e" if sos_act=="true" else "#ef4444")
-        with c2: kpi("TIN",
-                     "✅ Verified" if tin_bool=="true" else "❌ Not verified",
-                     "IRS EIN match","#22c55e" if tin_bool=="true" else "#ef4444")
-        with c3: kpi("NAICS",
-                     f"{'⚠️ ' if naics_val=='561499' else ''}{naics_val or 'N/A'}",
-                     "561499=fallback" if naics_val=="561499" else "classification",
-                     "#f59e0b" if naics_val=="561499" else "#22c55e")
-        with c4: kpi("Watchlist",
-                     f"🚨 {wl_hits} hit(s)" if wl_hits>0 else "✅ Clean",
-                     "","#ef4444" if wl_hits>0 else "#22c55e")
-        with c5: kpi("IDV",
-                     "✅ Passed" if idv_val=="true" else ("❌ Not passed" if idv_val=="false" else "⚠️ Unknown"),
-                     "Plaid","#22c55e" if idv_val=="true" else "#f59e0b")
+
+        # ── Card 1: SOS ───────────────────────────────────────────────────────
+        with c1:
+            if sos_act=="true":
+                sos_badge  = "✅ Active"
+                sos_color  = "#22c55e"
+                sos_reason = "The entity is registered and in good legal standing with the state."
+                sos_detail = "Middesk (or OC) confirmed an active SOS filing for this business name and state."
+            elif sos_act=="false":
+                sos_badge  = "🚨 Inactive"
+                sos_color  = "#ef4444"
+                sos_reason = "The entity exists in the state registry but is NOT in good standing — it cannot legally conduct business."
+                sos_detail = f"Common causes: unpaid franchise tax, missed annual report filing, administrative dissolution. Source confidence: {middesk_conf_v:.3f}."
+            else:
+                sos_badge  = "⚠️ Unknown"
+                sos_color  = "#f59e0b"
+                sos_reason = "No vendor returned an SOS active status for this business."
+                sos_detail = "Middesk and OC both had confidence=0 — entity was not found in SOS registry."
+
+            diag_card("SOS Registry", sos_badge, sos_color, sos_reason, sos_detail,
+                """| Badge | Meaning | Cause |
+|---|---|---|
+| ✅ **Active** | In good standing with state | Middesk/OC matched and filing is active |
+| 🚨 **Inactive** | NOT in good standing — cannot operate | Unpaid taxes, missed annual report, admin dissolution |
+| ⚠️ **Unknown** | Status not determinable | No vendor matched this entity (confidence=0) |""",
+                "`sos_active` fact · pid=16 (Middesk) or pid=23 (OC)")
+
+        # ── Card 2: TIN ───────────────────────────────────────────────────────
+        with c2:
+            if tin_bool=="true":
+                tin_badge  = "✅ Verified"
+                tin_color  = "#22c55e"
+                tin_reason = "IRS confirmed: the submitted EIN matches this exact legal business name."
+                tin_detail = f"Middesk TIN review task result: success. {('Message: ' + tin_message[:80]) if tin_message else ''}"
+            elif tin_status_str=="failure":
+                tin_badge  = "❌ Not verified"
+                tin_color  = "#ef4444"
+                # Determine specific failure reason from Middesk message
+                if "does not have a record" in tin_message.lower():
+                    tin_reason = "IRS has no record for this EIN + legal name combination."
+                    tin_detail = "Most likely cause: wrong EIN submitted, or the legal name differs from what's registered with the IRS (DBA vs legal name)."
+                elif "different business name" in tin_message.lower() or "associated with" in tin_message.lower():
+                    tin_reason = "🚨 FRAUD RISK: This EIN is registered under a DIFFERENT business name."
+                    tin_detail = "The EIN exists in IRS records but belongs to another entity. This is a serious signal — possible EIN reuse or fraudulent application."
+                elif "duplicate" in tin_message.lower():
+                    tin_reason = "Duplicate TIN request — Middesk received a repeat submission."
+                    tin_detail = "Re-submit after 24 hours."
+                elif "invalid" in tin_message.lower():
+                    tin_reason = "The EIN format is invalid (wrong length, non-numeric, etc.)."
+                    tin_detail = "Ask applicant to check their EIN certificate — must be exactly 9 digits."
+                elif "unavailable" in tin_message.lower():
+                    tin_reason = "IRS system was temporarily unavailable when verification was attempted."
+                    tin_detail = "Auto-retry in 24h — not a business data issue."
+                else:
+                    tin_reason = f"TIN match failed. Middesk message: '{tin_message[:100]}'" if tin_message else "TIN verification failed — specific reason not stored."
+                    tin_detail = "Check tin_match.message fact for the full Middesk IRS response."
+            elif tin_status_str=="pending":
+                tin_badge  = "⏳ Pending"
+                tin_color  = "#f59e0b"
+                tin_reason = "TIN verification request sent to IRS but response not yet received."
+                tin_detail = "Normal for same-day submissions — IRS response typically arrives within 24–48 hours. If pending > 72h, investigate Middesk API."
+            elif tin_submitted_v in ("false","0",""):
+                tin_badge  = "📭 Not submitted"
+                tin_color  = "#64748b"
+                tin_reason = "The applicant did not provide an EIN during onboarding."
+                tin_detail = "No TIN = no IRS verification possible. Require EIN resubmission before approval."
+            else:
+                tin_badge  = "⚠️ Unknown"
+                tin_color  = "#f59e0b"
+                tin_reason = "TIN status could not be determined — the verification may not have been triggered."
+                tin_detail = f"tin_match_boolean={tin_bool}, tin_match.status='{tin_status_str}'. Check if Middesk was called for this business."
+
+            diag_card("TIN Verification", tin_badge, tin_color, tin_reason, tin_detail,
+                """| Badge | Meaning | Most common cause |
+|---|---|---|
+| ✅ **Verified** | IRS confirmed EIN + legal name match | Correct EIN, correct legal name |
+| ❌ **Not verified (no record)** | IRS has no EIN for this name | Wrong EIN, or name differs from IRS registration |
+| ❌ **Not verified (wrong business)** | EIN belongs to a different entity | EIN reuse, fraud signal |
+| ⏳ **Pending** | IRS response awaited | Normal for same-day submissions |
+| 📭 **Not submitted** | Applicant skipped the EIN field | Onboarding form not enforcing EIN |
+| ⚠️ **Unknown** | Middesk not called or status missing | Entity matching failed before TIN check |""",
+                "`tin_match_boolean`, `tin_match.status`, `tin_match.message` facts · pid=16 (Middesk)")
+
+        # ── Card 3: NAICS ─────────────────────────────────────────────────────
+        with c3:
+            naics_src_v  = gp("naics_code")
+            naics_conf_v = gc("naics_code")
+            if not naics_val or naics_val=="None":
+                naics_badge  = "⚠️ Not classified"
+                naics_color  = "#64748b"
+                naics_reason = "No NAICS code was assigned — the Fact Engine found no vendor or AI classification."
+                naics_detail = "This should not happen — the Fact Engine always assigns at minimum 561499."
+            elif naics_val=="561499":
+                naics_badge  = f"⚠️ {naics_val} (fallback)"
+                naics_color  = "#f59e0b"
+                naics_reason = "NAICS 561499 (All Other Business Support Services) is the fallback code assigned when the industry cannot be determined."
+                naics_detail = f"Winning source: {naics_src_v} (confidence: {naics_conf_v:.3f}). Root cause: entity matching failed for all vendors → AI fired with name+address only → could not classify."
+            else:
+                naics_badge  = naics_val
+                naics_color  = "#22c55e"
+                naics_reason = f"Business classified as NAICS {naics_val}."
+                naics_detail = f"Winning source: {naics_src_v} (confidence: {naics_conf_v:.3f}). {('Low confidence — may be incorrect.' if naics_conf_v<0.40 else 'Confidence is acceptable.')}"
+
+            diag_card("NAICS Classification", naics_badge, naics_color, naics_reason, naics_detail,
+                """| Badge | Meaning | Cause |
+|---|---|---|
+| ✅ **6-digit code** | Classified (e.g. 722511) | Vendor matched and provided NAICS |
+| ⚠️ **561499 (fallback)** | Could not classify industry | Entity matching failed; AI couldn't determine industry |
+| ⚠️ **Not classified** | No code assigned at all | Fact Engine pipeline error |""",
+                "`naics_code` fact · pid=17(EFX)/24(ZI)/23(OC)/31(AI)/22(SERP)")
+
+        # ── Card 4: Watchlist ─────────────────────────────────────────────────
+        with c4:
+            if wl_hits==0:
+                wl_badge  = "✅ Clean"
+                wl_color  = "#22c55e"
+                wl_reason = "No watchlist hits found. The business (and its owners) do not appear on any tracked sanctions, PEP, or compliance lists."
+                wl_detail = "Source: Trulioo PSC screening + Middesk watchlist review task."
+            elif wl_hits>0:
+                wl_badge  = f"🚨 {wl_hits} hit(s)"
+                wl_color  = "#ef4444"
+                wl_reason = f"{wl_hits} watchlist hit(s) found. The business or its owners appear on one or more compliance screening lists."
+                wl_detail = "Check the ⚠️ Risk tab for detailed hit types (Sanctions/PEP/Adverse Media). Sanctions = hard stop. PEP = Enhanced Due Diligence required."
+            else:
+                wl_badge  = "⚠️ Unknown"
+                wl_color  = "#64748b"
+                wl_reason = "Watchlist screening status could not be determined."
+                wl_detail = "watchlist_hits fact not found or has no value."
+
+            diag_card("Watchlist", wl_badge, wl_color, wl_reason, wl_detail,
+                """| Badge | Meaning | Action |
+|---|---|---|
+| ✅ **Clean** | No hits on any list | No compliance action needed |
+| 🚨 **N hit(s) — Sanctions** | On OFAC/UN/EU/HMT sanctions list | **Hard stop** — cannot approve without compliance clearance |
+| 🚨 **N hit(s) — PEP** | Owner is a Politically Exposed Person | Enhanced Due Diligence required — not automatic denial |
+| 🚨 **N hit(s) — Other** | On other compliance/law enforcement list | Manual review required |
+| ⚠️ **Unknown** | Screening not completed | Trigger re-screening before decision |""",
+                "`watchlist_hits` fact · `clients.customer_table.watchlist_count` · `rds_integration_data.business_entity_review_task`")
+
+        # ── Card 5: IDV ───────────────────────────────────────────────────────
+        with c5:
+            # Get the dominant IDV status
+            idv_dominant = "UNKNOWN"
+            if isinstance(idv_status_raw, dict) and idv_status_raw:
+                idv_dominant = max(idv_status_raw, key=lambda k: idv_status_raw[k])
+            elif idv_val=="true":
+                idv_dominant = "SUCCESS"
+            elif idv_val=="false":
+                idv_dominant = "FAILED"
+
+            IDV_REASONS = {
+                "SUCCESS": ("✅ Passed","#22c55e",
+                    "Identity confirmed via Plaid IDV — government ID scanned, selfie matched, liveness check passed.",
+                    "The owner's real identity is verified. This is the strongest possible identity confirmation."),
+                "FAILED":  ("❌ Failed","#ef4444",
+                    "Plaid IDV completed but rejected the verification.",
+                    "Most common reasons: (1) expired or damaged ID, (2) selfie doesn't match ID photo, (3) liveness check failed (possible deepfake attempt), (4) ID type not supported for this country."),
+                "PENDING": ("⏳ Pending","#f59e0b",
+                    "IDV session was created but the owner has not completed it yet.",
+                    "Normal for recent applications. If pending > 48h, send a reminder or re-issue the session link."),
+                "CANCELED":("🚫 Canceled","#f97316",
+                    "Owner opened the IDV session but chose to exit before completing it.",
+                    "Could indicate friction in the UX, distrust of the biometric process, or deliberate avoidance. Follow up by phone."),
+                "EXPIRED": ("⌛ Expired","#64748b",
+                    "The IDV session link expired before the owner used it.",
+                    "Session links are valid for 15–30 minutes. Re-issue a new IDV session link."),
+                "UNKNOWN": ("⚠️ Unknown","#94a3b8",
+                    "IDV status could not be determined from stored facts.",
+                    "The idv_status fact may not be stored for this business, or the IDV flow was never triggered."),
+            }
+            badge_info = IDV_REASONS.get(idv_dominant, IDV_REASONS["UNKNOWN"])
+            diag_card("IDV (Plaid)", badge_info[0], badge_info[1], badge_info[2], badge_info[3],
+                """| Badge | Meaning | Root cause |
+|---|---|---|
+| ✅ **Passed** | Identity confirmed | Government ID + selfie verified by Plaid AI |
+| ❌ **Failed** | Verification rejected | Expired ID, selfie mismatch, liveness fail, unsupported document |
+| ⏳ **Pending** | Not yet completed | Owner hasn't opened the link yet |
+| 🚫 **Canceled** | Owner exited the flow | UX friction or deliberate avoidance |
+| ⌛ **Expired** | Link expired | Owner did not use the link within 15–30 minutes |
+| ⚠️ **Unknown** | Not triggered or not stored | IDV may not have been requested for this business |""",
+                "`idv_status` (dict of status counts), `idv_passed_boolean` facts · pid=40 (Plaid)")
+
+        # ── Causal summary card ────────────────────────────────────────────────
+        # Identify most critical issue and explain it
+        issues = []
+        if sos_act=="false":    issues.append(("🔴","SOS inactive","Entity cannot legally operate. First red flag in underwriting."))
+        if tin_bool!="true" and tin_status_str=="failure" and "different business name" in tin_message.lower():
+            issues.append(("🔴","TIN EIN mismatch — potential fraud","EIN belongs to a different entity. Escalate to fraud review."))
+        elif tin_bool!="true" and tin_status_str=="failure":
+            issues.append(("🟡","TIN verification failed","IRS EIN-name mismatch. Ask applicant for correct EIN."))
+        elif tin_bool!="true" and tin_submitted_v in ("false","0",""):
+            issues.append(("🟡","No EIN submitted","Require EIN before proceeding."))
+        if wl_hits>0:          issues.append(("🔴","Watchlist hits found",f"{wl_hits} hit(s) — check sanctions/PEP status immediately."))
+        if naics_val=="561499": issues.append(("🟡","NAICS fallback","Industry unclassified — entity matching failed."))
+        if idv_dominant in ("FAILED","EXPIRED","CANCELED"):
+            issues.append(("🟡",f"IDV {idv_dominant}","Identity not confirmed — re-trigger IDV."))
+
+        if issues:
+            st.markdown("#### ⚡ Priority Action Summary")
+            for severity, title, action in sorted(issues, key=lambda x: x[0]):
+                color = "#ef4444" if severity=="🔴" else "#f59e0b"
+                st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
+                    border-radius:8px;padding:10px 14px;margin:4px 0;display:flex;gap:12px;align-items:center">
+                  <span style="font-size:1.2rem">{severity}</span>
+                  <div><span style="color:{color};font-weight:700">{title}</span>
+                  <span style="color:#94A3B8;font-size:.78rem;margin-left:8px">{action}</span></div>
+                </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"""<div style="background:#052e16;border-left:4px solid #22c55e;
+                border-radius:8px;padding:10px 14px;margin:4px 0">
+              <span style="color:#22c55e;font-weight:700">✅ No critical issues detected across all 5 signals.</span>
+              <span style="color:#86efac;font-size:.78rem;margin-left:8px">SOS active, TIN verified, no watchlist hits, IDV passed.</span>
+            </div>""", unsafe_allow_html=True)
 
         # ── Tab structure mirroring Admin Portal ─────────────────────────────
         tab_bg, tab_reg, tab_ident, tab_class, tab_risk, tab_worth, tab_anomaly, tab_all = st.tabs([
