@@ -5429,13 +5429,32 @@ elif section == "🔎 Business Lookup":
             except Exception: return 0
 
         def fact_row(name, label=None):
-            """Build a display row for a single fact."""
+            """Build a display row for a single fact with rich source attribution."""
             v = gv(name)
-            if isinstance(v,(dict,list)): display = json.dumps(v)[:120]
-            else: display = str(v)[:120] if v is not None else "(not stored)"
+            if isinstance(v, list):
+                display = f"📋 list · {len(v)} item(s) — expand in 📋 All Facts"
+            elif isinstance(v, dict):
+                # Special handling for known dict-valued facts
+                if name == "idv_status" and v:
+                    parts = [f"{k}:{cnt}" for k,cnt in v.items() if cnt]
+                    display = "IDV: " + ", ".join(parts[:4])
+                else:
+                    display = f"🗂️ object · {len(v)} key(s) — expand in 📋 All Facts"
+            elif v is None:
+                display = "(not stored)"
+            elif str(v) == "[too large — query PostgreSQL RDS directly]":
+                display = "📦 too large — see 📋 All Facts for SQL"
+            else:
+                display = str(v)[:150]
+
             conf = gc(name)
+            # Build source display with knowledge fallback
+            raw_src = gp(name)
+            if raw_src in ("Unknown source","No vendor (default)","Applicant/System") and name in FACT_SOURCE_KNOWLEDGE:
+                raw_src = FACT_SOURCE_KNOWLEDGE.get(name, raw_src)
+
             return {"Field": label or name, "Value": display,
-                    "Source": gp(name), "Confidence": f"{conf:.3f}" if conf>0 else "—",
+                    "Source": raw_src, "Confidence": f"{conf:.3f}" if conf>0 else "—",
                     "Updated": gts(name)}
 
         # ── Summary header ────────────────────────────────────────────────────
@@ -6891,28 +6910,145 @@ The following 20 relationship checks were evaluated. All passed for this busines
                 for n in names:
                     fact_to_group[n] = grp
 
+            # ── Source lookup from api-docs knowledge ─────────────────────────
+            # Every fact in rds_warehouse_public.facts has a source.platformId
+            # indicating which vendor WON the Fact Engine selection.
+            # pid="" or pid missing = applicant-submitted or system default.
+            FACT_SOURCE_KNOWLEDGE = {
+                # Facts that come from a specific known vendor always
+                "business_name":        "Applicant form / ZI / EFX",
+                "legal_name":           "Middesk BEV / OC",
+                "dba_found":            "Middesk review tasks / OC",
+                "names":                "ZI / EFX / Middesk",
+                "names_found":          "ZI / EFX / OC (merged)",
+                "names_submitted":      "Applicant form",
+                "people":               "Middesk / OC / Trulioo (too large for Redshift)",
+                "customer_ids":         "System internal (case management)",
+                "external_id":          "System internal (case management)",
+                "kyb_submitted":        "System flag — true when any vendor matched",
+                "sos_filings":          "Middesk (primary) / OC (fallback) — too large for Redshift",
+                "sos_match":            "Middesk / OC — too large for Redshift",
+                "sos_match_boolean":    "Middesk / OC",
+                "sos_active":           "Calculated from sos_filings array",
+                "formation_state":      "Middesk / OC (jurisdiction_code)",
+                "formation_date":       "Middesk / OC / EFX",
+                "year_established":     "EFX (yrest) / ZI (year_founded) / Middesk",
+                "corporation":          "Middesk (company_type) / OC",
+                "middesk_confidence":   "Middesk — task-based confidence score",
+                "middesk_id":           "Middesk internal entity ID",
+                "tin":                  "Middesk BEV (decrypted) / OC / applicant",
+                "tin_submitted":        "Applicant form",
+                "tin_match":            "Middesk TIN review task / Trulioo",
+                "tin_match_boolean":    "Calculated from tin_match.status",
+                "idv_status":           "Plaid IDV (dict of status counts per session)",
+                "idv_passed":           "Calculated from idv_status.SUCCESS count",
+                "idv_passed_boolean":   "Calculated: true iff idv_passed > 0",
+                "is_sole_prop":         "Calculated from tin_submitted + idv_status",
+                "name_match":           "Middesk / OC / Trulioo review tasks",
+                "name_match_boolean":   "Calculated from name_match.status",
+                "address_match":        "Middesk / SERP / Google",
+                "address_match_boolean":"Calculated from address_match.status",
+                "address_verification": "Middesk address review task",
+                "address_verification_boolean": "Calculated from address_verification.status",
+                "addresses_deliverable":"USPS/postal check via Middesk",
+                "addresses":            "ZI / EFX / OC / Middesk (merged list)",
+                "addresses_found":      "ZI / EFX / OC / Middesk",
+                "addresses_submitted":  "Applicant form",
+                "primary_address":      "Applicant form / ZI / EFX",
+                "address_registered_agent": "Middesk / OC",
+                "naics_code":           "EFX/ZI/OC/SERP/Trulioo/AI (Fact Engine winner)",
+                "mcc_code":             "AI enrichment / rel_naics_mcc lookup",
+                "industry":             "Calculated from naics_code 2-digit prefix",
+                "naics_description":    "core_naics_code lookup table",
+                "mcc_description":      "AI enrichment / core_mcc_code lookup",
+                "website":              "SERP / ZI / AI",
+                "website_found":        "SERP (Google search)",
+                "watchlist":            "Middesk + Trulioo PSC (consolidated, too large)",
+                "watchlist_hits":       "Calculated from watchlist.metadata.length",
+                "adverse_media_hits":   "Trulioo / adverseMediaDetails records",
+                "num_bankruptcies":     "Public records (Middesk / Verdata)",
+                "num_judgements":       "Public records (Middesk / Verdata)",
+                "num_liens":            "Public records (Middesk / Verdata)",
+                "worth_score":          "ai-score-service → rds_manual_score_public",
+                "revenue":              "ZI / EFX / Plaid / accounting integration",
+                "num_employees":        "ZI (zi_c_employees) / EFX (corpempcnt)",
+            }
+
+            def _format_value_expandable(fact_name, v, raw_value_str):
+                """Format a value for display. Lists/dicts get expandable content."""
+                if v is None:
+                    return "(null)", None
+                if str(v) == "[too large — query PostgreSQL RDS directly]":
+                    return "📦 [too large — see SQL below]", None
+
+                if isinstance(v, list):
+                    preview = f"📋 list · {len(v)} item(s)"
+                    detail  = v
+                    return preview, detail
+
+                if isinstance(v, dict):
+                    preview = f"🗂️ object · {len(v)} key(s)"
+                    detail  = v
+                    return preview, detail
+
+                return str(v)[:150], None
+
             # Group all facts
-            grouped = {}
+            grouped    = {}
+            grouped_raw = {}  # store raw fact dict for expandable details
             for _, row in facts_df.drop_duplicates("name").iterrows():
-                f  = _parse_fact(row["value"])
+                raw_str = row.get("value","") or ""
+                f  = _parse_fact(raw_str)
                 v  = f.get("value")
-                if isinstance(v,(dict,list)):
-                    dv = f"[{type(v).__name__}, {len(v) if isinstance(v,list) else len(v)} item(s)]"
-                else:
-                    dv = str(v)[:120] if v is not None else "(null)"
+
+                preview, detail = _format_value_expandable(row["name"], v, raw_str)
+
+                # Source — try platform_id, then alternatives[0].source.platformId
+                pid_raw = str(_safe_get(f,"source","platformId",default="") or "")
+                if not pid_raw or pid_raw in ("","None","-1","0"):
+                    # Check alternatives for a source hint
+                    alts = f.get("alternatives",[]) or []
+                    for alt in alts[:1]:
+                        if isinstance(alt,dict):
+                            alt_pid = str(_safe_get(alt,"source","platformId",default="") or "")
+                            if alt_pid and alt_pid not in ("","None","-1"):
+                                pid_raw = f"alt:{alt_pid}"
+                                break
+
+                source_display = pid_name(pid_raw.replace("alt:","")) if not pid_raw.startswith("alt:") else f"{pid_name(pid_raw.replace('alt:',''))} (via alternatives)"
+
+                # Override with known source if source metadata is missing
+                if source_display in ("Unknown source","No vendor (default)","Applicant/System") and row["name"] in FACT_SOURCE_KNOWLEDGE:
+                    source_display = FACT_SOURCE_KNOWLEDGE[row["name"]]
+
                 conf = float(_safe_get(f,"source","confidence",default=0) or 0)
                 grp  = fact_to_group.get(row["name"],"📦 Other")
                 if grp not in grouped:
-                    grouped[grp] = []
+                    grouped[grp]     = []
+                    grouped_raw[grp] = []
+
+                has_override = row.get("value") and str(row.get("value","")).find('"override"')>0
+                override_val = _safe_get(f,"override","value",default=None)
+                analyst_note = ""
+                if override_val:
+                    analyst_note = f"⚠️ Analyst override: {str(override_val)[:60]}"
+
                 grouped[grp].append({
-                    "Fact":       row["name"],
-                    "Value":      dv,
-                    "Source":     pid_name(str(_safe_get(f,"source","platformId",default=""))),
-                    "Confidence": f"{conf:.3f}" if conf>0 else "—",
-                    "Updated":    str(row["received_at"])[:16],
+                    "Fact":            row["name"],
+                    "Value":           preview,
+                    "Source (winner)": source_display,
+                    "Confidence":      f"{conf:.3f}" if conf>0 else "—",
+                    "Updated":         str(row["received_at"])[:16],
+                    "Override":        analyst_note,
+                })
+                grouped_raw[grp].append({
+                    "name":   row["name"],
+                    "detail": detail,
+                    "fact":   f,
+                    "raw":    raw_str,
                 })
 
-            # Show counts summary first
+            # Show counts + column guide
             total_facts = facts_df["name"].nunique()
             stored_count = sum(1 for _,row in facts_df.drop_duplicates("name").iterrows()
                                if _parse_fact(row["value"]).get("value") is not None)
@@ -6922,17 +7058,128 @@ The following 20 relationship checks were evaluated. All passed for this busines
             with c2: kpi("Has Value",f"{stored_count}","non-null facts","#22c55e")
             with c3: kpi("Null/Missing",f"{null_count}","(null) value","#f59e0b")
 
+            with st.expander("ℹ️ How to read this table — Value, Source, Confidence explained"):
+                st.markdown("""
+**Value column:**
+| Display | Meaning |
+|---|---|
+| Plain text / number | The actual stored value |
+| `📋 list · N item(s)` | A JSON array — click the fact name row expander below to see all items |
+| `🗂️ object · N key(s)` | A JSON object — click the fact name row expander to see all keys |
+| `📦 [too large]` | The value exceeds Redshift federation VARCHAR(65535) limit. Query from PostgreSQL RDS (port 5432) directly using the SQL in the tab below. |
+| `(null)` | No value was stored for this fact — see "Why null?" below |
+
+**Source (winner) column — who provided this value to the Admin Portal:**
+The Fact Engine selects ONE winning vendor for each fact. The source shown is the vendor whose value
+the customer sees in the Admin Portal. Source can be:
+- `Middesk` (pid=16) — US SOS live query
+- `OC` (pid=23) — OpenCorporates global registry
+- `ZoomInfo` (pid=24) — Firmographic bulk data
+- `Equifax` (pid=17) — Firmographic bulk data
+- `Trulioo` (pid=38) — KYB / person screening
+- `AI` (pid=31) — GPT AI enrichment (last resort)
+- `SERP` (pid=22) — Google/web scraping
+- `Plaid` (pid=40) — Bank/identity verification
+- `Applicant/System` — Data submitted by the applicant on the onboarding form
+- Name with source knowledge — derived from api-docs and source code analysis
+
+**Why null?** A fact is null (no value) when:
+1. The vendor that provides this fact did NOT match this business (entity matching failed)
+2. The field is optional and the applicant didn't submit it (e.g. email, phone)
+3. The fact is calculated from another fact that is also null (e.g. `naics_description` is null if `naics_code` is null)
+4. The integration for this fact was not active when this business was onboarded
+
+**Override column:** Shows `⚠️ Analyst override: value` if an analyst manually changed this fact in the Admin Portal.
+                """)
+
             # Render each group in an expander
             group_order = list(FACT_GROUPS.keys()) + ["📦 Other"]
-            for grp in group_order:
+            for gi, grp in enumerate(group_order):
                 facts_in_grp = grouped.get(grp, [])
+                raw_in_grp   = grouped_raw.get(grp, [])
                 if not facts_in_grp:
                     continue
                 has_val  = sum(1 for r in facts_in_grp if r["Value"] not in ("(null)","(not stored)",""))
                 null_in  = len(facts_in_grp) - has_val
                 label = f"{grp} ({len(facts_in_grp)} facts · {has_val} with values · {null_in} null)"
                 with st.expander(label, expanded=(grp in ("🏢 Identity / Name","🏛️ Registry / SOS","🔐 TIN / EIN"))):
-                    styled_table(pd.DataFrame(facts_in_grp))
+                    # Render table + expandable detail for list/dict values
+                    display_df = pd.DataFrame([{k:v for k,v in r.items() if k!="Override"}
+                                                for r in facts_in_grp])
+                    styled_table(display_df, color_col="Value")
+
+                    # Show expandable detail for list/dict values
+                    for ri, (row_data, raw_data) in enumerate(zip(facts_in_grp, raw_in_grp)):
+                        val_preview = row_data["Value"]
+                        detail      = raw_data.get("detail")
+                        fact        = raw_data.get("fact",{})
+                        fact_name   = raw_data.get("name","")
+
+                        if detail is not None:
+                            with st.expander(f"🔍 Expand `{fact_name}` — {val_preview}"):
+                                if isinstance(detail, list):
+                                    st.markdown(f"**{len(detail)} items in `{fact_name}` array:**")
+                                    for idx, item in enumerate(detail):
+                                        if isinstance(item, dict):
+                                            st.markdown(f"**Item {idx+1}:**")
+                                            st.json(item)
+                                        else:
+                                            st.markdown(f"- `{item}`")
+                                elif isinstance(detail, dict):
+                                    st.markdown(f"**Object keys in `{fact_name}`:**")
+                                    st.json(detail)
+
+                                # Show alternatives if present
+                                alts = fact.get("alternatives",[]) or []
+                                if alts:
+                                    st.markdown(f"**Other vendors that also had a value for `{fact_name}`:**")
+                                    alt_rows = []
+                                    for alt in alts:
+                                        if isinstance(alt, dict):
+                                            alt_pid  = str(_safe_get(alt,"source","platformId",default="") or "")
+                                            alt_conf = float(_safe_get(alt,"source","confidence",default=0) or 0)
+                                            alt_val  = alt.get("value")
+                                            alt_rows.append({
+                                                "Source": pid_name(alt_pid),
+                                                "Value":  str(alt_val)[:80] if alt_val is not None else "(null)",
+                                                "Confidence": f"{alt_conf:.3f}" if alt_conf>0 else "—",
+                                            })
+                                    if alt_rows:
+                                        styled_table(pd.DataFrame(alt_rows))
+
+                        elif "[too large" in str(val_preview):
+                            with st.expander(f"🔍 Query `{fact_name}` directly (too large for Redshift)"):
+                                st.markdown(f"**Source:** {row_data.get('Source (winner)','Unknown')}")
+                                st.code(f"""-- Run on PostgreSQL RDS (port 5432):
+SELECT value, received_at
+FROM rds_warehouse_public.facts
+WHERE business_id = '{bid}'
+  AND name = '{fact_name}';
+-- The value column is native JSONB on PostgreSQL — use -> and ->> operators
+-- e.g.: SELECT jsonb_array_elements(value->'value') AS item FROM ... WHERE ...""", language="sql")
+
+                        # Show override warning inline
+                        if row_data.get("Override"):
+                            flag(row_data["Override"], "amber")
+
+                    # Explain null facts
+                    null_facts = [r["Fact"] for r in facts_in_grp if r["Value"]=="(null)"]
+                    if null_facts:
+                        with st.expander(f"❓ Why are {len(null_facts)} facts null in this group?"):
+                            st.markdown("""
+A `(null)` value means the fact exists in the system schema but no vendor provided a value for this specific business.
+
+**Common reasons:**
+- **Entity matching failed**: the vendor couldn't match this business → no data returned
+- **Optional field**: the applicant didn't submit this data (e.g. email, phone)
+- **Calculated fact**: depends on another null fact (e.g. `naics_description` requires `naics_code`)
+- **Not in source**: this field is not available in the vendor's database for this business
+
+**The source column still shows** who *would* provide this fact if it existed — not who confirmed the null.
+                            """)
+                            for fn in null_facts:
+                                known = FACT_SOURCE_KNOWLEDGE.get(fn, "")
+                                st.markdown(f"- `{fn}`: {known if known else 'Source not documented'}")
 
             st.markdown("---")
             st.markdown("#### 🔍 SQL for deeper investigation")
