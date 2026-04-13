@@ -5358,6 +5358,13 @@ elif section == "🔎 Business Lookup":
         def gp(name): return pid_name(str(_safe_get(latest.get(name,{}),"source","platformId",default="")))
         def gts(name): return str(facts_df[facts_df["name"]==name]["received_at"].iloc[0])[:16] if name in facts_df["name"].values else "N/A"
 
+        def _safe_int_gv(name):
+            """Safely extract a numeric fact value — handles placeholder strings and lists."""
+            v = gv(name)
+            if v is None: return 0
+            try: return int(float(str(v)))
+            except Exception: return 0
+
         def fact_row(name, label=None):
             """Build a display row for a single fact."""
             v = gv(name)
@@ -6417,12 +6424,6 @@ ORDER BY score_date DESC LIMIT 3;""", language="sql")
                     "tin_submitted=false, tin_match_boolean=true"))
 
             # ── 18. Watchlist hits but no sanctions ───────────────────────────
-            def _safe_int_gv(name):
-                v = gv(name)
-                if v is None: return 0
-                try: return int(float(str(v)))
-                except Exception: return 0
-
             if wl_hits>0:
                 sanctions_val = _safe_int_gv("sanctions_hits")
                 pep_val       = _safe_int_gv("pep_hits")
