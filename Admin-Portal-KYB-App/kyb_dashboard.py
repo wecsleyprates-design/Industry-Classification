@@ -1570,8 +1570,8 @@ elif section == "🏛️ Identity & Registry":
         flag(f"⚠️ {inactive:,} businesses have SOS inactive status. "
              "Inactive+perpetual = entity cannot legally operate. First red flag in underwriting.", "amber")
 
-    tab_sos, tab_tin, tab_idv, tab_cross, tab_vendors, tab_dq = st.tabs([
-        "🏛️ SOS Registry","🔐 TIN","🪪 IDV (Plaid)","🔗 Cross-Analysis","📡 Vendors","🔬 Quality Checks"
+    tab_sos, tab_dom_foreign, tab_tin, tab_idv, tab_cross, tab_vendors, tab_dq = st.tabs([
+        "🏛️ SOS Registry","🗺️ Domestic vs Foreign","🔐 TIN","🪪 IDV (Plaid)","🔗 Cross-Analysis","📡 Vendors","🔬 Quality Checks"
     ])
 
     # ── SOS ────────────────────────────────────────────────────────────────────
@@ -1717,6 +1717,366 @@ Cross-reference with the "Neither matched" count — they should be similar popu
             "but Middesk could not match in US SOS. Causes: new incorporation, name mismatch, Middesk API failure.",
             f"Neither vendor matched ({both_no_match:,}): entity existence completely unverified. "
             "Route 100% of these to manual underwriting.",
+        ])
+
+    # ── DOMESTIC vs FOREIGN ────────────────────────────────────────────────────
+    with tab_dom_foreign:
+        st.markdown("#### 🗺️ Domestic vs Foreign Registration Analysis")
+        st.markdown(
+            "Understanding the complexity of domestic vs foreign registrations is critical for entity resolution. "
+            "A **domestic** registration = the state where the entity was **incorporated** (legal home). "
+            "A **foreign** registration = any other state where the entity is **qualified to do business** (operational presence). "
+            "These are often different states, and the current search-by-address approach may only find the **foreign** record."
+        )
+
+        flag("Key insight from entity resolution: if a business incorporated in Delaware (domestic) "
+             "operates in Nevada (foreign registration), searching by the Nevada address finds the "
+             "**foreign qualification** record — NOT the primary domestic record. "
+             "This means the entity's true legal identity (Delaware) may be missed.", "red")
+
+        # ── What we know from scalar facts ────────────────────────────────────
+        flag("sos_filings (which contains foreign_domestic field) exceeds the Redshift federation "
+             "VARCHAR limit — it must be queried from PostgreSQL RDS (port 5432) directly. "
+             "This analysis uses formation_state (domestic state) and primary_address.state "
+             "(operating state) as proxies to identify likely domestic/foreign situations.", "amber")
+
+        # ── Live query: formation_state vs address state ───────────────────────
+        st.markdown("---")
+        st.markdown("### Part 1 — Formation State vs Operating State (Proxy Analysis)")
+        st.markdown(
+            "**Formation state** = where the entity was incorporated (domestic state). "
+            "**Primary address state** = where the business currently operates (may trigger foreign qualification). "
+            "When these differ, the business almost certainly has a domestic filing in one state "
+            "and a foreign qualification in another."
+        )
+
+        dom_foreign_sql = f"""
+            SELECT
+                fs.business_id,
+                JSON_EXTRACT_PATH_TEXT(fs.value,'value') AS formation_state,
+                JSON_EXTRACT_PATH_TEXT(pa.value,'value','state') AS operating_state
+            FROM rds_warehouse_public.facts fs
+            JOIN rds_warehouse_public.facts pa
+              ON pa.business_id = fs.business_id AND pa.name = 'primary_address'
+            WHERE fs.name = 'formation_state'
+              AND JSON_EXTRACT_PATH_TEXT(fs.value,'value') IS NOT NULL
+              AND JSON_EXTRACT_PATH_TEXT(pa.value,'value','state') IS NOT NULL
+            ORDER BY fs.received_at DESC{_limit_clause(record_limit)}
+        """
+        df_states = run_query(dom_foreign_sql)
+
+        if df_states is not None and not df_states.empty:
+            df_states["formation_state"]  = df_states["formation_state"].str.upper().str.strip()
+            df_states["operating_state"]  = df_states["operating_state"].str.upper().str.strip()
+            df_states["states_match"]     = df_states["formation_state"] == df_states["operating_state"]
+            df_states["likely_situation"] = df_states.apply(lambda r:
+                "✅ Domestic only (incorporated & operates in same state)" if r["states_match"]
+                else ("⚠️ Domestic + Foreign qualification likely" if r["formation_state"] in
+                      ("DE","NV","WY","FL","TX","CA","NY","IL","GA","PA","NC","OH","CO","AZ","WA")
+                      else "🔍 Multi-state — check for foreign qualification"), axis=1)
+
+            # Key metrics
+            total_checked = len(df_states)
+            same_state    = df_states["states_match"].sum()
+            diff_state    = total_checked - same_state
+            tax_haven_dom = df_states[df_states["formation_state"].isin(["DE","NV","WY"])]["business_id"].nunique()
+
+            c1,c2,c3,c4 = st.columns(4)
+            with c1: kpi("Businesses Analyzed", f"{total_checked:,}", "with formation + address state", "#3B82F6")
+            with c2: kpi("Same State (likely domestic only)", f"{same_state:,}",
+                         f"{same_state/max(total_checked,1)*100:.1f}%","#22c55e")
+            with c3: kpi("Different States (foreign qual. likely)", f"{diff_state:,}",
+                         f"{diff_state/max(total_checked,1)*100:.1f}%","#f59e0b")
+            with c4: kpi("Incorporated in Tax-Haven State (DE/NV/WY)", f"{tax_haven_dom:,}",
+                         f"{tax_haven_dom/max(total_checked,1)*100:.1f}%","#8B5CF6")
+
+            col_l, col_r = st.columns(2)
+            with col_l:
+                sit_counts = df_states["likely_situation"].value_counts().reset_index()
+                sit_counts.columns = ["Situation","Count"]
+                fig_sit = px.pie(sit_counts, names="Situation", values="Count",
+                                 color="Situation",
+                                 color_discrete_map={
+                                     "✅ Domestic only (incorporated & operates in same state)":"#22c55e",
+                                     "⚠️ Domestic + Foreign qualification likely":"#f59e0b",
+                                     "🔍 Multi-state — check for foreign qualification":"#f97316",
+                                 }, hole=0.45, title="Domestic vs Foreign Situation")
+                st.plotly_chart(dark_chart_layout(fig_sit), use_container_width=True)
+
+            with col_r:
+                # Top formation states
+                form_counts = df_states["formation_state"].value_counts().head(12).reset_index()
+                form_counts.columns = ["State","Count"]
+                form_counts["Is Tax Haven"] = form_counts["State"].isin(["DE","NV","WY"])
+                fig_form = px.bar(form_counts, x="Count", y="State", orientation="h",
+                                  color="Is Tax Haven",
+                                  color_discrete_map={True:"#8B5CF6",False:"#3B82F6"},
+                                  title="Top 12 Formation States")
+                fig_form.update_layout(yaxis=dict(autorange="reversed"),showlegend=True)
+                st.plotly_chart(dark_chart_layout(fig_form), use_container_width=True)
+
+            # Cross-tab: formation state vs operating state
+            st.markdown("#### Formation State → Operating State Flow")
+            st.markdown(
+                "Each cell shows how many businesses incorporated in the formation state (rows) "
+                "are operating in the operating state (columns). "
+                "Off-diagonal cells = businesses that likely have BOTH a domestic and a foreign registration."
+            )
+            top_form  = df_states["formation_state"].value_counts().head(8).index.tolist()
+            top_oper  = df_states["operating_state"].value_counts().head(8).index.tolist()
+            cross_df  = df_states[df_states["formation_state"].isin(top_form) &
+                                    df_states["operating_state"].isin(top_oper)]
+            cross_tab = pd.crosstab(cross_df["formation_state"], cross_df["operating_state"])
+            fig_heat = go.Figure(go.Heatmap(
+                z=cross_tab.values,
+                x=[f"Operates: {c}" for c in cross_tab.columns],
+                y=[f"Incorporated: {r}" for r in cross_tab.index],
+                colorscale="Blues",
+                text=cross_tab.values,
+                texttemplate="%{text}",
+                hovertemplate="Incorporated in: %{y}<br>Operates in: %{x}<br>Count: %{z}",
+            ))
+            fig_heat.update_layout(
+                title="Formation State × Operating State Cross-Tabulation (top 8 each)",
+                xaxis_title="Operating State (primary_address)", yaxis_title="Formation State"
+            )
+            st.plotly_chart(dark_chart_layout(fig_heat), use_container_width=True)
+
+            # Businesses where search-by-address would miss domestic record
+            st.markdown("#### 🚨 Entity Resolution Gap — Address-Based Search Finds Wrong Registration")
+            gap_df = df_states[~df_states["states_match"]].copy()
+            gap_df["gap_risk"] = gap_df.apply(lambda r:
+                "🔴 HIGH — Tax haven domestic (DE/NV/WY)" if r["formation_state"] in ("DE","NV","WY")
+                else "🟡 MEDIUM — Multi-state operation", axis=1)
+
+            # Most common domestic states being missed
+            missed_domestic = gap_df.groupby("formation_state").agg(
+                count=("business_id","count"),
+                top_operating=("operating_state",lambda x: x.value_counts().index[0])
+            ).reset_index().sort_values("count",ascending=False).head(10)
+            missed_domestic.columns = ["Domestic (formation) state","# Businesses","Most common operating state"]
+
+            col_l, col_r = st.columns(2)
+            with col_l:
+                fig_gap = px.bar(missed_domestic, x="# Businesses", y="Domestic (formation) state",
+                                 orientation="h", color="# Businesses",
+                                 color_continuous_scale="Reds",
+                                 title="Domestic States Most Likely to Be Missed by Address Search")
+                fig_gap.update_layout(yaxis=dict(autorange="reversed"), coloraxis_showscale=False)
+                st.plotly_chart(dark_chart_layout(fig_gap), use_container_width=True)
+            with col_r:
+                styled_table(missed_domestic)
+                st.markdown(f"""
+**Why this matters:**
+When your entity matching searches by the business's submitted address,
+it finds the **foreign qualification** record in the operating state.
+The **domestic record** in the formation state (e.g. Delaware) is not found.
+
+This means:
+- The SOS name on the domestic filing may differ from the submitted name
+- Foreign qualifications may have different officer information
+- The actual **legal entity** is Delaware-registered, not Nevada-registered
+- `sos_match_boolean` may be FALSE because Middesk matched the wrong record
+                """)
+
+            analyst_card("Domestic vs Foreign — Entity Resolution Deep Dive", [
+                f"{diff_state:,} businesses ({diff_state/max(total_checked,1)*100:.1f}%) have their formation state "
+                f"different from their operating state. Each of these businesses almost certainly has "
+                "BOTH a domestic filing (in formation state) AND a foreign qualification (in operating state).",
+                f"{tax_haven_dom:,} businesses incorporated in DE/NV/WY — the three most common 'tax haven' "
+                "states chosen for favorable corporate laws, regardless of where the business actually operates. "
+                "These are the highest-risk for entity resolution gaps because the name on the Delaware "
+                "filing may differ significantly from the d/b/a name submitted in the application.",
+                "The current entity matching approach: Middesk performs a live SOS query based on the "
+                "submitted business name AND submitted address. If the address is in Nevada but the "
+                "entity is incorporated in Delaware, Middesk finds the Nevada foreign qualification record — "
+                "which may have: different officer names, different registered agent, or a different legal name.",
+                "Impact on sos_match_boolean: if the foreign qualification name differs from the submitted name, "
+                "sos_match_boolean=false — even though the business IS legitimately registered. "
+                "This creates false negatives in the verification pipeline.",
+                "Recommended fix: when sos_match_boolean=false AND formation_state ≠ operating_state, "
+                "re-run the Middesk search using the FORMATION state specifically. "
+                "This is a known gap in the integration-service Middesk integration.",
+            ])
+
+        else:
+            flag("Could not load formation_state and address data. Showing SQL-based analysis.", "amber")
+
+        # ── Part 2: The Delaware Problem ──────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### Part 2 — The Delaware Problem")
+        st.markdown("""
+**Why Delaware is special:**
+
+~60% of Fortune 500 companies and many SMBs incorporate in Delaware because:
+1. **No state income tax** for companies that don't operate in Delaware
+2. **Court of Chancery** — a specialized business court with predictable rulings
+3. **Flexible corporate law** — easier to structure equity, voting rights, investor protections
+4. **Privacy** — Delaware doesn't require naming officers/directors in public filings
+
+**The entity resolution problem this creates:**
+
+| Business submits | Middesk searches | Finds | Problem |
+|---|---|---|---|
+| "Joe's Plumbing LLC" + Texas address | Texas SOS | "Joe's Plumbing LLC (Texas foreign)" | Found foreign qualification only |
+| Delaware domestic filing | Not searched | "Joe's Plumbing LLC (Delaware domestic)" | The TRUE legal entity is missed |
+| Delaware name = "JPS Holdings LLC" | — | — | Name mismatch → sos_match=false |
+
+**The gap**: `sos_match_boolean=false` may be a false negative when the real issue is
+that we searched the wrong state.
+        """)
+
+        # ── Part 3: What the SOS filings fact would tell us ─────────────────
+        st.markdown("---")
+        st.markdown("### Part 3 — What sos_filings Contains (PostgreSQL RDS Required)")
+        st.markdown("""
+The `sos_filings` fact stores a JSON array where each element represents one SOS filing.
+Each filing has a `foreign_domestic` field that directly answers the question.
+This fact exceeds the Redshift federation VARCHAR(65535) limit — query from PostgreSQL RDS:
+        """)
+        st.code("""-- Run on PostgreSQL RDS (port 5432) — sos_filings is native JSONB, no size limit
+
+-- 1. Count domestic vs foreign filings across all businesses
+SELECT
+    filing->>'foreign_domestic'  AS filing_type,
+    COUNT(DISTINCT f.business_id) AS businesses,
+    ROUND(COUNT(DISTINCT f.business_id)*100.0 / SUM(COUNT(DISTINCT f.business_id)) OVER(), 2) AS pct
+FROM rds_warehouse_public.facts f
+CROSS JOIN jsonb_array_elements(f.value->'value') AS filing
+WHERE f.name = 'sos_filings'
+  AND filing->>'foreign_domestic' IS NOT NULL
+GROUP BY filing->>'foreign_domestic'
+ORDER BY businesses DESC;
+
+-- 2. Businesses with BOTH domestic AND foreign filings (most interesting)
+SELECT business_id, COUNT(*) AS filing_count,
+       SUM(CASE WHEN filing->>'foreign_domestic'='domestic' THEN 1 ELSE 0 END) AS domestic_count,
+       SUM(CASE WHEN filing->>'foreign_domestic'='foreign'  THEN 1 ELSE 0 END) AS foreign_count,
+       STRING_AGG(DISTINCT filing->>'jurisdiction', ', ') AS jurisdictions
+FROM rds_warehouse_public.facts f
+CROSS JOIN jsonb_array_elements(f.value->'value') AS filing
+WHERE f.name = 'sos_filings'
+GROUP BY business_id
+HAVING SUM(CASE WHEN filing->>'foreign_domestic'='domestic' THEN 1 ELSE 0 END) >= 1
+   AND SUM(CASE WHEN filing->>'foreign_domestic'='foreign'  THEN 1 ELSE 0 END) >= 1
+ORDER BY filing_count DESC
+LIMIT 100;
+
+-- 3. Cases where submitted address state ≠ domestic formation state
+SELECT
+    f.business_id,
+    dom_filing->>'jurisdiction' AS domestic_state,
+    forein_filing->>'jurisdiction' AS foreign_state,
+    dom_filing->>'active'  AS domestic_active,
+    forein_filing->>'active' AS foreign_active
+FROM rds_warehouse_public.facts f
+CROSS JOIN jsonb_array_elements(f.value->'value') AS dom_filing
+CROSS JOIN jsonb_array_elements(f.value->'value') AS forein_filing
+WHERE f.name = 'sos_filings'
+  AND dom_filing->>'foreign_domestic' = 'domestic'
+  AND forein_filing->>'foreign_domestic' = 'foreign'
+  AND dom_filing->>'jurisdiction' != forein_filing->>'jurisdiction'
+LIMIT 200;
+
+-- 4. Entity resolution gap detection: sos_match=false but has domestic filing
+SELECT
+    f.business_id,
+    sos.value->>'value' AS sos_match_boolean,
+    filing->>'foreign_domestic' AS filing_type,
+    filing->>'jurisdiction' AS jurisdiction,
+    filing->>'active' AS active
+FROM rds_warehouse_public.facts f
+CROSS JOIN jsonb_array_elements(f.value->'value') AS filing
+JOIN rds_warehouse_public.facts sos
+  ON sos.business_id = f.business_id AND sos.name = 'sos_match_boolean'
+WHERE f.name = 'sos_filings'
+  AND sos.value->>'value' = 'false'
+  AND filing->>'foreign_domestic' = 'domestic'
+LIMIT 100;""", language="sql")
+
+        # ── Part 4: Sanity checks using available scalar data ─────────────────
+        st.markdown("---")
+        st.markdown("### Part 4 — Sanity Checks Using Available Data")
+
+        # Middesk confidence vs formation state mismatch
+        if df_states is not None and not df_states.empty:
+            # Check: do mismatched-state businesses have lower Middesk confidence?
+            if "middesk_conf" in sos.columns and "business_id" in sos.columns:
+                sos_with_states = sos.merge(
+                    df_states[["business_id","states_match","formation_state","operating_state"]],
+                    on="business_id", how="inner"
+                )
+                if not sos_with_states.empty and "states_match" in sos_with_states.columns:
+                    matched_conf   = sos_with_states[sos_with_states["states_match"]]["middesk_conf"].mean()
+                    mismatched_conf= sos_with_states[~sos_with_states["states_match"]]["middesk_conf"].mean()
+
+                    col_l, col_r = st.columns(2)
+                    with col_l:
+                        kpi("Avg Middesk Conf: Same State",
+                            f"{matched_conf:.3f}",
+                            "formation = operating state","#22c55e")
+                    with col_r:
+                        kpi("Avg Middesk Conf: Different State",
+                            f"{mismatched_conf:.3f}",
+                            "formation ≠ operating state (entity resolution gap risk)",
+                            "#ef4444" if mismatched_conf < matched_conf*0.9 else "#f59e0b")
+
+                    if mismatched_conf < matched_conf * 0.9:
+                        flag(f"⚠️ Businesses with mismatched formation/operating states have "
+                             f"lower Middesk confidence ({mismatched_conf:.3f} vs {matched_conf:.3f}). "
+                             "This confirms the entity resolution gap hypothesis: "
+                             "Middesk is finding the foreign qualification record (lower confidence) "
+                             "instead of the primary domestic record.", "red")
+
+                    fig_box = px.box(sos_with_states, x="states_match", y="middesk_conf",
+                                     color="states_match",
+                                     color_discrete_map={True:"#22c55e",False:"#ef4444"},
+                                     labels={"states_match":"Formation = Operating State",
+                                             "middesk_conf":"Middesk Confidence"},
+                                     title="Middesk Confidence: Same State vs Different State")
+                    fig_box.update_layout(showlegend=False)
+                    st.plotly_chart(dark_chart_layout(fig_box), use_container_width=True)
+
+                    analyst_card("Sanity Check — Confidence Gap Confirms Entity Resolution Gap", [
+                        f"Same-state businesses (domestic filing = operating state) have avg Middesk confidence "
+                        f"{matched_conf:.3f}. These businesses are easy to match because the address "
+                        "Middesk searches is in the same state as the domestic incorporation.",
+                        f"Different-state businesses (likely have foreign qualification) have avg Middesk confidence "
+                        f"{mismatched_conf:.3f}. Lower confidence = Middesk is less certain about the match — "
+                        "possibly because it found the foreign qualification record with a different name/format.",
+                        "Fix recommendation: when formation_state ≠ operating_state, trigger an additional "
+                        "Middesk lookup specifying the formation state explicitly. This would search the "
+                        "domestic record directly instead of the foreign qualification.",
+                        "Integration-service change required: pass `jurisdiction_override=formation_state` "
+                        "to the Middesk API call when these two states differ.",
+                    ])
+
+        # ── Part 5: Tax Haven Impact Summary ──────────────────────────────────
+        st.markdown("---")
+        st.markdown("### Part 5 — Tax Haven State Impact on Underwriting")
+        st.markdown("""
+**Delaware, Nevada, Wyoming** are the three most common "corporate formation" states.
+Businesses incorporate here for legal/tax benefits while operating elsewhere.
+This creates predictable entity resolution challenges:
+
+| State | Why businesses incorporate here | Entity resolution challenge |
+|---|---|---|
+| **Delaware** | Court of Chancery, flexible corp law, no disclosure of officers | Name on DE filing may differ from DBA; Middesk finds out-of-state foreign qualification |
+| **Nevada** | No state income tax, strong liability protection | Operating in CA/TX/NY but incorporated in NV; address search finds wrong record |
+| **Wyoming** | LLC privacy (no public officer disclosure), low fees | Particularly common for anonymous holding companies; very hard to resolve |
+
+**What this means for underwriting:**
+- A business in Nevada incorporated in Delaware with a DBA name is the hardest case to verify
+- `sos_match_boolean=false` + formation_state=DE + operating_state≠DE = likely false negative
+- The business IS real, it IS registered — we're just not searching the right state
+        """)
+
+        cross_box("Recommended Entity Resolution Improvements", [
+            "Add a formation-state-specific Middesk search as a fallback when the primary search fails (sos_match=false)",
+            "Store the domestic filing jurisdiction separately from the foreign filing — currently both are in sos_filings array but not split in any fact",
+            "Add a `has_foreign_qualification` fact to the Fact Engine — binary flag that triggers enhanced entity resolution",
+            "For DE/NV/WY incorporations: always perform a dual search (formation state + operating state) regardless of match result",
+            "Flag businesses where formation_state ∈ {DE, NV, WY} AND sos_match=false for manual review — these are high-probability false negatives",
         ])
 
     # ── TIN ────────────────────────────────────────────────────────────────────
