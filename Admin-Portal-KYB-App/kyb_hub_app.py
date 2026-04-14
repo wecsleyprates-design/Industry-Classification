@@ -587,20 +587,99 @@ if tab=="🏠 Home":
                     st.success("UUID set. Navigate to any section in the sidebar.")
 
         st.markdown("---")
-        st.markdown("#### Understanding the Red Flag Score")
-        st.markdown("""
-| Flag | Score | Why it matters |
-|---|---|---|
-| 🔴 Watchlist hit | +12 | Sanctions/PEP — hard stop required |
-| 🔴 SOS Inactive | +10 | Entity cannot legally operate |
-| 🔴 No SOS data | +8 | Entity existence completely unverified |
-| 🔴 TIN Failed | +6 | EIN-name mismatch per IRS |
-| 🟡 IDV Failed | +4 | Identity verification not confirmed |
-| 🟡 No/Missing TIN | +3 | EIN not submitted or not verified |
-| 🟡 No NAICS/Fallback | +2–3 | Industry classification missing |
-| 🟡 Bankruptcy | +3 each | Public record on file |
+        st.markdown("#### 🧮 Red Flag Score — Methodology Card")
+        st.markdown("""<div style="background:#1E293B;border-left:4px solid #6366f1;border-radius:10px;padding:16px 20px;margin:8px 0">
 
-**Score ≥ 12** = Critical · **8–11** = High · **1–7** = Medium
+<div style="color:#a5b4fc;font-weight:700;font-size:.95rem;margin-bottom:6px">
+  📐 What is this score?
+</div>
+<div style="color:#CBD5E1;font-size:.82rem;line-height:1.7">
+  This is a <strong>custom additive heuristic</strong> built specifically for this dashboard.
+  It is <em>not</em> sourced from any external scoring model, regulatory framework, or vendor.
+  It is not the Worth Score, not an AML risk score, and not a credit score.
+  It exists solely to <strong>rank and surface businesses needing manual review</strong>
+  on the Home tab — a triage signal, not a decisioning tool.
+</div>
+
+<div style="color:#a5b4fc;font-weight:700;font-size:.95rem;margin:12px 0 6px">
+  ⚙️ How is it calculated?
+</div>
+<div style="color:#CBD5E1;font-size:.82rem;line-height:1.7">
+  Each detected condition adds a fixed integer to a running total.
+  Conditions are checked independently — a business can accumulate multiple flags.
+  The final score is the <strong>sum of all triggered weights</strong>.
+  There is no normalization, no probability model, and no ML inference involved.
+</div>
+
+<div style="color:#a5b4fc;font-weight:700;font-size:.95rem;margin:12px 0 6px">
+  🏗️ Why these specific weights?
+</div>
+<div style="color:#CBD5E1;font-size:.82rem;line-height:1.7">
+  Weights reflect <strong>compliance and underwriting priority order</strong>, derived from
+  the internal KYB decision logic documented across the Fact Engine, integration-service rules,
+  and the Worth Score model feature importance. The relative ordering follows these principles:
+  <ul style="margin:6px 0 0 16px;color:#CBD5E1">
+    <li><strong>Sanctions/Watchlist (+12)</strong> — regulatory hard stop per OFAC/FinCEN guidance.
+      Any watchlist hit mandates compliance review before any other action. Highest weight.</li>
+    <li><strong>SOS Inactive (+10)</strong> — a business that is not in good standing with its
+      Secretary of State cannot legally operate. Maps to the <code>sos_active</code> fact from Middesk.</li>
+    <li><strong>No SOS data (+8)</strong> — entity existence is completely unverified.
+      Slightly lower than inactive because the vendor lookup may simply have failed,
+      not because the entity is confirmed bad.</li>
+    <li><strong>TIN Failed (+6)</strong> — IRS EIN-name mismatch (Middesk TIN check).
+      Indicates possible identity fraud or incorrect filing. Serious but recoverable
+      with corrected documentation.</li>
+    <li><strong>IDV Failed (+4)</strong> — beneficial owner identity not confirmed (Trulioo/IDology).
+      Significant for KYC but does not by itself block merchant from existing.</li>
+    <li><strong>Missing TIN / NAICS (+2–3)</strong> — data gaps. May be timing (not yet enriched)
+      rather than a true problem. Lower weight to avoid false alarms on newly onboarded merchants.</li>
+    <li><strong>Bankruptcy (+3 each)</strong> — public record on file. Weighted per occurrence
+      because multiple bankruptcies compound the credit risk signal.</li>
+  </ul>
+</div>
+
+<div style="color:#a5b4fc;font-weight:700;font-size:.95rem;margin:12px 0 6px">
+  ⚠️ Limitations & intended use
+</div>
+<div style="color:#CBD5E1;font-size:.82rem;line-height:1.7">
+  <ul style="margin:4px 0 0 16px">
+    <li>This score is a <strong>triage / prioritisation tool only</strong>. It should not be used
+      for automated approval or decline decisions.</li>
+    <li>Weights are <strong>not statistically calibrated</strong>. They have not been validated
+      against historical default or fraud rates.</li>
+    <li>A score of 0 does not mean the business is safe — it means no flags were detected
+      in the facts currently stored in Redshift.</li>
+    <li>Data latency in <code>rds_warehouse_public.facts</code> means some flags may appear
+      minutes or hours after onboarding.</li>
+    <li>To make this score production-grade, replace it with the Worth Score
+      (<code>rds_manual_score_public.business_scores</code>) or the BERT review signal
+      (<code>rds_integration_data.business_entity_review_task</code>).</li>
+  </ul>
+</div>
+
+<div style="color:#475569;font-size:.72rem;margin-top:12px;border-top:1px solid #334155;padding-top:8px">
+  Source: Custom dashboard heuristic. Internal reference:
+  integration-service <code>lib/facts/rules.ts</code> (rule priority ordering),
+  Worth Score feature importance (<code>ai-score-service/worth_score_model.py</code>),
+  OFAC/FinCEN KYC guidance (watchlist hard-stop).
+  Not a regulatory-compliant risk score.
+</div>
+</div>""", unsafe_allow_html=True)
+
+        st.markdown("**Score weights at a glance:**")
+        st.markdown("""
+| Flag | Score | Regulatory / operational basis |
+|---|---|---|
+| 🔴 Watchlist hit | +12 | OFAC/FinCEN hard stop — highest compliance priority |
+| 🔴 SOS Inactive | +10 | Entity legally cannot operate in its state |
+| 🔴 No SOS data | +8 | Entity existence unverifiable — vendor lookup may have failed |
+| 🔴 TIN Failed | +6 | IRS EIN-name mismatch — potential identity fraud signal |
+| 🟡 IDV Failed | +4 | Beneficial owner identity not confirmed |
+| 🟡 Missing TIN | +3 | EIN not submitted or not yet checked |
+| 🟡 No / Fallback NAICS | +2–3 | Classification gap — industry unverified |
+| 🟡 Bankruptcy (per occurrence) | +3 | Public record — additive per filing |
+
+**Score ≥ 12** = Critical · **8–11** = High · **1–7** = Medium · **0** = No flags detected
         """)
 
 # ════════════════════════════════════════════════════════════════════════════════
