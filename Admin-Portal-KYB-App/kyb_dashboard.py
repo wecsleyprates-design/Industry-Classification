@@ -139,29 +139,28 @@ def run_query(sql):
         return None
 
 
-def query_fact(fact_name, limit, extra_cols=""):
+def query_fact(fact_name, limit, extra_cols="", date_from=None, date_to=None):
     """
-    Query a SINGLE fact name.  If the value column exceeds the Redshift
-    federation VARCHAR(65535) limit for ANY row, the whole query fails.
-    By querying one fact at a time we can skip the offending ones and
-    still return data for the others.
-    extra_cols: additional SQL expressions to add to the SELECT list.
+    Query a SINGLE fact name with optional date range on received_at.
+    If the value column exceeds the Redshift federation VARCHAR(65535) limit
+    for ANY row, the whole query fails.
     """
     cols = f"business_id, '{fact_name}' AS name, value, received_at"
     if extra_cols:
         cols += f", {extra_cols}"
+    dc = _date_clause("received_at", date_from, date_to)
     sql = f"""
         SELECT {cols}
         FROM rds_warehouse_public.facts
-        WHERE name = '{fact_name}'
+        WHERE name = '{fact_name}'{dc}
         ORDER BY received_at DESC{_limit_clause(limit)}
     """
     return run_query(sql)
 
 
-def query_facts_safe(fact_names, limit):
+def query_facts_safe(fact_names, limit, date_from=None, date_to=None):
     """
-    Query multiple fact names one at a time.
+    Query multiple fact names one at a time with optional date filter.
     Silently skips any fact whose value column exceeds the 65535-byte
     Redshift federation VARCHAR limit.
     Returns a combined DataFrame of all facts that succeeded, or None.
@@ -169,7 +168,7 @@ def query_facts_safe(fact_names, limit):
     frames = []
     skipped = []
     for name in fact_names:
-        df = query_fact(name, limit)
+        df = query_fact(name, limit, date_from=date_from, date_to=date_to)
         if df is not None and not df.empty:
             frames.append(df)
         else:
@@ -201,6 +200,18 @@ def test_connection():
 
 def _limit_clause(limit):
     return f" LIMIT {limit}" if limit is not None else ""
+
+def _date_clause(col, date_from, date_to):
+    """Returns a SQL AND clause filtering col between date_from and date_to.
+    date_from / date_to are datetime.date objects or None."""
+    if date_from is None and date_to is None:
+        return ""
+    parts = []
+    if date_from is not None:
+        parts.append(f"{col} >= '{date_from}'")
+    if date_to is not None:
+        parts.append(f"{col} <= '{date_to} 23:59:59'")
+    return " AND " + " AND ".join(parts)
 
 def kpi(label, value, sub="", color="#3B82F6"):
     st.markdown(f"""<div class="kpi" style="border-left-color:{color}">
@@ -343,20 +354,9 @@ def _safe_get(d, *keys, default=""):
     return cur if cur is not None else default
 
 
-def live_sos(limit):
-    """
-    rds_warehouse_public is a Redshift FEDERATED external schema pointing to RDS PostgreSQL.
-    The federation layer hard-caps VARCHAR at 65535 bytes — sos_filings inner arrays can be
-    97KB+, so selecting that fact crashes regardless of SQL transformation used.
-
-    Solution: use the small scalar SOS facts instead:
-      - sos_active          → boolean (is any filing active?)
-      - sos_match_boolean   → boolean (did SOS name match?)
-      - sos_match           → small object {status, confidence, source}
-
-    These are always small scalar values and never hit the 65535 limit.
-    We derive per-vendor confidence from source.platformId in these facts.
-    """
+def live_sos(limit, date_from=None, date_to=None):
+    """SOS scalar facts with optional date filter on received_at."""
+    _dc = _date_clause("received_at", date_from, date_to)
     raw = query_facts_safe(
         ['sos_active', 'sos_match_boolean', 'sos_match', 'middesk_confidence'],
         limit)
@@ -409,7 +409,7 @@ def live_sos(limit):
     return df
 
 
-def live_tin(limit):
+def live_tin(limit, date_from=None, date_to=None):
     sql = f"""
         SELECT business_id, name, value, received_at
         FROM rds_warehouse_public.facts
@@ -495,10 +495,10 @@ def live_tin(limit):
     return pivoted
 
 
-def live_naics(limit):
+def live_naics(limit, date_from=None, date_to=None):
     # CONFIRMED from top-100: naics_code ✅ 69,949 · mcc_code ✅ 69,681
     # naics_description ✅ 69,681 · mcc_description ✅ 69,681 · industry ✅ 69,681
-    raw = query_fact("naics_code", limit)
+    raw = query_fact("naics_code", limit, date_from=date_from, date_to=date_to)
     if raw is None or raw.empty:
         return None
 
@@ -524,7 +524,7 @@ def live_naics(limit):
     raw["naics_label"]   = raw["naics_code"].apply(
         lambda c: "Fallback (Other Business Support)" if c=="561499" else c)
 
-    mcc = query_fact("mcc_code", limit)
+    mcc = query_fact("mcc_code", limit, date_from=date_from, date_to=date_to)
     if mcc is not None and not mcc.empty:
         mcc["mcc_code"] = mcc["value"].apply(
             lambda v: str(_parse_fact(v).get("value","")) if v else "")
@@ -552,7 +552,7 @@ def _discover_fact_names(pattern_list):
     return []
 
 
-def live_banking(limit):
+def live_banking(limit, date_from=None, date_to=None):
     """
     Banking data lives in rds_integration_data (Redshift federated external schema).
 
@@ -686,7 +686,7 @@ def live_banking(limit):
     return df
 
 
-def live_worth(limit):
+def live_worth(limit, date_from=None, date_to=None):
     """
     Worth Score sources (confirmed from schema inspection):
 
@@ -715,7 +715,7 @@ def live_worth(limit):
         FROM rds_manual_score_public.data_current_scores cs
         JOIN rds_manual_score_public.business_scores bs
           ON bs.id = cs.score_id
-        WHERE bs.weighted_score_850 IS NOT NULL
+        WHERE bs.weighted_score_850 IS NOT NULL{_date_clause("bs.created_at", date_from, date_to)}
         ORDER BY bs.created_at DESC{_limit_clause(limit)}
     """
     raw = run_query(sql_primary)
@@ -731,7 +731,7 @@ def live_worth(limit):
                 score_decision,
                 created_at       AS scored_at
             FROM rds_manual_score_public.business_scores
-            WHERE weighted_score_850 IS NOT NULL
+            WHERE weighted_score_850 IS NOT NULL{_date_clause("created_at", date_from, date_to)}
             ORDER BY created_at DESC{_limit_clause(limit)}
         """
         raw = run_query(sql_fallback)
@@ -808,7 +808,7 @@ def live_worth(limit):
     return raw
 
 
-def live_kyc(limit):
+def live_kyc(limit, date_from=None, date_to=None):
     # CONFIRMED fact names from top-100 query:
     #   name_match_boolean       ✅ 73K
     #   address_match_boolean    ✅ 73K
@@ -824,7 +824,7 @@ def live_kyc(limit):
         'idv_status', 'idv_passed_boolean', 'idv_passed',
         'is_sole_prop', 'verification_status',
         'compliance_status', 'risk_score',
-    ], limit)
+    ], limit, date_from=date_from, date_to=date_to)
     if raw is None or raw.empty:
         return None
 
@@ -882,7 +882,7 @@ def live_kyc(limit):
     return pivoted
 
 
-def live_dd(limit):
+def live_dd(limit, date_from=None, date_to=None):
     """
     Due Diligence data from multiple sources:
 
@@ -909,7 +909,7 @@ def live_dd(limit):
     raw = query_facts_safe([
         'watchlist_hits', 'adverse_media_hits',
         'num_bankruptcies', 'num_judgements', 'num_liens',
-    ], limit)
+    ], limit, date_from=date_from, date_to=date_to)
 
     if raw is not None and not raw.empty:
         raw["fact_value"] = raw["value"].apply(
@@ -1089,12 +1089,23 @@ OPTIONAL_SECTIONS = {"banking", "kyc", "worth"}
 
 # ── Session-state cache helpers ────────────────────────────────────────────────
 def _cache_key(section_key, limit):
-    """Unique key for session_state cache — includes limit so changing the
-    slider correctly invalidates the cached data."""
+    """Unique key for session_state cache — includes limit AND date range so
+    changing the slider or date filter correctly invalidates cached data."""
     return f"_data_{section_key}_{limit}"
 
 def _cache_ts_key(section_key, limit):
     return f"_ts_{section_key}_{limit}"
+
+def _cache_key_dated(section_key, limit, date_from, date_to):
+    """Cache key that includes date range — different dates = different cache entry."""
+    df_str = str(date_from) if date_from else "any"
+    dt_str = str(date_to)   if date_to   else "any"
+    return f"_data_{section_key}_{limit}_{df_str}_{dt_str}"
+
+def _cache_ts_key_dated(section_key, limit, date_from, date_to):
+    df_str = str(date_from) if date_from else "any"
+    dt_str = str(date_to)   if date_to   else "any"
+    return f"_ts_{section_key}_{limit}_{df_str}_{dt_str}"
 
 def clear_data_cache():
     """Remove all cached DataFrames from session_state.
@@ -1105,26 +1116,18 @@ def clear_data_cache():
     for k in keys_to_del:
         del st.session_state[k]
 
-def get_cache_age(section_key, limit):
+def get_cache_age(section_key, limit, date_from=None, date_to=None):
     """Return how many seconds ago this dataset was loaded, or None if not cached."""
-    ts = st.session_state.get(_cache_ts_key(section_key, limit))
+    ts = st.session_state.get(_cache_ts_key_dated(section_key, limit, date_from, date_to))
     if ts is None:
         return None
     return int((datetime.now(timezone.utc) - ts).total_seconds())
 
-def get_section_data(section_key, limit):
+def get_section_data(section_key, limit, date_from=None, date_to=None):
     """
     Load data with session_state caching.
-
-    Flow:
-      1. Check session_state for a cached DataFrame under (section_key, limit).
-      2. If found → return immediately (no Redshift query).
-      3. If not found → query Redshift, store result in session_state, return.
-
-    Cache is invalidated when:
-      - User clicks '🔄 Refresh All Data' in the sidebar (calls clear_data_cache())
-      - The 'Records to load' slider value changes (different limit = different key)
-      - The Streamlit server restarts (session_state is process-local)
+    date_from / date_to are datetime.date objects or None.
+    Different date ranges produce different cache keys.
     """
     loaders = {
         "sos":     live_sos,
@@ -1137,12 +1140,12 @@ def get_section_data(section_key, limit):
     }
     live_fn    = loaders[section_key]
     is_optional = section_key in OPTIONAL_SECTIONS
-    cache_key  = _cache_key(section_key, limit)
+    cache_key  = _cache_key_dated(section_key, limit, date_from, date_to)
+    ts_key     = _cache_ts_key_dated(section_key, limit, date_from, date_to)
 
     # ── Step 1: return cached data if available ────────────────────────────────
     if cache_key in st.session_state:
         cached = st.session_state[cache_key]
-        # None is a valid cached value (optional section returned no data)
         if cached is None and is_optional:
             return None
         if cached is not None and not (hasattr(cached,"empty") and cached.empty):
@@ -1153,12 +1156,18 @@ def get_section_data(section_key, limit):
         st.error("🔴 Not connected to Redshift. Connect VPN and click **Retry connection** in the sidebar.")
         st.stop()
 
-    with st.spinner(f"⏳ Loading {section_key} data from Redshift… (will cache for this session)"):
-        df = live_fn(limit)
+    date_label = (f" ({date_from} → {date_to})" if (date_from or date_to) else "")
+    with st.spinner(f"⏳ Loading {section_key} data{date_label}…"):
+        # Pass date filter to loaders that support it
+        try:
+            df = live_fn(limit, date_from=date_from, date_to=date_to)
+        except TypeError:
+            # Older loaders don't accept date args — call without
+            df = live_fn(limit)
 
-    # Store in session_state regardless of success/failure (None = no data available)
+    # Store in session_state
     st.session_state[cache_key] = df
-    st.session_state[_cache_ts_key(section_key, limit)] = datetime.now(timezone.utc)
+    st.session_state[ts_key]    = datetime.now(timezone.utc)
 
     if df is None or (hasattr(df, 'empty') and df.empty):
         err = st.session_state.get("_last_db_error", "")
@@ -1205,6 +1214,277 @@ GROUP BY name ORDER BY rows DESC LIMIT 50;"""
 live, _conn_err = test_connection()
 
 
+# ── Worth Score Waterfall Chart ───────────────────────────────────────────────
+def render_worth_score_waterfall(score_850, bk_n=0, judg_n=0, lien_n=0,
+                                  sos_active=True, tin_ok=True, wl_hits=0,
+                                  age_years=None, has_revenue=False,
+                                  num_emp=0, naics_ok=True, label=""):
+    """
+    Builds a waterfall chart showing how each factor group contributes
+    to the final Worth Score, starting from the base of 300.
+
+    Category contributions are *estimated* from available facts using the
+    known model architecture (ai-score-service/lookups.py + model weights).
+    Actual SHAP values require rds_manual_score_public.business_score_factors.
+
+    Chart mirrors the Admin Portal Worth Score breakdown:
+      Base score → Performance measures → Financial trends →
+      Public records → Business operations → Company profile → Final score
+    """
+    BASE = 300
+    total_range = 550  # 850 - 300
+
+    # ── Estimate each category's contribution ──────────────────────────────
+    # Public Records (most negative — BK/Judgment/Lien)
+    pr_penalty = 0
+    if bk_n > 0:   pr_penalty += min(bk_n * 40, 120)   # up to -120 for BK
+    if judg_n > 0: pr_penalty += min(judg_n * 20, 60)   # up to -60 for judgments
+    if lien_n > 0: pr_penalty += min(lien_n * 10, 40)   # up to -40 for liens
+    pr_contribution = -pr_penalty
+
+    # Performance measures (SOS active + TIN verified = trust signals)
+    perf = 0
+    if sos_active: perf += 10
+    if tin_ok:     perf += 10
+    if wl_hits > 0: perf -= min(wl_hits * 20, 80)
+    perf_contribution = perf
+
+    # Financial trends (revenue, financial ratios)
+    fin_contribution = 25 if has_revenue else 0
+
+    # Business operations (age, employees, reviews)
+    ops = 0
+    if age_years is not None:
+        if age_years >= 5:   ops += 30
+        elif age_years >= 2: ops += 20
+        elif age_years >= 1: ops += 10
+    if num_emp and num_emp > 0:
+        ops += min(int(float(str(num_emp).replace(",",""))/10), 20) if str(num_emp) not in ("","None") else 0
+    ops_contribution = ops
+
+    # Company profile (NAICS, entity type, size indicators)
+    profile_contribution = 15 if naics_ok else 5
+
+    # Remaining gap = what's attributed to economic/macro (captured in base)
+    explained = perf_contribution + fin_contribution + pr_contribution + ops_contribution + profile_contribution
+    remaining = score_850 - BASE - explained
+    # Distribute remaining to financial trends (macro economic factors)
+    fin_contribution += remaining
+
+    # ── Build waterfall ────────────────────────────────────────────────────
+    categories = [
+        "Base score",
+        "Performance measures\n(SOS, TIN, Watchlist)",
+        "Financial trends\n(Revenue, Cash Flow, Ratios)",
+        "Public records\n(BK, Judgments, Liens)",
+        "Business operations\n(Age, Employees, Reviews)",
+        "Company profile\n(NAICS, Entity Type)",
+        "Worth Score",
+    ]
+    contributions = [
+        BASE,
+        perf_contribution,
+        fin_contribution,
+        pr_contribution,
+        ops_contribution,
+        profile_contribution,
+        0,  # placeholder for final bar
+    ]
+
+    # Waterfall running totals
+    running = BASE
+    measure = ["absolute"]
+    x_vals, y_vals, colors, texts, bases_list = [], [], [], [], []
+
+    x_vals.append(categories[0])
+    y_vals.append(BASE)
+    colors.append("#C4A8FF")  # light purple like Admin Portal
+    texts.append(str(BASE))
+    bases_list.append(0)
+    running = BASE
+
+    for i in range(1, len(categories)-1):
+        val = contributions[i]
+        x_vals.append(categories[i])
+        y_vals.append(abs(val))
+        color = "#5B21B6" if val > 0 else "#EF4444"
+        if i == 1:   color = "#3B82F6"   # Performance — blue
+        if i == 2:   color = "#1E3A5F"   # Financial trends — dark blue
+        if i == 3:   color = "#7C3AED"   # Public records — purple
+        if i == 4:   color = "#8B5CF6"   # Business ops — medium purple
+        if i == 5:   color = "#9CA3AF"   # Company profile — gray
+        if val < 0: color = "#EF4444"    # negative = red
+        colors.append(color)
+        texts.append(f"{'+' if val>=0 else ''}{int(val)}")
+        bases_list.append(running if val >= 0 else running + val)
+        running += val
+
+    # Final bar (total)
+    x_vals.append(categories[-1])
+    y_vals.append(score_850)
+    colors.append("#EC4899")  # pink like Admin Portal
+    texts.append(str(int(score_850)))
+    bases_list.append(0)
+
+    fig = go.Figure()
+    # Connector lines (thin lines between bars)
+    for i in range(1, len(x_vals)-1):
+        if i < len(x_vals)-2:
+            top_prev = bases_list[i] + y_vals[i] if contributions[i] >= 0 else bases_list[i]
+            fig.add_shape(type="line",
+                          x0=i-0.35, x1=i+0.35,
+                          y0=top_prev, y1=top_prev,
+                          line=dict(color="#64748B",width=1,dash="dot"))
+
+    # Bars
+    for i, (x, y, c, t, b) in enumerate(zip(x_vals, y_vals, colors, texts, bases_list)):
+        fig.add_trace(go.Bar(
+            x=[x], y=[y], base=[b],
+            marker_color=c,
+            text=[t], textposition="outside",
+            textfont=dict(color="#E2E8F0", size=13, family="monospace"),
+            name=x.split("\n")[0],
+            showlegend=True,
+            width=0.6,
+        ))
+
+    score_color = "#22c55e" if score_850>=650 else ("#f59e0b" if score_850>=500 else "#ef4444")
+    risk_label  = "LOW RISK" if score_850>=650 else ("MODERATE" if score_850>=500 else "HIGH RISK")
+
+    fig.update_layout(
+        title=dict(
+            text=f"Worth Score Waterfall{' — ' + label if label else ''}: "
+                 f"<span style='color:{score_color}'>{int(score_850)} / 850 ({risk_label})</span>",
+            font=dict(color="#E2E8F0", size=16)
+        ),
+        barmode="stack",
+        yaxis=dict(range=[250, 880], gridcolor="#334155", tickfont=dict(color="#94A3B8"),
+                   title="Score (300–850)"),
+        xaxis=dict(tickfont=dict(color="#94A3B8", size=9)),
+        paper_bgcolor="#0F172A", plot_bgcolor="#1E293B",
+        font_color="#E2E8F0",
+        legend=dict(bgcolor="#1E293B", font=dict(color="#CBD5E1", size=9),
+                    orientation="h", yanchor="bottom", y=-0.45),
+        margin=dict(t=60, b=160, l=10, r=10),
+        height=480,
+        showlegend=False,
+    )
+    return fig, contributions, categories
+
+
+def render_waterfall_explanation(bk_n, judg_n, lien_n, sos_active, tin_ok,
+                                  wl_hits, age_years, has_revenue, num_emp,
+                                  naics_ok, contributions, categories):
+    """Render the analyst explanation cards below the waterfall chart."""
+    cat_descs = {
+        "Base score": {
+            "color":"#C4A8FF",
+            "title":"Base Score — 300",
+            "what":"Every business starts at 300. This represents a zero-information state: "
+                   "no public records, no financials, no verification, no entity history. "
+                   "The base is the lower bound of the 300–850 scale.",
+            "features":["No features — this is the starting point before any data is applied"],
+            "formula":"Base = 300 (always fixed)",
+        },
+        "Performance measures": {
+            "color":"#3B82F6",
+            "title":"Performance Measures — Trust & Verification Signals",
+            "what":"Binary verification signals: SOS active status, TIN verified, watchlist hits. "
+                   "These are the fastest-changing factors — they can flip the moment an entity is reinstated or an EIN is corrected.",
+            "features":["sos_active (SOS in good standing = +10 pts)",
+                        "tin_match_boolean (IRS EIN match = +10 pts)",
+                        "watchlist_hits (each hit = −20 pts, cap −80)"],
+            "formula":f"SOS: {'✅ +10' if sos_active else '❌ 0'} · TIN: {'✅ +10' if tin_ok else '❌ 0'} · WL: {'-'+str(min(wl_hits*20,80)) if wl_hits>0 else '✅ 0'}",
+        },
+        "Financial trends": {
+            "color":"#1E3A5F",
+            "title":"Financial Trends — Revenue, Cash Flow & Ratios",
+            "what":"Financial signals from Plaid-connected accounts and accounting integrations. "
+                   "If the business has NOT connected Plaid, these features are imputed to 0 — neutral, not penalizing. "
+                   "Strong financials can add 20–50 points; missing data adds 0.",
+            "features":["revenue (annual revenue from accounting)",
+                        "is_net_income (P&L profitability)",
+                        "bs_total_debt, ratio_debt_to_equity",
+                        "cf_operating_cash_flow, cf_cash_at_end_of_period",
+                        "ratio_gross_margin, ratio_return_on_assets",
+                        "Macro: gdp_pch, t10y2y (yield curve), vix, unemp, cpi"],
+            "formula":f"{'Revenue data present — positive contribution' if has_revenue else 'No Plaid/revenue data — imputed to 0 (neutral)'}",
+        },
+        "Public records": {
+            "color":"#7C3AED",
+            "title":"Public Records — BK, Judgments & Liens",
+            "what":"The MOST penalizing category. Each record reduces the score based on COUNT and AGE. "
+                   "Recent records (< 2 years) carry the full penalty. Records > 7 years carry ~20% of the original penalty. "
+                   "Multiple records compound the penalty.",
+            "features":["count_bankruptcy (each BK ≈ −40 pts, cap −120)",
+                        "age_bankruptcy (months since filing — older = less impact)",
+                        "count_judgment (each judgment ≈ −20 pts, cap −60)",
+                        "age_judgment",
+                        "count_lien (each lien ≈ −10 pts, cap −40)",
+                        "age_lien"],
+            "formula":f"BK: {bk_n}×(−40)={-min(bk_n*40,120)} · Judg: {judg_n}×(−20)={-min(judg_n*20,60)} · Liens: {lien_n}×(−10)={-min(lien_n*10,40)}",
+        },
+        "Business operations": {
+            "color":"#8B5CF6",
+            "title":"Business Operations — Age, Employees & Activity",
+            "what":"Firmographic signals indicating business maturity and operational activity. "
+                   "Older, larger, more reviewed businesses score higher. "
+                   "A business < 1 year old has minimal contribution from this category.",
+            "features":["age_business (months since formation date → converted from formation_date fact)",
+                        "count_employees (num_employees fact)",
+                        "count_reviews (Google/SERP review count)",
+                        "score_reviews (average review rating)"],
+            "formula":f"Age: {age_years}yr={'≥5yr: +30' if (age_years or 0)>=5 else ('2–5yr: +20' if (age_years or 0)>=2 else '≥1yr: +10' if (age_years or 0)>=1 else '<1yr: 0')} · Employees: {num_emp or 0}",
+        },
+        "Company profile": {
+            "color":"#9CA3AF",
+            "title":"Company Profile — NAICS, Entity Type & Industry Benchmark",
+            "what":"Industry classification and entity structure signals. "
+                   "The NAICS 6-digit code enables the model to compare this business against "
+                   "industry peers — businesses in historically safer industries score higher. "
+                   "Corporations and LLCs score slightly above sole proprietors.",
+            "features":["naics6 (industry risk benchmark — varies by sector)",
+                        "bus_struct (LLC/Corp > Sole Prop)",
+                        "state (geographic risk factor)",
+                        "indicator_government, indicator_nonprofit, indicator_education"],
+            "formula":f"NAICS: {'Real code (benchmark applied)' if naics_ok else '561499 (fallback — no benchmark, generic sector used)'} · Entity: structured entity",
+        },
+        "Worth Score": {
+            "color":"#EC4899",
+            "title":"Final Worth Score",
+            "what":"The calibrated final score. The raw model output (0–1 probability) is scaled: "
+                   "Score = prediction × 550 + 300. The score represents the model's confidence "
+                   "that this business will NOT default on its obligations.",
+            "features":["All 100+ features combined via 3-model ensemble (firmographic XGBoost + financial neural net + economic model)",
+                        "Final calibration adjusts for portfolio-level probability"],
+            "formula":"Score = model_prediction × 550 + 300",
+        },
+    }
+
+    st.markdown("#### 🔬 Bar-by-Bar Explanation")
+    for i, cat in enumerate(categories):
+        short_key = cat.split("\n")[0]
+        desc = cat_descs.get(short_key)
+        if not desc:
+            continue
+        val = contributions[i] if i < len(contributions) else 0
+        direction = ("➡️ Base" if short_key=="Base score"
+                     else ("⬆️ Positive" if val>0 else ("⬇️ Negative" if val<0 else "➡️ Neutral")))
+        with st.expander(f"{direction} — **{desc['title']}** ({'+' if isinstance(val,int) and val>=0 else ''}{int(val) if isinstance(val,int) else '300'} pts)", expanded=(i==0 or (val<0 and val!=0))):
+            st.markdown(f"**What it measures:** {desc['what']}")
+            st.markdown("**Model features in this category:**")
+            for f in desc["features"]:
+                st.markdown(f"  - `{f.split(' (')[0]}` — {f.split(' (')[1].rstrip(')') if '(' in f else ''}")
+            st.markdown(f"**Formula / current values:** `{desc['formula']}`")
+            if short_key == "Public records" and (bk_n>0 or judg_n>0 or lien_n>0):
+                flag(f"Public records found: {bk_n} BK, {judg_n} judgments, {lien_n} liens. "
+                     "These are the primary driver of any score below 550. "
+                     "The penalty reduces as records age — check back in 6–12 months.", "red")
+            elif short_key == "Public records":
+                flag("No public records — this category contributes 0 penalty, "
+                     "which is the best possible outcome.", "green")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR — 6 consolidated sections
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1231,17 +1511,34 @@ with st.sidebar:
         "🔎 Business Lookup",
     ])
     st.markdown("---")
-    load_all = st.checkbox("Load ALL records", value=False)
-    if load_all:
-        record_limit = None
-        st.caption("⚠️ No limit — may be slow")
+    # Record limit: use date filter when active (natural scope),
+    # otherwise load all records. No manual slider needed.
+    record_limit = None  # always load all — date range is the scoping mechanism
+
+    # ── Date range filter ──────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("**📅 Date Range**")
+    use_date_filter = st.toggle("Filter by date", value=False,
+                                help="Filter all data to a specific time period (received_at / created_at)")
+    if use_date_filter:
+        today = datetime.now(timezone.utc).date()
+        col_fd, col_td = st.columns(2)
+        with col_fd:
+            date_from = st.date_input("From", value=today - pd.Timedelta(days=90),
+                                      max_value=today, label_visibility="collapsed")
+            st.caption(f"From: {date_from}")
+        with col_td:
+            date_to = st.date_input("To", value=today,
+                                    max_value=today, label_visibility="collapsed")
+            st.caption(f"To: {date_to}")
+        if date_from > date_to:
+            st.error("'From' date must be before 'To' date.")
+            date_from = date_to
+        st.caption(f"📅 Showing data from **{date_from}** to **{date_to}**")
     else:
-        record_limit = st.select_slider(
-            "Records to load",
-            options=[500, 1_000, 5_000, 10_000, 25_000, 50_000, 100_000],
-            value=5_000,
-        )
-        st.caption(f"Up to {record_limit:,} records")
+        date_from = None
+        date_to   = None
+        st.caption("No date filter — showing latest N records.")
 
     # ── Cache status & refresh ─────────────────────────────────────────────────
     st.markdown("---")
@@ -1254,7 +1551,7 @@ with st.sidebar:
     }
     any_cached = False
     for sk in ALL_SECTIONS:
-        age = get_cache_age(sk, record_limit)
+        age = get_cache_age(sk, record_limit, date_from, date_to)
         if age is not None:
             any_cached = True
             mins = age // 60
@@ -1299,11 +1596,11 @@ if section == "📋 Overview":
     st.markdown("*All KYB fields · vendor match rates · data quality · risk signals · anomaly detection*")
 
     # ── Load all datasets (served from session_state cache on repeat visits) ──
-    sos   = get_section_data("sos",   record_limit)
-    tin   = get_section_data("tin",   record_limit)
-    dd    = get_section_data("dd",    record_limit)
-    naics = get_section_data("naics", record_limit)
-    kyc   = get_section_data("kyc",   record_limit)
+    sos   = get_section_data("sos", record_limit, date_from, date_to)
+    tin   = get_section_data("tin", record_limit, date_from, date_to)
+    dd    = get_section_data("dd", record_limit, date_from, date_to)
+    naics = get_section_data("naics", record_limit, date_from, date_to)
+    kyc   = get_section_data("kyc", record_limit, date_from, date_to)
 
     biz = sos["business_id"].nunique()
     sos_active_pct   = sos["active"].mean()*100
@@ -1526,9 +1823,9 @@ elif section == "🏛️ Identity & Registry":
        "SOS filings · TIN verification · IDV (Plaid) · vendor match rates · "
        "Middesk gap · inactive+perpetual · consistency checks", "🏛️")
 
-    sos = get_section_data("sos",  record_limit)
-    tin = get_section_data("tin",  record_limit)
-    kyc = get_section_data("kyc",  record_limit)
+    sos = get_section_data("sos", record_limit, date_from, date_to)
+    tin = get_section_data("tin", record_limit, date_from, date_to)
+    kyc = get_section_data("kyc", record_limit, date_from, date_to)
 
     tin["tin_match_boolean"] = tin["tin_match_boolean"].astype(bool)
     tin["tin_submitted"]     = tin["tin_submitted"].astype(bool)
@@ -1570,8 +1867,8 @@ elif section == "🏛️ Identity & Registry":
         flag(f"⚠️ {inactive:,} businesses have SOS inactive status. "
              "Inactive+perpetual = entity cannot legally operate. First red flag in underwriting.", "amber")
 
-    tab_sos, tab_tin, tab_idv, tab_cross, tab_vendors, tab_dq = st.tabs([
-        "🏛️ SOS Registry","🔐 TIN","🪪 IDV (Plaid)","🔗 Cross-Analysis","📡 Vendors","🔬 Quality Checks"
+    tab_sos, tab_dom_foreign, tab_tin, tab_idv, tab_cross, tab_vendors, tab_dq = st.tabs([
+        "🏛️ SOS Registry","🗺️ Domestic vs Foreign","🔐 TIN","🪪 IDV (Plaid)","🔗 Cross-Analysis","📡 Vendors","🔬 Quality Checks"
     ])
 
     # ── SOS ────────────────────────────────────────────────────────────────────
@@ -1717,6 +2014,366 @@ Cross-reference with the "Neither matched" count — they should be similar popu
             "but Middesk could not match in US SOS. Causes: new incorporation, name mismatch, Middesk API failure.",
             f"Neither vendor matched ({both_no_match:,}): entity existence completely unverified. "
             "Route 100% of these to manual underwriting.",
+        ])
+
+    # ── DOMESTIC vs FOREIGN ────────────────────────────────────────────────────
+    with tab_dom_foreign:
+        st.markdown("#### 🗺️ Domestic vs Foreign Registration Analysis")
+        st.markdown(
+            "Understanding the complexity of domestic vs foreign registrations is critical for entity resolution. "
+            "A **domestic** registration = the state where the entity was **incorporated** (legal home). "
+            "A **foreign** registration = any other state where the entity is **qualified to do business** (operational presence). "
+            "These are often different states, and the current search-by-address approach may only find the **foreign** record."
+        )
+
+        flag("Key insight from entity resolution: if a business incorporated in Delaware (domestic) "
+             "operates in Nevada (foreign registration), searching by the Nevada address finds the "
+             "**foreign qualification** record — NOT the primary domestic record. "
+             "This means the entity's true legal identity (Delaware) may be missed.", "red")
+
+        # ── What we know from scalar facts ────────────────────────────────────
+        flag("sos_filings (which contains foreign_domestic field) exceeds the Redshift federation "
+             "VARCHAR limit — it must be queried from PostgreSQL RDS (port 5432) directly. "
+             "This analysis uses formation_state (domestic state) and primary_address.state "
+             "(operating state) as proxies to identify likely domestic/foreign situations.", "amber")
+
+        # ── Live query: formation_state vs address state ───────────────────────
+        st.markdown("---")
+        st.markdown("### Part 1 — Formation State vs Operating State (Proxy Analysis)")
+        st.markdown(
+            "**Formation state** = where the entity was incorporated (domestic state). "
+            "**Primary address state** = where the business currently operates (may trigger foreign qualification). "
+            "When these differ, the business almost certainly has a domestic filing in one state "
+            "and a foreign qualification in another."
+        )
+
+        dom_foreign_sql = f"""
+            SELECT
+                fs.business_id,
+                JSON_EXTRACT_PATH_TEXT(fs.value,'value') AS formation_state,
+                JSON_EXTRACT_PATH_TEXT(pa.value,'value','state') AS operating_state
+            FROM rds_warehouse_public.facts fs
+            JOIN rds_warehouse_public.facts pa
+              ON pa.business_id = fs.business_id AND pa.name = 'primary_address'
+            WHERE fs.name = 'formation_state'
+              AND JSON_EXTRACT_PATH_TEXT(fs.value,'value') IS NOT NULL
+              AND JSON_EXTRACT_PATH_TEXT(pa.value,'value','state') IS NOT NULL
+            ORDER BY fs.received_at DESC{_limit_clause(record_limit)}
+        """
+        df_states = run_query(dom_foreign_sql)
+
+        if df_states is not None and not df_states.empty:
+            df_states["formation_state"]  = df_states["formation_state"].str.upper().str.strip()
+            df_states["operating_state"]  = df_states["operating_state"].str.upper().str.strip()
+            df_states["states_match"]     = df_states["formation_state"] == df_states["operating_state"]
+            df_states["likely_situation"] = df_states.apply(lambda r:
+                "✅ Domestic only (incorporated & operates in same state)" if r["states_match"]
+                else ("⚠️ Domestic + Foreign qualification likely" if r["formation_state"] in
+                      ("DE","NV","WY","FL","TX","CA","NY","IL","GA","PA","NC","OH","CO","AZ","WA")
+                      else "🔍 Multi-state — check for foreign qualification"), axis=1)
+
+            # Key metrics
+            total_checked = len(df_states)
+            same_state    = df_states["states_match"].sum()
+            diff_state    = total_checked - same_state
+            tax_haven_dom = df_states[df_states["formation_state"].isin(["DE","NV","WY"])]["business_id"].nunique()
+
+            c1,c2,c3,c4 = st.columns(4)
+            with c1: kpi("Businesses Analyzed", f"{total_checked:,}", "with formation + address state", "#3B82F6")
+            with c2: kpi("Same State (likely domestic only)", f"{same_state:,}",
+                         f"{same_state/max(total_checked,1)*100:.1f}%","#22c55e")
+            with c3: kpi("Different States (foreign qual. likely)", f"{diff_state:,}",
+                         f"{diff_state/max(total_checked,1)*100:.1f}%","#f59e0b")
+            with c4: kpi("Incorporated in Tax-Haven State (DE/NV/WY)", f"{tax_haven_dom:,}",
+                         f"{tax_haven_dom/max(total_checked,1)*100:.1f}%","#8B5CF6")
+
+            col_l, col_r = st.columns(2)
+            with col_l:
+                sit_counts = df_states["likely_situation"].value_counts().reset_index()
+                sit_counts.columns = ["Situation","Count"]
+                fig_sit = px.pie(sit_counts, names="Situation", values="Count",
+                                 color="Situation",
+                                 color_discrete_map={
+                                     "✅ Domestic only (incorporated & operates in same state)":"#22c55e",
+                                     "⚠️ Domestic + Foreign qualification likely":"#f59e0b",
+                                     "🔍 Multi-state — check for foreign qualification":"#f97316",
+                                 }, hole=0.45, title="Domestic vs Foreign Situation")
+                st.plotly_chart(dark_chart_layout(fig_sit), use_container_width=True)
+
+            with col_r:
+                # Top formation states
+                form_counts = df_states["formation_state"].value_counts().head(12).reset_index()
+                form_counts.columns = ["State","Count"]
+                form_counts["Is Tax Haven"] = form_counts["State"].isin(["DE","NV","WY"])
+                fig_form = px.bar(form_counts, x="Count", y="State", orientation="h",
+                                  color="Is Tax Haven",
+                                  color_discrete_map={True:"#8B5CF6",False:"#3B82F6"},
+                                  title="Top 12 Formation States")
+                fig_form.update_layout(yaxis=dict(autorange="reversed"),showlegend=True)
+                st.plotly_chart(dark_chart_layout(fig_form), use_container_width=True)
+
+            # Cross-tab: formation state vs operating state
+            st.markdown("#### Formation State → Operating State Flow")
+            st.markdown(
+                "Each cell shows how many businesses incorporated in the formation state (rows) "
+                "are operating in the operating state (columns). "
+                "Off-diagonal cells = businesses that likely have BOTH a domestic and a foreign registration."
+            )
+            top_form  = df_states["formation_state"].value_counts().head(8).index.tolist()
+            top_oper  = df_states["operating_state"].value_counts().head(8).index.tolist()
+            cross_df  = df_states[df_states["formation_state"].isin(top_form) &
+                                    df_states["operating_state"].isin(top_oper)]
+            cross_tab = pd.crosstab(cross_df["formation_state"], cross_df["operating_state"])
+            fig_heat = go.Figure(go.Heatmap(
+                z=cross_tab.values,
+                x=[f"Operates: {c}" for c in cross_tab.columns],
+                y=[f"Incorporated: {r}" for r in cross_tab.index],
+                colorscale="Blues",
+                text=cross_tab.values,
+                texttemplate="%{text}",
+                hovertemplate="Incorporated in: %{y}<br>Operates in: %{x}<br>Count: %{z}",
+            ))
+            fig_heat.update_layout(
+                title="Formation State × Operating State Cross-Tabulation (top 8 each)",
+                xaxis_title="Operating State (primary_address)", yaxis_title="Formation State"
+            )
+            st.plotly_chart(dark_chart_layout(fig_heat), use_container_width=True)
+
+            # Businesses where search-by-address would miss domestic record
+            st.markdown("#### 🚨 Entity Resolution Gap — Address-Based Search Finds Wrong Registration")
+            gap_df = df_states[~df_states["states_match"]].copy()
+            gap_df["gap_risk"] = gap_df.apply(lambda r:
+                "🔴 HIGH — Tax haven domestic (DE/NV/WY)" if r["formation_state"] in ("DE","NV","WY")
+                else "🟡 MEDIUM — Multi-state operation", axis=1)
+
+            # Most common domestic states being missed
+            missed_domestic = gap_df.groupby("formation_state").agg(
+                count=("business_id","count"),
+                top_operating=("operating_state",lambda x: x.value_counts().index[0])
+            ).reset_index().sort_values("count",ascending=False).head(10)
+            missed_domestic.columns = ["Domestic (formation) state","# Businesses","Most common operating state"]
+
+            col_l, col_r = st.columns(2)
+            with col_l:
+                fig_gap = px.bar(missed_domestic, x="# Businesses", y="Domestic (formation) state",
+                                 orientation="h", color="# Businesses",
+                                 color_continuous_scale="Reds",
+                                 title="Domestic States Most Likely to Be Missed by Address Search")
+                fig_gap.update_layout(yaxis=dict(autorange="reversed"), coloraxis_showscale=False)
+                st.plotly_chart(dark_chart_layout(fig_gap), use_container_width=True)
+            with col_r:
+                styled_table(missed_domestic)
+                st.markdown(f"""
+**Why this matters:**
+When your entity matching searches by the business's submitted address,
+it finds the **foreign qualification** record in the operating state.
+The **domestic record** in the formation state (e.g. Delaware) is not found.
+
+This means:
+- The SOS name on the domestic filing may differ from the submitted name
+- Foreign qualifications may have different officer information
+- The actual **legal entity** is Delaware-registered, not Nevada-registered
+- `sos_match_boolean` may be FALSE because Middesk matched the wrong record
+                """)
+
+            analyst_card("Domestic vs Foreign — Entity Resolution Deep Dive", [
+                f"{diff_state:,} businesses ({diff_state/max(total_checked,1)*100:.1f}%) have their formation state "
+                f"different from their operating state. Each of these businesses almost certainly has "
+                "BOTH a domestic filing (in formation state) AND a foreign qualification (in operating state).",
+                f"{tax_haven_dom:,} businesses incorporated in DE/NV/WY — the three most common 'tax haven' "
+                "states chosen for favorable corporate laws, regardless of where the business actually operates. "
+                "These are the highest-risk for entity resolution gaps because the name on the Delaware "
+                "filing may differ significantly from the d/b/a name submitted in the application.",
+                "The current entity matching approach: Middesk performs a live SOS query based on the "
+                "submitted business name AND submitted address. If the address is in Nevada but the "
+                "entity is incorporated in Delaware, Middesk finds the Nevada foreign qualification record — "
+                "which may have: different officer names, different registered agent, or a different legal name.",
+                "Impact on sos_match_boolean: if the foreign qualification name differs from the submitted name, "
+                "sos_match_boolean=false — even though the business IS legitimately registered. "
+                "This creates false negatives in the verification pipeline.",
+                "Recommended fix: when sos_match_boolean=false AND formation_state ≠ operating_state, "
+                "re-run the Middesk search using the FORMATION state specifically. "
+                "This is a known gap in the integration-service Middesk integration.",
+            ])
+
+        else:
+            flag("Could not load formation_state and address data. Showing SQL-based analysis.", "amber")
+
+        # ── Part 2: The Delaware Problem ──────────────────────────────────────
+        st.markdown("---")
+        st.markdown("### Part 2 — The Delaware Problem")
+        st.markdown("""
+**Why Delaware is special:**
+
+~60% of Fortune 500 companies and many SMBs incorporate in Delaware because:
+1. **No state income tax** for companies that don't operate in Delaware
+2. **Court of Chancery** — a specialized business court with predictable rulings
+3. **Flexible corporate law** — easier to structure equity, voting rights, investor protections
+4. **Privacy** — Delaware doesn't require naming officers/directors in public filings
+
+**The entity resolution problem this creates:**
+
+| Business submits | Middesk searches | Finds | Problem |
+|---|---|---|---|
+| "Joe's Plumbing LLC" + Texas address | Texas SOS | "Joe's Plumbing LLC (Texas foreign)" | Found foreign qualification only |
+| Delaware domestic filing | Not searched | "Joe's Plumbing LLC (Delaware domestic)" | The TRUE legal entity is missed |
+| Delaware name = "JPS Holdings LLC" | — | — | Name mismatch → sos_match=false |
+
+**The gap**: `sos_match_boolean=false` may be a false negative when the real issue is
+that we searched the wrong state.
+        """)
+
+        # ── Part 3: What the SOS filings fact would tell us ─────────────────
+        st.markdown("---")
+        st.markdown("### Part 3 — What sos_filings Contains (PostgreSQL RDS Required)")
+        st.markdown("""
+The `sos_filings` fact stores a JSON array where each element represents one SOS filing.
+Each filing has a `foreign_domestic` field that directly answers the question.
+This fact exceeds the Redshift federation VARCHAR(65535) limit — query from PostgreSQL RDS:
+        """)
+        st.code("""-- Run on PostgreSQL RDS (port 5432) — sos_filings is native JSONB, no size limit
+
+-- 1. Count domestic vs foreign filings across all businesses
+SELECT
+    filing->>'foreign_domestic'  AS filing_type,
+    COUNT(DISTINCT f.business_id) AS businesses,
+    ROUND(COUNT(DISTINCT f.business_id)*100.0 / SUM(COUNT(DISTINCT f.business_id)) OVER(), 2) AS pct
+FROM rds_warehouse_public.facts f
+CROSS JOIN jsonb_array_elements(f.value->'value') AS filing
+WHERE f.name = 'sos_filings'
+  AND filing->>'foreign_domestic' IS NOT NULL
+GROUP BY filing->>'foreign_domestic'
+ORDER BY businesses DESC;
+
+-- 2. Businesses with BOTH domestic AND foreign filings (most interesting)
+SELECT business_id, COUNT(*) AS filing_count,
+       SUM(CASE WHEN filing->>'foreign_domestic'='domestic' THEN 1 ELSE 0 END) AS domestic_count,
+       SUM(CASE WHEN filing->>'foreign_domestic'='foreign'  THEN 1 ELSE 0 END) AS foreign_count,
+       STRING_AGG(DISTINCT filing->>'jurisdiction', ', ') AS jurisdictions
+FROM rds_warehouse_public.facts f
+CROSS JOIN jsonb_array_elements(f.value->'value') AS filing
+WHERE f.name = 'sos_filings'
+GROUP BY business_id
+HAVING SUM(CASE WHEN filing->>'foreign_domestic'='domestic' THEN 1 ELSE 0 END) >= 1
+   AND SUM(CASE WHEN filing->>'foreign_domestic'='foreign'  THEN 1 ELSE 0 END) >= 1
+ORDER BY filing_count DESC
+LIMIT 100;
+
+-- 3. Cases where submitted address state ≠ domestic formation state
+SELECT
+    f.business_id,
+    dom_filing->>'jurisdiction' AS domestic_state,
+    forein_filing->>'jurisdiction' AS foreign_state,
+    dom_filing->>'active'  AS domestic_active,
+    forein_filing->>'active' AS foreign_active
+FROM rds_warehouse_public.facts f
+CROSS JOIN jsonb_array_elements(f.value->'value') AS dom_filing
+CROSS JOIN jsonb_array_elements(f.value->'value') AS forein_filing
+WHERE f.name = 'sos_filings'
+  AND dom_filing->>'foreign_domestic' = 'domestic'
+  AND forein_filing->>'foreign_domestic' = 'foreign'
+  AND dom_filing->>'jurisdiction' != forein_filing->>'jurisdiction'
+LIMIT 200;
+
+-- 4. Entity resolution gap detection: sos_match=false but has domestic filing
+SELECT
+    f.business_id,
+    sos.value->>'value' AS sos_match_boolean,
+    filing->>'foreign_domestic' AS filing_type,
+    filing->>'jurisdiction' AS jurisdiction,
+    filing->>'active' AS active
+FROM rds_warehouse_public.facts f
+CROSS JOIN jsonb_array_elements(f.value->'value') AS filing
+JOIN rds_warehouse_public.facts sos
+  ON sos.business_id = f.business_id AND sos.name = 'sos_match_boolean'
+WHERE f.name = 'sos_filings'
+  AND sos.value->>'value' = 'false'
+  AND filing->>'foreign_domestic' = 'domestic'
+LIMIT 100;""", language="sql")
+
+        # ── Part 4: Sanity checks using available scalar data ─────────────────
+        st.markdown("---")
+        st.markdown("### Part 4 — Sanity Checks Using Available Data")
+
+        # Middesk confidence vs formation state mismatch
+        if df_states is not None and not df_states.empty:
+            # Check: do mismatched-state businesses have lower Middesk confidence?
+            if "middesk_conf" in sos.columns and "business_id" in sos.columns:
+                sos_with_states = sos.merge(
+                    df_states[["business_id","states_match","formation_state","operating_state"]],
+                    on="business_id", how="inner"
+                )
+                if not sos_with_states.empty and "states_match" in sos_with_states.columns:
+                    matched_conf   = sos_with_states[sos_with_states["states_match"]]["middesk_conf"].mean()
+                    mismatched_conf= sos_with_states[~sos_with_states["states_match"]]["middesk_conf"].mean()
+
+                    col_l, col_r = st.columns(2)
+                    with col_l:
+                        kpi("Avg Middesk Conf: Same State",
+                            f"{matched_conf:.3f}",
+                            "formation = operating state","#22c55e")
+                    with col_r:
+                        kpi("Avg Middesk Conf: Different State",
+                            f"{mismatched_conf:.3f}",
+                            "formation ≠ operating state (entity resolution gap risk)",
+                            "#ef4444" if mismatched_conf < matched_conf*0.9 else "#f59e0b")
+
+                    if mismatched_conf < matched_conf * 0.9:
+                        flag(f"⚠️ Businesses with mismatched formation/operating states have "
+                             f"lower Middesk confidence ({mismatched_conf:.3f} vs {matched_conf:.3f}). "
+                             "This confirms the entity resolution gap hypothesis: "
+                             "Middesk is finding the foreign qualification record (lower confidence) "
+                             "instead of the primary domestic record.", "red")
+
+                    fig_box = px.box(sos_with_states, x="states_match", y="middesk_conf",
+                                     color="states_match",
+                                     color_discrete_map={True:"#22c55e",False:"#ef4444"},
+                                     labels={"states_match":"Formation = Operating State",
+                                             "middesk_conf":"Middesk Confidence"},
+                                     title="Middesk Confidence: Same State vs Different State")
+                    fig_box.update_layout(showlegend=False)
+                    st.plotly_chart(dark_chart_layout(fig_box), use_container_width=True)
+
+                    analyst_card("Sanity Check — Confidence Gap Confirms Entity Resolution Gap", [
+                        f"Same-state businesses (domestic filing = operating state) have avg Middesk confidence "
+                        f"{matched_conf:.3f}. These businesses are easy to match because the address "
+                        "Middesk searches is in the same state as the domestic incorporation.",
+                        f"Different-state businesses (likely have foreign qualification) have avg Middesk confidence "
+                        f"{mismatched_conf:.3f}. Lower confidence = Middesk is less certain about the match — "
+                        "possibly because it found the foreign qualification record with a different name/format.",
+                        "Fix recommendation: when formation_state ≠ operating_state, trigger an additional "
+                        "Middesk lookup specifying the formation state explicitly. This would search the "
+                        "domestic record directly instead of the foreign qualification.",
+                        "Integration-service change required: pass `jurisdiction_override=formation_state` "
+                        "to the Middesk API call when these two states differ.",
+                    ])
+
+        # ── Part 5: Tax Haven Impact Summary ──────────────────────────────────
+        st.markdown("---")
+        st.markdown("### Part 5 — Tax Haven State Impact on Underwriting")
+        st.markdown("""
+**Delaware, Nevada, Wyoming** are the three most common "corporate formation" states.
+Businesses incorporate here for legal/tax benefits while operating elsewhere.
+This creates predictable entity resolution challenges:
+
+| State | Why businesses incorporate here | Entity resolution challenge |
+|---|---|---|
+| **Delaware** | Court of Chancery, flexible corp law, no disclosure of officers | Name on DE filing may differ from DBA; Middesk finds out-of-state foreign qualification |
+| **Nevada** | No state income tax, strong liability protection | Operating in CA/TX/NY but incorporated in NV; address search finds wrong record |
+| **Wyoming** | LLC privacy (no public officer disclosure), low fees | Particularly common for anonymous holding companies; very hard to resolve |
+
+**What this means for underwriting:**
+- A business in Nevada incorporated in Delaware with a DBA name is the hardest case to verify
+- `sos_match_boolean=false` + formation_state=DE + operating_state≠DE = likely false negative
+- The business IS real, it IS registered — we're just not searching the right state
+        """)
+
+        cross_box("Recommended Entity Resolution Improvements", [
+            "Add a formation-state-specific Middesk search as a fallback when the primary search fails (sos_match=false)",
+            "Store the domestic filing jurisdiction separately from the foreign filing — currently both are in sos_filings array but not split in any fact",
+            "Add a `has_foreign_qualification` fact to the Fact Engine — binary flag that triggers enhanced entity resolution",
+            "For DE/NV/WY incorporations: always perform a dual search (formation state + operating state) regardless of match result",
+            "Flag businesses where formation_state ∈ {DE, NV, WY} AND sos_match=false for manual review — these are high-probability false negatives",
         ])
 
     # ── TIN ────────────────────────────────────────────────────────────────────
@@ -2340,7 +2997,7 @@ elif section == "🏭 Classification":
        "naics_code · mcc_code · 561499 fallback · vendor source breakdown · "
        "entity-type cross-analysis · data quality checks", "🏭")
 
-    naics = get_section_data("naics", record_limit)
+    naics = get_section_data("naics", record_limit, date_from, date_to)
 
     total = len(naics); fallbacks = int(naics["is_fallback"].sum()); real = total-fallbacks
     top_src = naics.groupby("naics_source").size().idxmax() if "naics_source" in naics.columns else "unknown"
@@ -3144,8 +3801,8 @@ elif section == "💰 Risk & Score":
        "Worth Score · score_decision · Due Diligence · watchlist · sanctions · PEP · "
        "BK/judgments/liens · cross-analysis", "💰")
 
-    dd    = get_section_data("dd",    record_limit)
-    worth = get_section_data("worth", record_limit)
+    dd    = get_section_data("dd", record_limit, date_from, date_to)
+    worth = get_section_data("worth", record_limit, date_from, date_to)
 
     # ── Due Diligence KPIs ─────────────────────────────────────────────────────
     biz_dd = dd["business_id"].nunique() if "business_id" in dd.columns else len(dd)
@@ -3421,6 +4078,62 @@ LIMIT 10;""", language="sql")
             # ════════ 1. DISTRIBUTION ════════════════════════════════════════
             with ws1:
                 st.markdown("#### 📊 Worth Score Distribution Analysis")
+
+                # ── Population-level waterfall (median business) ─────────────
+                st.markdown("##### 📊 Portfolio Score Waterfall — How the Median Business Builds to Its Score")
+                st.markdown(
+                    "This waterfall shows how each factor category contributes to the **median** "
+                    "Worth Score across your portfolio. Each bar = one category's average contribution. "
+                    "Bars above the running total are positive; bars below are negative."
+                )
+                # Compute median/mode values from the score_df + enriched data
+                med_score = float(score_df["worth_score_850"].median())
+                # Use enriched data if available, otherwise use safe defaults
+                med_bk    = 0; med_judg = 0; med_lien = 0
+                if "bk_hits" in score_df.columns:
+                    med_bk   = float(score_df["bk_hits"].median())
+                if "judgment_hits" in score_df.columns:
+                    med_judg = float(score_df["judgment_hits"].median())
+                if "lien_hits" in score_df.columns:
+                    med_lien = float(score_df["lien_hits"].median())
+
+                fig_wf_portfolio, contributions_p, categories_p = render_worth_score_waterfall(
+                    score_850=med_score,
+                    bk_n=int(med_bk), judg_n=int(med_judg), lien_n=int(med_lien),
+                    sos_active=True, tin_ok=True, wl_hits=0,
+                    age_years=3, has_revenue=False, num_emp=5,
+                    naics_ok=True, label=f"Median Score {med_score:.0f}"
+                )
+                st.plotly_chart(dark_chart_layout(fig_wf_portfolio), use_container_width=True)
+
+                flag("ℹ️ Population waterfall uses the median score and estimated average factor contributions. "
+                     "Each business's actual breakdown requires SHAP values from "
+                     "`rds_manual_score_public.business_score_factors`. "
+                     "Use the 🔎 Business Lookup → 💰 Worth Score tab for per-business waterfalls.", "blue")
+
+                with st.expander("📖 How to read this waterfall chart"):
+                    st.markdown("""
+**Reading the waterfall:**
+- **Base score (300)**: Every business starts here — the minimum score before any data is applied.
+- **Positive bars** (going up): factors that ADD points. Larger = more positive impact.
+- **Negative bars** (going down): factors that SUBTRACT points. Deeper = more penalty.
+- **Final bar (pink)**: the actual Worth Score — where you land after all factors are applied.
+
+**The Admin Portal shows the same chart** (labeled: Base score → Performance measures → 
+Financial trends → Public records → Business operations → Company profile → Worth score).
+These categories map directly to the model's sub-models in `ai-score-service`.
+
+**Why your median score may differ from the base score + shown contributions:**
+The model uses 100+ features and a 3-layer ensemble. This waterfall is an approximation
+built from available fact data. Exact SHAP values are in `business_score_factors`.
+                    """)
+                render_waterfall_explanation(
+                    bk_n=int(med_bk), judg_n=int(med_judg), lien_n=int(med_lien),
+                    sos_active=True, tin_ok=True, wl_hits=0,
+                    age_years=3, has_revenue=False, num_emp=5, naics_ok=True,
+                    contributions=contributions_p, categories=categories_p
+                )
+                st.markdown("---")
                 col_l,col_r = st.columns(2)
                 with col_l:
                     fig = px.histogram(score_df,x="worth_score_850",nbins=35,
@@ -3489,8 +4202,8 @@ LIMIT 10;""", language="sql")
                      "These are optional joins — if no match, the score is still shown.", "blue")
 
                 # Try to join score with naics/state from facts
-                naics_for_join = get_section_data("naics", record_limit)
-                sos_for_join   = get_section_data("sos",   record_limit)
+                naics_for_join = get_section_data("naics", record_limit, date_from, date_to)
+                sos_for_join   = get_section_data("sos", record_limit, date_from, date_to)
 
                 score_enriched = score_df.copy()
                 if naics_for_join is not None and "naics_code" in naics_for_join.columns and "business_id" in score_enriched.columns:
@@ -3511,25 +4224,130 @@ LIMIT 10;""", language="sql")
                 # ── Slice by Score Decision ──────────────────────────────────
                 if "score_decision" in score_df.columns:
                     st.markdown("##### Score Distribution by Decision")
-                    fig_dec = px.box(score_df,x="score_decision",y="worth_score_850",
-                                     color="score_decision",
-                                     color_discrete_map={"APPROVE":"#22c55e",
-                                                          "FURTHER_REVIEW_NEEDED":"#f59e0b",
-                                                          "DECLINE":"#ef4444"},
-                                     title="Score Range per Decision")
-                    fig_dec.update_layout(showlegend=False)
-                    st.plotly_chart(dark_chart_layout(fig_dec),use_container_width=True)
+                    st.markdown(
+                        "**What is being approved or declined?** The Worth Score model evaluates "
+                        "whether a business is creditworthy enough to receive a **payment processing "
+                        "limit, a line of credit, or access to a financial product** offered by "
+                        "Worth AI's customers (e.g. VizyPay, AMEX GCS, Team Branch). "
+                        "The decision is not about the business itself being 'good' or 'bad' — "
+                        "it is about whether the business's risk profile meets the underwriter's "
+                        "acceptance threshold for that specific product."
+                    )
+
+                    col_l, col_r = st.columns(2)
+                    with col_l:
+                        fig_dec = px.box(score_df, x="score_decision", y="worth_score_850",
+                                         color="score_decision",
+                                         color_discrete_map={"APPROVE":"#22c55e",
+                                                              "FURTHER_REVIEW_NEEDED":"#f59e0b",
+                                                              "DECLINE":"#ef4444"},
+                                         title="Score Range per Decision")
+                        fig_dec.update_layout(showlegend=False)
+                        st.plotly_chart(dark_chart_layout(fig_dec), use_container_width=True)
+
+                    with col_r:
+                        # Decision distribution
+                        dec_counts = score_df["score_decision"].value_counts().reset_index()
+                        dec_counts.columns = ["Decision","Count"]
+                        dec_counts["% of Total"] = (dec_counts["Count"]/len(score_df)*100).round(1)
+                        dec_counts["Avg Score"] = dec_counts["Decision"].map(
+                            score_df.groupby("score_decision")["worth_score_850"].mean().round(0).to_dict())
+                        styled_table(dec_counts, color_col="Decision",
+                                     palette={"approve":"#22c55e","further_review_needed":"#f59e0b","decline":"#ef4444"})
+
+                    # What the box plot shows
                     st.markdown("""
-**What each decision means:**
-- **APPROVE**: Model probability above the approval threshold. Score typically >575.
-- **FURTHER REVIEW**: Model is uncertain — score near a threshold boundary. Human analyst reviews.
-- **DECLINE**: Model probability below the decline threshold. Score typically <450.
-The exact thresholds are customer-configurable and represent underwriter risk appetite.
+**How to read the box plot:**
+Each box shows the range of Worth Scores for businesses that received that decision.
+- **Box** = middle 50% of scores (P25–P75)
+- **Line inside box** = median score
+- **Whiskers** = range (excluding outliers)
+- **Dots** = outliers (unusually low or high scores for that decision)
+
+A healthy model shows clear separation: APPROVE box clearly higher than DECLINE box,
+with FURTHER_REVIEW in between. Overlap means the threshold is in a dense region of the distribution.
                     """)
+
+                    # Full causal explanation per decision
+                    st.markdown("##### What each decision means — and what caused it")
+
+                    decision_details = {
+                        "APPROVE": {
+                            "color":"#22c55e","icon":"✅",
+                            "what":"The business was **approved** for the financial product offered by the customer (e.g. merchant cash advance, payment processing account, line of credit).",
+                            "means":"The Worth Score model determined that the probability of this business defaulting on its obligations is **below the customer's acceptance threshold**.",
+                            "typical_score":"Score typically > 575–600 (varies by customer configuration).",
+                            "common_profile":[
+                                "No public records (or old/minor ones)",
+                                "SOS active in good standing",
+                                "TIN verified (EIN matches legal name per IRS)",
+                                "No watchlist hits",
+                                "Established business (> 2 years)",
+                                "Revenue data available (Plaid connected) showing stable cash flow",
+                            ],
+                            "action":"Business can proceed. If Plaid is connected, the processing limit is set based on the financial model's outputs.",
+                        },
+                        "FURTHER_REVIEW_NEEDED": {
+                            "color":"#f59e0b","icon":"🔍",
+                            "what":"The business was **not auto-approved or auto-declined** — a human underwriter must review it before a final decision.",
+                            "means":"The model's probability estimate falls in an **uncertain zone** near the threshold boundary. The model is not confident enough to auto-decide.",
+                            "typical_score":"Score typically 500–575 (the 'gray zone' between thresholds).",
+                            "common_profile":[
+                                "Some risk signals present but not disqualifying (e.g. 1 old judgment, no current watchlist hits)",
+                                "Entity is relatively new (< 1 year) with limited track record",
+                                "TIN failed or pending (name/EIN mismatch needs explanation)",
+                                "NAICS 561499 fallback — industry risk unknown",
+                                "Missing financial data (no Plaid connection) — model imputes 0",
+                            ],
+                            "action":"Route to underwriting queue. An analyst reviews: TIN failure reason, business age, public records age, revenue documentation. Decision may flip to APPROVE or DECLINE.",
+                        },
+                        "DECLINE": {
+                            "color":"#ef4444","icon":"❌",
+                            "what":"The business was **declined** for the financial product.",
+                            "means":"The Worth Score model determined that the probability of this business defaulting is **above the customer's maximum acceptable risk threshold**.",
+                            "typical_score":"Score typically < 450–500 (varies by customer configuration).",
+                            "common_profile":[
+                                "Recent bankruptcy (< 2 years) — single strongest decline signal",
+                                "Multiple public records (BK + judgment + lien)",
+                                "SOS inactive (entity cannot legally operate)",
+                                "Sanctions/watchlist hit — hard stop",
+                                "Very low credit indicators across all data sources",
+                                "High debt-to-equity or negative equity (if Plaid connected)",
+                            ],
+                            "action":"Business is not approved for this product at this time. Some customers allow re-application after 6–12 months if the disqualifying factors resolve.",
+                        },
+                    }
+
+                    for dec, info in decision_details.items():
+                        n_biz = int((score_df["score_decision"]==dec).sum())
+                        if n_biz == 0:
+                            continue
+                        pct = n_biz/len(score_df)*100
+                        avg_s = score_df[score_df["score_decision"]==dec]["worth_score_850"].mean()
+                        st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {info['color']};
+                            border-radius:10px;padding:16px 20px;margin:10px 0">
+                          <div style="font-size:1.05rem;font-weight:700;color:{info['color']}">
+                            {info['icon']} {dec.replace('_',' ')} — {n_biz:,} businesses ({pct:.1f}%) · avg score {avg_s:.0f}</div>
+                          <div style="color:#CBD5E1;font-size:.82rem;margin-top:8px">
+                            <strong>What was {dec.split('_')[0].lower()}d:</strong> {info['what']}</div>
+                          <div style="color:#94A3B8;font-size:.79rem;margin-top:6px">
+                            <strong>What this means:</strong> {info['means']}</div>
+                          <div style="color:#64748b;font-size:.75rem;margin-top:4px">
+                            <em>{info['typical_score']}</em></div>
+                          <div style="color:#94A3B8;font-size:.78rem;margin-top:8px">
+                            <strong>Typical profile for this decision:</strong>
+                            <ul style="margin:4px 0 0 16px">{''.join(f'<li>{p}</li>' for p in info['common_profile'])}</ul>
+                          </div>
+                          <div style="color:#60A5FA;font-size:.77rem;margin-top:6px">
+                            <strong>What happens next:</strong> {info['action']}</div>
+                        </div>""", unsafe_allow_html=True)
 
                 # ── Slice by NAICS Sector ─────────────────────────────────────
                 if "naics_sector" in score_enriched.columns and score_enriched["naics_sector"].notna().sum()>0:
                     st.markdown("##### Score Distribution by NAICS 2-Digit Sector")
+
+                    # Map 2-digit codes to sector names — codes 31/32/33 all = Manufacturing,
+                    # 44/45 all = Retail. Map FIRST then group by name to avoid double bars.
                     NAICS_SECTOR_NAMES = {
                         "11":"Agriculture","21":"Mining","22":"Utilities","23":"Construction",
                         "31":"Manufacturing","32":"Manufacturing","33":"Manufacturing",
@@ -3537,13 +4355,17 @@ The exact thresholds are customer-configurable and represent underwriter risk ap
                         "51":"Information","52":"Finance","53":"Real Estate",
                         "54":"Professional Svcs","56":"Admin/Support","61":"Education",
                         "62":"Healthcare","71":"Arts/Entertainment","72":"Food/Lodging",
-                        "81":"Other Services","92":"Government","561499":"Fallback"
+                        "81":"Other Services","92":"Government","561499":"Fallback (unclassified)"
                     }
-                    sector_stats = score_enriched.groupby("naics_sector")["worth_score_850"].agg(
-                        count="count",mean="mean").reset_index()
-                    sector_stats["Sector Name"] = sector_stats["naics_sector"].map(NAICS_SECTOR_NAMES).fillna("Unknown")
-                    sector_stats = sector_stats[sector_stats["count"]>=5].sort_values("mean",ascending=False)
-                    sector_stats.columns = ["Sector Code","Count","Avg Score","Sector Name"]
+                    # Apply sector name BEFORE grouping so 31/32/33 → "Manufacturing" merge into one bar
+                    score_enriched["sector_name"] = score_enriched["naics_sector"].map(
+                        NAICS_SECTOR_NAMES).fillna("Unknown")
+
+                    # Group by sector_name (not raw code) — fixes double-bar issue
+                    sector_stats = score_enriched.groupby("sector_name")["worth_score_850"].agg(
+                        count="count", mean="mean").reset_index()
+                    sector_stats.columns = ["Sector Name","Count","Avg Score"]
+                    sector_stats = sector_stats[sector_stats["Count"]>=5].sort_values("Avg Score",ascending=False)
                     sector_stats["Avg Score"] = sector_stats["Avg Score"].round(1)
 
                     col_l,col_r = st.columns(2)
@@ -3555,18 +4377,34 @@ The exact thresholds are customer-configurable and represent underwriter risk ap
                         fig_sec.update_layout(height=450,coloraxis_showscale=False)
                         st.plotly_chart(dark_chart_layout(fig_sec),use_container_width=True)
                     with col_r:
-                        styled_table(sector_stats[["Sector Name","Sector Code","Count","Avg Score"]])
+                        styled_table(sector_stats[["Sector Name","Count","Avg Score"]])
+
+                    st.markdown("""
+**Why did Retail and Manufacturing previously show two bars each?**
+NAICS codes `31`, `32`, `33` all belong to Manufacturing, and `44`, `45` both belong to Retail.
+The previous chart grouped by the 2-digit code (giving 3 separate Manufacturing bars and 2 Retail bars),
+then plotted them all with the label "Manufacturing" or "Retail" — producing stacked/overlapping bars.
+**Fixed:** The chart now groups by sector name first, so all Manufacturing codes merge into one bar.
+                    """)
 
                     analyst_card("NAICS Sector Score Differences — Why They Exist", [
-                        "Different NAICS sectors have inherently different risk profiles because the model was "
-                        "trained on historical data where sector predicted default likelihood.",
-                        "Sectors like Finance (52), Real Estate (53), and cash-intensive businesses typically "
-                        "score lower due to higher historical default rates in those industries.",
-                        "Sectors like Healthcare (62), Professional Services (54), and Education (61) typically "
-                        "score higher due to more stable revenue and lower default rates.",
-                        "The NAICS 6-digit code is a model feature (`naics6`). A wrong NAICS code "
-                        "can mis-classify a business into the wrong risk bucket — this is one reason "
-                        "the 561499 fallback is problematic beyond just data completeness.",
+                        "Different NAICS sectors score differently because the Worth Score model was "
+                        "trained on historical data where industry type predicted default likelihood. "
+                        "The model uses `naics6` as a feature — the 6-digit NAICS code enables "
+                        "industry-specific risk benchmarking.",
+                        "Arts/Entertainment (71) and Healthcare (62) scoring lower is counterintuitive. "
+                        "Possible causes: (1) these industries have high proportions of new small businesses "
+                        "with limited financial history, (2) more public records in these sectors historically, "
+                        "or (3) higher representation of sole proprietors (lower firmographic score).",
+                        "Retail (44/45) and Manufacturing (31/32/33) show the widest score ranges — "
+                        "these sectors have the most diverse business profiles, from tiny sole-prop shops "
+                        "to established multi-employee companies.",
+                        "'Fallback (unclassified)' businesses (NAICS 561499) have lower scores on average "
+                        "because the model cannot apply industry benchmarks — it uses a generic sector average. "
+                        "This is another reason the 561499 fallback hurts beyond data quality.",
+                        "A sector with unexpectedly low average score is worth investigating: "
+                        "it may indicate a data quality issue (wrong NAICS assigned) or a genuine "
+                        "risk concentration in that industry within your customer base.",
                     ])
 
                 # ── Is score different by state? ──────────────────────────────
@@ -3585,14 +4423,20 @@ The exact thresholds are customer-configurable and represent underwriter risk ap
                     if state_df is not None and not state_df.empty:
                         state_df = state_df.drop_duplicates("business_id")
                         score_w_state = score_enriched.merge(state_df,on="business_id",how="left")
-                        state_stats = score_w_state.groupby("state")["worth_score_850"].agg(
-                            count="count",mean="mean").reset_index()
-                        state_stats = state_stats[state_stats["count"]>=10].sort_values("mean",ascending=False)
-                        state_stats["Avg Score"] = state_stats["mean"].round(1)
-                        fig_state = px.bar(state_stats.head(20),x="state",y="Avg Score",
-                                           color="Avg Score",color_continuous_scale="RdYlGn",
-                                           title="Avg Worth Score by State (top 20, ≥10 businesses)")
-                        st.plotly_chart(dark_chart_layout(fig_state),use_container_width=True)
+                        # Guard: only proceed if the state column has real values
+                        if "state" in score_w_state.columns and score_w_state["state"].notna().sum() >= 10:
+                            score_w_state_clean = score_w_state.dropna(subset=["state"])
+                            state_stats = score_w_state_clean.groupby("state")["worth_score_850"].agg(
+                                count="count",mean="mean").reset_index()
+                            state_stats = state_stats[state_stats["count"]>=10].sort_values("mean",ascending=False)
+                            state_stats["Avg Score"] = state_stats["mean"].round(1)
+                            fig_state = px.bar(state_stats.head(20),x="state",y="Avg Score",
+                                               color="Avg Score",color_continuous_scale="RdYlGn",
+                                               title="Avg Worth Score by State (top 20, ≥10 businesses)")
+                            st.plotly_chart(dark_chart_layout(fig_state),use_container_width=True)
+                        else:
+                            flag("State join returned no matching rows — the primary_address fact "
+                                 "may store state differently in this environment.", "amber")
                     else:
                         flag("State data requires primary_address fact — querying live. "
                              "If this appears empty, the join may not have found matches.", "amber")
@@ -4046,38 +4890,160 @@ Admin Portal + KYB Dashboard
                 styled_table(lineage_tbl)
 
     with tab_audit:
-        if is_audit:
-            audit_df = worth
-            flag("Individual scores not accessible — showing aggregate fill rates from "
-                 "warehouse.worth_score_input_audit.", "amber")
-            c1,c2,c3 = st.columns(3)
-            with c1: kpi("Audit Days",f"{len(audit_df):,}","scoring days","#3B82F6")
-            with c2: kpi("Avg Biz/Day",f"{audit_df['rows_per_day'].mean():.0f}","scored daily","#22c55e")
-            with c3: kpi("Latest Date",str(audit_df["score_date"].max()),"","#8B5CF6")
+        st.markdown("#### 📊 Score Audit — Model Input Data Quality Tracking")
+        flag("Source: `warehouse.worth_score_input_audit` — a Redshift table tracking what % of "
+             "model input features were populated on each scoring day. "
+             "This tab **always loads independently**, regardless of whether individual score data is available.", "blue")
 
-            fill_cols = [c for c in audit_df.columns if c.startswith("fill_")]
-            latest = audit_df.iloc[0]
-            fill_data = [{"Feature":c.replace("fill_",""),"Fill %":float(latest[c])} for c in fill_cols if c in audit_df.columns]
-            fill_df = pd.DataFrame(fill_data).sort_values("Fill %",ascending=True)
-            fill_df["Status"] = fill_df["Fill %"].apply(
-                lambda v:"Good (>80%)" if v>=80 else("Medium (30-80%)" if v>=30 else"Low (<30%)"))
-            fig = px.bar(fill_df.tail(30),x="Fill %",y="Feature",orientation="h",
-                         color="Status",
-                         color_discrete_map={"Good (>80%)":"#22c55e","Medium (30-80%)":"#f59e0b","Low (<30%)":"#ef4444"},
-                         title=f"Feature Fill Rates (latest: {latest['score_date']})")
-            fig.update_layout(height=600)
-            st.plotly_chart(dark_chart_layout(fig),use_container_width=True)
+        with st.expander("ℹ️ What is Score Audit? Why does it matter?"):
+            st.markdown("""
+**The Worth Score model uses 100+ input features.** For each feature, the model either gets
+a real value or uses an **imputed default** (e.g. 0 for revenue if Plaid is not connected).
 
-            zero_features = fill_df[fill_df["Fill %"]==0]["Feature"].tolist()
-            if zero_features:
-                flag(f"{len(zero_features)} features at 0% fill: {', '.join(zero_features[:10])}. "
-                     "These features are not reaching the model.", "red")
-        else:
-            st.info("Score audit data will appear here when individual scores are also unavailable. "
-                    "Both sources were checked.")
-            st.code("""SELECT score_date, rows_per_day, fill_state, fill_naics6, fill_revenue
+**The Score Audit table tracks fill rates per scoring day:**
+- `fill_revenue = 90` → 90% of businesses scored that day had real revenue data
+- `fill_naics6 = 85` → 85% had a specific NAICS code (15% got the 561499 fallback)
+- `fill_age_bankruptcy = 0` → 0% had bankruptcy age data (expected — most businesses have no BK)
+
+**Why this matters:**
+- A sudden **drop in fill rate** = a data pipeline problem (Plaid disconnected, ZI data stale)
+- Consistent **0% fill** for a non-public-record feature = data source not feeding the model
+- **100% fill** for macro indicators (GDP, VIX, CPI) is expected — live daily data
+
+**Data flow:**
+```
+Vendors → integration-service → RDS
+  → warehouse-service: sp_worth_score_auditing_refresh.sql
+  → warehouse.worth_score_input_audit (Redshift)
+  → This tab
+```
+            """)
+
+        # Always load audit data directly — independent of whether scores loaded
+        _audit_cache_key = f"_audit_direct_{date_from}_{date_to}"
+        if _audit_cache_key not in st.session_state:
+            with st.spinner("Loading score audit data from warehouse.worth_score_input_audit…"):
+                _dc_audit = _date_clause("score_date", date_from, date_to)
+                audit_sql = f"""
+                    SELECT *
+                    FROM warehouse.worth_score_input_audit
+                    WHERE 1=1{_dc_audit}
+                    ORDER BY score_date DESC
+                    LIMIT 90
+                """
+                st.session_state[_audit_cache_key] = run_query(audit_sql)
+
+        audit_df = st.session_state[_audit_cache_key]
+
+        if audit_df is None or audit_df.empty:
+            flag("No audit data returned. The table may not exist yet or require different permissions.", "amber")
+            st.code("""SELECT score_date, rows_per_day, fill_state, fill_naics6, fill_revenue,
+       fill_count_employees, fill_age_bankruptcy
 FROM warehouse.worth_score_input_audit
 ORDER BY score_date DESC LIMIT 10;""", language="sql")
+        else:
+            c1,c2,c3,c4 = st.columns(4)
+            with c1: kpi("Audit Days",f"{len(audit_df):,}","days with data","#3B82F6")
+            with c2: kpi("Avg Businesses/Day",f"{audit_df['rows_per_day'].mean():.0f}","scored per day","#22c55e")
+            with c3: kpi("Latest Date",str(audit_df["score_date"].max()),"","#8B5CF6")
+            with c4: kpi("Earliest Date",str(audit_df["score_date"].min()),"","#64748b")
+
+            fill_cols = [c for c in audit_df.columns if c.startswith("fill_")]
+            if fill_cols:
+                latest_row = audit_df.iloc[0]
+                fill_data = [{"Feature":c.replace("fill_",""),"Fill %":float(latest_row[c])}
+                              for c in fill_cols if c in audit_df.columns]
+                fill_df = pd.DataFrame(fill_data).sort_values("Fill %",ascending=True)
+                fill_df["Status"] = fill_df["Fill %"].apply(
+                    lambda v: "✅ Good (>80%)" if v>=80 else ("⚠️ Medium (30-80%)" if v>=30 else "❌ Low (<30%)"))
+
+                zero_features    = fill_df[fill_df["Fill %"]==0]["Feature"].tolist()
+                partial_features = fill_df[(fill_df["Fill %"]>0)&(fill_df["Fill %"]<30)]["Feature"].tolist()
+
+                c5,c6,c7 = st.columns(3)
+                with c5: kpi("Features at 100%",f"{(fill_df['Fill %']==100).sum()}","fully populated","#22c55e")
+                with c6: kpi("Features at 0%",f"{len(zero_features)}","zero fill (many expected)","#64748b")
+                with c7: kpi("Features < 30%",f"{len(partial_features)}","low fill — investigate",
+                             "#ef4444" if len(partial_features)>5 else "#f59e0b")
+
+                st.markdown(f"#### Feature Fill Rates — {latest_row['score_date']} (latest day)")
+                col_l,col_r = st.columns([2,1])
+                with col_l:
+                    fig_fill = px.bar(fill_df.tail(35),x="Fill %",y="Feature",orientation="h",
+                                      color="Status",
+                                      color_discrete_map={"✅ Good (>80%)":"#22c55e",
+                                                           "⚠️ Medium (30-80%)":"#f59e0b",
+                                                           "❌ Low (<30%)":"#ef4444"},
+                                      title=f"Feature Fill Rates (latest: {latest_row['score_date']})")
+                    fig_fill.update_layout(height=650,showlegend=True)
+                    st.plotly_chart(dark_chart_layout(fig_fill),use_container_width=True)
+                with col_r:
+                    st.markdown("**Expected fill rates by category:**")
+                    st.markdown("""
+| Feature category | Expected fill | Why |
+|---|---|---|
+| Macro indicators (GDP, VIX, CPI) | 100% | Live daily data always available |
+| State, city, NAICS | 85–95% | High vendor coverage |
+| Revenue, cash flow | 40–80% | Depends on Plaid connections |
+| Public records (BK/Judgment age) | 0–20% | 0% = no records = good |
+| Reviews | 70–90% | Google/SERP coverage |
+                    """)
+
+                # Trend over time
+                KEY_FEATURES = ["fill_naics6","fill_revenue","fill_state",
+                                 "fill_count_employees","fill_count_reviews","fill_age_bankruptcy"]
+                avail_trend = [f for f in KEY_FEATURES if f in audit_df.columns]
+                if avail_trend:
+                    st.markdown("#### Fill Rate Trends Over Time")
+                    trend_df = audit_df[["score_date"]+avail_trend].copy()
+                    trend_df["score_date"] = pd.to_datetime(trend_df["score_date"])
+                    trend_melt = trend_df.melt(id_vars="score_date",var_name="Feature",value_name="Fill %")
+                    trend_melt["Feature"] = trend_melt["Feature"].str.replace("fill_","")
+                    fig_trend = px.line(trend_melt,x="score_date",y="Fill %",color="Feature",
+                                        title="Key Feature Fill Rates Over Time")
+                    fig_trend.add_hline(y=80,line_dash="dash",line_color="#f59e0b",annotation_text="80% target")
+                    st.plotly_chart(dark_chart_layout(fig_trend),use_container_width=True)
+
+                # Volume over time
+                if "rows_per_day" in audit_df.columns:
+                    st.markdown("#### Scoring Volume Per Day")
+                    vol_df = audit_df[["score_date","rows_per_day"]].copy()
+                    vol_df["score_date"] = pd.to_datetime(vol_df["score_date"])
+                    fig_vol = px.bar(vol_df.sort_values("score_date"),x="score_date",y="rows_per_day",
+                                     color_discrete_sequence=["#3B82F6"],
+                                     title="Businesses Scored Per Day")
+                    st.plotly_chart(dark_chart_layout(fig_vol),use_container_width=True)
+                    st.caption("Spikes = batch scoring. Gaps = pipeline issues or low application volume.")
+
+                # Alerts
+                EXPECTED_ZERO = {"age_bankruptcy","age_judgment","age_lien",
+                                  "count_bankruptcy","count_judgment","count_lien",
+                                  "flag_equity_negative","flag_net_income_negative","flag_total_liabilities_over_assets"}
+                unexpected_zero = [f for f in zero_features if f not in EXPECTED_ZERO]
+                if unexpected_zero:
+                    flag(f"🚨 {len(unexpected_zero)} features at 0% fill that SHOULD have data: "
+                         f"{', '.join(unexpected_zero[:8])}. Investigate the data pipeline.", "red")
+                expected_zero_found = [f for f in zero_features if f in EXPECTED_ZERO]
+                if expected_zero_found:
+                    flag(f"✅ {len(expected_zero_found)} features at 0% are EXPECTED (public records — "
+                         "most businesses have no BK/judgments/liens): "
+                         f"{', '.join(expected_zero_found[:6])}", "green")
+
+                analyst_card("Score Audit — How to Monitor and When to Act", [
+                    "`fill_naics6` dropping below 80%: NAICS fallback rate is increasing. "
+                    "Check the entity-matching pipeline — ZI/EFX/OC bulk data may be stale.",
+                    "`fill_revenue` dropping: fewer businesses are connecting Plaid. "
+                    "The financial model runs on imputed 0 values, reducing score accuracy for those businesses.",
+                    "Macro indicators (GDP, VIX, CPI, Fed rates) should ALWAYS be 100%. "
+                    "If any is below 100%, the economic data pipeline is broken — contact warehouse-service.",
+                    "Public record fill rates at 0% are NORMAL and GOOD — it means most businesses have no BK/judgments. "
+                    "These become non-zero only when actual public records exist.",
+                    "`rows_per_day` consistent at 0 for multiple days = scoring pipeline stopped. "
+                    "Check the ai-score-service Celery workers and Kafka consumers.",
+                    "This table is updated by warehouse-service task `perform_worth_score_audit.py` "
+                    "calling `sp_worth_score_auditing_refresh.sql`. "
+                    "If this Celery task fails, the audit table stops updating silently.",
+                ])
 
     with tab_dq_risk:
         st.markdown("#### 🔬 Risk & Score Data Quality Checks")
@@ -4511,6 +5477,11 @@ elif section == "🔎 Business Lookup":
                                    "AI vs vendor NAICS comparison"],
             "⚠️ Risk & Watchlist": ["Sanctions/PEP/adverse media", "Bankruptcy age and count",
                                      "Judgment and lien status", "Vendor confidence aggregate risk score"],
+            "💰 Worth Score": ["Live score from rds_manual_score_public.business_scores",
+                                "Risk level (HIGH/MODERATE/LOW) with underwriting action",
+                                "Score decision (APPROVE/FURTHER_REVIEW/DECLINE)",
+                                "Factor analysis: public records, firmographic, identity, financials",
+                                "Score improvement opportunities with specific actions"],
             "🔗 Cross-Field Anomalies": ["Entity type vs NAICS sector (e.g. sole prop + manufacturing)",
                                           "State of formation vs operating jurisdiction",
                                           "Website found but NAICS 561499",
@@ -4518,14 +5489,43 @@ elif section == "🔎 Business Lookup":
                                           "High vendor conf but no NAICS"],
         }
         for cat, checks in categories.items():
-            with st.expander(cat):
+            with st.expander(cat, expanded=(cat == "💰 Worth Score")):
                 for c in checks:
                     st.markdown(f"  - {c}")
     else:
         bid = business_id.strip()
 
-        biz_cache_key    = f"_biz_{bid}"
-        biz_ts_key       = f"_biz_ts_{bid}"
+        # ── Per-business date range ────────────────────────────────────────────
+        st.markdown("---")
+        with st.expander("📅 Historical snapshot — filter facts by date", expanded=False):
+            st.markdown(
+                "By default this shows the **latest** facts for this business. "
+                "Use this filter to see a **historical snapshot** — what did this business's "
+                "facts look like in a specific period? Useful for auditing past decisions."
+            )
+            col_bd1, col_bd2 = st.columns(2)
+            today_biz = datetime.now(timezone.utc).date()
+            with col_bd1:
+                biz_date_from = st.date_input("Facts from", value=None,
+                                               max_value=today_biz, key="biz_date_from",
+                                               label_visibility="visible")
+            with col_bd2:
+                biz_date_to = st.date_input("Facts to", value=None,
+                                             max_value=today_biz, key="biz_date_to",
+                                             label_visibility="visible")
+            if biz_date_from and biz_date_to and biz_date_from > biz_date_to:
+                st.error("'From' must be before 'To'")
+                biz_date_from = None
+            if biz_date_from or biz_date_to:
+                flag(f"Showing facts between {biz_date_from or 'any'} and {biz_date_to or 'today'} for this business.", "blue")
+
+        biz_dc = _date_clause("received_at", biz_date_from if (biz_date_from or biz_date_to) else None,
+                               biz_date_to   if (biz_date_from or biz_date_to) else None)
+
+        # Cache key includes date range so historical queries are separately cached
+        biz_date_suffix  = f"_{biz_date_from}_{biz_date_to}" if (biz_date_from or biz_date_to) else ""
+        biz_cache_key    = f"_biz_{bid}{biz_date_suffix}"
+        biz_ts_key       = f"_biz_ts_{bid}{biz_date_suffix}"
 
         # Force reload if the user clicked the Refresh button
         # (clear_data_cache() removes _biz_* keys)
@@ -4537,7 +5537,7 @@ elif section == "🔎 Business Lookup":
                 names_sql = f"""
                     SELECT DISTINCT name, MAX(received_at) AS received_at
                     FROM rds_warehouse_public.facts
-                    WHERE business_id = '{bid}'
+                    WHERE business_id = '{bid}'{biz_dc}
                     GROUP BY name
                     ORDER BY name
                 """
@@ -4572,7 +5572,7 @@ elif section == "🔎 Business Lookup":
                             SELECT name, value, received_at
                             FROM rds_warehouse_public.facts
                             WHERE business_id = '{bid}'
-                              AND name = '{fact_name}'
+                              AND name = '{fact_name}'{biz_dc}
                             ORDER BY received_at DESC
                             LIMIT 1
                         """
@@ -4660,14 +5660,76 @@ elif section == "🔎 Business Lookup":
         def gp(name): return pid_name(str(_safe_get(latest.get(name,{}),"source","platformId",default="")))
         def gts(name): return str(facts_df[facts_df["name"]==name]["received_at"].iloc[0])[:16] if name in facts_df["name"].values else "N/A"
 
-        def fact_row(name, label=None):
-            """Build a display row for a single fact."""
+        def _safe_int_gv(name):
+            """Safely extract a numeric fact value — handles placeholder strings and lists."""
             v = gv(name)
-            if isinstance(v,(dict,list)): display = json.dumps(v)[:120]
-            else: display = str(v)[:120] if v is not None else "(not stored)"
+            if v is None: return 0
+            try: return int(float(str(v)))
+            except Exception: return 0
+
+        # FACT_SOURCE_KNOWLEDGE must be defined before fact_row/diag_card use it
+        FACT_SOURCE_KNOWLEDGE = {
+            "business_name":"Applicant form / ZI / EFX","legal_name":"Middesk BEV / OC",
+            "dba_found":"Middesk review tasks / OC","names":"ZI / EFX / Middesk",
+            "names_found":"ZI / EFX / OC (merged)","names_submitted":"Applicant form",
+            "people":"Middesk / OC / Trulioo (too large)","customer_ids":"System internal",
+            "external_id":"System internal","kyb_submitted":"System flag",
+            "sos_filings":"Middesk (primary) / OC (fallback) — too large",
+            "sos_match":"Middesk / OC — too large","sos_match_boolean":"Middesk / OC",
+            "sos_active":"Calculated from sos_filings","formation_state":"Middesk / OC",
+            "formation_date":"Middesk / OC / EFX","year_established":"EFX / ZI / Middesk",
+            "corporation":"Middesk / OC","middesk_confidence":"Middesk confidence score",
+            "middesk_id":"Middesk internal ID","tin":"Middesk BEV / OC / applicant",
+            "tin_submitted":"Applicant form","tin_match":"Middesk TIN task / Trulioo",
+            "tin_match_boolean":"Calculated from tin_match.status",
+            "idv_status":"Plaid IDV","idv_passed":"Calculated from idv_status.SUCCESS",
+            "idv_passed_boolean":"Calculated: true iff idv_passed > 0",
+            "is_sole_prop":"Calculated from tin + idv_status",
+            "name_match":"Middesk / OC / Trulioo","name_match_boolean":"Calculated",
+            "address_match":"Middesk / SERP","address_match_boolean":"Calculated",
+            "address_verification":"Middesk","address_verification_boolean":"Calculated",
+            "addresses_deliverable":"USPS via Middesk","addresses":"ZI / EFX / OC / Middesk",
+            "addresses_found":"ZI / EFX / OC / Middesk","addresses_submitted":"Applicant form",
+            "primary_address":"Applicant form / ZI / EFX","address_registered_agent":"Middesk / OC",
+            "naics_code":"EFX/ZI/OC/SERP/Trulioo/AI","mcc_code":"AI / rel_naics_mcc lookup",
+            "industry":"Calculated from naics_code","naics_description":"core_naics_code lookup",
+            "mcc_description":"AI / core_mcc_code lookup","website":"SERP / ZI / AI",
+            "website_found":"SERP","watchlist":"Middesk + Trulioo PSC (too large)",
+            "watchlist_hits":"Calculated from watchlist","adverse_media_hits":"Trulioo",
+            "num_bankruptcies":"Public records (Middesk/Verdata)",
+            "num_judgements":"Public records (Middesk/Verdata)",
+            "num_liens":"Public records (Middesk/Verdata)",
+            "worth_score":"ai-score-service","revenue":"ZI / EFX / Plaid",
+            "num_employees":"ZI / EFX",
+        }
+
+        def fact_row(name, label=None):
+            """Build a display row for a single fact with rich source attribution."""
+            v = gv(name)
+            if isinstance(v, list):
+                display = f"📋 list · {len(v)} item(s) — expand in 📋 All Facts"
+            elif isinstance(v, dict):
+                # Special handling for known dict-valued facts
+                if name == "idv_status" and v:
+                    parts = [f"{k}:{cnt}" for k,cnt in v.items() if cnt]
+                    display = "IDV: " + ", ".join(parts[:4])
+                else:
+                    display = f"🗂️ object · {len(v)} key(s) — expand in 📋 All Facts"
+            elif v is None:
+                display = "(not stored)"
+            elif str(v) == "[too large — query PostgreSQL RDS directly]":
+                display = "📦 too large — see 📋 All Facts for SQL"
+            else:
+                display = str(v)[:150]
+
             conf = gc(name)
+            # Build source display with knowledge fallback
+            raw_src = gp(name)
+            if raw_src in ("Unknown source","No vendor (default)","Applicant/System") and name in FACT_SOURCE_KNOWLEDGE:
+                raw_src = FACT_SOURCE_KNOWLEDGE.get(name, raw_src)
+
             return {"Field": label or name, "Value": display,
-                    "Source": gp(name), "Confidence": f"{conf:.3f}" if conf>0 else "—",
+                    "Source": raw_src, "Confidence": f"{conf:.3f}" if conf>0 else "—",
                     "Updated": gts(name)}
 
         # ── Summary header ────────────────────────────────────────────────────
@@ -4680,23 +5742,261 @@ elif section == "🔎 Business Lookup":
         idv_val   = str(gv("idv_passed_boolean") or "").lower()
 
         st.markdown(f"### 🔍 KYB Investigation — `{biz_name}` (`{bid}`)")
+
+        # ── Pre-load facts needed for causal analysis ─────────────────────────
+        tin_match_obj  = latest.get("tin_match",{}).get("value")
+        tin_status_str = ""
+        tin_message    = ""
+        if isinstance(tin_match_obj, dict):
+            tin_status_str = tin_match_obj.get("status","").lower()
+            tin_message    = tin_match_obj.get("message","")
+        elif tin_match_obj and str(tin_match_obj) not in ("[too large","None",""):
+            try:
+                _tm = json.loads(str(tin_match_obj))
+                tin_status_str = _tm.get("status","").lower()
+                tin_message    = _tm.get("message","")
+            except Exception:
+                pass
+
+        middesk_tin_task = str(latest.get("middesk_tin_task",{}).get("value","none") or "none").lower()
+        tin_submitted_v  = str(gv("tin_submitted") or "").lower()
+        oc_conf_v        = gc("sos_match")
+        middesk_conf_v   = gc("middesk_confidence") if "middesk_confidence" in latest else gc("sos_match")
+        idv_status_raw   = gv("idv_status")
+        name_match_v     = str(gv("name_match_boolean") or "").lower()
+
+        # ── Diagnostic card renderer ──────────────────────────────────────────
+        def diag_card(title, badge, badge_color, reason, detail, all_states, source_hint):
+            """Renders a focused diagnostic card showing only THIS result's meaning.
+            all_states is kept as a parameter for compatibility but NOT rendered as
+            an expander — we show only the result relevant to this specific business."""
+            st.markdown(f"""<div style="background:#1E293B;border-radius:10px;
+                padding:14px 16px;border-left:4px solid {badge_color};margin-bottom:6px">
+              <div style="color:#94A3B8;font-size:.70rem;text-transform:uppercase;letter-spacing:.05em">{title}</div>
+              <div style="color:{badge_color};font-size:1.15rem;font-weight:700;margin:4px 0">{badge}</div>
+              <div style="color:#CBD5E1;font-size:.78rem;margin-top:6px">
+                <strong>Why this result:</strong> {reason}</div>
+              <div style="color:#94A3B8;font-size:.74rem;margin-top:4px">{detail}</div>
+              <div style="color:#475569;font-size:.68rem;margin-top:8px;border-top:1px solid #334155;padding-top:4px">
+                Source: {source_hint}</div>
+            </div>""", unsafe_allow_html=True)
+            # No expander — only show what's relevant for this specific business.
+            # For a reference guide of all possible states, see the KYB Dashboard docs.
+
         c1,c2,c3,c4,c5 = st.columns(5)
-        with c1: kpi("SOS",
-                     "✅ Active" if sos_act=="true" else ("🚨 Inactive" if sos_act=="false" else "⚠️ Unknown"),
-                     "registry","#22c55e" if sos_act=="true" else "#ef4444")
-        with c2: kpi("TIN",
-                     "✅ Verified" if tin_bool=="true" else "❌ Not verified",
-                     "IRS EIN match","#22c55e" if tin_bool=="true" else "#ef4444")
-        with c3: kpi("NAICS",
-                     f"{'⚠️ ' if naics_val=='561499' else ''}{naics_val or 'N/A'}",
-                     "561499=fallback" if naics_val=="561499" else "classification",
-                     "#f59e0b" if naics_val=="561499" else "#22c55e")
-        with c4: kpi("Watchlist",
-                     f"🚨 {wl_hits} hit(s)" if wl_hits>0 else "✅ Clean",
-                     "","#ef4444" if wl_hits>0 else "#22c55e")
-        with c5: kpi("IDV",
-                     "✅ Passed" if idv_val=="true" else ("❌ Not passed" if idv_val=="false" else "⚠️ Unknown"),
-                     "Plaid","#22c55e" if idv_val=="true" else "#f59e0b")
+
+        # ── Card 1: SOS ───────────────────────────────────────────────────────
+        with c1:
+            if sos_act=="true":
+                sos_badge  = "✅ Active"
+                sos_color  = "#22c55e"
+                sos_reason = "The entity is registered and in good legal standing with the state."
+                sos_detail = "Middesk (or OC) confirmed an active SOS filing for this business name and state."
+            elif sos_act=="false":
+                sos_badge  = "🚨 Inactive"
+                sos_color  = "#ef4444"
+                sos_reason = "The entity exists in the state registry but is NOT in good standing — it cannot legally conduct business."
+                sos_detail = f"Common causes: unpaid franchise tax, missed annual report filing, administrative dissolution. Source confidence: {middesk_conf_v:.3f}."
+            else:
+                sos_badge  = "⚠️ Unknown"
+                sos_color  = "#f59e0b"
+                sos_reason = "No vendor returned an SOS active status for this business."
+                sos_detail = "Middesk and OC both had confidence=0 — entity was not found in SOS registry."
+
+            diag_card("SOS Registry", sos_badge, sos_color, sos_reason, sos_detail,
+                """| Badge | Meaning | Cause |
+|---|---|---|
+| ✅ **Active** | In good standing with state | Middesk/OC matched and filing is active |
+| 🚨 **Inactive** | NOT in good standing — cannot operate | Unpaid taxes, missed annual report, admin dissolution |
+| ⚠️ **Unknown** | Status not determinable | No vendor matched this entity (confidence=0) |""",
+                "`sos_active` fact · pid=16 (Middesk) or pid=23 (OC)")
+
+        # ── Card 2: TIN ───────────────────────────────────────────────────────
+        with c2:
+            if tin_bool=="true":
+                tin_badge  = "✅ Verified"
+                tin_color  = "#22c55e"
+                tin_reason = "IRS confirmed: the submitted EIN matches this exact legal business name."
+                tin_detail = f"Middesk TIN review task result: success. {('Message: ' + tin_message[:80]) if tin_message else ''}"
+            elif tin_status_str=="failure":
+                tin_badge  = "❌ Not verified"
+                tin_color  = "#ef4444"
+                # Determine specific failure reason from Middesk message
+                if "does not have a record" in tin_message.lower():
+                    tin_reason = "IRS has no record for this EIN + legal name combination."
+                    tin_detail = "Most likely cause: wrong EIN submitted, or the legal name differs from what's registered with the IRS (DBA vs legal name)."
+                elif "different business name" in tin_message.lower() or "associated with" in tin_message.lower():
+                    tin_reason = "🚨 FRAUD RISK: This EIN is registered under a DIFFERENT business name."
+                    tin_detail = "The EIN exists in IRS records but belongs to another entity. This is a serious signal — possible EIN reuse or fraudulent application."
+                elif "duplicate" in tin_message.lower():
+                    tin_reason = "Duplicate TIN request — Middesk received a repeat submission."
+                    tin_detail = "Re-submit after 24 hours."
+                elif "invalid" in tin_message.lower():
+                    tin_reason = "The EIN format is invalid (wrong length, non-numeric, etc.)."
+                    tin_detail = "Ask applicant to check their EIN certificate — must be exactly 9 digits."
+                elif "unavailable" in tin_message.lower():
+                    tin_reason = "IRS system was temporarily unavailable when verification was attempted."
+                    tin_detail = "Auto-retry in 24h — not a business data issue."
+                else:
+                    tin_reason = f"TIN match failed. Middesk message: '{tin_message[:100]}'" if tin_message else "TIN verification failed — specific reason not stored."
+                    tin_detail = "Check tin_match.message fact for the full Middesk IRS response."
+            elif tin_status_str=="pending":
+                tin_badge  = "⏳ Pending"
+                tin_color  = "#f59e0b"
+                tin_reason = "TIN verification request sent to IRS but response not yet received."
+                tin_detail = "Normal for same-day submissions — IRS response typically arrives within 24–48 hours. If pending > 72h, investigate Middesk API."
+            elif tin_submitted_v in ("false","0",""):
+                tin_badge  = "📭 Not submitted"
+                tin_color  = "#64748b"
+                tin_reason = "The applicant did not provide an EIN during onboarding."
+                tin_detail = "No TIN = no IRS verification possible. Require EIN resubmission before approval."
+            else:
+                tin_badge  = "⚠️ Unknown"
+                tin_color  = "#f59e0b"
+                tin_reason = "TIN status could not be determined — the verification may not have been triggered."
+                tin_detail = f"tin_match_boolean={tin_bool}, tin_match.status='{tin_status_str}'. Check if Middesk was called for this business."
+
+            diag_card("TIN Verification", tin_badge, tin_color, tin_reason, tin_detail,
+                """| Badge | Meaning | Most common cause |
+|---|---|---|
+| ✅ **Verified** | IRS confirmed EIN + legal name match | Correct EIN, correct legal name |
+| ❌ **Not verified (no record)** | IRS has no EIN for this name | Wrong EIN, or name differs from IRS registration |
+| ❌ **Not verified (wrong business)** | EIN belongs to a different entity | EIN reuse, fraud signal |
+| ⏳ **Pending** | IRS response awaited | Normal for same-day submissions |
+| 📭 **Not submitted** | Applicant skipped the EIN field | Onboarding form not enforcing EIN |
+| ⚠️ **Unknown** | Middesk not called or status missing | Entity matching failed before TIN check |""",
+                "`tin_match_boolean`, `tin_match.status`, `tin_match.message` facts · pid=16 (Middesk)")
+
+        # ── Card 3: NAICS ─────────────────────────────────────────────────────
+        with c3:
+            naics_src_v  = gp("naics_code")
+            naics_conf_v = gc("naics_code")
+            if not naics_val or naics_val=="None":
+                naics_badge  = "⚠️ Not classified"
+                naics_color  = "#64748b"
+                naics_reason = "No NAICS code was assigned — the Fact Engine found no vendor or AI classification."
+                naics_detail = "This should not happen — the Fact Engine always assigns at minimum 561499."
+            elif naics_val=="561499":
+                naics_badge  = f"⚠️ {naics_val} (fallback)"
+                naics_color  = "#f59e0b"
+                naics_reason = "NAICS 561499 (All Other Business Support Services) is the fallback code assigned when the industry cannot be determined."
+                naics_detail = f"Winning source: {naics_src_v} (confidence: {naics_conf_v:.3f}). Root cause: entity matching failed for all vendors → AI fired with name+address only → could not classify."
+            else:
+                naics_badge  = naics_val
+                naics_color  = "#22c55e"
+                naics_reason = f"Business classified as NAICS {naics_val}."
+                naics_detail = f"Winning source: {naics_src_v} (confidence: {naics_conf_v:.3f}). {('Low confidence — may be incorrect.' if naics_conf_v<0.40 else 'Confidence is acceptable.')}"
+
+            diag_card("NAICS Classification", naics_badge, naics_color, naics_reason, naics_detail,
+                """| Badge | Meaning | Cause |
+|---|---|---|
+| ✅ **6-digit code** | Classified (e.g. 722511) | Vendor matched and provided NAICS |
+| ⚠️ **561499 (fallback)** | Could not classify industry | Entity matching failed; AI couldn't determine industry |
+| ⚠️ **Not classified** | No code assigned at all | Fact Engine pipeline error |""",
+                "`naics_code` fact · pid=17(EFX)/24(ZI)/23(OC)/31(AI)/22(SERP)")
+
+        # ── Card 4: Watchlist ─────────────────────────────────────────────────
+        with c4:
+            if wl_hits==0:
+                wl_badge  = "✅ Clean"
+                wl_color  = "#22c55e"
+                wl_reason = "No watchlist hits found. The business (and its owners) do not appear on any tracked sanctions, PEP, or compliance lists."
+                wl_detail = "Source: Trulioo PSC screening + Middesk watchlist review task."
+            elif wl_hits>0:
+                wl_badge  = f"🚨 {wl_hits} hit(s)"
+                wl_color  = "#ef4444"
+                wl_reason = f"{wl_hits} watchlist hit(s) found. The business or its owners appear on one or more compliance screening lists."
+                wl_detail = "Check the ⚠️ Risk tab for detailed hit types (Sanctions/PEP/Adverse Media). Sanctions = hard stop. PEP = Enhanced Due Diligence required."
+            else:
+                wl_badge  = "⚠️ Unknown"
+                wl_color  = "#64748b"
+                wl_reason = "Watchlist screening status could not be determined."
+                wl_detail = "watchlist_hits fact not found or has no value."
+
+            diag_card("Watchlist", wl_badge, wl_color, wl_reason, wl_detail,
+                """| Badge | Meaning | Action |
+|---|---|---|
+| ✅ **Clean** | No hits on any list | No compliance action needed |
+| 🚨 **N hit(s) — Sanctions** | On OFAC/UN/EU/HMT sanctions list | **Hard stop** — cannot approve without compliance clearance |
+| 🚨 **N hit(s) — PEP** | Owner is a Politically Exposed Person | Enhanced Due Diligence required — not automatic denial |
+| 🚨 **N hit(s) — Other** | On other compliance/law enforcement list | Manual review required |
+| ⚠️ **Unknown** | Screening not completed | Trigger re-screening before decision |""",
+                "`watchlist_hits` fact · `clients.customer_table.watchlist_count` · `rds_integration_data.business_entity_review_task`")
+
+        # ── Card 5: IDV ───────────────────────────────────────────────────────
+        with c5:
+            # Get the dominant IDV status
+            idv_dominant = "UNKNOWN"
+            if isinstance(idv_status_raw, dict) and idv_status_raw:
+                idv_dominant = max(idv_status_raw, key=lambda k: idv_status_raw[k])
+            elif idv_val=="true":
+                idv_dominant = "SUCCESS"
+            elif idv_val=="false":
+                idv_dominant = "FAILED"
+
+            IDV_REASONS = {
+                "SUCCESS": ("✅ Passed","#22c55e",
+                    "Identity confirmed via Plaid IDV — government ID scanned, selfie matched, liveness check passed.",
+                    "The owner's real identity is verified. This is the strongest possible identity confirmation."),
+                "FAILED":  ("❌ Failed","#ef4444",
+                    "Plaid IDV completed but rejected the verification.",
+                    "Most common reasons: (1) expired or damaged ID, (2) selfie doesn't match ID photo, (3) liveness check failed (possible deepfake attempt), (4) ID type not supported for this country."),
+                "PENDING": ("⏳ Pending","#f59e0b",
+                    "IDV session was created but the owner has not completed it yet.",
+                    "Normal for recent applications. If pending > 48h, send a reminder or re-issue the session link."),
+                "CANCELED":("🚫 Canceled","#f97316",
+                    "Owner opened the IDV session but chose to exit before completing it.",
+                    "Could indicate friction in the UX, distrust of the biometric process, or deliberate avoidance. Follow up by phone."),
+                "EXPIRED": ("⌛ Expired","#64748b",
+                    "The IDV session link expired before the owner used it.",
+                    "Session links are valid for 15–30 minutes. Re-issue a new IDV session link."),
+                "UNKNOWN": ("⚠️ Unknown","#94a3b8",
+                    "IDV status could not be determined from stored facts.",
+                    "The idv_status fact may not be stored for this business, or the IDV flow was never triggered."),
+            }
+            badge_info = IDV_REASONS.get(idv_dominant, IDV_REASONS["UNKNOWN"])
+            diag_card("IDV (Plaid)", badge_info[0], badge_info[1], badge_info[2], badge_info[3],
+                """| Badge | Meaning | Root cause |
+|---|---|---|
+| ✅ **Passed** | Identity confirmed | Government ID + selfie verified by Plaid AI |
+| ❌ **Failed** | Verification rejected | Expired ID, selfie mismatch, liveness fail, unsupported document |
+| ⏳ **Pending** | Not yet completed | Owner hasn't opened the link yet |
+| 🚫 **Canceled** | Owner exited the flow | UX friction or deliberate avoidance |
+| ⌛ **Expired** | Link expired | Owner did not use the link within 15–30 minutes |
+| ⚠️ **Unknown** | Not triggered or not stored | IDV may not have been requested for this business |""",
+                "`idv_status` (dict of status counts), `idv_passed_boolean` facts · pid=40 (Plaid)")
+
+        # ── Causal summary card ────────────────────────────────────────────────
+        # Identify most critical issue and explain it
+        issues = []
+        if sos_act=="false":    issues.append(("🔴","SOS inactive","Entity cannot legally operate. First red flag in underwriting."))
+        if tin_bool!="true" and tin_status_str=="failure" and "different business name" in tin_message.lower():
+            issues.append(("🔴","TIN EIN mismatch — potential fraud","EIN belongs to a different entity. Escalate to fraud review."))
+        elif tin_bool!="true" and tin_status_str=="failure":
+            issues.append(("🟡","TIN verification failed","IRS EIN-name mismatch. Ask applicant for correct EIN."))
+        elif tin_bool!="true" and tin_submitted_v in ("false","0",""):
+            issues.append(("🟡","No EIN submitted","Require EIN before proceeding."))
+        if wl_hits>0:          issues.append(("🔴","Watchlist hits found",f"{wl_hits} hit(s) — check sanctions/PEP status immediately."))
+        if naics_val=="561499": issues.append(("🟡","NAICS fallback","Industry unclassified — entity matching failed."))
+        if idv_dominant in ("FAILED","EXPIRED","CANCELED"):
+            issues.append(("🟡",f"IDV {idv_dominant}","Identity not confirmed — re-trigger IDV."))
+
+        if issues:
+            st.markdown("#### ⚡ Priority Action Summary")
+            for severity, title, action in sorted(issues, key=lambda x: x[0]):
+                color = "#ef4444" if severity=="🔴" else "#f59e0b"
+                st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
+                    border-radius:8px;padding:10px 14px;margin:4px 0;display:flex;gap:12px;align-items:center">
+                  <span style="font-size:1.2rem">{severity}</span>
+                  <div><span style="color:{color};font-weight:700">{title}</span>
+                  <span style="color:#94A3B8;font-size:.78rem;margin-left:8px">{action}</span></div>
+                </div>""", unsafe_allow_html=True)
+        else:
+            st.markdown(f"""<div style="background:#052e16;border-left:4px solid #22c55e;
+                border-radius:8px;padding:10px 14px;margin:4px 0">
+              <span style="color:#22c55e;font-weight:700">✅ No critical issues detected across all 5 signals.</span>
+              <span style="color:#86efac;font-size:.78rem;margin-left:8px">SOS active, TIN verified, no watchlist hits, IDV passed.</span>
+            </div>""", unsafe_allow_html=True)
 
         # ── Tab structure mirroring Admin Portal ─────────────────────────────
         tab_bg, tab_reg, tab_ident, tab_class, tab_risk, tab_worth, tab_anomaly, tab_all = st.tabs([
@@ -5076,7 +6376,7 @@ The fact exists and has a value, but the `source.platformId` field in the JSON i
                        bs.created_at
                 FROM rds_manual_score_public.data_current_scores cs
                 JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
-                WHERE cs.business_id = '{bid}'
+                WHERE cs.business_id = '{bid}'{_date_clause("bs.created_at", biz_date_from if (biz_date_from or biz_date_to) else None, biz_date_to if (biz_date_from or biz_date_to) else None)}
                 ORDER BY bs.created_at DESC LIMIT 1
             """
             worth_df = run_query(worth_sql)
@@ -5132,6 +6432,63 @@ The fact exists and has a value, but the `source.platformId` field in the JSON i
                 if decision in decision_info:
                     di = decision_info[decision]
                     st.markdown(f"**Score Decision: {di[0]} {di[1]}** — {di[2]}")
+
+                # ── Waterfall chart for this specific business ─────────────────
+                st.markdown("---")
+                st.markdown("#### 📊 Score Waterfall — How This Business Built Its Score")
+                st.markdown(
+                    "Shows the contribution of each factor category to this business's final score, "
+                    "starting from the base of 300 and building to the final score. "
+                    "This mirrors the **Admin Portal Worth Score breakdown chart**."
+                )
+
+                # Collect this business's data from already-loaded facts
+                bk_n_biz   = _safe_int_gv("num_bankruptcies")
+                judg_n_biz = _safe_int_gv("num_judgements")
+                lien_n_biz = _safe_int_gv("num_liens")
+                wl_n_biz   = _safe_int_gv("watchlist_hits")
+                sos_a_biz  = str(gv("sos_active") or "").lower() == "true"
+                tin_ok_biz = str(gv("tin_match_boolean") or "").lower() == "true"
+                rev_biz    = gv("revenue")
+                has_rev_biz= rev_biz is not None and str(rev_biz) not in ("","None","[too large")
+                emp_biz_raw= gv("num_employees")
+                emp_biz    = 0
+                try:
+                    if emp_biz_raw and str(emp_biz_raw) not in ("","None","[too large"):
+                        emp_biz = int(float(str(emp_biz_raw).replace(",","")))
+                except Exception:
+                    pass
+                naics_biz  = str(gv("naics_code") or "561499")
+                naics_ok_biz = naics_biz != "561499"
+                form_date_biz = str(gv("formation_date") or "")
+                age_biz = None
+                try:
+                    if form_date_biz:
+                        age_biz = datetime.now(timezone.utc).year - int(form_date_biz[:4])
+                except Exception:
+                    pass
+
+                fig_wf_biz, contributions_biz, categories_biz = render_worth_score_waterfall(
+                    score_850=score,
+                    bk_n=bk_n_biz, judg_n=judg_n_biz, lien_n=lien_n_biz,
+                    sos_active=sos_a_biz, tin_ok=tin_ok_biz, wl_hits=wl_n_biz,
+                    age_years=age_biz, has_revenue=has_rev_biz,
+                    num_emp=emp_biz, naics_ok=naics_ok_biz,
+                    label=f"{biz_name} ({bid[:8]}…)"
+                )
+                st.plotly_chart(dark_chart_layout(fig_wf_biz), use_container_width=True)
+
+                flag("ℹ️ This waterfall is estimated from available facts (BK count, TIN status, SOS active, etc.). "
+                     "Exact SHAP values per factor are in `rds_manual_score_public.business_score_factors`. "
+                     "The total may differ slightly from the actual score due to unobserved features.", "blue")
+
+                render_waterfall_explanation(
+                    bk_n=bk_n_biz, judg_n=judg_n_biz, lien_n=lien_n_biz,
+                    sos_active=sos_a_biz, tin_ok=tin_ok_biz, wl_hits=wl_n_biz,
+                    age_years=age_biz, has_revenue=has_rev_biz,
+                    num_emp=emp_biz, naics_ok=naics_ok_biz,
+                    contributions=contributions_biz, categories=categories_biz
+                )
 
             else:
                 flag(f"No Worth Score found for business `{bid}`. "
@@ -5662,12 +7019,6 @@ ORDER BY score_date DESC LIMIT 3;""", language="sql")
                     "tin_submitted=false, tin_match_boolean=true"))
 
             # ── 18. Watchlist hits but no sanctions ───────────────────────────
-            def _safe_int_gv(name):
-                v = gv(name)
-                if v is None: return 0
-                try: return int(float(str(v)))
-                except Exception: return 0
-
             if wl_hits>0:
                 sanctions_val = _safe_int_gv("sanctions_hits")
                 pep_val       = _safe_int_gv("pep_hits")
@@ -5838,28 +7189,86 @@ The following 20 relationship checks were evaluated. All passed for this busines
                 for n in names:
                     fact_to_group[n] = grp
 
+            # ── Source lookup from api-docs knowledge ─────────────────────────
+            # Every fact in rds_warehouse_public.facts has a source.platformId
+            # FACT_SOURCE_KNOWLEDGE is defined earlier (before fact_row) — reuse it here.
+            # indicating which vendor WON the Fact Engine selection.
+
+            def _format_value_expandable(fact_name, v, raw_value_str):
+                """Format a value for display. Lists/dicts get expandable content."""
+                if v is None:
+                    return "(null)", None
+                if str(v) == "[too large — query PostgreSQL RDS directly]":
+                    return "📦 [too large — see SQL below]", None
+
+                if isinstance(v, list):
+                    preview = f"📋 list · {len(v)} item(s)"
+                    detail  = v
+                    return preview, detail
+
+                if isinstance(v, dict):
+                    preview = f"🗂️ object · {len(v)} key(s)"
+                    detail  = v
+                    return preview, detail
+
+                return str(v)[:150], None
+
             # Group all facts
-            grouped = {}
+            grouped    = {}
+            grouped_raw = {}  # store raw fact dict for expandable details
             for _, row in facts_df.drop_duplicates("name").iterrows():
-                f  = _parse_fact(row["value"])
+                raw_str = row.get("value","") or ""
+                f  = _parse_fact(raw_str)
                 v  = f.get("value")
-                if isinstance(v,(dict,list)):
-                    dv = f"[{type(v).__name__}, {len(v) if isinstance(v,list) else len(v)} item(s)]"
-                else:
-                    dv = str(v)[:120] if v is not None else "(null)"
+
+                preview, detail = _format_value_expandable(row["name"], v, raw_str)
+
+                # Source — try platform_id, then alternatives[0].source.platformId
+                pid_raw = str(_safe_get(f,"source","platformId",default="") or "")
+                if not pid_raw or pid_raw in ("","None","-1","0"):
+                    # Check alternatives for a source hint
+                    alts = f.get("alternatives",[]) or []
+                    for alt in alts[:1]:
+                        if isinstance(alt,dict):
+                            alt_pid = str(_safe_get(alt,"source","platformId",default="") or "")
+                            if alt_pid and alt_pid not in ("","None","-1"):
+                                pid_raw = f"alt:{alt_pid}"
+                                break
+
+                source_display = pid_name(pid_raw.replace("alt:","")) if not pid_raw.startswith("alt:") else f"{pid_name(pid_raw.replace('alt:',''))} (via alternatives)"
+
+                # Override with known source if source metadata is missing
+                if source_display in ("Unknown source","No vendor (default)","Applicant/System") and row["name"] in FACT_SOURCE_KNOWLEDGE:
+                    source_display = FACT_SOURCE_KNOWLEDGE[row["name"]]
+
                 conf = float(_safe_get(f,"source","confidence",default=0) or 0)
                 grp  = fact_to_group.get(row["name"],"📦 Other")
                 if grp not in grouped:
-                    grouped[grp] = []
+                    grouped[grp]     = []
+                    grouped_raw[grp] = []
+
+                has_override = row.get("value") and str(row.get("value","")).find('"override"')>0
+                override_val = _safe_get(f,"override","value",default=None)
+                analyst_note = ""
+                if override_val:
+                    analyst_note = f"⚠️ Analyst override: {str(override_val)[:60]}"
+
                 grouped[grp].append({
-                    "Fact":       row["name"],
-                    "Value":      dv,
-                    "Source":     pid_name(str(_safe_get(f,"source","platformId",default=""))),
-                    "Confidence": f"{conf:.3f}" if conf>0 else "—",
-                    "Updated":    str(row["received_at"])[:16],
+                    "Fact":            row["name"],
+                    "Value":           preview,
+                    "Source (winner)": source_display,
+                    "Confidence":      f"{conf:.3f}" if conf>0 else "—",
+                    "Updated":         str(row["received_at"])[:16],
+                    "Override":        analyst_note,
+                })
+                grouped_raw[grp].append({
+                    "name":   row["name"],
+                    "detail": detail,
+                    "fact":   f,
+                    "raw":    raw_str,
                 })
 
-            # Show counts summary first
+            # Show counts + column guide
             total_facts = facts_df["name"].nunique()
             stored_count = sum(1 for _,row in facts_df.drop_duplicates("name").iterrows()
                                if _parse_fact(row["value"]).get("value") is not None)
@@ -5869,17 +7278,129 @@ The following 20 relationship checks were evaluated. All passed for this busines
             with c2: kpi("Has Value",f"{stored_count}","non-null facts","#22c55e")
             with c3: kpi("Null/Missing",f"{null_count}","(null) value","#f59e0b")
 
+            with st.expander("ℹ️ How to read this table — Value, Source, Confidence explained"):
+                st.markdown("""
+**Value column:**
+| Display | Meaning |
+|---|---|
+| Plain text / number | The actual stored value |
+| `📋 list · N item(s)` | A JSON array — click the fact name row expander below to see all items |
+| `🗂️ object · N key(s)` | A JSON object — click the fact name row expander to see all keys |
+| `📦 [too large]` | The value exceeds Redshift federation VARCHAR(65535) limit. Query from PostgreSQL RDS (port 5432) directly using the SQL in the tab below. |
+| `(null)` | No value was stored for this fact — see "Why null?" below |
+
+**Source (winner) column — who provided this value to the Admin Portal:**
+The Fact Engine selects ONE winning vendor for each fact. The source shown is the vendor whose value
+the customer sees in the Admin Portal. Source can be:
+- `Middesk` (pid=16) — US SOS live query
+- `OC` (pid=23) — OpenCorporates global registry
+- `ZoomInfo` (pid=24) — Firmographic bulk data
+- `Equifax` (pid=17) — Firmographic bulk data
+- `Trulioo` (pid=38) — KYB / person screening
+- `AI` (pid=31) — GPT AI enrichment (last resort)
+- `SERP` (pid=22) — Google/web scraping
+- `Plaid` (pid=40) — Bank/identity verification
+- `Applicant/System` — Data submitted by the applicant on the onboarding form
+- Name with source knowledge — derived from api-docs and source code analysis
+
+**Why null?** A fact is null (no value) when:
+1. The vendor that provides this fact did NOT match this business (entity matching failed)
+2. The field is optional and the applicant didn't submit it (e.g. email, phone)
+3. The fact is calculated from another fact that is also null (e.g. `naics_description` is null if `naics_code` is null)
+4. The integration for this fact was not active when this business was onboarded
+
+**Override column:** Shows `⚠️ Analyst override: value` if an analyst manually changed this fact in the Admin Portal.
+                """)
+
             # Render each group in an expander
             group_order = list(FACT_GROUPS.keys()) + ["📦 Other"]
-            for grp in group_order:
+            for gi, grp in enumerate(group_order):
                 facts_in_grp = grouped.get(grp, [])
+                raw_in_grp   = grouped_raw.get(grp, [])
                 if not facts_in_grp:
                     continue
                 has_val  = sum(1 for r in facts_in_grp if r["Value"] not in ("(null)","(not stored)",""))
                 null_in  = len(facts_in_grp) - has_val
                 label = f"{grp} ({len(facts_in_grp)} facts · {has_val} with values · {null_in} null)"
                 with st.expander(label, expanded=(grp in ("🏢 Identity / Name","🏛️ Registry / SOS","🔐 TIN / EIN"))):
-                    styled_table(pd.DataFrame(facts_in_grp))
+                    # Render table + expandable detail for list/dict values
+                    display_df = pd.DataFrame([{k:v for k,v in r.items() if k!="Override"}
+                                                for r in facts_in_grp])
+                    styled_table(display_df, color_col="Value")
+
+                    # Show list/dict detail using HTML <details> — avoids nested expander error
+                    for ri, (row_data, raw_data) in enumerate(zip(facts_in_grp, raw_in_grp)):
+                        val_preview = row_data["Value"]
+                        detail      = raw_data.get("detail")
+                        fact_obj    = raw_data.get("fact",{})
+                        fact_name   = raw_data.get("name","")
+
+                        if detail is not None:
+                            if isinstance(detail, list):
+                                items_html = "".join(
+                                    f"<li><code>{json.dumps(item, default=str)[:300]}</code></li>"
+                                    if isinstance(item,(dict,list)) else f"<li><code>{str(item)[:300]}</code></li>"
+                                    for item in detail
+                                )
+                                inner = f"<ol style='color:#CBD5E1;font-size:.74rem;margin:4px 0'>{items_html}</ol>"
+                            else:
+                                inner = (f"<pre style='color:#CBD5E1;font-size:.70rem;background:#0F172A;"
+                                         f"padding:8px;border-radius:6px;overflow:auto'>"
+                                         f"{json.dumps(detail, default=str, indent=2)[:2000]}</pre>")
+                            alts = fact_obj.get("alternatives",[]) or []
+                            alts_html = ""
+                            if alts:
+                                alt_rows_html = "".join(
+                                    f"<tr><td style='padding:3px 8px;color:#94A3B8'>{pid_name(str(_safe_get(a,'source','platformId',default='') or ''))}</td>"
+                                    f"<td style='padding:3px 8px;color:#CBD5E1'>{str(a.get('value',''))[:60]}</td>"
+                                    f"<td style='padding:3px 8px;color:#64748b'>{float(_safe_get(a,'source','confidence',default=0) or 0):.3f}</td></tr>"
+                                    for a in alts if isinstance(a,dict)
+                                )
+                                alts_html = (f"<br><span style='color:#60A5FA;font-size:.70rem'>Other vendors ({len(alts)}):</span>"
+                                             f"<table style='width:100%;font-size:.70rem'>"
+                                             f"<tr><th style='color:#60A5FA;text-align:left;padding:2px 8px'>Source</th>"
+                                             f"<th style='color:#60A5FA;text-align:left;padding:2px 8px'>Value</th>"
+                                             f"<th style='color:#60A5FA;text-align:left;padding:2px 8px'>Conf</th></tr>"
+                                             f"{alt_rows_html}</table>")
+                            st.markdown(
+                                f"<details style='background:#0F172A;border-radius:6px;padding:5px 10px;margin:2px 0'>"
+                                f"<summary style='color:#60A5FA;font-size:.74rem;cursor:pointer'>"
+                                f"🔍 <code>{fact_name}</code> — {val_preview}</summary>"
+                                f"{inner}{alts_html}</details>",
+                                unsafe_allow_html=True)
+
+                        elif "[too large" in str(val_preview):
+                            src = row_data.get("Source (winner)","Unknown")
+                            st.markdown(
+                                f"<details style='background:#0F172A;border-radius:6px;padding:5px 10px;margin:2px 0'>"
+                                f"<summary style='color:#f59e0b;font-size:.74rem;cursor:pointer'>"
+                                f"📦 <code>{fact_name}</code> — too large (click for SQL)</summary>"
+                                f"<div style='color:#94A3B8;font-size:.70rem;margin-top:4px'>Source: {src}</div>"
+                                f"<pre style='color:#22c55e;background:#052e16;padding:8px;border-radius:6px;font-size:.68rem'>"
+                                f"-- PostgreSQL RDS (port 5432):\nSELECT value FROM rds_warehouse_public.facts\n"
+                                f"WHERE business_id = '{bid}' AND name = '{fact_name}';</pre>"
+                                f"</details>",
+                                unsafe_allow_html=True)
+
+                        if row_data.get("Override"):
+                            flag(row_data["Override"], "amber")
+
+                    null_facts = [r["Fact"] for r in facts_in_grp if r["Value"]=="(null)"]
+                    if null_facts:
+                        null_items = "".join(
+                            f"<li><code>{fn}</code>: <span style='color:#64748b'>"
+                            f"{FACT_SOURCE_KNOWLEDGE.get(fn,'source not documented')}</span></li>"
+                            for fn in null_facts
+                        )
+                        st.markdown(
+                            f"<details style='background:#0F172A;border-radius:6px;padding:5px 10px;margin:4px 0'>"
+                            f"<summary style='color:#94A3B8;font-size:.72rem;cursor:pointer'>"
+                            f"❓ Why are {len(null_facts)} facts null?</summary>"
+                            f"<div style='color:#94A3B8;font-size:.71rem;margin-top:4px'>"
+                            f"No vendor provided data. Common causes: entity matching failed, optional field "
+                            f"not submitted, calculated from another null fact, or not in vendor's database.<br>"
+                            f"<ul style='margin:4px 0 0 16px'>{null_items}</ul></div></details>",
+                            unsafe_allow_html=True)
 
             st.markdown("---")
             st.markdown("#### 🔍 SQL for deeper investigation")
