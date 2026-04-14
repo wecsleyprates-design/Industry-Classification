@@ -115,30 +115,89 @@ def run_sql(sql):
         df=pd.read_sql(sql,conn); conn.close(); return df,None
     except Exception as e: return None,str(e)
 
-# ── Load facts (two-pass) ─────────────────────────────────────────────────────
+# ── Load facts — BULK (2 queries total, not N+1) ──────────────────────────────
 KNOWN_LARGE={"sos_filings","sos_match","watchlist","watchlist_raw","bankruptcies",
              "judgements","liens","people","addresses","internal_platform_matches_combined"}
 
-# TTL=600 (10 min). Pure function — no Streamlit calls inside so cache works correctly.
+def _large_exclusion():
+    names = ",".join(f"'{n}'" for n in KNOWN_LARGE)
+    return f"AND name NOT IN ({names})"
+
+def run_sql_conn(sql, conn):
+    """Run a query on an already-open connection (no open/close overhead)."""
+    try:
+        return pd.read_sql(sql, conn), None
+    except Exception as e:
+        return None, str(e)
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_facts(bid):
-    names_df,err=run_sql(f"""SELECT DISTINCT name,MAX(received_at) AS received_at
-        FROM rds_warehouse_public.facts WHERE business_id='{bid}' GROUP BY name ORDER BY name""")
-    if names_df is None: return None,err
-    if names_df.empty: return {},None
-    latest={}
-    for name in names_df["name"].tolist():
-        if name in KNOWN_LARGE:
-            latest[name]={"_too_large":True,"_name":name,
-                          "_received_at":str(names_df[names_df["name"]==name]["received_at"].iloc[0])[:16]}
-            continue
-        df,_=run_sql(f"""SELECT name,value,received_at FROM rds_warehouse_public.facts
-            WHERE business_id='{bid}' AND name='{name}' ORDER BY received_at DESC LIMIT 1""")
-        if df is not None and not df.empty:
-            f=parse_fact(df.iloc[0]["value"])
-            f["_name"]=name; f["_received_at"]=str(df.iloc[0]["received_at"])[:16]
-            latest[name]=f
-    return latest,None
+    """2-query bulk loader: 1 query for names, 1 bulk query for all small facts."""
+    import psycopg2
+    try:
+        conn = psycopg2.connect(
+            dbname=os.getenv("REDSHIFT_DB","dev"),
+            user=os.getenv("REDSHIFT_USER","readonly_all_access"),
+            password=os.getenv("REDSHIFT_PASSWORD","Y7&.D3!09WvT4/nSqXS2>qbO"),
+            host=os.getenv("REDSHIFT_HOST","worthai-services-redshift-endpoint-k9sdhv2ja6lgojidri87.808338307022.us-east-1.redshift-serverless.amazonaws.com"),
+            port=int(os.getenv("REDSHIFT_PORT","5439")),
+            connect_timeout=15)
+    except Exception as e:
+        return None, str(e)
+
+    try:
+        # Query 1 — get all fact names + timestamps (tiny result)
+        names_df, err = run_sql_conn(
+            f"""SELECT DISTINCT name, MAX(received_at) AS received_at
+                FROM rds_warehouse_public.facts
+                WHERE business_id='{bid}'
+                GROUP BY name ORDER BY name""", conn)
+        if names_df is None:
+            conn.close(); return None, err
+        if names_df.empty:
+            conn.close(); return {}, None
+
+        all_names = set(names_df["name"].tolist())
+        large_names = all_names & KNOWN_LARGE
+        small_names = all_names - KNOWN_LARGE
+
+        latest = {}
+
+        # Pre-populate stubs for large facts (no query needed)
+        for name in large_names:
+            row = names_df[names_df["name"]==name]
+            ts = str(row["received_at"].iloc[0])[:16] if not row.empty else ""
+            latest[name] = {"_too_large": True, "_name": name, "_received_at": ts}
+
+        # Query 2 — fetch ALL small facts in one round-trip
+        # QUALIFY keeps only the latest row per name (Redshift supports QUALIFY)
+        excl = ",".join(f"'{n}'" for n in KNOWN_LARGE) if KNOWN_LARGE else "''"
+        bulk_df, bulk_err = run_sql_conn(f"""
+            SELECT name, value, received_at
+            FROM (
+                SELECT name, value, received_at,
+                       ROW_NUMBER() OVER (PARTITION BY name ORDER BY received_at DESC) AS rn
+                FROM rds_warehouse_public.facts
+                WHERE business_id='{bid}'
+                  AND name NOT IN ({excl})
+            ) t
+            WHERE rn = 1
+        """, conn)
+
+        if bulk_df is not None and not bulk_df.empty:
+            for _, row in bulk_df.iterrows():
+                name = row["name"]
+                f = parse_fact(row["value"])
+                f["_name"] = name
+                f["_received_at"] = str(row["received_at"])[:16]
+                latest[name] = f
+
+        conn.close()
+        return latest, None
+    except Exception as e:
+        try: conn.close()
+        except: pass
+        return None, str(e)
 
 # ── Cached per-business queries (TTL=600) ────────────────────────────────────
 @st.cache_data(ttl=600, show_spinner=False)
@@ -189,6 +248,41 @@ def load_home_recent(date_from, date_to):
     """)
 
 @st.cache_data(ttl=600, show_spinner=False)
+def load_home_kyb_stats(date_from, date_to):
+    """One bulk query returning all KYB health metrics per business for the dashboard."""
+    parts=[]
+    if date_from: parts.append(f"received_at >= '{date_from}'")
+    if date_to:   parts.append(f"received_at <= '{date_to} 23:59:59'")
+    dc=(" AND "+" AND ".join(parts)) if parts else ""
+    # Pivot scalar KYB facts into columns using conditional aggregation
+    return run_sql(f"""
+        SELECT
+            business_id,
+            MAX(CASE WHEN name='sos_active'          THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS sos_active,
+            MAX(CASE WHEN name='tin_match_boolean'   THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS tin_match,
+            MAX(CASE WHEN name='idv_passed_boolean'  THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS idv_passed,
+            MAX(CASE WHEN name='naics_code'          THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS naics_code,
+            MAX(CASE WHEN name='watchlist_hits'      THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS watchlist_hits,
+            MAX(CASE WHEN name='num_bankruptcies'    THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_bankruptcies,
+            MAX(CASE WHEN name='num_judgements'      THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_judgements,
+            MAX(CASE WHEN name='num_liens'           THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_liens,
+            MAX(CASE WHEN name='adverse_media_hits'  THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS adverse_media,
+            MAX(CASE WHEN name='revenue'             THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS revenue,
+            MAX(CASE WHEN name='formation_date'      THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS formation_date,
+            MAX(CASE WHEN name='formation_state'     THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS formation_state,
+            MAX(received_at) AS last_seen,
+            MIN(received_at) AS first_seen,
+            COUNT(DISTINCT name) AS fact_count
+        FROM rds_warehouse_public.facts
+        WHERE name IN (
+            'sos_active','tin_match_boolean','idv_passed_boolean','naics_code',
+            'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
+            'adverse_media_hits','revenue','formation_date','formation_state'
+        ){dc}
+        GROUP BY business_id
+    """)
+
+@st.cache_data(ttl=600, show_spinner=False)
 def load_home_flags(date_from, date_to):
     parts=[]
     if date_from: parts.append(f"received_at >= '{date_from}'")
@@ -213,14 +307,14 @@ def load_facts_with_ui(bid, tab_key):
     col_info, col_ref = st.columns([5,1])
     with col_ref:
         if st.button("🔄 Refresh", key=f"ref_{tab_key}",
-                     help="Clear cached facts and reload from Redshift (takes ~10–20s)"):
+                     help="Clear cached facts and reload from Redshift (takes ~3–5s)"):
             load_facts.clear()
             if cache_key in st.session_state: del st.session_state[cache_key]
             st.rerun()
     with col_info:
         cached = cache_key in st.session_state
-        st.caption(f"{'⚡ From cache' if cached else '🔃 Loading from Redshift…'} · "
-                   f"UUID: `{bid[:16]}…` · Cache TTL: 10 min")
+        st.caption(f"{'⚡ Instant — from cache' if cached else '🔃 Loading from Redshift (bulk query)…'} · "
+                   f"UUID: `{bid[:16]}…` · TTL: 10 min")
     with st.spinner("Loading facts from Redshift…" if not cached else "Reading from cache…"):
         facts, err = load_facts(bid)
     if facts is not None:
@@ -443,7 +537,7 @@ if tab=="🏠 Home":
         st.caption(f"📅 Period: **{period_label}** · Toggle 'Filter by date' in sidebar to change")
     with ref_c:
         if st.button("🔄 Refresh", key="home_refresh", help="Clear cached data and reload from Redshift"):
-            load_home_recent.clear(); load_home_flags.clear(); st.rerun()
+            load_home_recent.clear(); load_home_flags.clear(); load_home_kyb_stats.clear(); st.rerun()
     st.markdown("---")
 
     # ── Load recently onboarded businesses (cached) ───────────────────────────
@@ -509,51 +603,267 @@ if tab=="🏠 Home":
             if flags or score > 0:
                 biz_flags[bid_check] = {"flags": flags, "score": score}
 
-    # Merge flag scores into recent_df
-    recent_df["flag_score"] = recent_df["business_id"].map(
-        lambda b: biz_flags.get(b,{}).get("score",0))
-    recent_df["flag_count"] = recent_df["business_id"].map(
-        lambda b: len(biz_flags.get(b,{}).get("flags",[])))
-    recent_df["has_flags"] = recent_df["flag_score"] > 0
+    # ── Load enriched KYB stats (single bulk query) ───────────────────────────
+    with st.spinner("Loading KYB metrics…"):
+        stats_df, stats_err = load_home_kyb_stats(hub_date_from, hub_date_to)
 
+    # Build per-business flag map from the pivoted stats_df (faster than flag_df loop)
+    biz_flags = {}
+    if stats_df is not None and not stats_df.empty:
+        def _safe_str(v): return str(v or "").lower().strip()
+        def _safe_int(v):
+            try: return int(float(v or 0))
+            except: return 0
+
+        for _, sr in stats_df.iterrows():
+            bid_check = sr["business_id"]
+            flags=[]; score=0
+            if _safe_str(sr["sos_active"])=="false":
+                flags.append(("🔴","SOS Inactive","Entity cannot legally operate")); score+=10
+            if _safe_str(sr["sos_active"])=="":
+                flags.append(("🔴","No SOS data","Entity existence unverified")); score+=8
+            if _safe_str(sr["tin_match"])=="false":
+                flags.append(("🔴","TIN Failed","EIN-name mismatch per IRS")); score+=6
+            if _safe_str(sr["tin_match"])=="":
+                flags.append(("🟡","TIN Missing","EIN not submitted")); score+=3
+            wl=_safe_int(sr["watchlist_hits"])
+            if wl>0:
+                flags.append(("🔴",f"Watchlist {wl} hit(s)","Sanctions/PEP hit")); score+=12
+            nc=_safe_str(sr["naics_code"])
+            if nc=="561499":
+                flags.append(("🟡","NAICS Fallback","Industry unclassified")); score+=2
+            elif nc=="":
+                flags.append(("🟡","No NAICS","Classification missing")); score+=3
+            if _safe_str(sr["idv_passed"])=="false":
+                flags.append(("🟡","IDV Failed","Identity verification failed")); score+=4
+            bk=_safe_int(sr["num_bankruptcies"])
+            if bk>0:
+                flags.append(("🟡",f"BK: {bk}","Bankruptcy on record")); score+=3*bk
+            if flags: biz_flags[bid_check]={"flags":flags,"score":score}
+
+    # Merge flags into recent_df
+    recent_df["flag_score"] = recent_df["business_id"].map(lambda b: biz_flags.get(b,{}).get("score",0))
+    recent_df["flag_count"] = recent_df["business_id"].map(lambda b: len(biz_flags.get(b,{}).get("flags",[])))
+    recent_df["has_flags"]  = recent_df["flag_score"] > 0
     flagged_biz = recent_df[recent_df["has_flags"]].sort_values("flag_score",ascending=False)
     clean_biz   = recent_df[~recent_df["has_flags"]]
 
-    # ── Portfolio KPIs ────────────────────────────────────────────────────────
-    st.markdown("### 📊 Portfolio Overview")
-    c1,c2,c3,c4,c5 = st.columns(5)
-    with c1: kpi("Businesses",f"{total_biz:,}","in period","#3B82F6")
-    with c2: kpi("🚨 With Red Flags",f"{len(flagged_biz):,}",
-                 f"{len(flagged_biz)/max(total_biz,1)*100:.0f}% of total",
-                 "#ef4444" if len(flagged_biz)>0 else "#22c55e")
-    with c3: kpi("✅ Clean",f"{len(clean_biz):,}",
-                 f"{len(clean_biz)/max(total_biz,1)*100:.0f}% of total","#22c55e")
-    with c4:
-        sos_fail = sum(1 for b in recent_df["business_id"] if biz_flags.get(b,{}).get("score",0)>=10)
-        kpi("SOS Issues",f"{sos_fail:,}","inactive or missing","#f97316")
-    with c5:
-        wl_hit = sum(1 for b in recent_df["business_id"]
-                     if any("Watchlist" in f[1] for f in biz_flags.get(b,{}).get("flags",[])))
-        kpi("Watchlist Hits",f"{wl_hit:,}","businesses with hits","#ef4444" if wl_hit>0 else "#22c55e")
+    # ── Helper: rate % ────────────────────────────────────────────────────────
+    def rate(num, den): return f"{num/max(den,1)*100:.0f}%"
 
-    # Flag distribution chart
-    if biz_flags:
-        flag_type_counts = {}
+    # ── Pre-compute KYB health rates from stats_df ────────────────────────────
+    if stats_df is not None and not stats_df.empty:
+        n = len(stats_df)
+        sos_ok   = (stats_df["sos_active"].str.lower().str.strip()=="true").sum()
+        sos_fail = (stats_df["sos_active"].str.lower().str.strip()=="false").sum()
+        sos_miss = n - sos_ok - sos_fail
+        tin_ok   = (stats_df["tin_match"].str.lower().str.strip()=="true").sum()
+        tin_fail = (stats_df["tin_match"].str.lower().str.strip()=="false").sum()
+        idv_ok   = (stats_df["idv_passed"].str.lower().str.strip()=="true").sum()
+        idv_fail = (stats_df["idv_passed"].str.lower().str.strip()=="false").sum()
+        wl_biz   = (stats_df["watchlist_hits"].apply(lambda v: _safe_int(v)>0)).sum()
+        naics_ok = (~stats_df["naics_code"].isin(["561499","",None]) &
+                    stats_df["naics_code"].notna()).sum()
+        naics_fb = (stats_df["naics_code"].str.strip()=="561499").sum()
+        naics_ms = (stats_df["naics_code"].isna() | (stats_df["naics_code"].str.strip()=="")).sum()
+        bk_biz   = (stats_df["num_bankruptcies"].apply(lambda v: _safe_int(v)>0)).sum()
+        has_rev  = stats_df["revenue"].notna().sum()
+        # formation state distribution
+        state_counts = (stats_df["formation_state"]
+                        .dropna().str.upper().str.strip()
+                        .value_counts().head(10).reset_index())
+        state_counts.columns=["State","Count"]
+        # NAICS 2-digit sector
+        def _sector(c):
+            try: return str(int(str(c)[:2])) if c and str(c).strip() not in ("","561499") else None
+            except: return None
+        naics_sector = (stats_df["naics_code"].apply(_sector)
+                        .dropna().value_counts().head(12).reset_index())
+        naics_sector.columns=["Sector","Count"]
+        # Onboarding timeline
+        stats_df["first_seen_dt"] = pd.to_datetime(stats_df["first_seen"], errors="coerce")
+        timeline = (stats_df.dropna(subset=["first_seen_dt"])
+                    .set_index("first_seen_dt")
+                    .resample("D")["business_id"].count()
+                    .reset_index())
+        timeline.columns=["Date","New Businesses"]
+    else:
+        n=total_biz; sos_ok=sos_fail=sos_miss=tin_ok=tin_fail=0
+        idv_ok=idv_fail=wl_biz=naics_ok=naics_fb=naics_ms=bk_biz=has_rev=0
+        state_counts=pd.DataFrame(); naics_sector=pd.DataFrame(); timeline=pd.DataFrame()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # PORTFOLIO OVERVIEW DASHBOARD
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("### 📊 Portfolio Overview")
+    st.caption(f"📅 **{period_label}** · {total_biz:,} businesses · data from `rds_warehouse_public.facts`")
+
+    # ── Row 1: KPI cards ─────────────────────────────────────────────────────
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+    with c1: kpi("Total","" + f"{total_biz:,}","businesses","#3B82F6")
+    with c2: kpi("🚨 Red Flags",f"{len(flagged_biz):,}",rate(len(flagged_biz),total_biz)+" flagged","#ef4444" if flagged_biz.shape[0]>0 else "#22c55e")
+    with c3: kpi("SOS Active",f"{sos_ok:,}",rate(sos_ok,n)+" pass rate","#22c55e" if sos_ok/max(n,1)>0.8 else "#f97316")
+    with c4: kpi("TIN Verified",f"{tin_ok:,}",rate(tin_ok,n)+" pass rate","#22c55e" if tin_ok/max(n,1)>0.8 else "#f59e0b")
+    with c5: kpi("IDV Passed",f"{idv_ok:,}",rate(idv_ok,n)+" pass rate","#22c55e" if idv_ok/max(n,1)>0.7 else "#f59e0b")
+    with c6: kpi("Watchlist Hits",f"{wl_biz:,}",rate(wl_biz,n)+" affected","#ef4444" if wl_biz>0 else "#22c55e")
+
+    st.markdown("---")
+
+    # ── Row 2: KYB Health Gauges + Onboarding Timeline ───────────────────────
+    col_health, col_timeline = st.columns([1,2])
+
+    with col_health:
+        st.markdown("#### 🩺 KYB Health Rates")
+        metrics = [
+            ("SOS Active",    sos_ok,   sos_fail, sos_miss,  n, "#22c55e","#ef4444"),
+            ("TIN Verified",  tin_ok,   tin_fail, n-tin_ok-tin_fail, n, "#22c55e","#ef4444"),
+            ("IDV Passed",    idv_ok,   idv_fail, n-idv_ok-idv_fail, n, "#22c55e","#f59e0b"),
+            ("NAICS Classified", naics_ok, naics_fb, naics_ms, n, "#22c55e","#f59e0b"),
+            ("Revenue Known", has_rev,  0, n-has_rev, n, "#22c55e","#64748b"),
+        ]
+        for label,ok_n,fail_n,miss_n,total_n,ok_col,fail_col in metrics:
+            ok_pct   = int(ok_n/max(total_n,1)*100)
+            fail_pct = int(fail_n/max(total_n,1)*100)
+            miss_pct = 100-ok_pct-fail_pct
+            bar_html = (
+                f'<div style="display:flex;height:10px;border-radius:5px;overflow:hidden;margin:3px 0">'
+                f'<div style="width:{ok_pct}%;background:{ok_col}"></div>'
+                f'<div style="width:{fail_pct}%;background:{fail_col}"></div>'
+                f'<div style="width:{miss_pct}%;background:#334155"></div>'
+                f'</div>'
+            )
+            st.markdown(f"""<div style="margin:6px 0">
+              <div style="display:flex;justify-content:space-between">
+                <span style="color:#CBD5E1;font-size:.78rem;font-weight:600">{label}</span>
+                <span style="color:{ok_col};font-size:.78rem;font-weight:700">{ok_pct}% ✓</span>
+              </div>
+              {bar_html}
+              <div style="display:flex;gap:12px;font-size:.68rem;color:#64748b;margin-top:1px">
+                <span style="color:{ok_col}">✓ {ok_n:,}</span>
+                <span style="color:{fail_col}">✗ {fail_n:,}</span>
+                <span>? {miss_n:,}</span>
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+    with col_timeline:
+        st.markdown("#### 📈 Onboarding Timeline")
+        if not timeline.empty:
+            fig_t = px.area(timeline, x="Date", y="New Businesses",
+                            title=f"Daily New Businesses ({period_label})",
+                            color_discrete_sequence=["#3B82F6"])
+            fig_t.update_traces(fill="tozeroy", fillcolor="rgba(59,130,246,0.15)",
+                                line=dict(width=2))
+            fig_t.update_layout(height=260, margin=dict(t=40,b=20,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_t), use_container_width=True)
+        else:
+            st.info("Timeline requires date-filtered data. Enable 'Filter by date' in sidebar.")
+
+    st.markdown("---")
+
+    # ── Row 3: Red Flag Distribution + Risk Donut + NAICS Sectors ────────────
+    col_flags, col_donut, col_naics = st.columns([2,1,1])
+
+    with col_flags:
+        st.markdown("#### 🚩 Red Flag Distribution")
+        flag_type_counts={}
         for b_data in biz_flags.values():
             for _,flag_title,_ in b_data["flags"]:
-                base = flag_title.split(" ")[0]+" "+flag_title.split(" ")[1] if len(flag_title.split())>1 else flag_title
-                flag_type_counts[base] = flag_type_counts.get(base,0) + 1
-        fdf = pd.DataFrame(list(flag_type_counts.items()), columns=["Issue","Count"]).sort_values("Count",ascending=False)
-        col_l, col_r = st.columns([2,1])
-        with col_l:
-            fig = px.bar(fdf, x="Issue", y="Count", color="Count",
-                         color_continuous_scale="Reds",
-                         title=f"Red Flag Distribution ({period_label})")
-            fig.update_layout(coloraxis_showscale=False, xaxis_tickangle=-30)
-            st.plotly_chart(dark_chart(fig), use_container_width=True)
-        with col_r:
-            st.markdown("**Issue counts:**")
-            st.dataframe(fdf, use_container_width=True, hide_index=True)
+                base=flag_title.split(" ")[0]+" "+flag_title.split(" ")[1] if len(flag_title.split())>1 else flag_title
+                flag_type_counts[base]=flag_type_counts.get(base,0)+1
+        if flag_type_counts:
+            fdf=pd.DataFrame(list(flag_type_counts.items()),columns=["Issue","Count"]).sort_values("Count",ascending=False)
+            color_map={"IDV Failed":"#f59e0b","TIN Failed":"#ef4444","SOS Inactive":"#ef4444",
+                       "No NAICS":"#8B5CF6","NAICS Fallback":"#6366f1","Watchlist":"#dc2626",
+                       "TIN Missing":"#f97316","No SOS":"#f97316","BK:":"#a855f7"}
+            bar_colors=[next((v for k,v in color_map.items() if k in iss),"#64748b") for iss in fdf["Issue"]]
+            fig_f=go.Figure(go.Bar(x=fdf["Issue"],y=fdf["Count"],marker_color=bar_colors,
+                                   text=fdf["Count"],textposition="outside"))
+            fig_f.update_layout(title="Businesses with each issue type",height=260,
+                                xaxis_tickangle=-30,margin=dict(t=40,b=60,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_f),use_container_width=True)
+        else:
+            flag("✅ No red flags in this period","green")
+
+    with col_donut:
+        st.markdown("#### 🎯 Risk Profile")
+        critical=sum(1 for d in biz_flags.values() if d["score"]>=12)
+        high=sum(1 for d in biz_flags.values() if 8<=d["score"]<12)
+        medium=sum(1 for d in biz_flags.values() if 0<d["score"]<8)
+        clean_n=total_biz-critical-high-medium
+        fig_d=go.Figure(go.Pie(
+            labels=["Critical","High","Medium","Clean"],
+            values=[critical,high,medium,clean_n],
+            marker=dict(colors=["#ef4444","#f97316","#f59e0b","#22c55e"]),
+            hole=0.55,
+            textinfo="label+percent",
+            textfont=dict(size=11)))
+        fig_d.update_layout(height=260,showlegend=False,
+                            margin=dict(t=10,b=10,l=10,r=10),
+                            annotations=[dict(text=f"{clean_n}<br>clean",
+                                              font=dict(size=13,color="#22c55e"),showarrow=False)])
+        st.plotly_chart(dark_chart(fig_d),use_container_width=True)
+        # mini legend
+        for label,count,color in [("CRITICAL ≥12",critical,"#ef4444"),
+                                   ("HIGH 8–11",high,"#f97316"),
+                                   ("MEDIUM 1–7",medium,"#f59e0b"),
+                                   ("CLEAN 0",clean_n,"#22c55e")]:
+            st.markdown(f'<div style="color:{color};font-size:.70rem">■ {label}: {count:,}</div>',
+                        unsafe_allow_html=True)
+
+    with col_naics:
+        st.markdown("#### 🏭 Top Industry Sectors")
+        if not naics_sector.empty:
+            SECTOR_NAMES={"11":"Agriculture","21":"Mining","22":"Utilities","23":"Construction",
+                          "31":"Manufacturing","32":"Manufacturing","33":"Manufacturing",
+                          "42":"Wholesale","44":"Retail","45":"Retail","48":"Transport",
+                          "49":"Transport","51":"Information","52":"Finance","53":"Real Estate",
+                          "54":"Professional Svcs","55":"Mgmt","56":"Admin Svcs",
+                          "61":"Education","62":"Health","71":"Arts","72":"Food & Accom",
+                          "81":"Other Services","92":"Public Admin"}
+            naics_sector["Label"]=naics_sector["Sector"].map(
+                lambda s: f"{s} {SECTOR_NAMES.get(s,'')}".strip())
+            fig_n=px.bar(naics_sector,x="Count",y="Label",orientation="h",
+                         color="Count",color_continuous_scale="Blues",
+                         title="NAICS 2-digit sectors")
+            fig_n.update_layout(height=260,coloraxis_showscale=False,
+                                margin=dict(t=40,b=10,l=10,r=10),yaxis_title="")
+            st.plotly_chart(dark_chart(fig_n),use_container_width=True)
+        else:
+            st.info("No NAICS data available.")
+
+    st.markdown("---")
+
+    # ── Row 4: Public Records + Formation States + SOS/TIN/IDV detail ────────
+    col_pr, col_states = st.columns([1,1])
+
+    with col_pr:
+        st.markdown("#### 📜 Public Records & Risk")
+        pr_data=[
+            ("Bankruptcies",bk_biz,rate(bk_biz,n)+" of businesses","#8B5CF6"),
+            ("Watchlist hits",wl_biz,rate(wl_biz,n)+" of businesses","#ef4444"),
+            ("Adverse Media",(stats_df["adverse_media"].apply(lambda v:_safe_int(v)>0)).sum()
+              if stats_df is not None and not stats_df.empty else 0,
+              "","#f59e0b"),
+        ]
+        for label,count,sub,color in pr_data:
+            kpi(label,f"{count:,}",sub,color)
+
+    with col_states:
+        st.markdown("#### 🗺️ Formation States (Top 10)")
+        if not state_counts.empty:
+            TAX_HAVENS={"DE","NV","WY"}
+            state_counts["Tax Haven"]=state_counts["State"].isin(TAX_HAVENS)
+            state_counts["Color"]=state_counts["State"].map(
+                lambda s: "#f59e0b" if s in TAX_HAVENS else "#3B82F6")
+            fig_s=px.bar(state_counts,x="State",y="Count",
+                         color="Tax Haven",
+                         color_discrete_map={True:"#f59e0b",False:"#3B82F6"},
+                         title="Top 10 formation states · 🟡=tax haven")
+            fig_s.update_layout(height=240,showlegend=False,
+                                margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_s),use_container_width=True)
+        else:
+            st.info("No formation state data available.")
 
     st.markdown("---")
 
