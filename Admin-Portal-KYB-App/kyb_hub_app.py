@@ -606,6 +606,17 @@ if tab=="🏠 Home":
     st.markdown("### 🚨 Top 10 Businesses Needing Attention")
     st.markdown("*Ranked by severity of red flags — highest risk at the top.*")
 
+    # Weight metadata for score breakdown tooltip
+    FLAG_WEIGHT_META = {
+        "SOS Inactive":      (10, "🔴", "sos_active = false",       "Entity not in good standing with Secretary of State. Cannot legally operate."),
+        "No SOS data":       ( 8, "🔴", "sos_active + sos_match = ∅","Entity existence completely unverified — vendor lookup may have failed."),
+        "TIN Failed":        ( 6, "🔴", "tin_match_boolean = false", "IRS EIN-name mismatch. Potential identity fraud or incorrect EIN filing."),
+        "TIN Missing":       ( 3, "🟡", "tin_match_boolean = ∅",    "EIN not submitted or TIN check not yet run. May be onboarding lag."),
+        "IDV Failed":        ( 4, "🟡", "idv_passed_boolean = false","Beneficial owner identity not confirmed via Plaid/Trulioo."),
+        "NAICS Fallback":    ( 2, "🟡", "naics_code = 561499",      "Industry unclassified — all vendors failed, AI used fallback code."),
+        "No NAICS":          ( 3, "🟡", "naics_code = ∅",           "No industry classification stored at all."),
+    }
+
     if flagged_biz.empty:
         flag("✅ No red flags detected in this period. All businesses appear clean.", "green")
     else:
@@ -613,8 +624,8 @@ if tab=="🏠 Home":
         for rank, (_, row) in enumerate(top10.iterrows(), 1):
             bid_check = row["business_id"]
             b_data    = biz_flags.get(bid_check, {})
-            flags     = b_data.get("flags",[])
-            score     = b_data.get("score",0)
+            flags_list = b_data.get("flags",[])
+            score      = b_data.get("score",0)
 
             sev_color = "#ef4444" if score>=10 else "#f97316" if score>=6 else "#f59e0b"
             sev_label = "🔴 CRITICAL" if score>=12 else "🔴 HIGH" if score>=8 else "🟡 MEDIUM"
@@ -623,8 +634,8 @@ if tab=="🏠 Home":
                 bg={"🔴":"#7f1d1d","🟡":"#78350f"}.get(icon,"#1e293b")
                 fg={"🔴":"#fca5a5","🟡":"#fde68a"}.get(icon,"#cbd5e1")
                 return f'<span style="background:{bg};color:{fg};padding:2px 7px;border-radius:10px;font-size:.70rem;margin:2px;display:inline-block">{icon} {title}</span>'
-            flag_pills = "".join(_pill2(i,t) for i,t,_ in flags)
-            flag_detail = " · ".join(desc for _,_,desc in flags)
+            flag_pills  = "".join(_pill2(i,t) for i,t,_ in flags_list)
+            flag_detail = " · ".join(desc for _,_,desc in flags_list)
 
             col_rank, col_card, col_btn = st.columns([0.3,5,1])
             with col_rank:
@@ -647,6 +658,93 @@ if tab=="🏠 Home":
                   <div style="color:#475569;font-size:.68rem;margin-top:4px">
                     First seen: {str(row['first_seen'])[:16]} · {row['fact_count']} facts stored</div>
                 </div>""", unsafe_allow_html=True)
+
+                # ── Score breakdown expander ──────────────────────────────
+                with st.expander(f"📊 Score breakdown — {score} pts from {len(flags_list)} flag(s)"):
+                    # Build rows: match each flag to its metadata
+                    breakdown_rows = []
+                    running = 0
+                    for icon, title, desc in flags_list:
+                        # Watchlist is dynamic (title contains hit count)
+                        if "Watchlist" in title:
+                            wl_count = int(''.join(filter(str.isdigit, title)) or 0)
+                            pts = 12
+                            fact_field = f"watchlist_hits = {wl_count}"
+                            explanation = "Sanctions/PEP screening hit (OFAC/FinCEN). Hard stop — compliance review mandatory."
+                        elif "BK:" in title:
+                            bk_count = int(''.join(filter(str.isdigit, title)) or 1)
+                            pts = 3 * bk_count
+                            fact_field = f"num_bankruptcies = {bk_count}"
+                            explanation = f"Public bankruptcy record(s). Score = +3 per filing (×{bk_count})."
+                        else:
+                            meta = FLAG_WEIGHT_META.get(title, (0, icon, "—", desc))
+                            pts, _, fact_field, explanation = meta
+                        running += pts
+                        bar_pct = int(pts / max(score, 1) * 100)
+                        bar_color = "#ef4444" if icon == "🔴" else "#f59e0b"
+                        breakdown_rows.append((icon, title, pts, running, bar_pct, bar_color, fact_field, explanation))
+
+                    # Render score receipt
+                    st.markdown("""<div style="font-size:.72rem;color:#94A3B8;margin-bottom:6px">
+                        Each row = one detected condition → its fixed weight → running total.
+                        Total = sum of all weights. No ML, no normalization.</div>""",
+                        unsafe_allow_html=True)
+
+                    for icon, title, pts, cumul, bar_pct, bar_color, fact_field, explanation in breakdown_rows:
+                        st.markdown(f"""<div style="background:#0f172a;border-radius:8px;
+                            padding:10px 14px;margin:4px 0;border:1px solid #1e293b">
+                          <div style="display:flex;justify-content:space-between;align-items:center">
+                            <div>
+                              <span style="color:{bar_color};font-weight:700;font-size:.82rem">
+                                {icon} {title}</span>
+                              <span style="color:#64748b;font-size:.70rem;margin-left:8px">
+                                fact: <code style="color:#93c5fd">{fact_field}</code></span>
+                            </div>
+                            <div style="text-align:right">
+                              <span style="color:{bar_color};font-weight:700;font-size:.90rem">
+                                +{pts} pts</span>
+                              <span style="color:#475569;font-size:.68rem;margin-left:6px">
+                                → {cumul} total</span>
+                            </div>
+                          </div>
+                          <div style="background:#1e293b;border-radius:4px;height:4px;margin:6px 0">
+                            <div style="background:{bar_color};width:{bar_pct}%;height:4px;
+                              border-radius:4px"></div>
+                          </div>
+                          <div style="color:#94A3B8;font-size:.70rem">{explanation}</div>
+                        </div>""", unsafe_allow_html=True)
+
+                    # Final score summary bar
+                    max_possible = 12+10+8+6+4+3+3+3  # all flags triggered
+                    overall_pct  = int(score / max_possible * 100)
+                    st.markdown(f"""<div style="background:#1e293b;border-radius:8px;
+                        padding:10px 14px;margin-top:8px;border:1px solid #334155">
+                      <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+                        <span style="color:#e2e8f0;font-weight:700;font-size:.80rem">
+                          Total Red Flag Score</span>
+                        <span style="color:{sev_color};font-weight:700;font-size:.95rem">
+                          {score} / {max_possible} pts max · {sev_label}</span>
+                      </div>
+                      <div style="background:#0f172a;border-radius:4px;height:8px">
+                        <div style="background:{sev_color};width:{overall_pct}%;height:8px;
+                          border-radius:4px"></div>
+                      </div>
+                      <div style="color:#64748b;font-size:.68rem;margin-top:4px">
+                        Max possible = 49 pts (all flags triggered simultaneously).
+                        Score ≥12=CRITICAL · 8–11=HIGH · 1–7=MEDIUM.
+                        This is a triage heuristic — not the Worth Score, not a regulatory score.
+                      </div>
+                    </div>""", unsafe_allow_html=True)
+
+                    # Recommended action
+                    if score >= 12:
+                        action = "🚨 **Immediate action required.** Compliance review before any underwriting decision. If SANCTIONS hit present — hard stop, escalate to Compliance team."
+                    elif score >= 8:
+                        action = "⚠️ **Manual underwriting required.** Review SOS reinstatement status, TIN documentation, and IDV retry before approval."
+                    else:
+                        action = "🟡 **Low-priority review.** Check for data freshness — flags may reflect onboarding lag rather than genuine risk."
+                    st.markdown(f"**Recommended action:** {action}")
+
             with col_btn:
                 st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("Investigate →", key=f"top10_{bid_check}", use_container_width=True):
