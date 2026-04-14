@@ -7328,78 +7328,79 @@ the customer sees in the Admin Portal. Source can be:
                                                 for r in facts_in_grp])
                     styled_table(display_df, color_col="Value")
 
-                    # Show expandable detail for list/dict values
+                    # Show list/dict detail using HTML <details> — avoids nested expander error
                     for ri, (row_data, raw_data) in enumerate(zip(facts_in_grp, raw_in_grp)):
                         val_preview = row_data["Value"]
                         detail      = raw_data.get("detail")
-                        fact        = raw_data.get("fact",{})
+                        fact_obj    = raw_data.get("fact",{})
                         fact_name   = raw_data.get("name","")
 
                         if detail is not None:
-                            with st.expander(f"🔍 Expand `{fact_name}` — {val_preview}"):
-                                if isinstance(detail, list):
-                                    st.markdown(f"**{len(detail)} items in `{fact_name}` array:**")
-                                    for idx, item in enumerate(detail):
-                                        if isinstance(item, dict):
-                                            st.markdown(f"**Item {idx+1}:**")
-                                            st.json(item)
-                                        else:
-                                            st.markdown(f"- `{item}`")
-                                elif isinstance(detail, dict):
-                                    st.markdown(f"**Object keys in `{fact_name}`:**")
-                                    st.json(detail)
-
-                                # Show alternatives if present
-                                alts = fact.get("alternatives",[]) or []
-                                if alts:
-                                    st.markdown(f"**Other vendors that also had a value for `{fact_name}`:**")
-                                    alt_rows = []
-                                    for alt in alts:
-                                        if isinstance(alt, dict):
-                                            alt_pid  = str(_safe_get(alt,"source","platformId",default="") or "")
-                                            alt_conf = float(_safe_get(alt,"source","confidence",default=0) or 0)
-                                            alt_val  = alt.get("value")
-                                            alt_rows.append({
-                                                "Source": pid_name(alt_pid),
-                                                "Value":  str(alt_val)[:80] if alt_val is not None else "(null)",
-                                                "Confidence": f"{alt_conf:.3f}" if alt_conf>0 else "—",
-                                            })
-                                    if alt_rows:
-                                        styled_table(pd.DataFrame(alt_rows))
+                            if isinstance(detail, list):
+                                items_html = "".join(
+                                    f"<li><code>{json.dumps(item, default=str)[:300]}</code></li>"
+                                    if isinstance(item,(dict,list)) else f"<li><code>{str(item)[:300]}</code></li>"
+                                    for item in detail
+                                )
+                                inner = f"<ol style='color:#CBD5E1;font-size:.74rem;margin:4px 0'>{items_html}</ol>"
+                            else:
+                                inner = (f"<pre style='color:#CBD5E1;font-size:.70rem;background:#0F172A;"
+                                         f"padding:8px;border-radius:6px;overflow:auto'>"
+                                         f"{json.dumps(detail, default=str, indent=2)[:2000]}</pre>")
+                            alts = fact_obj.get("alternatives",[]) or []
+                            alts_html = ""
+                            if alts:
+                                alt_rows_html = "".join(
+                                    f"<tr><td style='padding:3px 8px;color:#94A3B8'>{pid_name(str(_safe_get(a,'source','platformId',default='') or ''))}</td>"
+                                    f"<td style='padding:3px 8px;color:#CBD5E1'>{str(a.get('value',''))[:60]}</td>"
+                                    f"<td style='padding:3px 8px;color:#64748b'>{float(_safe_get(a,'source','confidence',default=0) or 0):.3f}</td></tr>"
+                                    for a in alts if isinstance(a,dict)
+                                )
+                                alts_html = (f"<br><span style='color:#60A5FA;font-size:.70rem'>Other vendors ({len(alts)}):</span>"
+                                             f"<table style='width:100%;font-size:.70rem'>"
+                                             f"<tr><th style='color:#60A5FA;text-align:left;padding:2px 8px'>Source</th>"
+                                             f"<th style='color:#60A5FA;text-align:left;padding:2px 8px'>Value</th>"
+                                             f"<th style='color:#60A5FA;text-align:left;padding:2px 8px'>Conf</th></tr>"
+                                             f"{alt_rows_html}</table>")
+                            st.markdown(
+                                f"<details style='background:#0F172A;border-radius:6px;padding:5px 10px;margin:2px 0'>"
+                                f"<summary style='color:#60A5FA;font-size:.74rem;cursor:pointer'>"
+                                f"🔍 <code>{fact_name}</code> — {val_preview}</summary>"
+                                f"{inner}{alts_html}</details>",
+                                unsafe_allow_html=True)
 
                         elif "[too large" in str(val_preview):
-                            with st.expander(f"🔍 Query `{fact_name}` directly (too large for Redshift)"):
-                                st.markdown(f"**Source:** {row_data.get('Source (winner)','Unknown')}")
-                                st.code(f"""-- Run on PostgreSQL RDS (port 5432):
-SELECT value, received_at
-FROM rds_warehouse_public.facts
-WHERE business_id = '{bid}'
-  AND name = '{fact_name}';
--- The value column is native JSONB on PostgreSQL — use -> and ->> operators
--- e.g.: SELECT jsonb_array_elements(value->'value') AS item FROM ... WHERE ...""", language="sql")
+                            src = row_data.get("Source (winner)","Unknown")
+                            st.markdown(
+                                f"<details style='background:#0F172A;border-radius:6px;padding:5px 10px;margin:2px 0'>"
+                                f"<summary style='color:#f59e0b;font-size:.74rem;cursor:pointer'>"
+                                f"📦 <code>{fact_name}</code> — too large (click for SQL)</summary>"
+                                f"<div style='color:#94A3B8;font-size:.70rem;margin-top:4px'>Source: {src}</div>"
+                                f"<pre style='color:#22c55e;background:#052e16;padding:8px;border-radius:6px;font-size:.68rem'>"
+                                f"-- PostgreSQL RDS (port 5432):\nSELECT value FROM rds_warehouse_public.facts\n"
+                                f"WHERE business_id = '{bid}' AND name = '{fact_name}';</pre>"
+                                f"</details>",
+                                unsafe_allow_html=True)
 
-                        # Show override warning inline
                         if row_data.get("Override"):
                             flag(row_data["Override"], "amber")
 
-                    # Explain null facts
                     null_facts = [r["Fact"] for r in facts_in_grp if r["Value"]=="(null)"]
                     if null_facts:
-                        with st.expander(f"❓ Why are {len(null_facts)} facts null in this group?"):
-                            st.markdown("""
-A `(null)` value means the fact exists in the system schema but no vendor provided a value for this specific business.
-
-**Common reasons:**
-- **Entity matching failed**: the vendor couldn't match this business → no data returned
-- **Optional field**: the applicant didn't submit this data (e.g. email, phone)
-- **Calculated fact**: depends on another null fact (e.g. `naics_description` requires `naics_code`)
-- **Not in source**: this field is not available in the vendor's database for this business
-
-**The source column still shows** who *would* provide this fact if it existed — not who confirmed the null.
-                            """)
-                            for fn in null_facts:
-                                known = FACT_SOURCE_KNOWLEDGE.get(fn, "")
-                                st.markdown(f"- `{fn}`: {known if known else 'Source not documented'}")
+                        null_items = "".join(
+                            f"<li><code>{fn}</code>: <span style='color:#64748b'>"
+                            f"{FACT_SOURCE_KNOWLEDGE.get(fn,'source not documented')}</span></li>"
+                            for fn in null_facts
+                        )
+                        st.markdown(
+                            f"<details style='background:#0F172A;border-radius:6px;padding:5px 10px;margin:4px 0'>"
+                            f"<summary style='color:#94A3B8;font-size:.72rem;cursor:pointer'>"
+                            f"❓ Why are {len(null_facts)} facts null?</summary>"
+                            f"<div style='color:#94A3B8;font-size:.71rem;margin-top:4px'>"
+                            f"No vendor provided data. Common causes: entity matching failed, optional field "
+                            f"not submitted, calculated from another null fact, or not in vendor's database.<br>"
+                            f"<ul style='margin:4px 0 0 16px'>{null_items}</ul></div></details>",
+                            unsafe_allow_html=True)
 
             st.markdown("---")
             st.markdown("#### 🔍 SQL for deeper investigation")
