@@ -761,109 +761,273 @@ if tab=="🏠 Home":
     st.markdown("---")
 
     # ── Row 3: Red Flag Distribution + Risk Donut + NAICS Sectors ────────────
-    col_flags, col_donut, col_naics = st.columns([2,1,1])
+    # ── Row 3a: Red Flag Distribution (horizontal, consolidated) + NAICS ────────
+    col_flags, col_naics = st.columns([3,2])
 
     with col_flags:
         st.markdown("#### 🚩 Red Flag Distribution")
+        # Consolidate: merge all "Watchlist N hit(s)" → "Watchlist hits"
+        #              merge all "BK: N" → "Bankruptcy"
         flag_type_counts={}
         for b_data in biz_flags.values():
             for _,flag_title,_ in b_data["flags"]:
-                base=flag_title.split(" ")[0]+" "+flag_title.split(" ")[1] if len(flag_title.split())>1 else flag_title
-                flag_type_counts[base]=flag_type_counts.get(base,0)+1
+                if flag_title.startswith("Watchlist"): key="Watchlist hits"
+                elif flag_title.startswith("BK:"): key="Bankruptcy"
+                else: key=flag_title
+                flag_type_counts[key]=flag_type_counts.get(key,0)+1
         if flag_type_counts:
-            fdf=pd.DataFrame(list(flag_type_counts.items()),columns=["Issue","Count"]).sort_values("Count",ascending=False)
-            color_map={"IDV Failed":"#f59e0b","TIN Failed":"#ef4444","SOS Inactive":"#ef4444",
-                       "No NAICS":"#8B5CF6","NAICS Fallback":"#6366f1","Watchlist":"#dc2626",
-                       "TIN Missing":"#f97316","No SOS":"#f97316","BK:":"#a855f7"}
-            bar_colors=[next((v for k,v in color_map.items() if k in iss),"#64748b") for iss in fdf["Issue"]]
-            fig_f=go.Figure(go.Bar(x=fdf["Issue"],y=fdf["Count"],marker_color=bar_colors,
-                                   text=fdf["Count"],textposition="outside"))
-            fig_f.update_layout(title="Businesses with each issue type",height=260,
-                                xaxis_tickangle=-30,margin=dict(t=40,b=60,l=10,r=10))
-            st.plotly_chart(dark_chart(fig_f),use_container_width=True)
+            fdf=pd.DataFrame(list(flag_type_counts.items()),columns=["Issue","Count"])\
+                  .sort_values("Count",ascending=True)  # ascending for horizontal bar
+            COLOR_MAP={
+                "IDV Failed":"#f59e0b","TIN Failed":"#ef4444","TIN Missing":"#f97316",
+                "SOS Inactive":"#dc2626","No SOS data":"#f97316",
+                "NAICS Fallback":"#6366f1","No NAICS":"#8B5CF6",
+                "Watchlist hits":"#dc2626","Bankruptcy":"#a855f7",
+            }
+            bar_colors=[COLOR_MAP.get(iss,"#64748b") for iss in fdf["Issue"]]
+            fig_f=go.Figure(go.Bar(
+                x=fdf["Count"], y=fdf["Issue"],
+                orientation="h",
+                marker_color=bar_colors,
+                text=fdf["Count"].apply(lambda v: f"{v:,}"),
+                textposition="outside",
+                textfont=dict(color="#E2E8F0", size=12),
+            ))
+            fig_f.update_layout(
+                height=max(180, len(fdf)*38),
+                margin=dict(t=30, b=10, l=10, r=60),
+                xaxis=dict(showgrid=False, showticklabels=False, title=""),
+                yaxis=dict(title="", tickfont=dict(size=12)),
+            )
+            st.plotly_chart(dark_chart(fig_f), use_container_width=True)
+            st.caption("Each bar = number of businesses with that specific issue. "
+                       "One business can appear in multiple bars.")
         else:
-            flag("✅ No red flags in this period","green")
-
-    with col_donut:
-        st.markdown("#### 🎯 Risk Profile")
-        critical=sum(1 for d in biz_flags.values() if d["score"]>=12)
-        high=sum(1 for d in biz_flags.values() if 8<=d["score"]<12)
-        medium=sum(1 for d in biz_flags.values() if 0<d["score"]<8)
-        clean_n=total_biz-critical-high-medium
-        fig_d=go.Figure(go.Pie(
-            labels=["Critical","High","Medium","Clean"],
-            values=[critical,high,medium,clean_n],
-            marker=dict(colors=["#ef4444","#f97316","#f59e0b","#22c55e"]),
-            hole=0.55,
-            textinfo="label+percent",
-            textfont=dict(size=11)))
-        fig_d.update_layout(height=260,showlegend=False,
-                            margin=dict(t=10,b=10,l=10,r=10),
-                            annotations=[dict(text=f"{clean_n}<br>clean",
-                                              font=dict(size=13,color="#22c55e"),showarrow=False)])
-        st.plotly_chart(dark_chart(fig_d),use_container_width=True)
-        # mini legend
-        for label,count,color in [("CRITICAL ≥12",critical,"#ef4444"),
-                                   ("HIGH 8–11",high,"#f97316"),
-                                   ("MEDIUM 1–7",medium,"#f59e0b"),
-                                   ("CLEAN 0",clean_n,"#22c55e")]:
-            st.markdown(f'<div style="color:{color};font-size:.70rem">■ {label}: {count:,}</div>',
-                        unsafe_allow_html=True)
+            flag("✅ No red flags detected in this period","green")
 
     with col_naics:
         st.markdown("#### 🏭 Top Industry Sectors")
+        SECTOR_NAMES={"11":"Agriculture","21":"Mining","22":"Utilities","23":"Construction",
+                      "31":"Manufacturing","32":"Manufacturing","33":"Manufacturing",
+                      "42":"Wholesale","44":"Retail","45":"Retail","48":"Transport",
+                      "49":"Transport","51":"Information","52":"Finance","53":"Real Estate",
+                      "54":"Professional Svcs","55":"Mgmt","56":"Admin Svcs",
+                      "61":"Education","62":"Health","71":"Arts","72":"Food & Accom",
+                      "81":"Other Services","92":"Public Admin"}
         if not naics_sector.empty:
-            SECTOR_NAMES={"11":"Agriculture","21":"Mining","22":"Utilities","23":"Construction",
-                          "31":"Manufacturing","32":"Manufacturing","33":"Manufacturing",
-                          "42":"Wholesale","44":"Retail","45":"Retail","48":"Transport",
-                          "49":"Transport","51":"Information","52":"Finance","53":"Real Estate",
-                          "54":"Professional Svcs","55":"Mgmt","56":"Admin Svcs",
-                          "61":"Education","62":"Health","71":"Arts","72":"Food & Accom",
-                          "81":"Other Services","92":"Public Admin"}
             naics_sector["Label"]=naics_sector["Sector"].map(
-                lambda s: f"{s} {SECTOR_NAMES.get(s,'')}".strip())
-            fig_n=px.bar(naics_sector,x="Count",y="Label",orientation="h",
-                         color="Count",color_continuous_scale="Blues",
-                         title="NAICS 2-digit sectors")
-            fig_n.update_layout(height=260,coloraxis_showscale=False,
-                                margin=dict(t=40,b=10,l=10,r=10),yaxis_title="")
+                lambda s: f"{SECTOR_NAMES.get(s,s)} ({s})")
+            naics_sector_plot=naics_sector.sort_values("Count",ascending=True)
+            fig_n=go.Figure(go.Bar(
+                x=naics_sector_plot["Count"], y=naics_sector_plot["Label"],
+                orientation="h",
+                marker_color="#3B82F6",
+                text=naics_sector_plot["Count"].apply(lambda v: f"{v:,}"),
+                textposition="outside",
+                textfont=dict(color="#E2E8F0",size=11),
+            ))
+            fig_n.update_layout(
+                height=max(180,len(naics_sector_plot)*38),
+                margin=dict(t=30,b=10,l=10,r=60),
+                xaxis=dict(showgrid=False,showticklabels=False,title=""),
+                yaxis=dict(title="",tickfont=dict(size=11)),
+            )
             st.plotly_chart(dark_chart(fig_n),use_container_width=True)
         else:
             st.info("No NAICS data available.")
 
     st.markdown("---")
 
-    # ── Row 4: Public Records + Formation States + SOS/TIN/IDV detail ────────
-    col_pr, col_states = st.columns([1,1])
+    # ── Row 3b: Worth Score Distribution ─────────────────────────────────────
+    st.markdown("#### 💰 Worth Score Distribution")
+    st.caption("From `rds_manual_score_public.business_scores` · score_decision breakdown across portfolio")
 
-    with col_pr:
-        st.markdown("#### 📜 Public Records & Risk")
-        pr_data=[
-            ("Bankruptcies",bk_biz,rate(bk_biz,n)+" of businesses","#8B5CF6"),
-            ("Watchlist hits",wl_biz,rate(wl_biz,n)+" of businesses","#ef4444"),
-            ("Adverse Media",(stats_df["adverse_media"].apply(lambda v:_safe_int(v)>0)).sum()
-              if stats_df is not None and not stats_df.empty else 0,
-              "","#f59e0b"),
-        ]
-        for label,count,sub,color in pr_data:
-            kpi(label,f"{count:,}",sub,color)
+    @st.cache_data(ttl=600, show_spinner=False)
+    def load_worth_score_dist(date_from, date_to):
+        parts=[]
+        if date_from: parts.append(f"bs.created_at >= '{date_from}'")
+        if date_to:   parts.append(f"bs.created_at <= '{date_to} 23:59:59'")
+        dc=(" AND "+" AND ".join(parts)) if parts else ""
+        return run_sql(f"""
+            SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision
+            FROM rds_manual_score_public.data_current_scores cs
+            JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+            WHERE 1=1{dc}
+            LIMIT 5000
+        """)
 
-    with col_states:
-        st.markdown("#### 🗺️ Formation States (Top 10)")
-        if not state_counts.empty:
-            TAX_HAVENS={"DE","NV","WY"}
-            state_counts["Tax Haven"]=state_counts["State"].isin(TAX_HAVENS)
-            state_counts["Color"]=state_counts["State"].map(
-                lambda s: "#f59e0b" if s in TAX_HAVENS else "#3B82F6")
-            fig_s=px.bar(state_counts,x="State",y="Count",
-                         color="Tax Haven",
-                         color_discrete_map={True:"#f59e0b",False:"#3B82F6"},
-                         title="Top 10 formation states · 🟡=tax haven")
-            fig_s.update_layout(height=240,showlegend=False,
-                                margin=dict(t=40,b=10,l=10,r=10))
-            st.plotly_chart(dark_chart(fig_s),use_container_width=True)
+    ws_df, ws_err = load_worth_score_dist(hub_date_from, hub_date_to)
+    if ws_df is not None and not ws_df.empty:
+        ws_df["weighted_score_850"] = pd.to_numeric(ws_df["weighted_score_850"], errors="coerce")
+        ws_df = ws_df.dropna(subset=["weighted_score_850"])
+
+        wc1,wc2,wc3,wc4 = st.columns(4)
+        approved   = (ws_df["score_decision"]=="APPROVE").sum()
+        review     = (ws_df["score_decision"]=="FURTHER_REVIEW_NEEDED").sum()
+        declined   = (ws_df["score_decision"]=="DECLINE").sum()
+        median_sc  = ws_df["weighted_score_850"].median()
+        with wc1: kpi("Median Score",f"{median_sc:.0f}","300–850 scale","#3B82F6")
+        with wc2: kpi("✅ Approve",f"{approved:,}",rate(approved,len(ws_df)),"#22c55e")
+        with wc3: kpi("🔎 Review",f"{review:,}",rate(review,len(ws_df)),"#f59e0b")
+        with wc4: kpi("❌ Decline",f"{declined:,}",rate(declined,len(ws_df)),"#ef4444")
+
+        wsc1, wsc2 = st.columns([2,1])
+        with wsc1:
+            fig_ws = px.histogram(
+                ws_df, x="weighted_score_850", nbins=40,
+                color="score_decision",
+                color_discrete_map={
+                    "APPROVE":"#22c55e",
+                    "FURTHER_REVIEW_NEEDED":"#f59e0b",
+                    "DECLINE":"#ef4444",
+                },
+                labels={"weighted_score_850":"Worth Score (300–850)","score_decision":"Decision"},
+                title="Worth Score Distribution by Decision",
+                barmode="stack",
+            )
+            fig_ws.update_layout(height=300,legend=dict(orientation="h",y=-0.2),
+                                 margin=dict(t=40,b=40,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_ws),use_container_width=True)
+        with wsc2:
+            # Decision breakdown by risk_level
+            rl_counts = ws_df.groupby(["risk_level","score_decision"]).size().reset_index(name="Count")
+            if not rl_counts.empty:
+                fig_rl=px.bar(rl_counts,x="risk_level",y="Count",color="score_decision",
+                              barmode="stack",
+                              color_discrete_map={"APPROVE":"#22c55e",
+                                                  "FURTHER_REVIEW_NEEDED":"#f59e0b",
+                                                  "DECLINE":"#ef4444"},
+                              title="By Risk Level",
+                              labels={"risk_level":"Risk Level","score_decision":"Decision"})
+                fig_rl.update_layout(height=300,showlegend=False,
+                                     margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_rl),use_container_width=True)
+    else:
+        st.info(f"Worth Score data not available. {ws_err or 'Check VPN / Redshift access.'}")
+
+    st.markdown("---")
+
+    # ── Row 4: Domestic/Foreign + TIN Sources + Formation States ─────────────
+    col_domfor, col_tin, col_states = st.columns([1,1,1])
+
+    with col_domfor:
+        st.markdown("#### 🗺️ Domestic vs Foreign Registration")
+        if stats_df is not None and not stats_df.empty:
+            TAX_HAVENS={"DE","NV","WY","SD","MT","NM"}
+            total_with_state = stats_df["formation_state"].notna().sum()
+            th_count = stats_df["formation_state"].str.upper().str.strip().isin(TAX_HAVENS).sum()
+            non_th   = total_with_state - th_count
+            no_state = n - total_with_state
+
+            # Pie: tax haven vs non-tax-haven vs missing
+            fig_dom=go.Figure(go.Pie(
+                labels=["Tax-Haven State\n(DE/NV/WY/SD/MT/NM)","Other State","No State Data"],
+                values=[th_count, non_th, no_state],
+                marker=dict(colors=["#f59e0b","#3B82F6","#334155"]),
+                hole=0.5,
+                textinfo="percent+value",
+                textfont=dict(size=11),
+            ))
+            fig_dom.update_layout(height=220,showlegend=False,
+                                  margin=dict(t=10,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_dom),use_container_width=True)
+            st.caption("Tax-haven states (DE, NV, WY, SD, MT, NM) are high-risk for entity resolution gaps: "
+                       "Middesk finds the FOREIGN filing, missing the DOMESTIC primary record.")
+
+            # Top states table
+            if not state_counts.empty:
+                sc2=state_counts.copy()
+                sc2["Tax Haven"]=sc2["State"].isin(TAX_HAVENS).map({True:"⚠️ Yes",False:"No"})
+                st.dataframe(sc2[["State","Count","Tax Haven"]].head(8),
+                             use_container_width=True,hide_index=True)
         else:
             st.info("No formation state data available.")
+
+    with col_tin:
+        st.markdown("#### 🔐 TIN Verification Breakdown")
+        if stats_df is not None and not stats_df.empty:
+            tin_true  = (stats_df["tin_match"].str.lower().str.strip()=="true").sum()
+            tin_false = (stats_df["tin_match"].str.lower().str.strip()=="false").sum()
+            tin_null  = n - tin_true - tin_false
+
+            # Donut: pass/fail/missing
+            fig_tin=go.Figure(go.Pie(
+                labels=["✅ TIN Verified","❌ TIN Failed","⚪ Not Checked"],
+                values=[tin_true,tin_false,tin_null],
+                marker=dict(colors=["#22c55e","#ef4444","#334155"]),
+                hole=0.5,
+                textinfo="percent+value",
+                textfont=dict(size=11),
+            ))
+            fig_tin.update_layout(height=220,showlegend=False,
+                                  margin=dict(t=10,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_tin),use_container_width=True)
+
+            # Source concordance: SOS active vs TIN verified cross-tab
+            st.markdown("**Source Concordance — SOS × TIN**")
+            if stats_df is not None and not stats_df.empty:
+                def _sos_label(v):
+                    s=str(v or "").lower().strip()
+                    return "SOS Active" if s=="true" else ("SOS Inactive" if s=="false" else "SOS Unknown")
+                def _tin_label(v):
+                    s=str(v or "").lower().strip()
+                    return "TIN Pass" if s=="true" else ("TIN Fail" if s=="false" else "TIN Unknown")
+                ct=stats_df.copy()
+                ct["SOS"]=ct["sos_active"].apply(_sos_label)
+                ct["TIN"]=ct["tin_match"].apply(_tin_label)
+                cross=ct.groupby(["SOS","TIN"]).size().reset_index(name="Count")
+                cross=cross.sort_values("Count",ascending=False)
+                # Color code
+                def _cross_color(row):
+                    if row["SOS"]=="SOS Active" and row["TIN"]=="TIN Pass": return "✅ Good"
+                    if row["SOS"]=="SOS Inactive" or row["TIN"]=="TIN Fail": return "🔴 Review"
+                    return "🟡 Check"
+                cross["Signal"]=cross.apply(_cross_color,axis=1)
+                st.dataframe(cross[["SOS","TIN","Count","Signal"]],
+                             use_container_width=True,hide_index=True)
+        else:
+            st.info("No TIN data available.")
+
+    with col_states:
+        st.markdown("#### 📜 Public Records & Sources")
+        if stats_df is not None and not stats_df.empty:
+            am_count=(stats_df["adverse_media"].apply(lambda v:_safe_int(v)>0)).sum()
+
+            # Public records summary
+            pr_items=[
+                ("Watchlist hits",wl_biz,"#ef4444","Businesses with ≥1 PEP/Sanctions hit"),
+                ("Adverse Media",am_count,"#f59e0b","Businesses with negative press coverage"),
+                ("Bankruptcies",bk_biz,"#8B5CF6","Businesses with ≥1 bankruptcy on file"),
+            ]
+            for label,count,color,desc in pr_items:
+                pct=rate(count,n)
+                st.markdown(f"""<div style="background:#1E293B;border-left:3px solid {color};
+                    border-radius:8px;padding:10px 14px;margin:4px 0">
+                  <div style="display:flex;justify-content:space-between;align-items:center">
+                    <span style="color:#CBD5E1;font-weight:600;font-size:.82rem">{label}</span>
+                    <span style="color:{color};font-weight:700;font-size:1.1rem">{count:,}</span>
+                  </div>
+                  <div style="color:#64748b;font-size:.70rem;margin-top:2px">{pct} · {desc}</div>
+                </div>""",unsafe_allow_html=True)
+
+            # IDV source concordance
+            st.markdown("**IDV × SOS Concordance**")
+            def _idv_label(v):
+                s=str(v or "").lower().strip()
+                return "IDV Pass" if s=="true" else ("IDV Fail" if s=="false" else "IDV Unknown")
+            ct2=stats_df.copy()
+            ct2["SOS"]=ct2["sos_active"].apply(lambda v: "SOS Active" if str(v or "").lower().strip()=="true" else ("SOS Inactive" if str(v or "").lower().strip()=="false" else "SOS Unknown"))
+            ct2["IDV"]=ct2["idv_passed"].apply(_idv_label)
+            cross2=ct2.groupby(["SOS","IDV"]).size().reset_index(name="Count").sort_values("Count",ascending=False)
+            def _c2(row):
+                if row["SOS"]=="SOS Active" and row["IDV"]=="IDV Pass": return "✅"
+                if row["SOS"]=="SOS Inactive" or row["IDV"]=="IDV Fail": return "🔴"
+                return "🟡"
+            cross2["OK"]=cross2.apply(_c2,axis=1)
+            st.dataframe(cross2[["SOS","IDV","Count","OK"]],
+                         use_container_width=True,hide_index=True)
+        else:
+            st.info("No public records data available.")
 
     st.markdown("---")
 
