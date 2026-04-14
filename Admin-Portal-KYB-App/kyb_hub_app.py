@@ -298,6 +298,31 @@ with st.sidebar:
     tab=st.radio("Section",[
         "🏠 Home","🏛️ Registry & Identity","🏭 Classification & KYB",
         "⚠️ Risk & Watchlist","💰 Worth Score","🤖 AI Agent"])
+
+    # ── Date Range Filter ────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("**📅 Date Range**")
+    use_dates = st.toggle("Filter by date", value=False,
+                          help="Filter all queries to a specific onboarding period (received_at)")
+    if use_dates:
+        today = datetime.now(timezone.utc).date()
+        d_from = st.date_input("From", value=today - pd.Timedelta(days=30),
+                                max_value=today, key="hub_dfrom", label_visibility="collapsed")
+        d_to   = st.date_input("To",   value=today,
+                                max_value=today, key="hub_dto",   label_visibility="collapsed")
+        if d_from > d_to: d_from = d_to
+        st.caption(f"📅 {d_from} → {d_to}")
+        hub_date_from, hub_date_to = str(d_from), str(d_to)
+    else:
+        hub_date_from, hub_date_to = None, None
+        st.caption("Showing all data (no date filter)")
+
+    def hub_date_clause(col="received_at"):
+        parts = []
+        if hub_date_from: parts.append(f"{col} >= '{hub_date_from}'")
+        if hub_date_to:   parts.append(f"{col} <= '{hub_date_to} 23:59:59'")
+        return (" AND " + " AND ".join(parts)) if parts else ""
+
     st.markdown("---")
     st.markdown("**Sources**")
     for s in ["rds_warehouse_public.facts","rds_manual_score_public.*",
@@ -305,40 +330,278 @@ with st.sidebar:
         st.caption(f"`{s}`")
 
 # ════════════════════════════════════════════════════════════════════════════════
-# HOME
+# HOME — Live Dashboard
 # ════════════════════════════════════════════════════════════════════════════════
 if tab=="🏠 Home":
     st.markdown("# 🔬 KYB Intelligence Hub")
-    st.markdown("Enter a business UUID to investigate every KYB field with complete data lineage, "
-                "winning source + alternatives, SQL/Python code, analyst explanations, and AI assistance.")
-    bid=st.text_input("**Business UUID**",placeholder="e.g. af867694-9ed7-47c4-88db-190268d0a435")
-    st.session_state["hub_bid"]=bid.strip() if bid else ""
-    if bid and len(bid.strip())>10:
-        st.success("✅ UUID set — navigate to any section in the sidebar.")
-        for sec,desc in [
-            ("🏛️ Registry & Identity","SOS Registry (domestic/foreign), TIN, IDV, cross-analysis"),
-            ("🏭 Classification & KYB","NAICS/MCC source lineage, Background, Contact, Website"),
-            ("⚠️ Risk & Watchlist","Watchlist hits (sanctions/PEP/adverse), public records, BERT analysis"),
-            ("💰 Worth Score","Score factors, waterfall chart, model architecture, audit fill rates"),
-            ("🤖 AI Agent","RAG-powered chat — ask anything, get SQL, Python, lineage explanations"),
-        ]:
-            st.markdown(f"""<div class="flow-step"><strong>{sec}</strong><br>
-              <span style="color:#94A3B8;font-size:.74rem">{desc}</span></div>""",unsafe_allow_html=True)
-        with st.expander("📖 Key concepts"):
-            st.markdown("""
-**Fact Engine winner selection:** Selects ONE winning source per fact. Rule 2: highest confidence wins if gap>5%.
-Rule 3: highest weight breaks ties. Rule 4: NO minimum confidence cutoff. All others → alternatives[].
 
-**Confidence formulas:** Middesk=0.15+0.20×tasks(max4) · OC/ZI/EFX=match.index/55 · Trulioo=status-based · AI=self-reported
+    # ── UUID quick-jump ──────────────────────────────────────────────────────
+    col_bid, col_go = st.columns([4,1])
+    with col_bid:
+        bid_input = st.text_input("🔍 Jump to Business UUID",
+                                   placeholder="Paste UUID here to investigate…",
+                                   label_visibility="collapsed",
+                                   key="home_bid_input")
+    with col_go:
+        if st.button("Investigate ▶", type="primary", use_container_width=True):
+            if bid_input.strip():
+                st.session_state["hub_bid"] = bid_input.strip()
+                st.success(f"UUID set → navigate to any section in the sidebar.")
 
-**Domestic vs Foreign:** Domestic=incorporated there, Foreign=incorporated elsewhere, registered to operate there.
-Entity resolution gap: address-based Middesk search finds the FOREIGN record, missing the primary DOMESTIC record.
+    if not is_live:
+        st.error("🔴 Not connected to Redshift. Connect VPN and click Retry in the sidebar.")
+        st.stop()
 
-**561499 NAICS:** Fallback when all vendors fail and AI can't classify. Cascades to MCC 5614 fallback.
+    # ── Date range label ─────────────────────────────────────────────────────
+    period_label = f"{hub_date_from} → {hub_date_to}" if hub_date_from else "All time"
+    st.caption(f"📅 Period: **{period_label}** · Toggle 'Filter by date' in sidebar to change")
+    st.markdown("---")
 
-**Watchlist architecture:** Consolidated watchlist=PEP+SANCTIONS (adverse_media deliberately excluded).
-Tracked separately in adverse_media_hits. Both person-level and business-level hits merged.
-            """)
+    # ── Load recently onboarded businesses ────────────────────────────────────
+    dc = hub_date_clause("received_at")
+    recent_sql = f"""
+        SELECT business_id, MIN(received_at) AS first_seen, MAX(received_at) AS last_updated,
+               COUNT(DISTINCT name) AS fact_count
+        FROM rds_warehouse_public.facts
+        WHERE 1=1{dc}
+        GROUP BY business_id
+        ORDER BY first_seen DESC
+        LIMIT 200
+    """
+    recent_df, recent_err = run_sql(recent_sql)
+
+    if recent_df is None or recent_df.empty:
+        st.warning(f"No businesses found for this period. {recent_err or ''}")
+        st.code(recent_sql, language="sql")
+        st.stop()
+
+    total_biz = len(recent_df)
+
+    # ── Red flag scoring ──────────────────────────────────────────────────────
+    # Load key scalar facts for all recent businesses in one query
+    flag_sql = f"""
+        SELECT business_id, name,
+               JSON_EXTRACT_PATH_TEXT(value,'value') AS val,
+               received_at
+        FROM rds_warehouse_public.facts
+        WHERE name IN (
+            'sos_active','tin_match_boolean','watchlist_hits',
+            'naics_code','idv_passed_boolean','num_bankruptcies',
+            'num_judgements','num_liens','sos_match_boolean'
+        ){dc}
+        ORDER BY business_id, name, received_at DESC
+    """
+    flag_df, flag_err = run_sql(flag_sql)
+
+    # Build per-business red flag summary
+    biz_flags = {}  # business_id → {flags:[...], score:int}
+    if flag_df is not None and not flag_df.empty:
+        # Keep latest fact per business per name
+        latest_facts = (flag_df.sort_values("received_at", ascending=False)
+                               .drop_duplicates(subset=["business_id","name"])
+                               .set_index(["business_id","name"])["val"]
+                               .to_dict())
+
+        for bid_check in recent_df["business_id"].tolist():
+            flags = []
+            score = 0  # higher = more red flags
+
+            def fv(n):
+                return str(latest_facts.get((bid_check,n),"") or "").lower()
+
+            # Check each flag
+            if fv("sos_active") == "false":
+                flags.append(("🔴","SOS Inactive","Entity cannot legally operate"))
+                score += 10
+            if fv("sos_active") == "" and fv("sos_match_boolean") == "":
+                flags.append(("🔴","No SOS data","Entity existence unverified"))
+                score += 8
+            if fv("tin_match_boolean") == "false":
+                flags.append(("🔴","TIN Failed","EIN-name mismatch per IRS"))
+                score += 6
+            if fv("tin_match_boolean") == "":
+                flags.append(("🟡","TIN Missing","EIN not submitted or not checked"))
+                score += 3
+            wl = int(float(fv("watchlist_hits") or 0)) if fv("watchlist_hits").replace(".","").isdigit() else 0
+            if wl > 0:
+                flags.append(("🔴",f"Watchlist {wl} hit(s)","Sanctions/PEP screening hit"))
+                score += 12
+            if fv("naics_code") == "561499":
+                flags.append(("🟡","NAICS Fallback","Industry unclassified (561499)"))
+                score += 2
+            if fv("naics_code") == "":
+                flags.append(("🟡","No NAICS","Classification missing"))
+                score += 3
+            if fv("idv_passed_boolean") == "false":
+                flags.append(("🟡","IDV Failed","Identity verification failed"))
+                score += 4
+            bk = int(float(fv("num_bankruptcies") or 0)) if fv("num_bankruptcies").replace(".","").isdigit() else 0
+            if bk > 0:
+                flags.append(("🟡",f"BK: {bk}","Bankruptcy on record"))
+                score += 3 * bk
+            if flags or score > 0:
+                biz_flags[bid_check] = {"flags": flags, "score": score}
+
+    # Merge flag scores into recent_df
+    recent_df["flag_score"] = recent_df["business_id"].map(
+        lambda b: biz_flags.get(b,{}).get("score",0))
+    recent_df["flag_count"] = recent_df["business_id"].map(
+        lambda b: len(biz_flags.get(b,{}).get("flags",[])))
+    recent_df["has_flags"] = recent_df["flag_score"] > 0
+
+    flagged_biz = recent_df[recent_df["has_flags"]].sort_values("flag_score",ascending=False)
+    clean_biz   = recent_df[~recent_df["has_flags"]]
+
+    # ── Portfolio KPIs ────────────────────────────────────────────────────────
+    st.markdown("### 📊 Portfolio Overview")
+    c1,c2,c3,c4,c5 = st.columns(5)
+    with c1: kpi("Businesses",f"{total_biz:,}","in period","#3B82F6")
+    with c2: kpi("🚨 With Red Flags",f"{len(flagged_biz):,}",
+                 f"{len(flagged_biz)/max(total_biz,1)*100:.0f}% of total",
+                 "#ef4444" if len(flagged_biz)>0 else "#22c55e")
+    with c3: kpi("✅ Clean",f"{len(clean_biz):,}",
+                 f"{len(clean_biz)/max(total_biz,1)*100:.0f}% of total","#22c55e")
+    with c4:
+        sos_fail = sum(1 for b in recent_df["business_id"] if biz_flags.get(b,{}).get("score",0)>=10)
+        kpi("SOS Issues",f"{sos_fail:,}","inactive or missing","#f97316")
+    with c5:
+        wl_hit = sum(1 for b in recent_df["business_id"]
+                     if any("Watchlist" in f[1] for f in biz_flags.get(b,{}).get("flags",[])))
+        kpi("Watchlist Hits",f"{wl_hit:,}","businesses with hits","#ef4444" if wl_hit>0 else "#22c55e")
+
+    # Flag distribution chart
+    if biz_flags:
+        flag_type_counts = {}
+        for b_data in biz_flags.values():
+            for _,flag_title,_ in b_data["flags"]:
+                base = flag_title.split(" ")[0]+" "+flag_title.split(" ")[1] if len(flag_title.split())>1 else flag_title
+                flag_type_counts[base] = flag_type_counts.get(base,0) + 1
+        fdf = pd.DataFrame(list(flag_type_counts.items()), columns=["Issue","Count"]).sort_values("Count",ascending=False)
+        col_l, col_r = st.columns([2,1])
+        with col_l:
+            fig = px.bar(fdf, x="Issue", y="Count", color="Count",
+                         color_continuous_scale="Reds",
+                         title=f"Red Flag Distribution ({period_label})")
+            fig.update_layout(coloraxis_showscale=False, xaxis_tickangle=-30)
+            st.plotly_chart(dark_chart(fig), use_container_width=True)
+        with col_r:
+            st.markdown("**Issue counts:**")
+            st.dataframe(fdf, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # ── Recently Onboarded (most recent 10) ──────────────────────────────────
+    st.markdown("### 🕐 Recently Onboarded Businesses")
+    st.markdown("*Most recently seen in the facts table — ordered by first_seen DESC.*")
+
+    recent_10 = recent_df.head(10).copy()
+    recent_10["Status"] = recent_10.apply(lambda r:
+        f"🔴 {r['flag_count']} flag(s)" if r["flag_score"]>0 else "✅ Clean", axis=1)
+    recent_10["first_seen"] = recent_10["first_seen"].astype(str).str[:16]
+    recent_10["last_updated"] = recent_10["last_updated"].astype(str).str[:16]
+
+    for _, row in recent_10.iterrows():
+        bid_check = row["business_id"]
+        b_data    = biz_flags.get(bid_check, {})
+        flags     = b_data.get("flags",[])
+        score     = b_data.get("score",0)
+        border    = "#ef4444" if score>=10 else ("#f59e0b" if score>0 else "#22c55e")
+
+        def _pill_bg(ic): return {"🔴":"#7f1d1d","🟡":"#78350f"}.get(ic,"#1e293b")
+        def _pill_fg(ic): return {"🔴":"#fca5a5","🟡":"#fde68a"}.get(ic,"#cbd5e1")
+        flags_html = "".join(
+            f'<span style="background:{_pill_bg(icon)};color:{_pill_fg(icon)};'
+            f'padding:2px 6px;border-radius:10px;font-size:.68rem;margin:1px">{icon} {title}</span>'
+            for icon,title,_ in flags
+        ) if flags else '<span style="color:#22c55e;font-size:.72rem">✅ No issues detected</span>'
+
+        col_card, col_btn = st.columns([5,1])
+        with col_card:
+            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {border};
+                border-radius:10px;padding:12px 16px;margin:4px 0">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:#60A5FA;font-family:monospace;font-size:.80rem;font-weight:700">
+                  {bid_check}</span>
+                <span style="color:#64748b;font-size:.70rem">
+                  First seen: {row['first_seen']} · {row['fact_count']} facts</span>
+              </div>
+              <div style="margin-top:6px">{flags_html}</div>
+            </div>""", unsafe_allow_html=True)
+        with col_btn:
+            st.markdown("<br>", unsafe_allow_html=True)
+            if st.button("Investigate →", key=f"inv_{bid_check}", use_container_width=True):
+                st.session_state["hub_bid"] = bid_check
+                st.success(f"UUID set. Navigate to any section in the sidebar.")
+
+    st.markdown("---")
+
+    # ── Top 10 Red Flags ─────────────────────────────────────────────────────
+    st.markdown("### 🚨 Top 10 Businesses Needing Attention")
+    st.markdown("*Ranked by severity of red flags — highest risk at the top.*")
+
+    if flagged_biz.empty:
+        flag("✅ No red flags detected in this period. All businesses appear clean.", "green")
+    else:
+        top10 = flagged_biz.head(10)
+        for rank, (_, row) in enumerate(top10.iterrows(), 1):
+            bid_check = row["business_id"]
+            b_data    = biz_flags.get(bid_check, {})
+            flags     = b_data.get("flags",[])
+            score     = b_data.get("score",0)
+
+            sev_color = "#ef4444" if score>=10 else "#f97316" if score>=6 else "#f59e0b"
+            sev_label = "🔴 CRITICAL" if score>=12 else "🔴 HIGH" if score>=8 else "🟡 MEDIUM"
+
+            def _pill2(icon,title):
+                bg={"🔴":"#7f1d1d","🟡":"#78350f"}.get(icon,"#1e293b")
+                fg={"🔴":"#fca5a5","🟡":"#fde68a"}.get(icon,"#cbd5e1")
+                return f'<span style="background:{bg};color:{fg};padding:2px 7px;border-radius:10px;font-size:.70rem;margin:2px;display:inline-block">{icon} {title}</span>'
+            flag_pills = "".join(_pill2(i,t) for i,t,_ in flags)
+            flag_detail = " · ".join(desc for _,_,desc in flags)
+
+            col_rank, col_card, col_btn = st.columns([0.3,5,1])
+            with col_rank:
+                st.markdown(f"""<div style="background:{sev_color}22;border-radius:8px;
+                    padding:8px;text-align:center;margin-top:6px">
+                  <div style="color:{sev_color};font-weight:700;font-size:1rem">#{rank}</div>
+                  <div style="color:{sev_color};font-size:.60rem">score {score}</div>
+                </div>""", unsafe_allow_html=True)
+            with col_card:
+                st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {sev_color};
+                    border-radius:10px;padding:12px 16px;margin:4px 0">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                    <span style="color:#60A5FA;font-family:monospace;font-size:.82rem;font-weight:700">
+                      {bid_check}</span>
+                    <span style="color:{sev_color};font-size:.72rem;font-weight:700">{sev_label}</span>
+                  </div>
+                  <div style="margin:6px 0">{flag_pills}</div>
+                  <div style="color:#94A3B8;font-size:.72rem;margin-top:4px;font-style:italic">
+                    {flag_detail}</div>
+                  <div style="color:#475569;font-size:.68rem;margin-top:4px">
+                    First seen: {str(row['first_seen'])[:16]} · {row['fact_count']} facts stored</div>
+                </div>""", unsafe_allow_html=True)
+            with col_btn:
+                st.markdown("<br>", unsafe_allow_html=True)
+                if st.button("Investigate →", key=f"top10_{bid_check}", use_container_width=True):
+                    st.session_state["hub_bid"] = bid_check
+                    st.success("UUID set. Navigate to any section in the sidebar.")
+
+        st.markdown("---")
+        st.markdown("#### Understanding the Red Flag Score")
+        st.markdown("""
+| Flag | Score | Why it matters |
+|---|---|---|
+| 🔴 Watchlist hit | +12 | Sanctions/PEP — hard stop required |
+| 🔴 SOS Inactive | +10 | Entity cannot legally operate |
+| 🔴 No SOS data | +8 | Entity existence completely unverified |
+| 🔴 TIN Failed | +6 | EIN-name mismatch per IRS |
+| 🟡 IDV Failed | +4 | Identity verification not confirmed |
+| 🟡 No/Missing TIN | +3 | EIN not submitted or not verified |
+| 🟡 No NAICS/Fallback | +2–3 | Industry classification missing |
+| 🟡 Bankruptcy | +3 each | Public record on file |
+
+**Score ≥ 12** = Critical · **8–11** = High · **1–7** = Medium
+        """)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # REGISTRY & IDENTITY
