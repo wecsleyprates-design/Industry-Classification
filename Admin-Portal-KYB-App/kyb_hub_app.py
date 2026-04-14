@@ -68,8 +68,9 @@ def kpi(label, value, sub="", color="#3B82F6"):
                 unsafe_allow_html=True)
 
 def flag(text, level="blue"):
-    st.markdown(f'<div class="flag-{level}">{"🚨⚠️✅ℹ️".split()[{"red":0,"amber":1,"green":2,"blue":3}.get(level,3)]} {text}</div>',
-                unsafe_allow_html=True)
+    _icons = {"red":"🚨","amber":"⚠️","green":"✅","blue":"ℹ️"}
+    icon = _icons.get(level,"ℹ️")
+    st.markdown(f'<div class="flag-{level}">{icon} {text}</div>', unsafe_allow_html=True)
 
 def analyst_card(title, points):
     bullets = "".join(f"<p>• {p}</p>" for p in points)
@@ -329,18 +330,57 @@ def gv(facts,name):
     return v
 
 def gc(facts,name):
-    try: return float(safe_get(facts.get(name,{}),"source","confidence") or 0)
+    try:
+        v = facts.get(name,{}).get("source",{})
+        if not isinstance(v,dict): return 0.0
+        c = v.get("confidence")
+        return float(c) if c is not None else 0.0
     except: return 0.0
 
 def gp(facts,name):
-    return str(safe_get(facts.get(name,{}),"source","platformId") or "")
+    """Return platformId as string — handles 0 (Applicant) correctly."""
+    src = facts.get(name,{}).get("source",{})
+    if not isinstance(src,dict): return ""
+    pid = src.get("platformId")
+    return "" if pid is None else str(pid)
+
+def _alt_pid(a):
+    """Alternatives store source as bare int OR as nested dict {platformId:...}."""
+    s = a.get("source")
+    if isinstance(s, dict): return str(s.get("platformId",""))
+    if s is not None: return str(s)
+    return ""
+
+def _alt_conf(a):
+    s = a.get("source")
+    if isinstance(s, dict):
+        c = s.get("confidence")
+        return float(c) if c is not None else 0.0
+    # bare int source means conf stored at top level
+    c = a.get("confidence")
+    return float(c) if c is not None else 0.0
 
 def get_alts(facts,name):
     alts=facts.get(name,{}).get("alternatives",[]) or []
-    return [{"value":a.get("value"),"pid":str(safe_get(a,"source","platformId") or ""),
-             "conf":float(safe_get(a,"source","confidence") or 0)} for a in alts if isinstance(a,dict)]
+    return [{"value":a.get("value"),"pid":_alt_pid(a),"conf":_alt_conf(a)}
+            for a in alts if isinstance(a,dict)]
 
 # ── Fact lineage table ────────────────────────────────────────────────────────
+def _fmt_value(name, v):
+    if v is None: return "(null)"
+    if isinstance(v,list): return f"📋 list · {len(v)} item(s)"
+    if isinstance(v,dict):
+        if name=="idv_status": return " | ".join(f"{k}:{n}" for k,n in v.items() if n)
+        inner = v.get("status") or v.get("value") or v.get("message")
+        if inner: return str(inner)[:80]
+        return f"🗂️ object · {len(v)} keys"
+    return str(v)[:120]
+
+def _pid_label(pid_str):
+    """Return human name for a platformId — handles 0=Applicant correctly."""
+    if pid_str=="": return "Unknown"
+    return pid_info(pid_str)[0]
+
 def render_lineage(facts, names, title="Fact Lineage"):
     st.markdown(f"##### {title}")
     rows=[]
@@ -349,20 +389,36 @@ def render_lineage(facts, names, title="Fact Lineage"):
         if not f: continue
         too_large=f.get("_too_large",False)
         v=f.get("value")
-        if too_large: dv="📦 [too large — use PostgreSQL RDS SQL below]"
-        elif isinstance(v,list): dv=f"📋 list · {len(v)} items"
-        elif isinstance(v,dict):
-            if name=="idv_status" and isinstance(v,dict): dv=" | ".join(f"{k}:{n}" for k,n in v.items() if n)
-            else: dv=f"🗂️ object · {len(v)} keys"
-        else: dv=str(v)[:100] if v is not None else "(null)"
-        pid=str(safe_get(f,"source","platformId") or "")
-        conf=float(safe_get(f,"source","confidence") or 0)
-        win_name=pid_info(pid)[0]
-        alts=get_alts(facts,name)
-        alt_str=" | ".join(f"{pid_info(a['pid'])[0]}({a['conf']:.3f})" for a in alts[:3]) or "—"
-        rows.append({"Fact":f"`{name}`","Value":dv,
-                     "Winning Source":f"{win_name}({conf:.3f})" if conf>0 else win_name,
-                     "Alternatives":alt_str,"Updated":f.get("_received_at","")})
+        dv = "📦 [too large — use PostgreSQL RDS SQL below]" if too_large else _fmt_value(name,v)
+
+        # Source — handle pid=0 correctly (falsy but valid = Applicant)
+        src = f.get("source") or {}
+        pid = "" if not isinstance(src,dict) else (
+            "" if src.get("platformId") is None else str(src["platformId"]))
+        conf_raw = src.get("confidence") if isinstance(src,dict) else None
+        conf = float(conf_raw) if conf_raw is not None else None
+        win_name = _pid_label(pid)
+        conf_str = f"{conf:.4f}" if conf is not None else "n/a"
+        win_str  = f"{win_name} · {conf_str}"
+
+        # Rule applied
+        rule = safe_get(f,"ruleApplied","name") or safe_get(f,"ruleApplied","description") or "—"
+
+        # Alternatives
+        alts = get_alts(facts,name)
+        alt_str = " | ".join(
+            f"{_pid_label(a['pid'])}({a['conf']:.4f})" for a in alts[:4]
+        ) or "—"
+
+        rows.append({
+            "Fact": f"`{name}`",
+            "Value": dv,
+            "Winning Source": win_str,
+            "Confidence": conf_str,
+            "Rule": rule,
+            "Alternatives": alt_str,
+            "Updated": f.get("_received_at",""),
+        })
     if rows: st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
     return rows
 
@@ -423,10 +479,16 @@ def rag_search(q,top_k=8):
 def get_openai():
     try:
         from openai import OpenAI
-        key=os.getenv("OPENAI_API_KEY","")
-        if not key: return None
+        # Try env var first, then Streamlit secrets
+        key = os.getenv("OPENAI_API_KEY","")
+        if not key:
+            try: key = st.secrets.get("OPENAI_API_KEY","")
+            except: pass
+        if not key or not key.startswith("sk-"):
+            return None
         return OpenAI(api_key=key)
-    except: return None
+    except Exception as e:
+        return None
 
 SYSTEM="""You are the KYB Intelligence Hub AI — expert on Worth AI's KYB data pipeline.
 Rules: cite exact source (file, table, fact name, API endpoint). Always provide SQL/Python.
@@ -1363,153 +1425,322 @@ elif tab=="🏛️ Registry & Identity":
     r1,r2,r3,r4,r5=st.tabs(["🏛️ SOS","🗺️ Dom/Foreign","🔐 TIN","🪪 IDV","🔗 Cross-Analysis"])
 
     with r1:
-        st.markdown("#### SOS Registry — Winning Source & Alternatives")
+        st.markdown("#### SOS Registry — Full Data Lineage")
+        st.caption("""**Data source:** `rds_warehouse_public.facts` (Redshift federated view of PostgreSQL RDS) ·
+        **Winning source:** Middesk (pid=16, weight=2.0) or OpenCorporates (pid=23, weight=0.9) ·
+        **Rule applied:** `factWithHighestConfidence` — highest confidence×weight wins""")
+
         render_lineage(facts,["sos_active","sos_match","sos_match_boolean","middesk_confidence","middesk_id",
                                "formation_state","formation_date","year_established","corporation"])
 
-        st.markdown("##### Vendor Confidence on SOS Facts")
-        vendors=[("Middesk","16"),("OC","23"),("ZI","24"),("EFX","17"),("Trulioo","38")]
+        # Source concordance chart
+        st.markdown("##### Vendor Confidence Comparison")
+        vendors=[("Middesk","16"),("OpenCorporates","23"),("ZoomInfo","24"),("Equifax","17"),("Trulioo","38")]
         cdata=[]
         for vn,vp in vendors:
             for fn in ["sos_match","sos_match_boolean"]:
                 win_pid=gp(facts,fn); wconf=gc(facts,fn)
-                aconf=next((a["conf"] for a in get_alts(facts,fn) if a["pid"]==vp),0)
+                aconf=next((a["conf"] for a in get_alts(facts,fn) if a["pid"]==vp),0.0)
                 conf=wconf if win_pid==vp else aconf
-                if conf>0: cdata.append({"Vendor":vn,"Fact":fn,"Conf":conf,
-                                          "Role":"Winner" if win_pid==vp else "Alternative"})
+                if conf>0: cdata.append({"Vendor":vn,"Fact":fn,"Conf":round(conf,4),
+                                          "Role":"Winner ✓" if win_pid==vp else "Alternative"})
         if cdata:
-            fig=px.bar(pd.DataFrame(cdata),x="Vendor",y="Conf",color="Role",barmode="group",
-                       color_discrete_map={"Winner":"#22c55e","Alternative":"#8B5CF6"},
-                       title="Vendor Confidence on SOS Facts")
-            fig.update_layout(yaxis=dict(range=[0,1]))
+            cdf=pd.DataFrame(cdata)
+            fig=px.bar(cdf,x="Vendor",y="Conf",color="Role",barmode="group",
+                       color_discrete_map={"Winner ✓":"#22c55e","Alternative":"#8B5CF6"},
+                       title="Vendor Confidence — SOS facts (winner vs alternatives)")
+            fig.update_layout(yaxis=dict(range=[0,1.05],title="Confidence (0–1)"),height=300)
             st.plotly_chart(dark_chart(fig),use_container_width=True)
+            st.dataframe(cdf,use_container_width=True,hide_index=True)
+        else:
+            st.info("No vendor confidence data available for this business.")
 
-        ai_popup("SOS",f"SOS active:{sos_act} match:{sos_match} middesk_conf:{mdsk_conf:.3f}",[
+        # JSON structure explanation
+        with st.expander("📄 JSON structure — how this fact looks in the API response"):
+            st.markdown("""```json
+{
+  "sos_active": {
+    "name": "sos_active",
+    "value": true,                          ← what the Admin Portal shows
+    "source": {
+      "confidence": null,                   ← null = derived (dependent) fact
+      "platformId": -1,                     ← -1 = system computed
+      "name": "dependent"
+    },
+    "dependencies": ["sos_filings"],        ← computed FROM sos_filings.value[].active
+    "ruleApplied": null,                    ← no rule = pure dependency
+    "alternatives": []
+  },
+  "sos_match": {
+    "name": "sos_match",
+    "value": "success",
+    "source": {
+      "confidence": 0.9989,                 ← Middesk formula: 0.15 + 0.20×tasks
+      "platformId": 16,                     ← 16 = Middesk (weight=2.0, highest)
+      "name": "middesk"
+    },
+    "ruleApplied": { "name": "factWithHighestConfidence" },
+    "alternatives": [
+      { "value": "success", "source": 23, "confidence": 1.0 }   ← OC fallback
+    ]
+  }
+}
+```""")
+
+        ai_popup("SOS",f"SOS active:{sos_act} match:{sos_match} conf:{mdsk_conf:.4f} state:{form_state}",[
             "How is Middesk confidence calculated for SOS facts?",
             "Why might sos_match_boolean be false for a real business?",
             "What does sos_active=false mean for underwriting?",
-            "How do I query SOS filings from Redshift?",],bid)
+            "How do I query SOS filings from Redshift?",
+            "What is the difference between sos_match and sos_active?"],bid)
 
-        with st.expander("📋 SQL & Python"):
-            st.code(sql_for(bid,["sos_active","sos_match","sos_match_boolean","formation_state"]),language="sql")
+        with st.expander("📋 SQL & Python — how to load this data"):
+            st.markdown("**Redshift (VPN required) — scalar SOS facts:**")
+            st.code(sql_for(bid,["sos_active","sos_match","sos_match_boolean","formation_state","middesk_confidence"]),language="sql")
+            st.markdown("**PostgreSQL RDS port 5432 — sos_filings array (too large for Redshift federation):**")
+            st.code(f"""-- Run on PostgreSQL RDS (native JSONB, no VARCHAR(65535) limit):
+SELECT
+    filing->>'foreign_domestic'   AS filing_type,
+    filing->>'state'              AS state,
+    filing->>'active'             AS is_active,
+    filing->>'entity_type'        AS entity_type,
+    filing->>'registration_date'  AS reg_date,
+    filing->>'filing_name'        AS filing_name,
+    filing->>'url'                AS registry_url
+FROM rds_warehouse_public.facts
+CROSS JOIN jsonb_array_elements(value->'value') AS filing
+WHERE name='sos_filings' AND business_id='{bid}'
+ORDER BY (filing->>'active')::boolean DESC;""",language="sql")
+            st.markdown("**API endpoint that returns this data:**")
+            st.code(f"""GET https://api.joinworth.com/integration/api/v1/facts/business/{bid}/kyb
+Authorization: Bearer <token>
+# Response: data.sos_active, data.sos_match, data.sos_filings, ...
+# Cached in Redis: integration-express-cache::{bid}::/api/v1/facts/business/{bid}/kyb""",language="bash")
             st.code(py_for(bid,["sos_active","sos_match","sos_match_boolean"]),language="python")
-            st.code(f"""-- sos_filings: run on PostgreSQL RDS port 5432 (too large for Redshift federation):
-SELECT value->>'value' AS filings FROM rds_warehouse_public.facts
-WHERE business_id='{bid}' AND name='sos_filings';
--- Each filing: active, foreign_domestic, state, entity_type, registration_date""",language="sql")
 
-        analyst_card("SOS Registry — Interpretation",[
-            f"sos_active={sos_act}: {'✅ Entity in good standing' if sos_act=='true' else '🚨 NOT in good standing — check for unpaid taxes, missed annual report, or administrative dissolution.'}",
-            f"Middesk confidence {mdsk_conf:.3f}: formula = 0.15 base + 0.20 per successful review task (max 4 tasks: name, TIN, address, SOS). This score = ~{round((mdsk_conf-0.15)/0.20)} tasks confirmed.",
-            "sos_filings array (too large for Redshift federation) contains each SOS filing with foreign_domestic, active, state, entity_type. Must query from PostgreSQL RDS (port 5432).",
-            "Winner selection: Middesk (pid=16, w=2.0) is primary. OC (pid=23, w=0.9) is fallback. Higher confidence × weight wins.",
+        analyst_card("🔬 SOS Registry — Full Interpretation",[
+            f"sos_active = {sos_act}: {'✅ Entity in good standing with its Secretary of State.' if sos_act=='true' else '🚨 NOT in good standing — check for: unpaid taxes, missed annual report filing, or administrative dissolution by the state.' if sos_act=='false' else '⚠️ Unknown — Middesk may not have returned a SOS filing yet.'}",
+            f"Middesk confidence = {mdsk_conf:.4f}: Formula = 0.15 (base) + 0.20 × (number of passing review tasks, max 4). Tasks: name verification, TIN check, address verification, SOS lookup. Score of {mdsk_conf:.4f} implies ~{max(0,round((mdsk_conf-0.15)/0.20))} tasks passed.",
+            "sos_active is a DEPENDENT fact (platformId=-1, source='dependent'). It is derived by the Fact Engine from sos_filings.value[].active — not queried directly. sos_filings is queried by Middesk (pid=16) from the state Secretary of State registry.",
+            "sos_match is the WINNING fact (pid=16 Middesk, w=2.0). OpenCorporates (pid=23, w=0.9) is the alternative. The Fact Engine applies rule 'factWithHighestConfidence×weight'. The winner's value and source are stored in rds_warehouse_public.facts.",
+            "sos_filings is too large for Redshift federation (VARCHAR 65535 limit). It contains an array of SoSRegistration objects with: id, jurisdiction, filing_date, entity_type, active, foreign_domestic, state, url, filing_name, registration_date, officers[].",
+            "Admin Portal path: KYB tab → Business Registration → 'Verified' badge = sos_match_boolean=true AND sos_active=true. Rendered by microsites/packages/case/src/page/Cases/KYB/BusinessRegistration.tsx.",
         ])
 
     with r2:
         st.markdown("#### Domestic vs Foreign Registration")
         if tax_haven:
-            flag(f"Business incorporated in {form_state} (tax-haven state). Almost certainly has "
+            flag(f"Business incorporated in **{form_state}** (tax-haven state). It almost certainly has "
                  f"a domestic filing in {form_state} AND foreign qualifications in operating states. "
-                 "Middesk address-based search may find the FOREIGN record, missing the PRIMARY domestic record. "
-                 "This can cause sos_match_boolean=false as a FALSE NEGATIVE.", "amber")
+                 "Middesk searches by submitted address — it finds the FOREIGN record, missing the PRIMARY domestic. "
+                 "This causes sos_match_boolean=false as a FALSE NEGATIVE.", "amber")
 
-        st.markdown("##### Data Flow — How foreign_domestic Is Determined")
-        for i,(step,src,desc) in enumerate([
-            ("Middesk (primary, pid=16)","Middesk API registrations[] array",
-             "Each registration has foreign_domestic field set by Middesk based on filing type"),
-            ("OpenCorporates (fallback, pid=23)","OC home_jurisdiction_code comparison",
-             "Same state → 'domestic'. Different state → 'foreign'. company_type keywords also checked."),
-            ("sos_filings fact stored","rds_warehouse_public.facts",
-             "Array of SoSRegistration objects: {id, state, active, foreign_domestic, entity_type, registration_date}"),
-            ("Admin Portal","KYB → Business Registration tab",
-             "EntityJurisdictionCell.tsx: domestic='Primary' badge, foreign='Secondary' badge"),
-        ]):
-            color=["#f59e0b","#3B82F6","#22c55e","#8B5CF6"][i]
+        st.markdown("##### Complete Data Flow — How foreign_domestic is Determined")
+        FLOW=[
+            ("1","Merchant submits address","Onboarding form","Business submits operating address (e.g. Texas). This is what Middesk uses for its initial SOS search.","#f59e0b"),
+            ("2","Middesk SOS search by address","Middesk API (pid=16, w=2.0)","Middesk queries each state registry using the submitted address. Finds the Texas FOREIGN record first. May miss Delaware DOMESTIC record.","#f59e0b"),
+            ("3","OpenCorporates fallback","OC API (pid=23, w=0.9)","OC searches by company name globally. May find the Delaware domestic record that Middesk missed.","#3B82F6"),
+            ("4","sos_filings fact stored","rds_warehouse_public.facts","Array: [{id, state, active, foreign_domestic='domestic'/'foreign', entity_type, registration_date, officers[]}]. Source: pid=16 Middesk wins if conf > OC.","#22c55e"),
+            ("5","foreign_domestic field","sos_filings[].foreign_domestic","Middesk: set from API registrations[].foreignDomestic. OC: set by comparing home_jurisdiction_code to filing state.","#22c55e"),
+            ("6","Admin Portal display","microsites EntityJurisdictionCell.tsx","Domestic → 'Primary' badge (green). Foreign → 'Secondary' badge (grey). Sorted by active then by type.","#8B5CF6"),
+        ]
+        for num,title,source,desc,color in FLOW:
             st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
-                border-radius:8px;padding:9px 14px;margin:3px 0">
-              <strong style="color:{color}">Step {i+1}: {step}</strong>
-              <span style="color:#64748b;margin-left:8px;font-size:.70rem">{src}</span>
-              <div style="color:#94A3B8;font-size:.75rem;margin-top:3px">{desc}</div>
+                border-radius:8px;padding:10px 14px;margin:4px 0">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <div>
+                  <span style="color:{color};font-weight:700;font-size:.85rem">Step {num}: {title}</span>
+                  <span style="color:#64748b;font-size:.70rem;margin-left:8px">{source}</span>
+                </div>
+              </div>
+              <div style="color:#94A3B8;font-size:.75rem;margin-top:4px">{desc}</div>
             </div>""",unsafe_allow_html=True)
 
-        render_lineage(facts,["formation_state","formation_date","corporation"])
+        render_lineage(facts,["formation_state","formation_date","corporation","year_established"])
 
-        with st.expander("📋 SQL — sos_filings (PostgreSQL RDS port 5432)"):
-            st.code(f"""-- Connect to PostgreSQL RDS (port 5432) — native JSONB, no size limit:
+        with st.expander("📋 SQL — sos_filings domestic/foreign detail"):
+            st.code(f"""-- PostgreSQL RDS (port 5432) — full SOS filings with domestic/foreign type:
 SELECT
-    business_id,
-    filing->>'foreign_domestic' AS filing_type,
-    filing->>'state'            AS state,
-    filing->>'active'           AS active,
-    filing->>'entity_type'      AS entity_type,
-    filing->>'registration_date' AS reg_date
+    filing->>'foreign_domestic'   AS type,          -- 'domestic' or 'foreign'
+    filing->>'state'              AS state,
+    filing->>'active'             AS active,
+    filing->>'entity_type'        AS entity_type,
+    filing->>'registration_date'  AS registered,
+    filing->>'filing_name'        AS name,
+    filing->>'url'                AS registry_url
 FROM rds_warehouse_public.facts
 CROSS JOIN jsonb_array_elements(value->'value') AS filing
 WHERE name='sos_filings' AND business_id='{bid}'
-ORDER BY (filing->>'active')::boolean DESC;""",language="sql")
+ORDER BY
+    (filing->>'active')::boolean DESC,
+    CASE filing->>'foreign_domestic' WHEN 'domestic' THEN 0 ELSE 1 END;
 
-        analyst_card("Domestic vs Foreign — Key Insights",[
-            "A business incorporated in Delaware but operating in Texas has: (1) Domestic filing in Delaware (primary), and (2) Foreign qualification in Texas (secondary).",
-            "Entity resolution gap: Middesk searches by the submitted address (Texas). It finds the Texas FOREIGN record, missing the Delaware DOMESTIC primary record.",
-            f"{'⚠️ ' + form_state + ' is a tax-haven state. Verify both domestic AND foreign filings.' if tax_haven else '✅ No tax-haven state detected.'}",
-            "Fix: when sos_match=false AND formation_state≠operating_state, re-search Middesk using formation_state as jurisdiction.",
+-- Quick scalar check (Redshift OK):
+{sql_for(bid,["formation_state","formation_date","sos_active","sos_match_boolean"])}""",language="sql")
+
+        analyst_card("🔬 Domestic vs Foreign — Key Insights",[
+            "A business incorporated in Delaware (domestic) but operating in Texas has TWO SOS records: (1) Domestic = Delaware (primary), (2) Foreign qualification = Texas (secondary). Both are legitimate and valid.",
+            "Entity resolution gap: Middesk's default search is by submitted office address. If the Texas address is submitted, Middesk finds the Texas FOREIGN record. It may miss the Delaware DOMESTIC primary. This causes sos_match_boolean=false as a FALSE NEGATIVE — the entity IS real and registered, just not found via address search.",
+            f"{'⚠️ CURRENT BUSINESS: ' + form_state + ' is a tax-haven state (no state income tax, minimal disclosure). High probability of domestic+foreign split. Always verify both records.' if tax_haven else '✅ ' + (form_state or 'Unknown') + ' — no tax-haven signal detected for this business.'}",
+            "Resolution: when sos_match_boolean=false AND formation_state ≠ operating state, re-run Middesk search using formation_state as the jurisdiction parameter. Also check OpenCorporates alternative in the alternatives[] array.",
+            "Admin Portal shows: domestic filing → 'Primary' green badge, foreign filing → 'Secondary' grey badge. Multiple filings are possible (one per state where registered to operate).",
         ])
 
     with r3:
-        st.markdown("#### TIN Verification")
+        st.markdown("#### TIN Verification — Full Data Lineage")
+        st.caption("""**Source:** Middesk (pid=16) TIN review task → direct IRS query. 
+        **Fallback:** Trulioo BusinessRegistrationNumber comparison (pid=38). 
+        **Stored in:** `rds_warehouse_public.facts` (name='tin_match', 'tin_match_boolean', 'tin', 'tin_submitted')""")
+
         render_lineage(facts,["tin","tin_submitted","tin_match","tin_match_boolean"])
 
-        c1,c2,c3=st.columns(3)
-        with c1: kpi("Submitted","✅ Yes" if gv(facts,"tin_submitted") else "❌ No",
-                     "tin_submitted","#22c55e" if gv(facts,"tin_submitted") else "#ef4444")
-        with c2: kpi("IRS Status",tin_status.capitalize() or "Unknown","tin_match.value.status",
-                     "#22c55e" if tin_status=="success" else "#ef4444")
-        with c3: kpi("Boolean",tin_bool,"Derived from status==='success'",
+        # KPI row
+        tin_submitted_val=str(gv(facts,"tin_submitted") or "")
+        c1,c2,c3,c4=st.columns(4)
+        with c1: kpi("EIN Submitted","✅ Yes" if tin_submitted_val else "❌ No",
+                     f"Masked: {tin_submitted_val[:9]}" if tin_submitted_val else "tin_submitted fact","#22c55e" if tin_submitted_val else "#ef4444")
+        with c2: kpi("IRS Status",tin_status.capitalize() or "⚠️ Unknown","tin_match.value.status",
+                     "#22c55e" if tin_status=="success" else "#ef4444" if tin_status=="failure" else "#f59e0b")
+        with c3: kpi("IRS Message",tin_msg[:30]+"…" if len(tin_msg)>30 else (tin_msg or "(none)"),
+                     "tin_match.value.message","#22c55e" if tin_status=="success" else "#ef4444")
+        with c4: kpi("Boolean Result",tin_bool or "⚠️ Unknown","Admin Portal shows this value",
                      "#22c55e" if tin_bool=="true" else "#ef4444")
 
-        if tin_msg: flag(f"Middesk TIN message: \"{tin_msg}\"","amber" if tin_status!="success" else "green")
+        if tin_msg: flag(f"Middesk TIN message: **\"{tin_msg}\"**","green" if tin_status=="success" else "amber")
 
-        # Consistency check
+        # Source concordance
+        st.markdown("##### Source Concordance — Who provided the TIN")
+        tin_sources=[]
+        for fname in ["tin","tin_submitted"]:
+            f=facts.get(fname,{})
+            if f:
+                src=f.get("source") or {}
+                pid="" if not isinstance(src,dict) else ("" if src.get("platformId") is None else str(src["platformId"]))
+                conf_raw=src.get("confidence") if isinstance(src,dict) else None
+                conf=float(conf_raw) if conf_raw is not None else None
+                tin_sources.append({
+                    "Fact":fname,
+                    "Value":str(f.get("value",""))[:20],
+                    "Source":_pid_label(pid),
+                    "platformId":pid,
+                    "Confidence":f"{conf:.4f}" if conf is not None else "n/a (dependent)",
+                    "Rule":safe_get(f,"ruleApplied","name") or "—",
+                    "Notes":"Applicant-submitted — confidence=1.0 by definition" if pid=="0"
+                            else "Middesk confirmed from IRS system" if pid=="16"
+                            else "Trulioo fallback via BusinessRegistrationNumber" if pid=="38"
+                            else "Unknown source" if pid=="" else ""
+                })
+                # Also show alternatives
+                for alt in (f.get("alternatives") or []):
+                    if not isinstance(alt,dict): continue
+                    ap=_alt_pid(alt); ac=_alt_conf(alt)
+                    tin_sources.append({
+                        "Fact":f"{fname} [alt]",
+                        "Value":str(alt.get("value",""))[:20],
+                        "Source":_pid_label(ap),
+                        "platformId":ap,
+                        "Confidence":f"{ac:.4f}" if ac else "n/a",
+                        "Rule":"alternative (lost to winner)",
+                        "Notes":"",
+                    })
+        if tin_sources:
+            st.dataframe(pd.DataFrame(tin_sources),use_container_width=True,hide_index=True)
+
+        # Consistency checks
+        st.markdown("##### Data Integrity Checks")
         checks=[
-            ("TIN submitted",str(gv(facts,"tin_submitted") or "").lower() not in ("","false","0"),
-             str(gv(facts,"tin_submitted") or "(null)"),"EIN must be submitted"),
-            ("tin_match.status",tin_status in ("success","failure","pending"),
-             tin_status or "(missing)","Must be success/failure/pending"),
-            ("tin_match_boolean",tin_bool in ("true","false"),tin_bool,"Must be true or false"),
-            ("Boolean↔status consistent",tin_bool=="true"==(tin_status=="success"),
-             f"bool={tin_bool},status={tin_status}","CRITICAL: bool=true ONLY when status=success"),
+            ("EIN submitted", bool(tin_submitted_val), tin_submitted_val or "(null)", "EIN must be submitted before IRS check can run"),
+            ("tin_match.status present", tin_status in ("success","failure","pending"), tin_status or "(missing)", "Must be 'success', 'failure', or 'pending'"),
+            ("tin_match_boolean set", tin_bool in ("true","false"), tin_bool or "(missing)", "Must be true or false — null means IRS check not yet run"),
+            ("Boolean ↔ status consistent", (tin_bool=="true")==(tin_status=="success"), f"bool={tin_bool}, status={tin_status}","CRITICAL: tin_match_boolean=true MUST derive only from status='success' — any divergence = integration-service bug"),
+            ("Winning source is Middesk", gp(facts,"tin_match")=="16", f"pid={gp(facts,'tin_match')}", "Middesk (pid=16) is the only IRS-direct TIN checker. If pid≠16, TIN is not IRS-verified."),
         ]
-        st.dataframe(pd.DataFrame([{"Check":l,"Result":v,"Status":"✅ OK" if ok else "❌ ISSUE","Detail":d}
+        st.dataframe(pd.DataFrame([{"Check":l,"Result":v,"Status":"✅ OK" if ok else "❌ ISSUE","Explanation":d}
                                     for l,ok,v,d in checks]),use_container_width=True,hide_index=True)
 
-        # Failure reason
+        # Failure diagnosis
         if tin_status=="failure" and tin_msg:
             FAILURE_MAP={
-                "does not have a record":("Wrong EIN or name mismatch","HIGH","Ask applicant for exact legal name on EIN certificate"),
-                "associated with a different":("🚨 FRAUD: EIN belongs to different entity","CRITICAL","Escalate to fraud review immediately"),
-                "duplicate":("Duplicate request","LOW","Wait 24h and re-submit"),
-                "invalid":("Invalid EIN format","HIGH","Must be exactly 9 digits"),
-                "unavailable":("IRS temporary outage","LOW","Auto-retry in 24h"),
+                "does not have a record":("Wrong EIN or legal name mismatch","HIGH",
+                    "Ask applicant for the exact legal name on the IRS EIN certificate (not DBA). Submit name exactly as shown on SS-4 form."),
+                "associated with a different":("🚨 FRAUD SIGNAL: EIN belongs to different entity","CRITICAL",
+                    "Escalate to Compliance immediately. Do NOT approve. The EIN is registered to a different business — potential identity theft or intentional fraud."),
+                "duplicate":("Duplicate IRS request","LOW",
+                    "IRS blocks repeat TIN checks within 24h. Wait 24 hours and retry automatically."),
+                "invalid":("Invalid EIN format","HIGH",
+                    "EIN must be exactly 9 digits (format: XX-XXXXXXX). Ask applicant to resubmit with correct EIN."),
+                "unavailable":("IRS system temporarily unavailable","LOW",
+                    "IRS API outage — system will auto-retry in 24h. No action needed."),
             }
             for kw,(reason,sev,action) in FAILURE_MAP.items():
                 if kw.lower() in tin_msg.lower():
                     lvl="red" if sev in ("CRITICAL","HIGH") else "amber"
-                    flag(f"Failure: **{reason}** (Severity:{sev}) → {action}",lvl); break
+                    flag(f"**{reason}** (Severity: {sev})<br>{action}",lvl); break
 
-        ai_popup("TIN",f"TIN status:{tin_status} msg:{tin_msg} bool:{tin_bool}",[
+        with st.expander("📄 JSON structure — TIN facts in API response"):
+            st.markdown("""```json
+{
+  "tin": {
+    "value": "931667813",              ← actual EIN (9 digits, unmasked in Redshift)
+    "source": {
+      "confidence": 1.0,
+      "platformId": 0,                 ← 0 = Applicant (businessDetails)
+      "name": "businessDetails"
+    },
+    "ruleApplied": { "name": "factWithHighestConfidence" },
+    "alternatives": [
+      { "value": "931667813", "source": 16, "confidence": 0.9989 }   ← Middesk confirms
+    ]
+  },
+  "tin_submitted": {
+    "value": "XXXXX7813",              ← masked for display
+    "source": { "platformId": 0, "name": "businessDetails" }
+  },
+  "tin_match": {
+    "value": {
+      "status": "success",             ← "success" | "failure" | "pending"
+      "message": "The IRS has a record for the submitted TIN and Business Name combination",
+      "sublabel": "Found"
+    },
+    "source": { "confidence": 0.9989, "platformId": 16, "name": "middesk" }
+  },
+  "tin_match_boolean": {
+    "value": true,                     ← derived: status==="success"
+    "source": { "platformId": -1, "name": "dependent" },
+    "dependencies": ["tin_match"]
+  }
+}
+```""")
+
+        ai_popup("TIN",f"TIN status:{tin_status} msg:{tin_msg} bool:{tin_bool} pid:{gp(facts,'tin_match')}",[
             "How is tin_match_boolean derived from tin_match.status?",
-            "What does 'associated with a different Business Name' mean?",
-            "What is the Trulioo fallback for TIN when Middesk has no task?",
-            "How do I query TIN data from Redshift?",],bid)
+            "What does 'associated with a different Business Name' mean and what action to take?",
+            "When is Trulioo the fallback for TIN instead of Middesk?",
+            "How do I query TIN data from Redshift and what do the fields mean?",
+            "Why might tin_match_boolean be null even though tin_submitted is not empty?"],bid)
 
-        with st.expander("📋 SQL"):
+        with st.expander("📋 SQL & Python — how to load TIN data"):
             st.code(sql_for(bid,["tin","tin_submitted","tin_match","tin_match_boolean"]),language="sql")
+            st.code(f"""-- Redshift: get TIN match details
+SELECT
+    JSON_EXTRACT_PATH_TEXT(value,'value','status')   AS irs_status,
+    JSON_EXTRACT_PATH_TEXT(value,'value','message')  AS irs_message,
+    JSON_EXTRACT_PATH_TEXT(value,'value','sublabel') AS sublabel,
+    JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS winning_pid,
+    JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence,
+    received_at
+FROM rds_warehouse_public.facts
+WHERE business_id='{bid}' AND name='tin_match'
+ORDER BY received_at DESC LIMIT 5;""",language="sql")
+            st.code(py_for(bid,["tin","tin_submitted","tin_match","tin_match_boolean"]),language="python")
 
-        analyst_card("TIN Verification — Interpretation",[
-            f"tin_match_boolean={tin_bool}: This is what the Admin Portal shows. "
-            f"{'✅ IRS confirmed EIN matches legal name.' if tin_bool=='true' else '❌ EIN-name combination NOT confirmed by IRS.'}",
-            "Source: Middesk (pid=16) primary via direct IRS query. If Middesk has no TIN task → Trulioo BusinessRegistrationNumber comparison is fallback.",
-            "CRITICAL data integrity check: tin_match_boolean=true MUST only happen when tin_match.status='success'. Any divergence = code bug in integration-service L488-490.",
+        analyst_card("🔬 TIN Verification — Full Interpretation",[
+            f"tin_match_boolean = {tin_bool}: This is exactly what the Admin Portal's 'Tax ID Number (EIN)' field shows under KYB → Business Registration. {'✅ IRS confirmed this EIN and legal name combination is valid.' if tin_bool=='true' else '❌ IRS did NOT confirm this combination. The EIN may be wrong, the name may not match exactly, or the IRS system was unavailable.' if tin_bool=='false' else '⚠️ No IRS check has been run yet — the TIN check may not have been triggered.'}",
+            "Source hierarchy: (1) Middesk (pid=16, w=2.0) queries IRS directly via TIN review task — this is the ONLY source that confirms with IRS. (2) If Middesk has no TIN task → Trulioo (pid=38) BusinessRegistrationNumber comparison is fallback (not IRS-direct). (3) Applicant (pid=0) submits the raw EIN — this has confidence=1.0 by convention but means nothing about IRS validity.",
+            "tin vs tin_submitted: 'tin' = actual 9-digit EIN (unmasked in Redshift). 'tin_submitted' = masked version (XXXXX1234) returned to frontend. Both are stored as separate facts.",
+            "CRITICAL: tin_match_boolean=true MUST derive only from tin_match.value.status='success'. Any case where boolean=true but status≠'success' = data integrity bug in integration-service (see lib/facts/kyb/tin_match_boolean.ts).",
+            "Admin Portal path: KYB → Business Registration tab → 'Tax ID Number (EIN)' row. Verified badge appears only when tin_match_boolean=true AND tin_submitted is not null.",
+            f"Current winning source: {_pid_label(gp(facts,'tin_match'))} (pid={gp(facts,'tin_match')}). Confidence: {gc(facts,'tin_match'):.4f}. {('✅ IRS-direct verification.' if gp(facts,'tin_match')=='16' else '⚠️ NOT IRS-direct — this is Trulioo fallback or applicant-submitted, not confirmed by IRS.' if gp(facts,'tin_match') not in ('','16') else '⚠️ Source unknown.')}",
         ])
 
     with r4:
@@ -1937,7 +2168,17 @@ elif tab=="🤖 AI Agent":
     flag("RAG: api-docs (87 files) + integration-service + microsites + warehouse-service + inline knowledge (Worth Score, Watchlist, Domestic/Foreign, Fact Engine, NAICS, TIN). 1,965 chunks.","blue")
 
     if not get_openai():
-        flag("Set OPENAI_API_KEY environment variable to enable AI: export OPENAI_API_KEY=your-key","amber")
+        st.warning("⚠️ OpenAI key not detected. To enable AI responses, choose **one** of these options:")
+        c1,c2=st.columns(2)
+        with c1:
+            st.markdown("**Option A — Streamlit secrets (recommended):**")
+            st.code("""# Edit Admin-Portal-KYB-App/.streamlit/secrets.toml
+OPENAI_API_KEY = "sk-svcacct-your-key-here"
+""",language="toml")
+        with c2:
+            st.markdown("**Option B — Terminal / shell:**")
+            st.code('export OPENAI_API_KEY="sk-svcacct-your-key-here"\nstreamlit run kyb_hub_app.py',language="bash")
+        st.caption("After adding the key, click 🔄 Refresh in the sidebar or restart the app.")
 
     st.markdown("#### 💡 Quick Questions")
     quick={"🏛️ Registry":["How is sos_match_boolean determined?","Why might Middesk confidence be low?","What is the entity resolution gap for tax-haven states?"],
