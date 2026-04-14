@@ -119,16 +119,15 @@ def run_sql(sql):
 KNOWN_LARGE={"sos_filings","sos_match","watchlist","watchlist_raw","bankruptcies",
              "judgements","liens","people","addresses","internal_platform_matches_combined"}
 
-@st.cache_data(ttl=300)
+# TTL=600 (10 min). Pure function — no Streamlit calls inside so cache works correctly.
+@st.cache_data(ttl=600, show_spinner=False)
 def load_facts(bid):
     names_df,err=run_sql(f"""SELECT DISTINCT name,MAX(received_at) AS received_at
         FROM rds_warehouse_public.facts WHERE business_id='{bid}' GROUP BY name ORDER BY name""")
     if names_df is None: return None,err
     if names_df.empty: return {},None
     latest={}
-    prog=st.progress(0,"Loading facts…")
-    for i,name in enumerate(names_df["name"].tolist()):
-        prog.progress((i+1)/len(names_df),(f"Loading {name}…"))
+    for name in names_df["name"].tolist():
         if name in KNOWN_LARGE:
             latest[name]={"_too_large":True,"_name":name,
                           "_received_at":str(names_df[names_df["name"]==name]["received_at"].iloc[0])[:16]}
@@ -139,9 +138,94 @@ def load_facts(bid):
             f=parse_fact(df.iloc[0]["value"])
             f["_name"]=name; f["_received_at"]=str(df.iloc[0]["received_at"])[:16]
             latest[name]=f
-        st.session_state.pop("_last_db_error",None)
-    prog.empty()
     return latest,None
+
+# ── Cached per-business queries (TTL=600) ────────────────────────────────────
+@st.cache_data(ttl=600, show_spinner=False)
+def load_score(bid):
+    return run_sql(f"""SELECT bs.weighted_score_850 AS score_850,bs.weighted_score_100 AS score_100,
+        bs.risk_level,bs.score_decision,bs.created_at
+        FROM rds_manual_score_public.data_current_scores cs
+        JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+        WHERE cs.business_id='{bid}' ORDER BY bs.created_at DESC LIMIT 1""")
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_score_factors(bid):
+    return run_sql(f"""SELECT category_id,score_100,weighted_score_850
+        FROM rds_manual_score_public.business_score_factors
+        WHERE score_id=(SELECT score_id FROM rds_manual_score_public.data_current_scores
+                        WHERE business_id='{bid}' LIMIT 1)
+        ORDER BY ABS(weighted_score_850) DESC LIMIT 20""")
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_bert(bid):
+    return run_sql(f"""SELECT bev.business_id,bert.status,bert.sublabel,bert.created_at
+        FROM rds_integration_data.business_entity_review_task bert
+        JOIN rds_integration_data.business_entity_verification bev
+          ON bev.id=bert.business_entity_verification_id
+        WHERE bev.business_id='{bid}' AND bert.key='watchlist'
+        ORDER BY bert.created_at DESC LIMIT 5""")
+
+# Audit is not per-business — longer TTL (30 min)
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_audit():
+    return run_sql("SELECT * FROM warehouse.worth_score_input_audit ORDER BY score_date DESC LIMIT 30")
+
+# ── Cached Home-tab population queries (keyed by date range) ─────────────────
+@st.cache_data(ttl=600, show_spinner=False)
+def load_home_recent(date_from, date_to):
+    parts=[]
+    if date_from: parts.append(f"received_at >= '{date_from}'")
+    if date_to:   parts.append(f"received_at <= '{date_to} 23:59:59'")
+    dc=(" AND "+" AND ".join(parts)) if parts else ""
+    return run_sql(f"""
+        SELECT business_id, MIN(received_at) AS first_seen, MAX(received_at) AS last_updated,
+               COUNT(DISTINCT name) AS fact_count
+        FROM rds_warehouse_public.facts
+        WHERE 1=1{dc}
+        GROUP BY business_id
+        ORDER BY first_seen DESC
+        LIMIT 200
+    """)
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_home_flags(date_from, date_to):
+    parts=[]
+    if date_from: parts.append(f"received_at >= '{date_from}'")
+    if date_to:   parts.append(f"received_at <= '{date_to} 23:59:59'")
+    dc=(" AND "+" AND ".join(parts)) if parts else ""
+    return run_sql(f"""
+        SELECT business_id, name,
+               JSON_EXTRACT_PATH_TEXT(value,'value') AS val,
+               received_at
+        FROM rds_warehouse_public.facts
+        WHERE name IN (
+            'sos_active','tin_match_boolean','watchlist_hits',
+            'naics_code','idv_passed_boolean','num_bankruptcies',
+            'num_judgements','num_liens','sos_match_boolean'
+        ){dc}
+        ORDER BY business_id, name, received_at DESC
+    """)
+
+def load_facts_with_ui(bid, tab_key):
+    """Load facts showing a spinner, with a per-tab refresh button."""
+    cache_key = f"facts_loaded_{bid}"
+    col_info, col_ref = st.columns([5,1])
+    with col_ref:
+        if st.button("🔄 Refresh", key=f"ref_{tab_key}",
+                     help="Clear cached facts and reload from Redshift (takes ~10–20s)"):
+            load_facts.clear()
+            if cache_key in st.session_state: del st.session_state[cache_key]
+            st.rerun()
+    with col_info:
+        cached = cache_key in st.session_state
+        st.caption(f"{'⚡ From cache' if cached else '🔃 Loading from Redshift…'} · "
+                   f"UUID: `{bid[:16]}…` · Cache TTL: 10 min")
+    with st.spinner("Loading facts from Redshift…" if not cached else "Reading from cache…"):
+        facts, err = load_facts(bid)
+    if facts is not None:
+        st.session_state[cache_key] = True
+    return facts, err
 
 def gv(facts,name):
     f=facts.get(name,{})
@@ -352,46 +436,29 @@ if tab=="🏠 Home":
         st.error("🔴 Not connected to Redshift. Connect VPN and click Retry in the sidebar.")
         st.stop()
 
-    # ── Date range label ─────────────────────────────────────────────────────
+    # ── Date range label + refresh ────────────────────────────────────────────
     period_label = f"{hub_date_from} → {hub_date_to}" if hub_date_from else "All time"
-    st.caption(f"📅 Period: **{period_label}** · Toggle 'Filter by date' in sidebar to change")
+    hdr_c, ref_c = st.columns([5,1])
+    with hdr_c:
+        st.caption(f"📅 Period: **{period_label}** · Toggle 'Filter by date' in sidebar to change")
+    with ref_c:
+        if st.button("🔄 Refresh", key="home_refresh", help="Clear cached data and reload from Redshift"):
+            load_home_recent.clear(); load_home_flags.clear(); st.rerun()
     st.markdown("---")
 
-    # ── Load recently onboarded businesses ────────────────────────────────────
-    dc = hub_date_clause("received_at")
-    recent_sql = f"""
-        SELECT business_id, MIN(received_at) AS first_seen, MAX(received_at) AS last_updated,
-               COUNT(DISTINCT name) AS fact_count
-        FROM rds_warehouse_public.facts
-        WHERE 1=1{dc}
-        GROUP BY business_id
-        ORDER BY first_seen DESC
-        LIMIT 200
-    """
-    recent_df, recent_err = run_sql(recent_sql)
+    # ── Load recently onboarded businesses (cached) ───────────────────────────
+    with st.spinner("Loading portfolio data…"):
+        recent_df, recent_err = load_home_recent(hub_date_from, hub_date_to)
 
     if recent_df is None or recent_df.empty:
         st.warning(f"No businesses found for this period. {recent_err or ''}")
-        st.code(recent_sql, language="sql")
         st.stop()
 
     total_biz = len(recent_df)
 
-    # ── Red flag scoring ──────────────────────────────────────────────────────
-    # Load key scalar facts for all recent businesses in one query
-    flag_sql = f"""
-        SELECT business_id, name,
-               JSON_EXTRACT_PATH_TEXT(value,'value') AS val,
-               received_at
-        FROM rds_warehouse_public.facts
-        WHERE name IN (
-            'sos_active','tin_match_boolean','watchlist_hits',
-            'naics_code','idv_passed_boolean','num_bankruptcies',
-            'num_judgements','num_liens','sos_match_boolean'
-        ){dc}
-        ORDER BY business_id, name, received_at DESC
-    """
-    flag_df, flag_err = run_sql(flag_sql)
+    # ── Red flag scoring (cached) ──────────────────────────────────────────────
+    with st.spinner("Scoring red flags…"):
+        flag_df, flag_err = load_home_flags(hub_date_from, hub_date_to)
 
     # Build per-business red flag summary
     biz_flags = {}  # business_id → {flags:[...], score:int}
@@ -691,7 +758,7 @@ elif tab=="🏛️ Registry & Identity":
     st.markdown(f"## 🏛️ Registry & Identity — `{bid[:16]}…`")
     if not is_live: st.error("🔴 Not connected."); st.stop()
 
-    facts,err=load_facts(bid)
+    facts,err=load_facts_with_ui(bid,"registry")
     if facts is None: st.error(f"❌ {err}"); st.stop()
     if not facts: st.error("No facts found."); st.stop()
     st.caption(f"✅ {len(facts)} facts loaded")
@@ -944,7 +1011,7 @@ elif tab=="🏭 Classification & KYB":
     st.markdown(f"## 🏭 Classification & KYB — `{bid[:16]}…`")
     if not is_live: st.error("🔴 Not connected."); st.stop()
 
-    facts,err=load_facts(bid)
+    facts,err=load_facts_with_ui(bid,"classification")
     if facts is None: st.error(f"❌ {err}"); st.stop()
 
     naics=str(gv(facts,"naics_code") or "")
@@ -1052,7 +1119,7 @@ elif tab=="⚠️ Risk & Watchlist":
     st.markdown(f"## ⚠️ Risk & Watchlist — `{bid[:16]}…`")
     if not is_live: st.error("🔴 Not connected."); st.stop()
 
-    facts,err=load_facts(bid)
+    facts,err=load_facts_with_ui(bid,"risk")
     if facts is None: st.error(f"❌ {err}"); st.stop()
 
     wl=int(float(gv(facts,"watchlist_hits") or 0))
@@ -1094,12 +1161,9 @@ elif tab=="⚠️ Risk & Watchlist":
               <div style="color:#94A3B8;margin-top:2px">{d}</div>
             </div>""",unsafe_allow_html=True)
 
-        # BERT live query
+        # BERT live query (cached)
         st.markdown("##### Live BERT Query (rds_integration_data)")
-        bert_df,bert_err=run_sql(f"""SELECT bev.business_id,bert.status,bert.sublabel,bert.created_at
-            FROM rds_integration_data.business_entity_review_task bert
-            JOIN rds_integration_data.business_entity_verification bev ON bev.id=bert.business_entity_verification_id
-            WHERE bev.business_id='{bid}' AND bert.key='watchlist' ORDER BY bert.created_at DESC LIMIT 5""")
+        bert_df,bert_err=load_bert(bid)
         if bert_df is not None and not bert_df.empty: st.dataframe(bert_df,use_container_width=True,hide_index=True)
         else: flag(f"BERT table not accessible. {bert_err or ''}","blue")
 
@@ -1174,14 +1238,11 @@ elif tab=="💰 Worth Score":
     st.markdown(f"## 💰 Worth Score — `{bid[:16]}…`")
     if not is_live: st.error("🔴 Not connected."); st.stop()
 
-    facts,err=load_facts(bid)
+    facts,err=load_facts_with_ui(bid,"worthscore")
     if facts is None: st.error(f"❌ {err}"); st.stop()
 
-    score_df,score_err=run_sql(f"""SELECT bs.weighted_score_850 AS score_850,bs.weighted_score_100 AS score_100,
-        bs.risk_level,bs.score_decision,bs.created_at
-        FROM rds_manual_score_public.data_current_scores cs
-        JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
-        WHERE cs.business_id='{bid}' ORDER BY bs.created_at DESC LIMIT 1""")
+    with st.spinner("Loading Worth Score…"):
+        score_df,score_err=load_score(bid)
 
     ws1,ws2,ws3=st.tabs(["💰 Score","📊 Waterfall","📊 Audit"])
 
@@ -1208,9 +1269,7 @@ elif tab=="💰 Worth Score":
                        "DECLINE":"Model probability BELOW minimum threshold. Business exceeds maximum acceptable risk."}
             if dec in DECISIONS: flag(f"Decision={dec.replace('_',' ')}: {DECISIONS[dec]}","blue")
 
-            factors_df,_=run_sql(f"""SELECT category_id,score_100,weighted_score_850 FROM rds_manual_score_public.business_score_factors
-                WHERE score_id=(SELECT score_id FROM rds_manual_score_public.data_current_scores WHERE business_id='{bid}' LIMIT 1)
-                ORDER BY ABS(weighted_score_850) DESC LIMIT 20""")
+            factors_df,_=load_score_factors(bid)
             if factors_df is not None and not factors_df.empty:
                 st.markdown("##### Factor Contributions (business_score_factors)"); st.dataframe(factors_df,use_container_width=True,hide_index=True)
             else: flag("business_score_factors not accessible — showing estimated waterfall in next tab.","blue")
@@ -1281,7 +1340,7 @@ WHERE cs.business_id='{bid}' ORDER BY bs.created_at DESC LIMIT 1;""",language="s
         else: st.info("Score data not available for waterfall chart.")
 
     with ws3:
-        audit_df,audit_err=run_sql("SELECT * FROM warehouse.worth_score_input_audit ORDER BY score_date DESC LIMIT 30")
+        audit_df,audit_err=load_audit()
         if audit_df is not None and not audit_df.empty:
             fill_cols=[c for c in audit_df.columns if c.startswith("fill_")]
             lr=audit_df.iloc[0]
