@@ -22,27 +22,80 @@ st.set_page_config(page_title="KYB Intelligence Hub", page_icon="🔬",
                    layout="wide", initial_sidebar_state="expanded")
 BASE = Path(__file__).parent
 
+# ── GitHub source links ────────────────────────────────────────────────────────
+REPO = "https://github.com/wecsleyprates-design/Industry-Classification/blob/main/Admin-Portal-KYB-App"
+GITHUB_LINKS = {
+    # integration-service fact definitions
+    "facts/kyb/index.ts":       f"{REPO}/integration-service-main/lib/facts/kyb/index.ts",
+    "facts/businessDetails":    f"{REPO}/integration-service-main/lib/facts/businessDetails/index.ts",
+    "facts/rules.ts":           f"{REPO}/integration-service-main/lib/facts/rules.ts",
+    "facts/sources.ts":         f"{REPO}/integration-service-main/lib/facts/sources.ts",
+    "integrations.constant.ts": f"{REPO}/integration-service-main/src/constants/integrations.constant.ts",
+    "aiEnrichment":             f"{REPO}/integration-service-main/lib/aiEnrichment/aiNaicsEnrichment.ts",
+    "consolidatedWatchlist.ts": f"{REPO}/integration-service-main/lib/facts/kyb/consolidatedWatchlist.ts",
+    "middesk":                  f"{REPO}/integration-service-main/lib/middesk",
+    "plaid/plaidIdv.ts":        f"{REPO}/integration-service-main/lib/plaid",
+    "trulioo":                  f"{REPO}/integration-service-main/lib/trulioo",
+    # worth score
+    "aiscore.py":               f"{REPO}/ai-score-service-main/aiscore.py",
+    "worth_score_model.py":     f"{REPO}/ai-score-service-main/worth_score_model.py",
+    "lookups.py":               f"{REPO}/ai-score-service-main/lookups.py",
+    # warehouse
+    "customer_table.sql":       f"{REPO}/warehouse-service-main/datapooler/adapters/redshift/customer_file/tables/customer_table.sql",
+    "score_decision_matrix":    f"{REPO}/manual-score-service-main/db/migrations/migrate/sqls/20240109130303-initial-tables-up.sql",
+    # microsites (Admin Portal UI)
+    "EntityJurisdictionCell":   f"{REPO}/microsites-main/packages/case/src/page/Cases/KYB",
+    "KYB UI":                   f"{REPO}/microsites-main/packages/case/src/page/Cases/KYB",
+    # api-docs
+    "api-docs":                 f"{REPO}/api-docs",
+    "openapi/integration":      f"{REPO}/api-docs/openapi-specs/integration.json",
+}
+
+def src_link(key, label=None):
+    """Return a markdown link for a source file."""
+    url = GITHUB_LINKS.get(key, "")
+    txt = label or key
+    if url: return f"[`{txt}`]({url})"
+    return f"`{txt}`"
+
+def src_links_html(keys_labels):
+    """Return HTML badges for multiple source links."""
+    parts=[]
+    for key,label in keys_labels:
+        url=GITHUB_LINKS.get(key,"")
+        txt=label or key
+        if url:
+            parts.append(f'<a href="{url}" target="_blank" style="background:#1e3a5f;color:#60A5FA;'
+                         f'padding:2px 8px;border-radius:12px;font-size:.72rem;text-decoration:none;margin:1px;display:inline-block">'
+                         f'🔗 {txt}</a>')
+        else:
+            parts.append(f'<span style="background:#1e293b;color:#94A3B8;padding:2px 8px;border-radius:12px;font-size:.72rem;margin:1px;display:inline-block">`{txt}`</span>')
+    return " ".join(parts)
+
 # ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""<style>
   .main{background:#0A0F1E}.kpi{background:#1E293B;border-radius:10px;
   padding:14px 18px;border-left:4px solid #3B82F6;margin-bottom:6px}
-  .kpi .lbl{color:#94A3B8;font-size:.70rem;text-transform:uppercase;letter-spacing:.05em}
+  .kpi .lbl{color:#94A3B8;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}
   .kpi .val{color:#F1F5F9;font-size:1.4rem;font-weight:700}
-  .kpi .sub{color:#64748B;font-size:.70rem;margin-top:2px}
+  .kpi .sub{color:#64748B;font-size:.75rem;margin-top:2px}
   .analyst{background:#0C1A2E;border:1px solid #1E3A5F;border-radius:10px;
   padding:14px 16px;margin:8px 0}
-  .analyst .hdr{color:#60A5FA;font-weight:700;font-size:.82rem;margin-bottom:6px}
-  .analyst p{color:#CBD5E1;font-size:.79rem;margin:3px 0;line-height:1.5}
+  .analyst .hdr{color:#60A5FA;font-weight:700;font-size:.86rem;margin-bottom:6px}
+  .analyst p{color:#CBD5E1;font-size:.82rem;margin:3px 0;line-height:1.6}
   .flow-step{background:#1E293B;border-left:3px solid #3B82F6;border-radius:8px;
-  padding:9px 14px;margin:3px 0;font-size:.76rem;color:#CBD5E1}
+  padding:9px 14px;margin:3px 0;font-size:.80rem;color:#CBD5E1}
   .flag-red{background:#1f0a0a;border-left:4px solid #ef4444;border-radius:8px;
-  padding:10px 14px;margin:5px 0;color:#fca5a5;font-size:.80rem}
+  padding:10px 14px;margin:5px 0;color:#fca5a5;font-size:.82rem}
   .flag-amber{background:#1c1917;border-left:4px solid #f59e0b;border-radius:8px;
-  padding:10px 14px;margin:5px 0;color:#fde68a;font-size:.80rem}
+  padding:10px 14px;margin:5px 0;color:#fde68a;font-size:.82rem}
   .flag-green{background:#052e16;border-left:4px solid #22c55e;border-radius:8px;
-  padding:10px 14px;margin:5px 0;color:#86efac;font-size:.80rem}
+  padding:10px 14px;margin:5px 0;color:#86efac;font-size:.82rem}
   .flag-blue{background:#0c1a2e;border-left:4px solid #60a5fa;border-radius:8px;
-  padding:10px 14px;margin:5px 0;color:#93c5fd;font-size:.80rem}
+  padding:10px 14px;margin:5px 0;color:#93c5fd;font-size:.82rem}
+  details summary{font-size:.80rem !important}
+  details pre{font-size:.78rem !important}
+  .src-badge a{font-size:.75rem}
 </style>""", unsafe_allow_html=True)
 
 # ── Platform ID map — from integration-service/src/constants/integrations.constant.ts ─
@@ -119,42 +172,63 @@ def kpi(label, value, sub="", color="#3B82F6"):
 def kpi_detail(label, value, sub, color, fact_name, fact_value_raw,
                source_table, source_sql, why_null_reasons=None,
                json_snippet=None, api_path=None):
-    """KPI card + collapsible detail panel with data lineage, JSON, and SQL."""
+    """KPI card + collapsible expander with JSON (st.code), lineage, SQL, and source links."""
     kpi(label, value, sub, color)
 
-    # Build a smart "why is this value?" explanation
     is_null = str(value) in ("Unknown","⚠️ Unknown","N/A","None","","0","0.0")
-    is_zero = str(value) in ("0","0.0")
 
-    # JSON block
-    j_block = json_snippet or f'{{"value": {json.dumps(fact_value_raw, default=str)}, "source_table": "{source_table}"}}'
+    with st.expander(f"📊 {label} — source, lineage & JSON"):
+        # ── Source badges ─────────────────────────────────────────────────────
+        facts_link = GITHUB_LINKS.get("facts/kyb/index.ts","")
+        bd_link    = GITHUB_LINKS.get("facts/businessDetails","")
+        api_link   = GITHUB_LINKS.get("openapi/integration","")
+        badges = src_links_html([
+            ("facts/kyb/index.ts", "facts/kyb/index.ts"),
+            ("facts/businessDetails", "businessDetails/index.ts"),
+            ("integrations.constant.ts", "integrations.constant.ts"),
+            ("api-docs", "API Reference"),
+        ])
+        st.markdown(f"<div class='src-badge' style='margin-bottom:6px'>{badges}</div>", unsafe_allow_html=True)
 
-    # Why-null reasons
-    if why_null_reasons and is_null:
-        null_html = "".join(f"<li style='color:#94A3B8;font-size:.70rem'>{r}</li>" for r in why_null_reasons)
-        null_section = f"<div style='margin-top:6px'><span style='color:#f59e0b;font-size:.72rem'>Why might this be 0 / Unknown?</span><ul style='margin:4px 0 0 14px'>{null_html}</ul></div>"
-    else:
-        null_section = ""
+        # ── Storage info ──────────────────────────────────────────────────────
+        st.markdown(
+            f"<div style='font-size:.78rem;color:#94A3B8;margin-bottom:4px'>"
+            f"<strong style='color:#CBD5E1'>Stored in:</strong> "
+            f"<code style='color:#22c55e'>{source_table}</code> · "
+            f"<strong style='color:#CBD5E1'>Fact name:</strong> "
+            f"<code style='color:#60A5FA'>{fact_name}</code>"
+            + (f" · <strong style='color:#CBD5E1'>API:</strong> <code style='color:#f59e0b'>{api_path}</code>" if api_path else "")
+            + "</div>",
+            unsafe_allow_html=True
+        )
 
-    api_html = f"<div style='color:#475569;font-size:.68rem;margin-top:6px'>API: <code style='color:#60A5FA'>{api_path}</code></div>" if api_path else ""
+        # ── Why null / zero reasons ───────────────────────────────────────────
+        if why_null_reasons and is_null:
+            st.markdown(
+                "<div style='background:#1c1917;border-left:3px solid #f59e0b;border-radius:6px;"
+                "padding:8px 12px;margin:4px 0;font-size:.78rem'>"
+                "<strong style='color:#fde68a'>⚠️ Why might this show 0 / Unknown?</strong>"
+                "<ul style='color:#94A3B8;margin:4px 0 0 16px'>"
+                + "".join(f"<li style='margin:2px 0'>{r}</li>" for r in why_null_reasons)
+                + "</ul></div>",
+                unsafe_allow_html=True
+            )
 
-    st.markdown(
-        f"<details style='background:#0A0F1E;border-left:2px solid {color};"
-        f"border-radius:6px;padding:4px 10px;margin:-6px 0 4px 0'>"
-        f"<summary style='color:{color};font-size:.68rem;cursor:pointer;list-style:none'>"
-        f"📊 {label} — source, lineage & JSON</summary>"
-        f"<div style='font-size:.71rem;margin-top:6px'>"
-        f"<span style='color:#64748b'>Stored in:</span> <code style='color:#22c55e'>{source_table}</code> · "
-        f"<span style='color:#64748b'>Fact:</span> <code style='color:#60A5FA'>{fact_name}</code>"
-        f"{null_section}"
-        f"<pre style='color:#CBD5E1;background:#0f172a;padding:8px;border-radius:6px;"
-        f"font-size:.68rem;margin:6px 0;overflow:auto;max-height:250px'>{j_block}</pre>"
-        f"<pre style='color:#22c55e;background:#052e16;padding:6px;border-radius:6px;"
-        f"font-size:.68rem;margin:4px 0;overflow:auto'>{source_sql}</pre>"
-        f"{api_html}"
-        f"</div></details>",
-        unsafe_allow_html=True
-    )
+        # ── JSON as st.code ───────────────────────────────────────────────────
+        st.markdown("**JSON (as stored in Redshift / returned by API):**")
+        try:
+            j_obj = json.loads(json_snippet) if json_snippet and json_snippet.startswith("{") else None
+        except Exception:
+            j_obj = None
+        if j_obj:
+            st.code(json.dumps(j_obj, indent=2, ensure_ascii=False), language="json")
+        else:
+            clean_json = json.dumps({"value": fact_value_raw, "fact": fact_name, "source_table": source_table}, indent=2, default=str)
+            st.code(clean_json, language="json")
+
+        # ── SQL ───────────────────────────────────────────────────────────────
+        st.markdown("**SQL to verify this value from Redshift:**")
+        st.code(source_sql, language="sql")
 
 def flag(text, level="blue"):
     _icons = {"red":"🚨","amber":"⚠️","green":"✅","blue":"ℹ️"}
@@ -558,7 +632,17 @@ Applicant (pid=0): <code>1.0</code> by convention ·
 Dependent (pid=-1): <code>null</code> (not applicable)
 
 </div>
+<div style="margin-top:10px;padding-top:8px;border-top:1px solid #1e3a5f;font-size:.76rem">
+<strong style="color:#a5b4fc">📁 Source references (click to open in GitHub):</strong><br>
+</div>
 </div>""", unsafe_allow_html=True)
+    # Source links as Streamlit markdown (proper links)
+    st.markdown(
+        f"🔗 [{src_link('facts/rules.ts','facts/rules.ts')}]({GITHUB_LINKS.get('facts/rules.ts','')}) — rule algorithms · "
+        f"🔗 [{src_link('facts/sources.ts','facts/sources.ts')}]({GITHUB_LINKS.get('facts/sources.ts','')}) — vendor source definitions · "
+        f"🔗 [{src_link('integrations.constant.ts','INTEGRATION_ID map')}]({GITHUB_LINKS.get('integrations.constant.ts','')}) — all platform IDs · "
+        f"🔗 [{src_link('openapi/integration','API Reference')}]({GITHUB_LINKS.get('openapi/integration','')}) — /kyb endpoint"
+    )
 
 def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False):
     st.markdown(f"##### {title}")
@@ -793,67 +877,76 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
                  else "No competing sources — only one vendor returned data")),
             ]
 
-            # ── Source code reference ─────────────────────────────────────────
+            # ── Source code reference with clickable GitHub links ─────────────
             src_ref = FACT_SOURCE_REF.get(fname)
-            src_ref_html = ""
+            # Determine best GitHub link for this fact
+            _gh_key = ("facts/businessDetails" if fname in ("mcc_code","mcc_code_from_naics","mcc_description","naics_description","industry")
+                       else "facts/kyb/index.ts")
+            _gh_url = GITHUB_LINKS.get(_gh_key,"")
             if src_ref:
                 repo_path, fn_name, mechanism, desc = src_ref
-                src_ref_html = (
-                    f"<div style='background:#052e16;border-left:3px solid #22c55e;padding:8px 12px;"
-                    f"border-radius:6px;margin:6px 0;font-size:.72rem'>"
-                    f"<div style='color:#86efac;font-weight:600;margin-bottom:4px'>📁 Source Code Reference</div>"
-                    f"<div style='color:#CBD5E1'><strong>File:</strong> "
-                    f"<code style='color:#22c55e'>{repo_path}</code></div>"
-                    f"<div style='color:#CBD5E1'><strong>Fact definition:</strong> "
-                    f"<code style='color:#60A5FA'>{fn_name}</code> "
-                    f"· mechanism: <code style='color:#a5b4fc'>{mechanism}</code></div>"
-                    f"<div style='color:#94A3B8;margin-top:2px'>{desc}</div>"
-                    f"</div>"
-                )
+                # Find a link for the specific file
+                _file_link_url = next((v for k,v in GITHUB_LINKS.items() if k in repo_path or repo_path in k), _gh_url)
             else:
-                src_ref_html = (
-                    f"<div style='background:#0f172a;border-left:3px solid #334155;padding:6px 12px;"
-                    f"border-radius:6px;margin:6px 0;font-size:.71rem;color:#64748b'>"
-                    f"📁 Source: integration-service/lib/facts/kyb/index.ts "
-                    f"· fact name: <code style='color:#60A5FA'>{fname}</code>"
-                    f"</div>"
-                )
+                repo_path = "integration-service/lib/facts/kyb/index.ts"
+                fn_name = fname; mechanism = "see repo"; desc = ""
+                _file_link_url = _gh_url
 
-            # ── Storage + API reference ───────────────────────────────────────
+            src_ref_html = (
+                f"<div style='background:#052e16;border-left:3px solid #22c55e;padding:10px 14px;"
+                f"border-radius:6px;margin:6px 0'>"
+                f"<div style='color:#86efac;font-weight:700;font-size:.82rem;margin-bottom:6px'>📁 Source Code Reference</div>"
+                f"<div style='font-size:.78rem;color:#CBD5E1;margin-bottom:3px'>"
+                f"<strong>File:</strong> "
+                f"<a href='{_file_link_url}' target='_blank' style='color:#22c55e'>"
+                f"<code>{repo_path}</code></a></div>"
+                f"<div style='font-size:.78rem;color:#CBD5E1;margin-bottom:3px'>"
+                f"<strong>Fact definition:</strong> <code style='color:#60A5FA'>{fn_name}</code> "
+                f"· <strong>Mechanism:</strong> <code style='color:#a5b4fc'>{mechanism}</code></div>"
+                + (f"<div style='font-size:.76rem;color:#94A3B8'>{desc}</div>" if desc else "")
+                + (
+                    "<div style='margin-top:6px'>"
+                    "<a href='" + GITHUB_LINKS.get("facts/rules.ts","") + "' target='_blank' style='color:#60A5FA;font-size:.74rem;margin-right:10px'>🔗 facts/rules.ts</a>"
+                    "<a href='" + GITHUB_LINKS.get("facts/sources.ts","") + "' target='_blank' style='color:#60A5FA;font-size:.74rem;margin-right:10px'>🔗 facts/sources.ts</a>"
+                    "<a href='" + GITHUB_LINKS.get("integrations.constant.ts","") + "' target='_blank' style='color:#60A5FA;font-size:.74rem'>🔗 INTEGRATION_ID map</a>"
+                    "</div></div>"
+                )
+            )
+
             storage_html = (
-                f"<div style='background:#0c1a2e;border-left:3px solid #3B82F6;padding:8px 12px;"
-                f"border-radius:6px;margin:6px 0;font-size:.72rem'>"
-                f"<div style='color:#93c5fd;font-weight:600;margin-bottom:4px'>🗄️ Where to find this data</div>"
-                f"<div style='color:#CBD5E1'><strong>Redshift table:</strong> "
-                f"<code style='color:#60A5FA'>rds_warehouse_public.facts</code> "
-                f"WHERE business_id='{bid[:8]}...' AND name='{fname}'</div>"
-                f"<div style='color:#CBD5E1;margin-top:3px'><strong>API endpoint:</strong> "
-                f"<code style='color:#f59e0b'>GET /integration/api/v1/facts/business/{{bid}}/kyb</code>"
-                f" → <code>data.{fname}</code></div>"
-                f"<div style='color:#CBD5E1;margin-top:3px'><strong>Redis cache:</strong> "
-                f"<code>integration-express-cache::{{bid}}::/api/v1/facts/business/{{bid}}/kyb</code> "
-                f"(TTL: 2 min)</div>"
+                f"<div style='background:#0c1a2e;border-left:3px solid #3B82F6;padding:10px 14px;"
+                f"border-radius:6px;margin:6px 0'>"
+                f"<div style='color:#93c5fd;font-weight:700;font-size:.82rem;margin-bottom:6px'>🗄️ Where to find this data</div>"
+                f"<div style='font-size:.78rem;color:#CBD5E1;margin-bottom:3px'>"
+                f"<strong>Redshift:</strong> <code style='color:#60A5FA'>rds_warehouse_public.facts</code> "
+                f"WHERE name='{fname}'</div>"
+                "<div style='font-size:.78rem;color:#CBD5E1;margin-bottom:3px'>"
+                "<strong>API:</strong> "
+                "<a href='" + GITHUB_LINKS.get("openapi/integration","") + "' target='_blank' style='color:#f59e0b'>"
+                f"<code>GET /integration/api/v1/facts/business/{{bid}}/kyb → data.{fname}</code></a></div>"
+                f"<div style='font-size:.76rem;color:#64748b'>"
+                f"Redis cache: <code>integration-express-cache::{{bid}}::/api/v1/facts/business/{{bid}}/kyb</code> (TTL: 2 min)</div>"
                 f"</div>"
             )
 
-            # ── Annotation rows as HTML table ─────────────────────────────────
+            # ── Annotations table with larger font ────────────────────────────
             ann_rows_html = "".join(
-                f"<tr>"
-                f"<td style='padding:4px 8px;color:#60A5FA;font-family:monospace;font-size:.70rem;white-space:nowrap'>{field}</td>"
-                f"<td style='padding:4px 8px;color:#CBD5E1;font-size:.70rem'>{val}</td>"
-                f"<td style='padding:4px 8px;color:#94A3B8;font-size:.69rem'>{note}</td>"
+                f"<tr style='border-bottom:1px solid #0f172a'>"
+                f"<td style='padding:6px 10px;color:#60A5FA;font-family:monospace;font-size:.76rem;white-space:nowrap'>{field}</td>"
+                f"<td style='padding:6px 10px;color:#CBD5E1;font-size:.76rem'>{val}</td>"
+                f"<td style='padding:6px 10px;color:#94A3B8;font-size:.74rem'>{note}</td>"
                 f"</tr>"
                 for field,val,note in anns
             )
             ann_table_html = (
-                f"<table style='width:100%;border-collapse:collapse;margin:6px 0'>"
-                f"<tr style='border-bottom:1px solid #1e293b'>"
-                f"<th style='text-align:left;padding:4px 8px;color:#475569;font-size:.68rem'>Field</th>"
-                f"<th style='text-align:left;padding:4px 8px;color:#475569;font-size:.68rem'>Value</th>"
-                f"<th style='text-align:left;padding:4px 8px;color:#475569;font-size:.68rem'>What it means</th>"
+                f"<table style='width:100%;border-collapse:collapse;margin:6px 0;background:#0f172a;border-radius:6px'>"
+                f"<tr style='border-bottom:2px solid #1e293b'>"
+                f"<th style='text-align:left;padding:6px 10px;color:#475569;font-size:.76rem'>Field</th>"
+                f"<th style='text-align:left;padding:6px 10px;color:#475569;font-size:.76rem'>Value</th>"
+                f"<th style='text-align:left;padding:6px 10px;color:#475569;font-size:.76rem'>What it means</th>"
                 f"</tr>"
-                + ann_rows_html +
-                f"</table>"
+                + ann_rows_html
+                + f"</table>"
             )
 
             # ── Header colour ─────────────────────────────────────────────────
@@ -867,16 +960,16 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
                          else (f"{len(v)} keys" if isinstance(v,dict)
                          else dv_disp[:50]))
 
-            # ── Render via expander (not raw HTML) ────────────────────────────
+            # ── Render via expander ────────────────────────────────────────────
             with st.expander(f"{h_icon} {fname}  ·  {v_summary}  ·  source: {r['Winning Source']}"):
-                # 1) Source reference
+                # 1) Source reference + storage with clickable links
                 st.markdown(src_ref_html + storage_html, unsafe_allow_html=True)
 
-                # 2) Annotations table
+                # 2) Annotations table (larger font)
                 st.markdown("**Field-by-field annotations:**")
                 st.markdown(ann_table_html, unsafe_allow_html=True)
 
-                # 3) Valid JSON rendered as code
+                # 3) Valid JSON rendered as st.code (syntax highlighted, copy button)
                 st.markdown("**Full JSON (as stored in `rds_warehouse_public.facts.value`):**")
                 st.code(json_str, language="json")
 
@@ -2316,6 +2409,21 @@ LIMIT 100;""", language="sql")
             "PostgreSQL RDS (port 5432) using JSONB operators (->>, jsonb_array_elements). "
             "The scalar proxy facts (sos_active, sos_match_boolean, formation_state) are safe in Redshift.",
         ])
+        st.markdown("---")
+        st.markdown("**🔗 Source references:**")
+        st.markdown(
+            f"- [{src_link('facts/kyb/index.ts','sos_active / sos_filings fact definitions')}]({GITHUB_LINKS.get('facts/kyb/index.ts','')})\n"
+            f"- [{src_link('middesk','Middesk integration (registrations[].foreignDomestic)')}]({GITHUB_LINKS.get('middesk','')})\n"
+            f"- [{src_link('EntityJurisdictionCell','Admin Portal — EntityJurisdictionCell.tsx')}]({GITHUB_LINKS.get('EntityJurisdictionCell','')})\n"
+            f"- [{src_link('integrations.constant.ts','INTEGRATION_ID.MIDDESK=16, OPENCORPORATES=23')}]({GITHUB_LINKS.get('integrations.constant.ts','')})"
+        )
+        ai_popup("DomForeign",
+                 f"formation_state:{form_state} operating_state:{op_state} tax_haven:{is_th} sos_match:{sos_match}",[
+            "What is the entity resolution gap for tax-haven states and how does it affect sos_match_boolean?",
+            "How does Middesk determine if a filing is domestic or foreign?",
+            "Where is sos_filings stored and why can't it be queried from Redshift?",
+            "What SQL detects false negatives (sos_match=false + active domestic filing)?",
+            "How does OpenCorporates differ from Middesk for foreign_domestic classification?"],bid)
 
     with r3:
         st.markdown("#### TIN Verification — Full Data Lineage")
@@ -3194,6 +3302,18 @@ ORDER BY name, received_at DESC;""",language="sql")
 
         with st.expander("📋 SQL"):
             st.code(sql_for(bid,["website","website_found","serp_id","review_rating","review_count"]),language="sql")
+        st.markdown("**🔗 Source references:**")
+        st.markdown(
+            f"- [{src_link('facts/kyb/index.ts','website / website_found / serp_id fact definitions')}]({GITHUB_LINKS.get('facts/kyb/index.ts','')})\n"
+            f"- [{src_link('aiEnrichment','aiNaicsEnrichment.ts — uses website URL for NAICS classification')}]({GITHUB_LINKS.get('aiEnrichment','')})\n"
+            f"- [{src_link('integrations.constant.ts','INTEGRATION_ID.SERP_SCRAPE=22, SERP_GOOGLE_PROFILE=39')}]({GITHUB_LINKS.get('integrations.constant.ts','')})"
+        )
+        ai_popup("Website",f"website:{website_v[:40] if website_v else 'null'} web_found:{web_found_str} serp:{serp_id[:20] if serp_id else 'null'} naics:{naics}",[
+            "Why does a missing website cause NAICS=561499?",
+            "How does the AI enrichment use the website URL for NAICS classification?",
+            "What is the Gap G2 and how to fix it?",
+            "How is SERP/Google Business Profile data collected and stored?",
+            "What SQL shows all website-related facts for this business?"],bid)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # RISK & WATCHLIST
@@ -3469,6 +3589,37 @@ SELECT category_id, score_100, weighted_score_850
 FROM rds_manual_score_public.business_score_factors
 WHERE score_id=(SELECT score_id FROM rds_manual_score_public.data_current_scores WHERE business_id='{bid}' LIMIT 1)
   AND category_id='public_records';""",language="sql")
+        # AI popup + source links for rw2 (Public Records)
+        st.markdown("**🔗 Source references:**")
+        st.markdown(
+            f"- [{src_link('facts/kyb/index.ts','num_bankruptcies / num_judgements / num_liens definitions')}]({GITHUB_LINKS.get('facts/kyb/index.ts','')})\n"
+            f"- [{src_link('worth_score_model.py','Worth Score model features (count_bankruptcy, age_bankruptcy)')}]({GITHUB_LINKS.get('worth_score_model.py','')})\n"
+            f"- [{src_link('integrations.constant.ts','INTEGRATION_ID.EQUIFAX=17 (public records source)')}]({GITHUB_LINKS.get('integrations.constant.ts','')})"
+        )
+        ai_popup("PublicRecords",f"BK:{bk} Judgments:{ju} Liens:{li} WL:{wl} AM:{am}",[
+            "How does Equifax provide bankruptcy and lien data?",
+            "What is the exact Worth Score impact of bankruptcies vs judgments vs liens?",
+            "What SQL queries the full bankruptcies array from PostgreSQL RDS?",
+            "How are num_bankruptcies and bankruptcies[] related?",
+            "Why might num_bankruptcies=0 for a real business?"],bid)
+
+    # rw3 ai popup
+    with rw3:
+        pass  # rw3 content already rendered above; ai popup at end
+
+    # Add source links + AI popup to risk combinations (rw3)
+    with rw3:
+        st.markdown("**🔗 Source references:**")
+        st.markdown(
+            f"- [{src_link('consolidatedWatchlist.ts','Watchlist architecture (filterOutAdverseMedia)')}]({GITHUB_LINKS.get('consolidatedWatchlist.ts','')})\n"
+            f"- [{src_link('facts/kyb/index.ts','watchlist_hits / adverse_media_hits computation')}]({GITHUB_LINKS.get('facts/kyb/index.ts','')})"
+        )
+        ai_popup("RiskCombinations",f"WL:{wl} AM:{am} BK:{bk} Judg:{ju} Liens:{li}",[
+            "What compliance action is required for a SANCTIONS hit vs a PEP hit?",
+            "Why is adverse media tracked separately from the consolidated watchlist?",
+            "When should I escalate to Compliance vs handle in underwriting?",
+            "What SQL shows the full watchlist hit details including entity names?",
+            "How does the risk score (0-100) relate to watchlist and high_risk_people?"],bid)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # WORTH SCORE
@@ -3523,6 +3674,15 @@ customer_files.worth_score: from warehouse.latest_score (datascience schema) —
 
 </div></div>""",unsafe_allow_html=True)
 
+        # Source links for Worth Score architecture
+        st.markdown("**🔗 Source references — click to open in GitHub:**")
+        st.markdown(
+            f"- [{src_link('aiscore.py','aiscore.py — score formula (p × 550 + 300), SHAP computation')}]({GITHUB_LINKS.get('aiscore.py','')})\n"
+            f"- [{src_link('worth_score_model.py','worth_score_model.py — 3-model ensemble, feature extraction')}]({GITHUB_LINKS.get('worth_score_model.py','')})\n"
+            f"- [{src_link('lookups.py','lookups.py — all model input features and imputation defaults')}]({GITHUB_LINKS.get('lookups.py','')})\n"
+            f"- [{src_link('score_decision_matrix','score_decision_matrix migration — APPROVE/REVIEW/DECLINE thresholds')}]({GITHUB_LINKS.get('score_decision_matrix','')})\n"
+            f"- [{src_link('customer_table.sql','customer_table.sql — worth_score in customer_files')}]({GITHUB_LINKS.get('customer_table.sql','')})"
+        )
         st.markdown("---")
 
         # ── Score KPIs ────────────────────────────────────────────────────────
@@ -3915,6 +4075,18 @@ WHERE score_id = (
     WHERE business_id = '{bid}' LIMIT 1
 )
 ORDER BY ABS(weighted_score_850) DESC;""",language="sql")
+        st.markdown("**🔗 Source references:**")
+        st.markdown(
+            f"- [{src_link('aiscore.py','aiscore.py — SHAP computation (shap_scores × 550)')}]({GITHUB_LINKS.get('aiscore.py','')})\n"
+            f"- [{src_link('worth_score_model.py','worth_score_model.py — model prediction + feature extraction')}]({GITHUB_LINKS.get('worth_score_model.py','')})\n"
+            f"- [{src_link('lookups.py','lookups.py — FIRMOGRAPHIC/FINANCIAL/ECONOMIC feature lists')}]({GITHUB_LINKS.get('lookups.py','')})"
+        )
+        ai_popup("WorthScoreWaterfall",f"Score:{score_v if score_df is not None and not score_df.empty else 'N/A'}",[
+            "What is the exact SHAP calculation that produces the waterfall contributions?",
+            "Which feature category has the highest negative impact for this business?",
+            "What would improve this business's Worth Score the most?",
+            "How does the financial model (PyTorch) differ from the firmographic model (XGBoost)?",
+            "Why is the waterfall estimated and not the exact model output?"],bid)
 
     with ws3:
         st.markdown("#### 📊 Feature Fill Rates — Model Input Data Quality")
@@ -3982,6 +4154,19 @@ ORDER BY ABS(weighted_score_850) DESC;""",language="sql")
             flag(f"Audit table not accessible. {audit_err or ''}", "amber")
             st.code("""-- Try directly:
 SELECT * FROM warehouse.worth_score_input_audit ORDER BY score_date DESC LIMIT 5;""",language="sql")
+
+        st.markdown("**🔗 Source references:**")
+        st.markdown(
+            f"- [{src_link('lookups.py','lookups.py — INPUTS dict (all features + imputation defaults)')}]({GITHUB_LINKS.get('lookups.py','')})\n"
+            f"- [{src_link('worth_score_model.py','worth_score_model.py — _predict() feature pipeline')}]({GITHUB_LINKS.get('worth_score_model.py','')})\n"
+            f"- Redshift table: `warehouse.worth_score_input_audit` — fill rates computed nightly"
+        )
+        ai_popup("FillRates","Worth Score feature fill rates",[
+            "Which features have the lowest fill rate and why?",
+            "How does the model handle null features — what are the imputation defaults?",
+            "What is the impact of having all Financial Ratios null (no Plaid banking)?",
+            "How do I improve the fill rate for firmographic features (revenue, employees)?",
+            "Where are the imputation default values defined in the codebase?"],bid)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # ALL FACTS — grouped, enriched, with lineage
