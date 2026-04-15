@@ -3598,8 +3598,8 @@ SELECT range_start, range_end, risk_level, decision FROM score_decision_matrix O
         st.caption("Estimated from KYB facts. The waterfall approximates the model's contribution breakdown. "
                    "Exact SHAP values are in business_score_factors (Score tab).")
 
-        if score_df is not None and not score_df.empty:
-            score_v=float(score_df.iloc[0]["score_850"])
+        if score_df is not None and not score_df.empty and score_df.iloc[0].get("score_850") is not None:
+            score_v=float(score_df.iloc[0]["score_850"] or 0)
             bk_w=int(float(gv(facts,"num_bankruptcies") or 0))
             ju_w=int(float(gv(facts,"num_judgements") or 0))
             li_w=int(float(gv(facts,"num_liens") or 0))
@@ -3714,39 +3714,50 @@ ORDER BY ABS(weighted_score_850) DESC;""",language="sql")
         if audit_df is not None and not audit_df.empty:
             fill_cols=[c for c in audit_df.columns if c.startswith("fill_")]
             lr=audit_df.iloc[0]
-            fd2=[{"Feature":c.replace("fill_",""),
-                  "Fill %":round(float(lr[c]),1),
-                  "Category":"📜 Public Records" if any(x in c for x in ["bankruptcy","judgment","lien","reviews"])
-                            else "🏢 Company Profile" if any(x in c for x in ["age_business","state","naics","primsic","struct","employee","indicator"])
-                            else "📈 Financial Trends" if any(x in c for x in ["gdp","cpi","vix","t10y","unemp","ratio","wag","usd","ppi","brent","wti","csentiment","dolindx","ccdelinq"])
-                            else "💼 Business Ops" if any(x in c for x in ["revenue","net_income","cf_","bs_","is_"])
-                            else "📊 Performance" if any(x in c for x in ["ratio_return","ratio_gross","ratio_net","ratio_equity","ratio_income","flag_"])
-                            else "Other"
-                  }
-                 for c in fill_cols if c in audit_df.columns]
-            fdf=pd.DataFrame(fd2).sort_values("Fill %",ascending=True)
-            fdf["Status"]=fdf["Fill %"].apply(lambda v:"🟢 Good" if v>=80 else("🟡 Medium" if v>=30 else"🔴 Low"))
 
-            # Category summary
-            cat_summary=fdf.groupby("Category")["Fill %"].mean().reset_index()
-            cat_summary.columns=["Category","Avg Fill %"]
-            cat_summary["Avg Fill %"]=cat_summary["Avg Fill %"].round(1)
-            cat_summary["Status"]=cat_summary["Avg Fill %"].apply(lambda v:"🟢 Good" if v>=80 else("🟡 Medium" if v>=30 else"🔴 Low"))
+            # Safely extract fill rates — only numeric values (skip JSON/string blobs)
+            fd2=[]
+            for c in fill_cols:
+                if c not in audit_df.columns: continue
+                try:
+                    val=float(lr[c])
+                    if val<0 or val>100: continue   # sanity check: must be a percentage
+                except (TypeError,ValueError): continue  # skip non-numeric (JSON strings)
+                cat=("📜 Public Records" if any(x in c for x in ["bankruptcy","judgment","lien","reviews"])
+                     else "🏢 Company Profile" if any(x in c for x in ["age_business","state","naics","primsic","struct","employee","indicator"])
+                     else "📈 Financial Trends" if any(x in c for x in ["gdp","cpi","vix","t10y","unemp","ratio","wag","usd","ppi","brent","wti","csentiment","dolindx","ccdelinq"])
+                     else "💼 Business Ops" if any(x in c for x in ["revenue","net_income","cf_","bs_","is_"])
+                     else "📊 Performance" if any(x in c for x in ["ratio_return","ratio_gross","ratio_net","ratio_equity","ratio_income","flag_"])
+                     else "Other")
+                fd2.append({"Feature":c.replace("fill_",""),"Fill %":round(val,1),"Category":cat})
 
-            col_cat,col_chart=st.columns([1,2])
-            with col_cat:
-                st.markdown("**Category averages:**")
-                st.dataframe(cat_summary,use_container_width=True,hide_index=True)
-                st.markdown(f"**Score date:** {lr.get('score_date','N/A')}")
-                st.caption("Low fill rate = feature is imputed with default value → less accurate prediction for this category")
-            with col_chart:
-                fig_fill=px.bar(fdf.tail(40),x="Fill %",y="Feature",orientation="h",
-                                color="Status",
-                                color_discrete_map={"🟢 Good":"#22c55e","🟡 Medium":"#f59e0b","🔴 Low":"#ef4444"},
-                                title=f"Model Feature Fill Rates (top 40)")
-                fig_fill.update_layout(height=700,showlegend=True,
-                                       margin=dict(t=40,b=10,l=10,r=10))
-                st.plotly_chart(dark_chart(fig_fill),use_container_width=True)
+            if not fd2:
+                flag("audit table columns do not contain numeric fill rates — schema may differ.","amber")
+            else:
+                fdf=pd.DataFrame(fd2).sort_values("Fill %",ascending=True)
+                fdf["Status"]=fdf["Fill %"].apply(lambda v:"🟢 Good" if v>=80 else("🟡 Medium" if v>=30 else"🔴 Low"))
+
+                # Category summary
+                cat_summary=fdf.groupby("Category")["Fill %"].mean().reset_index()
+                cat_summary.columns=["Category","Avg Fill %"]
+                cat_summary["Avg Fill %"]=cat_summary["Avg Fill %"].round(1)
+                cat_summary["Status"]=cat_summary["Avg Fill %"].apply(lambda v:"🟢 Good" if v>=80 else("🟡 Medium" if v>=30 else"🔴 Low"))
+
+                col_cat,col_chart=st.columns([1,2])
+                with col_cat:
+                    st.markdown("**Category averages:**")
+                    st.dataframe(cat_summary,use_container_width=True,hide_index=True)
+                    st.markdown(f"**Score date:** {lr.get('score_date','N/A')}")
+                    st.caption("Low fill rate = feature imputed with default → less accurate prediction")
+                with col_chart:
+                    fig_fill=px.bar(fdf.sort_values("Fill %",ascending=True).tail(40),
+                                    x="Fill %",y="Feature",orientation="h",color="Status",
+                                    color_discrete_map={"🟢 Good":"#22c55e","🟡 Medium":"#f59e0b","🔴 Low":"#ef4444"},
+                                    title=f"Model Feature Fill Rates (top 40 by fill %)")
+                    fig_fill.update_layout(height=700,showlegend=True,
+                                           xaxis=dict(range=[0,110]),
+                                           margin=dict(t=40,b=10,l=10,r=10))
+                    st.plotly_chart(dark_chart(fig_fill),use_container_width=True)
 
             # Low fill rate features
             low_fill=fdf[fdf["Fill %"]<30].sort_values("Fill %")
@@ -4012,19 +4023,42 @@ elif tab=="📋 All Facts":
 
     if group_summary:
         gdf = pd.DataFrame(group_summary).sort_values("Fill %",ascending=True)
+        # Safe text labels — ensure no JSON strings leak in
+        safe_text = [f"{int(v)}%  ({int(r['With Value'])}/{int(r['Total'])})"
+                     for v,(_,r) in zip(gdf["Fill %"], gdf.iterrows())]
         fig_g = go.Figure()
-        fig_g.add_trace(go.Bar(x=gdf["Fill %"],y=gdf["Group"],orientation="h",
-                               marker_color=[("#22c55e" if v>=80 else "#f59e0b" if v>=50 else "#ef4444")
-                                             for v in gdf["Fill %"]],
-                               text=[f"{v}%  ({r['With Value']}/{r['Total']})" for _,r in gdf.iterrows()],
-                               textposition="outside",textfont=dict(size=10,color="#CBD5E1")))
-        fig_g.update_layout(title="Fill Rate by Fact Group",
-                            height=max(250,len(gdf)*34),
-                            xaxis=dict(range=[0,115],showticklabels=False,showgrid=False),
-                            yaxis=dict(tickfont=dict(size=11)),
-                            margin=dict(t=40,b=10,l=10,r=80))
-        st.plotly_chart(dark_chart(fig_g),use_container_width=True)
-        st.caption("Green ≥80% · Amber 50–79% · Red <50%")
+        fig_g.add_trace(go.Bar(
+            x=gdf["Fill %"].astype(float), y=gdf["Group"], orientation="h",
+            marker_color=[("#22c55e" if v>=80 else "#f59e0b" if v>=50 else "#ef4444")
+                          for v in gdf["Fill %"]],
+            text=safe_text,
+            textposition="outside",
+            textfont=dict(size=10, color="#CBD5E1"),
+            hovertemplate="<b>%{y}</b><br>Fill rate: %{x}%<br>%{text}<extra></extra>",
+        ))
+        fig_g.update_layout(
+            title="KYB Data Fill Rate by Fact Group",
+            height=max(250,len(gdf)*38),
+            xaxis=dict(range=[0,130], showticklabels=True, showgrid=True,
+                       title="Fill Rate (%)", ticksuffix="%"),
+            yaxis=dict(tickfont=dict(size=11)),
+            margin=dict(t=40, b=10, l=10, r=100),
+        )
+        st.plotly_chart(dark_chart(fig_g), use_container_width=True)
+        st.caption("🟢 Green ≥80%: good coverage · 🟡 Amber 50–79%: partial · 🔴 Red <50%: sparse — facts likely null for most businesses")
+
+        # Table version alongside
+        st.dataframe(
+            gdf[["Group","With Value","Null","Total","Fill %"]].sort_values("Fill %",ascending=False),
+            use_container_width=True, hide_index=True,
+            column_config={
+                "Group": st.column_config.TextColumn("Fact Group"),
+                "With Value": st.column_config.NumberColumn("✅ Has Value"),
+                "Null": st.column_config.NumberColumn("⚪ Null"),
+                "Total": st.column_config.NumberColumn("Total Facts"),
+                "Fill %": st.column_config.ProgressColumn("Fill Rate",min_value=0,max_value=100,format="%d%%"),
+            }
+        )
 
     st.markdown("---")
 
@@ -4087,17 +4121,80 @@ elif tab=="📋 All Facts":
                 "📊 Financial Ratios (Worth Score inputs)":[
                     "All ratio_* and bs_* facts are extracted from Plaid banking statements by the Worth Score pipeline.",
                     "These are PRIMARY model features for the financial sub-model (PyTorch neural net component).",
-                    "Null ratios = Plaid banking data not connected or not processed yet. Low fill rates reduce model accuracy.",
-                    "flag_equity_negative / flag_total_liabilities_over_assets = binary risk flags, high Worth Score impact.",
+                    "ALL 15 facts NULL = Plaid banking is NOT connected for this business. Financial model uses default imputations → score accuracy reduced.",
+                    "flag_equity_negative=true / flag_total_liabilities_over_assets=true = binary risk flags with high Worth Score negative impact.",
+                    "Source: ai-score-service reads these facts from rds_warehouse_public.facts → passes to PyTorch model.",
+                ],
+                "📞 Contact":[
+                    "business_phone and email are often null — not required fields on the onboarding form.",
+                    "phone_found = phone numbers found across all vendors via combineFacts rule (merges Middesk + SERP + ZI).",
+                    "countries = DERIVED (pid=-1) from addresses — extracted as unique country codes from addresses array.",
+                    "Admin Portal path: KYB → Contact Information tab.",
+                ],
+                "🌐 Website / Digital":[
+                    "website = submitted by applicant (pid=0) on onboarding form. Critical for AI NAICS classification (Gap G2 if missing).",
+                    "website_found = verified URLs found across vendors via combineFacts. Can be empty array [] if no website confirmed.",
+                    "serp_id = Google Business Profile ID from SERP API. review_rating/review_count = from Google My Business.",
+                    "If website is null AND NAICS=561499 → Gap G1+G2: entity not matched AND AI could not search web.",
+                ],
+                "💼 Firmographic":[
+                    "ALL 11 facts NULL = ZoomInfo and Equifax could NOT match this entity → no commercial firmographic data.",
+                    "revenue and num_employees are the primary firmographic Worth Score inputs. Null → model uses default imputation.",
+                    "kyb_submitted=true means onboarding form was completed. kyb_complete=true means business verified + people screened.",
+                    "business_verified = DERIVED from screened_people status. shareholder_document = uploaded ownership document.",
+                    "minority_owned / woman_owned / veteran_owned = optional self-reported fields from onboarding form.",
+                ],
+                "🪪 Identity Verification (KYC)":[
+                    "idv_status = object {SUCCESS:N, PENDING:N, FAILED:N, CANCELED:N, EXPIRED:N} — count of ALL sessions ever.",
+                    "idv_passed = COUNT of SUCCESS sessions. idv_passed_boolean=true when idv_passed >= 1.",
+                    "name_match and name_match_boolean: Middesk compares submitted business name to SOS registry name.",
+                    "verification_status: overall KYB status from integration-service (pending/verified/failed).",
+                ],
+                "🔗 Vendor / Integration":[
+                    "internal_platform_matches = matches found by the entity-matching XGBoost model across ZI/EFX/OC databases.",
+                    "internal_platform_matches_combined = TOO LARGE for Redshift. Contains full match records — query from PostgreSQL RDS.",
+                    "canadaopen_* = OpenCorporates Canada data (only if business has Canadian presence).",
+                    "internal_platform_matches_count = scalar count of matches (Redshift safe).",
+                ],
+                "🇨🇦 Canada (if applicable)":[
+                    "These facts are only populated for Canadian businesses or businesses with Canadian registration.",
+                    "canada_business_number = BN (Business Number) from CRA (Canada Revenue Agency).",
+                    "canada_corporate_id = provincial incorporation ID (Ontario, BC, Alberta, etc.).",
+                    "Source: OpenCorporates Canada API via integration-service.",
+                ],
+                "📦 Other":[
+                    "Facts not mapped to any standard group. Often: dependent/computed facts, internal metadata, or newly added facts.",
+                    "Check the JSON panel for each fact to understand its source, rule, and dependencies.",
+                    "Many 'Other' facts are null because they are computed from other facts that are also null.",
                 ],
             }
             if grp in GROUP_CARDS:
-                analyst_card(f"{grp} — Data Lineage Notes", GROUP_CARDS[grp])
+                analyst_card(f"{grp} — Data Lineage & Engineering Notes", GROUP_CARDS[grp])
+
+            # ── Column guide (inline, compact) ───────────────────────────────
+            st.markdown("""<div style="background:#0f172a;border-radius:6px;padding:8px 12px;margin:4px 0;font-size:.70rem;color:#64748b">
+<strong style="color:#94A3B8">Column guide:</strong>
+<strong style="color:#CBD5E1">Fact</strong> = internal name in rds_warehouse_public.facts ·
+<strong style="color:#CBD5E1">Value</strong> = winning value (click 📄 below to see full JSON) ·
+<strong style="color:#CBD5E1">Winning Source</strong> = vendor whose value the Admin Portal shows ·
+<strong style="color:#CBD5E1">Confidence</strong> = vendor's confidence score (null for dependent/computed facts) ·
+<strong style="color:#CBD5E1">Rule</strong> = Fact Engine selection algorithm ·
+<strong style="color:#CBD5E1">Deps/Alts</strong> = dependencies (computed facts) or alternative vendors (vendor facts)
+</div>""", unsafe_allow_html=True)
 
             # ── Facts table ───────────────────────────────────────────────
-            display_df = pd.DataFrame([{k:v for k,v in r.items() if k!="Override"}
+            display_df = pd.DataFrame([{k:v for k,v in r.items() if k not in ("Override","_raw_fact","_name")}
                                         for r in rows])
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            st.dataframe(display_df, use_container_width=True, hide_index=True,
+                         column_config={
+                             "Fact": st.column_config.TextColumn("Fact (click 📄 below for JSON)", width="medium"),
+                             "Value": st.column_config.TextColumn("Value", width="medium"),
+                             "Winning Source": st.column_config.TextColumn("Source", width="small"),
+                             "Confidence": st.column_config.TextColumn("Confidence", width="small"),
+                             "Rule": st.column_config.TextColumn("Rule", width="medium"),
+                             "Dependencies / Alternatives": st.column_config.TextColumn("Deps / Alternatives", width="large"),
+                             "Updated": st.column_config.TextColumn("Updated", width="small"),
+                         })
 
             # ── Per-fact expandable detail ─────────────────────────────────
             for row_data, m in zip(rows, meta):
