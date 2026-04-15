@@ -1,0 +1,17 @@
+# Streamlit secrets — NEVER commit real keys
+**/.streamlit/secrets.toml
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+.env.*
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
