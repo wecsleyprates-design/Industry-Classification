@@ -666,21 +666,36 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
             if isinstance(v, list): summary_label += f' &nbsp;<span style="color:#3B82F6;font-size:.68rem">({len(v)} items — expand to see all)</span>'
             elif isinstance(v, dict): summary_label += f' &nbsp;<span style="color:#8B5CF6;font-size:.68rem">({len(v)} keys)</span>'
 
-            json_block = f'''{{{"\n"}  "name": "{fname}",
-  "value": {val_display},                {f"← {dv_disp[:60]}" if not isinstance(v,(list,dict,type(None))) else ("← list with " + str(len(v)) + " items, all shown above" if isinstance(v,list) else ("← object with " + str(len(v)) + " keys" if isinstance(v,dict) else "← null = no vendor provided data"))}
-  "source": {{
-    "confidence": {conf_disp},           {f"← {_rule_label(rule_raw2)} confidence formula" if conf_disp not in (None,"null") else "← null = dependent/computed fact, no vendor query"}
-    "platformId": {pid_disp},            {pid_annotation}
-    "name": "{src_name_disp}"
-  }},
-  "ruleApplied": {{
-    "name": "{rule_raw2}",               ← {rule_raw2}: {rule_desc2 or _rule_label(rule_raw2)}
-  }},
-  "dependencies": {deps_block},          {f"← computed from: {', '.join(deps_raw2)}" if deps_raw2 else "← no dependencies (vendor-supplied fact)"}
-  "alternatives": [
-{alts_block}
-  ]
-}}'''
+            # Pre-compute all annotation strings (no backslashes inside f-string expressions)
+            _val_ann = ("← list with " + str(len(v)) + " items" if isinstance(v,list)
+                        else ("← object with " + str(len(v)) + " keys" if isinstance(v,dict)
+                        else ("← null = no vendor provided data" if v is None
+                        else "← " + str(dv_disp[:60]))))
+            _conf_ann = ("← " + _rule_label(rule_raw2) + " confidence formula"
+                         if conf_disp not in (None,"null")
+                         else "← null = dependent/computed fact, no vendor query")
+            _dep_ann = ("← computed from: " + ", ".join(deps_raw2)
+                        if deps_raw2 else "← no dependencies (vendor-supplied fact)")
+            _rule_ann = rule_raw2 + ": " + (rule_desc2 or _rule_label(rule_raw2))
+
+            json_block = (
+                '{\n'
+                '  "name": "' + fname + '",\n'
+                '  "value": ' + val_display + ',                ' + _val_ann + '\n'
+                '  "source": {\n'
+                '    "confidence": ' + str(conf_disp) + ',           ' + _conf_ann + '\n'
+                '    "platformId": ' + str(pid_disp) + ',            ' + pid_annotation + '\n'
+                '    "name": "' + str(src_name_disp) + '"\n'
+                '  },\n'
+                '  "ruleApplied": {\n'
+                '    "name": "' + str(rule_raw2) + '",               \u2190 ' + _rule_ann + '\n'
+                '  },\n'
+                '  "dependencies": ' + str(deps_block) + ',          ' + _dep_ann + '\n'
+                '  "alternatives": [\n'
+                + alts_block + '\n'
+                '  ]\n'
+                '}'
+            )
 
             st.markdown(
                 f"<details style='background:#0A0F1E;border-left:3px solid {h_color};"
