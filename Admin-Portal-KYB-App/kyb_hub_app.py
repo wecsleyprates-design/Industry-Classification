@@ -45,21 +45,70 @@ st.markdown("""<style>
   padding:10px 14px;margin:5px 0;color:#93c5fd;font-size:.80rem}
 </style>""", unsafe_allow_html=True)
 
-# ── Platform ID map ───────────────────────────────────────────────────────────
+# ── Platform ID map — from integration-service/src/constants/integrations.constant.ts ─
+# INTEGRATION_ID enum: PLAID=1, VERDATA=4, MIDDESK=16, EQUIFAX=17, PLAID_IDV=18,
+# SERP_SCRAPE=22, OPENCORPORATES=23, ZOOMINFO=24, AI_NAICS_ENRICHMENT=31,
+# AI_WEBSITE_ENRICHMENT=36, TRULIOO=38, SERP_GOOGLE_PROFILE=39, KYX=40, TRULIOO_PSC=42
 PID = {
-    "16":("Middesk","#f59e0b","US SOS live query · w=2.0 · confidence=0.15+0.20×tasks"),
-    "23":("OpenCorporates","#3B82F6","Global registry · w=0.9 · confidence=match.index/55"),
-    "24":("ZoomInfo","#8B5CF6","ZI firmographic bulk · w=0.8 · confidence=match.index/55"),
-    "17":("Equifax","#22c55e","EFX firmographic bulk · w=0.7 · confidence=XGBoost or index/55"),
-    "38":("Trulioo","#ec4899","KYB/PSC · w=0.8 · confidence=status-based(0.70/0.40/0.20)"),
-    "31":("AI (GPT)","#f97316","AI enrichment LAST RESORT · w=0.1 · confidence=self-reported"),
-    "22":("SERP","#a855f7","Google/web scraping · w=0.3 · confidence=heuristic"),
-    "40":("Plaid","#06b6d4","Bank/IDV · w=1.0"),
-    "0":("Applicant","#64748b","Submitted on onboarding form"),
-    "-1":("Default","#475569","System default — no vendor"),
-    "":("Unknown","#374151","Source metadata missing"),
+    "16": ("Middesk",         "#f59e0b",  "US SOS live registry query · weight=2.0 · conf=0.15+0.20×tasks · integration-service/lib/middesk/"),
+    "23": ("OpenCorporates",  "#3B82F6",  "Global company registry · weight=0.9 · conf=match.index÷55 · integration-service (OC API)"),
+    "24": ("ZoomInfo",        "#8B5CF6",  "Firmographic bulk data · weight=0.8 · conf=match.index÷55 · zoominfo.comp_standard_global"),
+    "17": ("Equifax",         "#22c55e",  "Firmographic + public records bulk · weight=0.7 · conf=XGBoost or match.index÷55 · warehouse.equifax_us_latest"),
+    "38": ("Trulioo",         "#ec4899",  "KYB/PSC compliance screening · weight=0.8 · conf=status-based(0.70/0.40/0.20) · integration-service/lib/trulioo/"),
+    "42": ("Trulioo PSC",     "#f43f5e",  "Person Screening (UBOs/directors) · weight=0.8 · integration-service/lib/trulioo/truliooPSCScreening.ts"),
+    "31": ("AI (GPT-4o-mini)","#f97316",  "AI NAICS enrichment · LAST RESORT · weight=0.1 · conf=self-reported · integration-service/lib/aiEnrichment/aiNaicsEnrichment.ts"),
+    "36": ("AI Website",      "#fb923c",  "AI website content enrichment · weight=0.1 · integration-service/lib/aiEnrichment/aiWebsiteEnrichment.ts"),
+    "22": ("SERP",            "#a855f7",  "Google Search/web scraping · weight=0.3 · conf=heuristic · integration-service/lib/serp/"),
+    "39": ("SERP Google Profile","#9333ea","Google Business Profile · integration-service/lib/serp/serpGoogleProfile.ts"),
+    "40": ("Plaid / KYX",    "#06b6d4",  "Bank connectivity + IDV · weight=1.0 · integration-service/lib/plaid/"),
+    "18": ("Plaid IDV",       "#0ea5e9",  "Identity Verification (government ID + selfie) · integration-service/lib/plaid/plaidIdv.ts"),
+    "1":  ("Plaid Banking",   "#0284c7",  "Bank account data + transactions · integration-service/lib/plaid/"),
+    "32": ("Canada Open",     "#10b981",  "Canadian company registry (OC Canada) · integration-service (canadaopen)"),
+    "4":  ("Verdata",         "#6366f1",  "Public records (BK/liens/judgments) · integration-service/lib/verdata/"),
+    "29": ("Entity Matching", "#8b5cf6",  "Internal XGBoost entity-match model · integration-service/lib/match/"),
+    "21": ("Manual Upload",   "#64748b",  "Analyst manually uploaded/overrode · integration-service (manual source)"),
+    "0":  ("Applicant",       "#94a3b8",  "Self-reported on onboarding form · businessDetails source · conf=1.0 by convention"),
+    "-1": ("Calculated",      "#475569",  "Internally computed by Fact Engine — NOT a vendor. Derived from other facts via fn(). Source: sources.calculated in integration-service/lib/facts/sources.ts L1235"),
+    "":   ("No source stored","#374155",  "platformId=null in database — fact has no source metadata. Check ruleApplied to understand origin."),
 }
-def pid_info(pid): return PID.get(str(pid or ""), (f"pid={pid}","#374151","Unknown source"))
+
+# Calculated facts — facts where source=sources.calculated (platformId=null, not a vendor)
+# These are computed internally by the Fact Engine from other facts
+# Source: integration-service/lib/facts/businessDetails/index.ts
+CALCULATED_FACTS = {
+    "mcc_code":         "Computed from mcc_code_found (AI direct) ?? mcc_code_from_naics (rel_naics_mcc lookup keyed by naics_code). Source: integration-service/lib/facts/businessDetails/index.ts L376–387",
+    "mcc_code_from_naics": "SQL lookup: SELECT mcc_code FROM rel_naics_mcc WHERE naics_code = naics_code.value. Source: businessDetails/index.ts L359–374",
+    "mcc_code_found":   "Direct MCC from AI enrichment response.mcc_code field. Source: businessDetails/index.ts L351–357",
+    "mcc_description":  "SQL lookup: SELECT mcc_label FROM rel_mcc WHERE mcc_code = mcc_code.value. Fallback: AI enrichment response.mcc_description. Source: businessDetails/index.ts L389–404",
+    "naics_description":"SQL lookup: SELECT naics_label FROM rel_naics WHERE naics_code = naics_code.value. Source: businessDetails/index.ts L406–415",
+    "industry":         "2-digit NAICS sector code derived from naics_code.value.substring(0,2). Source: businessDetails/index.ts",
+    "risk_score":       "0-100 integer computed from watchlist_hits + high_risk_people. 0=no hits. Source: kyb/index.ts",
+    "sos_active":       "true if ANY filing in sos_filings[].active=true. Computed by Fact Engine. Source: kyb/index.ts",
+    "sos_match_boolean":"Derived from sos_match.value === 'success'. Source: kyb/index.ts",
+    "tin_match_boolean":"Derived from tin_match.value.status === 'success'. Source: kyb/index.ts",
+    "idv_passed":       "COUNT of idv_status sessions where status=SUCCESS. Source: kyb/index.ts",
+    "idv_passed_boolean":"true when idv_passed >= 1. Source: kyb/index.ts",
+    "kyb_submitted":    "true when addresses[] is not empty (form submitted). Source: kyb/index.ts",
+    "kyb_complete":     "true when business_verified=true AND screened_people is not empty. Source: kyb/index.ts",
+    "is_sole_prop":     "true when tin_submitted=null AND idv_passed_boolean=true. Source: kyb/index.ts",
+    "primary_address":  "First entry from addresses[] array. Source: kyb/index.ts",
+    "address_match_boolean": "Derived from address_verification.value.status === 'success'. Source: kyb/index.ts",
+    "address_verification_boolean": "Derived from address_verification.value.status. Source: kyb/index.ts",
+    "name_match_boolean":"Derived from name_match.value.status === 'success'. Source: kyb/index.ts",
+    "compliance_status":"Derived from business_verified + risk_score. Source: kyb/index.ts",
+    "watchlist_hits":   "COUNT of watchlist.value.metadata[].length. Source: kyb/index.ts",
+    "adverse_media_hits":"COUNT of adverse_media records from Trulioo. Source: kyb/index.ts",
+    "num_bankruptcies": "COUNT of items in bankruptcies[] array (Equifax/Verdata). Source: kyb/index.ts",
+    "num_judgements":   "COUNT of items in judgements[] array. Source: kyb/index.ts",
+    "num_liens":        "COUNT of items in liens[] array. Source: kyb/index.ts",
+    "countries":        "Derived from addresses[] — extracts unique country codes. Source: kyb/index.ts",
+    "high_risk_people": "Derived from screened_people — filters by watchlist hit type. Source: kyb/index.ts",
+    "idv_passed":       "COUNT of SUCCESS sessions in idv_status. Source: kyb/index.ts",
+}
+
+def pid_info(pid):
+    """Return (name, color, description) for a platformId string."""
+    return PID.get(str(pid or ""), (f"pid={pid}", "#374151", f"Unknown platformId={pid} — check integrations.constant.ts"))
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def kpi(label, value, sub="", color="#3B82F6"):
@@ -532,16 +581,37 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
         win_name = _pid_label(pid)
         src_name = f.get("source",{}).get("name","") if isinstance(f.get("source"),dict) else ""
 
-        # Meaningful source label
-        if pid == "-1":
-            # Dependent fact — get the dependency name if available
-            deps = f.get("dependencies") or f.get("source",{}).get("dependencies") if isinstance(f.get("source"),dict) else None
-            dep_str = ""
-            if isinstance(deps,list) and deps: dep_str = f" ← {deps[0]}"
-            win_str = f"📐 Computed{dep_str}"
+        # Source name string from the JSON (e.g. "calculated", "dependent", "middesk")
+        src_name_str = src.get("name","") if isinstance(src,dict) else ""
+
+        # Meaningful source label — handle ALL cases
+        if pid == "-1" or src_name_str in ("dependent",):
+            # Dependent fact — computed from other facts by Fact Engine
+            deps = f.get("dependencies") or []
+            dep_str = (" ← " + deps[0]) if deps else ""
+            win_str = "📐 Computed" + dep_str
             conf_str = "n/a (derived)"
+        elif pid == "" and src_name_str in ("calculated",""):
+            # Calculated fact — Fact Engine fn() with sources.calculated
+            # Check if we know what computes it
+            calc_desc = CALCULATED_FACTS.get(name,"")
+            if calc_desc:
+                win_str = "⚙️ Calculated (Fact Engine)"
+                conf_str = "n/a (computed)"
+            elif v is not None:
+                # Has a value but unknown source — check if it's a known calculated fact
+                win_str = "⚙️ Calculated (Fact Engine)"
+                conf_str = "n/a (computed)"
+            else:
+                win_str = "⚙️ Calculated / No data"
+                conf_str = "n/a"
+        elif pid == "" and src_name_str not in ("", None):
+            # Has a source name but no platformId — use the name
+            win_str = src_name_str
+            conf_str = f"{conf:.4f}" if conf is not None else "n/a"
         elif pid == "":
-            win_str = "❓ Unknown source"
+            # Truly unknown — no platformId, no source name
+            win_str = "⚠️ Source not stored"
             conf_str = f"{conf:.4f}" if conf is not None else "n/a"
         elif conf is None:
             win_str = f"{win_name}"
@@ -592,7 +662,11 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
         "tin_match":          ("integration-service/lib/facts/kyb/index.ts","tinMatch","factWithHighestConfidence","Middesk IRS TIN verification result"),
         "tin_match_boolean":  ("integration-service/lib/facts/kyb/index.ts","tinMatchBoolean","dependent","Derived from tin_match.value.status==='success'"),
         "naics_code":         ("integration-service/lib/facts/kyb/index.ts","naicsCode","factWithHighestConfidence","Industry code — vendors cascade"),
-        "mcc_code":           ("integration-service/lib/facts/kyb/index.ts","mccCode","dependent","Derived from naics_code via rel_naics_mcc"),
+        "mcc_code":           ("integration-service/lib/facts/businessDetails/index.ts","mcc_code L376–387","calculated (sources.calculated — NOT a vendor)","mcc_code_found (AI direct) ?? mcc_code_from_naics (rel_naics_mcc SQL lookup). platformId=null because this is Fact Engine computation, not a vendor response."),
+        "mcc_code_from_naics":("integration-service/lib/facts/businessDetails/index.ts","mcc_code_from_naics L359–374","calculated","SQL: SELECT mcc_code FROM rel_naics_mcc WHERE naics_code='{naics_code.value}'"),
+        "mcc_description":    ("integration-service/lib/facts/businessDetails/index.ts","mcc_description L389–404","calculated","SQL lookup rel_mcc by mcc_code. Fallback: AINaicsEnrichment.response.mcc_description"),
+        "naics_description":  ("integration-service/lib/facts/businessDetails/index.ts","naics_description L406–415","calculated","SQL lookup rel_naics by naics_code. No vendor — internal DB lookup."),
+        "industry":           ("integration-service/lib/facts/businessDetails/index.ts","industry","calculated","naics_code.value.substring(0,2) = 2-digit NAICS sector"),
         "idv_status":         ("integration-service/lib/plaid/","plaidIdv.ts","pid=18","Plaid IDV session status object"),
         "idv_passed":         ("integration-service/lib/facts/kyb/index.ts","idvPassed","dependent","Count of SUCCESS sessions"),
         "idv_passed_boolean": ("integration-service/lib/facts/kyb/index.ts","idvPassedBoolean","dependent","true when idv_passed >= 1"),
@@ -676,38 +750,47 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
                 })
             json_str = json.dumps(clean_fact, default=str, indent=2, ensure_ascii=False)
 
-            # ── Annotations table (separate from JSON) ────────────────────────
-            PID_ANN = {
-                "16":"Middesk — US SOS live query · weight=2.0 · formula: 0.15+0.20×tasks",
-                "23":"OpenCorporates — global registry · weight=0.9 · formula: match.index÷55",
-                "24":"ZoomInfo — firmographic bulk · weight=0.8 · formula: match.index÷55",
-                "17":"Equifax — firmographic bulk · weight=0.7 · formula: match.index÷55",
-                "38":"Trulioo — KYB/PSC · weight=0.8 · formula: status-based (0.70/0.40/0.20)",
-                "31":"AI GPT-4o-mini — LAST RESORT · weight=0.1 · formula: self-reported",
-                "22":"SERP/Google — web scraping · weight=0.3 · formula: heuristic",
-                "40":"Plaid — banking/IDV · weight=1.0",
-                "0": "Applicant (businessDetails) — self-submitted · confidence=1.0 by convention",
-                "-1":"System computed — dependent/derived fact · no vendor involved",
-                "":  "Unknown source — platformId not stored",
-            }
+            # ── Annotations (uses PID global dict and CALCULATED_FACTS) ──────
+            pid_full_info = pid_info(pid_str)
+            pid_ann_str   = pid_full_info[2] if pid_full_info else "See integrations.constant.ts"
+
+            # Calculated fact explanation
+            calc_note = CALCULATED_FACTS.get(fname,"")
+            if not calc_note and pid_str=="" and src_name_str in ("calculated",""):
+                calc_note = "Internally computed by Fact Engine fn(). Check integration-service/lib/facts/businessDetails/index.ts or lib/facts/kyb/index.ts for the exact computation."
+
             RULE_ANN = {
                 "factWithHighestConfidence": "Picks the vendor with highest confidence. If within 5% (WEIGHT_THRESHOLD=0.05), uses platform weight as tiebreaker. Source: integration-service/lib/facts/rules.ts L36–59",
                 "combineFacts": "Merges values from ALL vendors into one deduplicated array. No single winner. Source: rules.ts L76–96",
-                "combineWatchlistMetadata": "Merges business + person watchlist hits, deduplicates by ID, removes adverse_media. Source: rules.ts L253+",
-                "null": "No rule = dependent/computed fact. Derived from dependencies[] listed above. Source: rules.ts L98–107",
+                "combineWatchlistMetadata": "Merges business+person watchlist hits, deduplicates, removes adverse_media. Source: rules.ts L253+",
+                "null": "No rule = dependent/computed fact. Derived from dependencies[]. Source: rules.ts L98–107",
             }
 
             anns = [
-                ("value", dv_disp, "What the Admin Portal shows" + (" — full array/object in JSON above" if isinstance(v,(list,dict)) else "")),
+                ("value", dv_disp,
+                 "What the Admin Portal shows" + (" — full array/object in JSON above" if isinstance(v,(list,dict)) else "") +
+                 ((" | Computed fact: " + calc_note) if calc_note else "")),
                 ("source.platformId", str(src.get("platformId","null") if isinstance(src,dict) else "null"),
-                 PID_ANN.get(pid_str, "See PID map in code")),
+                 pid_ann_str + (" | NOTE: null platformId = Calculated/Computed fact, not a vendor. See CALCULATED_FACTS dict." if pid_str=="" and calc_note else "")),
+                ("source.name", str(src.get("name","null") if isinstance(src,dict) else "null"),
+                 ("'calculated' = Fact Engine internally computed value (sources.calculated pseudo-source). NOT a vendor. Source: integration-service/lib/facts/sources.ts L1233–1235"
+                  if src_name_str=="calculated"
+                  else ("'dependent' = derived from dependencies[]. No vendor queried."
+                  if src_name_str=="dependent"
+                  else (pid_full_info[0] + " — source name from vendor integration" if pid_str and pid_str not in ("-1","") else "Source name not stored")))),
                 ("source.confidence", str(src.get("confidence","null") if isinstance(src,dict) else "null"),
-                 "null = dependent fact (no vendor). Otherwise = vendor match quality score (0–1)."),
-                ("ruleApplied", rule_raw2, RULE_ANN.get(rule_raw2, rule_desc2 or "See integration-service/lib/facts/rules.ts")),
+                 "null = calculated/dependent fact (no vendor match quality). " +
+                 ("Formula: " + {"16":"0.15+0.20×tasks","23":"match.index÷55","24":"match.index÷55",
+                   "17":"match.index÷55","38":"status-based(0.70/0.40/0.20)","31":"self-reported",
+                   "0":"1.0 by convention"}.get(pid_str,"see PID description") if pid_str not in ("","-1") else "")),
+                ("ruleApplied", rule_raw2,
+                 RULE_ANN.get(rule_raw2, rule_desc2 or "See integration-service/lib/facts/rules.ts")),
                 ("dependencies", json.dumps(deps_raw2) if deps_raw2 else "[]",
-                 ("Computed FROM these facts: " + ", ".join(deps_raw2)) if deps_raw2 else "Vendor-supplied — not derived from other facts"),
+                 ("Computed FROM: " + ", ".join(deps_raw2)) if deps_raw2 else "Vendor-supplied — not derived from other facts"),
                 ("alternatives[]", str(len(alts_raw)) + " competing vendor(s)",
-                 ("Other vendors that also returned data but LOST to the winner via " + rule_raw2) if alts_raw else "No competing sources — only one vendor returned data for this fact"),
+                 ("Other vendors that returned data but LOST via " + rule_raw2) if alts_raw
+                 else ("No competitors — this fact is internally computed, not vendor-selected" if calc_note or pid_str in ("","-1")
+                 else "No competing sources — only one vendor returned data")),
             ]
 
             # ── Source code reference ─────────────────────────────────────────
