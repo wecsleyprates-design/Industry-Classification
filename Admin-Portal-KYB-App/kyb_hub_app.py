@@ -67,6 +67,46 @@ def kpi(label, value, sub="", color="#3B82F6"):
                 f'<div class="val">{value}</div><div class="sub">{sub}</div></div>',
                 unsafe_allow_html=True)
 
+def kpi_detail(label, value, sub, color, fact_name, fact_value_raw,
+               source_table, source_sql, why_null_reasons=None,
+               json_snippet=None, api_path=None):
+    """KPI card + collapsible detail panel with data lineage, JSON, and SQL."""
+    kpi(label, value, sub, color)
+
+    # Build a smart "why is this value?" explanation
+    is_null = str(value) in ("Unknown","⚠️ Unknown","N/A","None","","0","0.0")
+    is_zero = str(value) in ("0","0.0")
+
+    # JSON block
+    j_block = json_snippet or f'{{"value": {json.dumps(fact_value_raw, default=str)}, "source_table": "{source_table}"}}'
+
+    # Why-null reasons
+    if why_null_reasons and is_null:
+        null_html = "".join(f"<li style='color:#94A3B8;font-size:.70rem'>{r}</li>" for r in why_null_reasons)
+        null_section = f"<div style='margin-top:6px'><span style='color:#f59e0b;font-size:.72rem'>Why might this be 0 / Unknown?</span><ul style='margin:4px 0 0 14px'>{null_html}</ul></div>"
+    else:
+        null_section = ""
+
+    api_html = f"<div style='color:#475569;font-size:.68rem;margin-top:6px'>API: <code style='color:#60A5FA'>{api_path}</code></div>" if api_path else ""
+
+    st.markdown(
+        f"<details style='background:#0A0F1E;border-left:2px solid {color};"
+        f"border-radius:6px;padding:4px 10px;margin:-6px 0 4px 0'>"
+        f"<summary style='color:{color};font-size:.68rem;cursor:pointer;list-style:none'>"
+        f"📊 {label} — source, lineage & JSON</summary>"
+        f"<div style='font-size:.71rem;margin-top:6px'>"
+        f"<span style='color:#64748b'>Stored in:</span> <code style='color:#22c55e'>{source_table}</code> · "
+        f"<span style='color:#64748b'>Fact:</span> <code style='color:#60A5FA'>{fact_name}</code>"
+        f"{null_section}"
+        f"<pre style='color:#CBD5E1;background:#0f172a;padding:8px;border-radius:6px;"
+        f"font-size:.68rem;margin:6px 0;overflow:auto;max-height:250px'>{j_block}</pre>"
+        f"<pre style='color:#22c55e;background:#052e16;padding:6px;border-radius:6px;"
+        f"font-size:.68rem;margin:4px 0;overflow:auto'>{source_sql}</pre>"
+        f"{api_html}"
+        f"</div></details>",
+        unsafe_allow_html=True
+    )
+
 def flag(text, level="blue"):
     _icons = {"red":"🚨","amber":"⚠️","green":"✅","blue":"ℹ️"}
     icon = _icons.get(level,"ℹ️")
@@ -1663,19 +1703,51 @@ elif tab=="🏛️ Registry & Identity":
     form_state=str(gv(facts,"formation_state") or "")
 
     c1,c2,c3,c4,c5=st.columns(5)
-    with c1: kpi("SOS","✅ Active" if sos_act=="true" else "🚨 Inactive" if sos_act=="false" else "⚠️ Unknown",
-                 "sos_active","#22c55e" if sos_act=="true" else "#ef4444")
-    with c2: kpi("SOS Match","✅ Matched" if sos_match=="true" else "❌ No match" if sos_match=="false" else "⚠️ Unknown",
-                 f"Middesk conf: {mdsk_conf:.3f}","#22c55e" if sos_match=="true" else "#ef4444")
-    with c3: kpi("TIN","✅ Verified" if tin_bool=="true" else f"❌ {tin_status.capitalize()}" if tin_status else "⚠️ Unknown",
-                 "tin_match_boolean","#22c55e" if tin_bool=="true" else "#ef4444")
-    with c4: kpi("IDV","✅ Passed" if idv_val=="true" else "❌ Not passed" if idv_val=="false" else "⚠️ Unknown",
-                 "idv_passed_boolean","#22c55e" if idv_val=="true" else "#f59e0b")
+    _sos_sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS sos_active FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='sos_active';"
+    _tin_sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','status') AS tin_status FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match';"
+    _idv_sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS idv_passed FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='idv_passed_boolean';"
+    _fs_sql =f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS formation_state FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='formation_state';"
+    with c1:
+        kpi_detail("SOS","✅ Active" if sos_act=="true" else "🚨 Inactive" if sos_act=="false" else "⚠️ Unknown",
+                 "sos_active","#22c55e" if sos_act=="true" else "#ef4444" if sos_act=="false" else "#64748b",
+                 "sos_active",sos_act or None,"rds_warehouse_public.facts",_sos_sql,
+                 ["sos_active is derived from sos_filings[].active — no sos_filings = no sos_active",
+                  "Middesk could not match the entity in SOS registry",
+                  "Entity is very new (< 2 weeks) — not yet in registry"],
+                 f'{{"name":"sos_active","value":{json.dumps(sos_act or None)},"source":{{"platformId":-1,"name":"dependent"}},"dependencies":["sos_filings"]}}')
+    with c2:
+        kpi_detail("SOS Match","✅ Matched" if sos_match=="true" else "❌ No match" if sos_match=="false" else "⚠️ Unknown",
+                 f"Middesk conf: {mdsk_conf:.3f}","#22c55e" if sos_match=="true" else "#ef4444" if sos_match=="false" else "#64748b",
+                 "sos_match_boolean",sos_match or None,"rds_warehouse_public.facts",
+                 f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS sos_match_boolean, JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS conf FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='sos_match_boolean';",
+                 ["Middesk searched by submitted address and found no matching record",
+                  "Entity resolution gap: formation state ≠ operating state",
+                  "Submitted business name differs from registered legal name (DBA)"],
+                 f'{{"name":"sos_match_boolean","value":{json.dumps(sos_match or None)},"source":{{"platformId":16,"name":"middesk","confidence":{mdsk_conf}}}}}')
+    with c3:
+        kpi_detail("TIN","✅ Verified" if tin_bool=="true" else f"❌ {tin_status.capitalize()}" if tin_status else "⚠️ Unknown",
+                 "tin_match_boolean","#22c55e" if tin_bool=="true" else "#ef4444" if tin_bool=="false" else "#64748b",
+                 "tin_match_boolean",tin_bool or None,"rds_warehouse_public.facts",_tin_sql,
+                 ["EIN not submitted on onboarding form","IRS name-EIN mismatch (wrong legal name vs DBA)",
+                  "Middesk TIN review task not yet run","IRS system temporarily unavailable"],
+                 f'{{"name":"tin_match_boolean","value":{json.dumps(tin_bool=="true" if tin_bool else None)},"source":{{"platformId":-1,"name":"dependent"}},"dependencies":["tin_match"]}}')
+    with c4:
+        kpi_detail("IDV","✅ Passed" if idv_val=="true" else "❌ Not passed" if idv_val=="false" else "⚠️ Unknown",
+                 "idv_passed_boolean","#22c55e" if idv_val=="true" else "#f59e0b" if idv_val=="false" else "#64748b",
+                 "idv_passed_boolean",idv_val or None,"rds_warehouse_public.facts",_idv_sql,
+                 ["IDV session not yet completed (PENDING status)","Plaid IDV session expired or canceled",
+                  "is_sole_prop=true — IDV may be skipped","Plaid IDV not yet triggered for this business"],
+                 f'{{"name":"idv_passed_boolean","value":{json.dumps(idv_val=="true" if idv_val else None)},"source":{{"platformId":-1,"name":"dependent"}},"dependencies":["idv_passed"]}}')
     with c5:
         tax_haven=form_state.upper() in ("DE","NV","WY")
-        kpi("Formation State",form_state or "Unknown",
+        kpi_detail("Formation State",form_state or "Unknown",
             "⚠️ Tax haven — entity resolution gap risk" if tax_haven else "formation_state fact",
-            "#f59e0b" if tax_haven else "#3B82F6")
+            "#f59e0b" if tax_haven else "#3B82F6" if form_state else "#64748b",
+            "formation_state",form_state or None,"rds_warehouse_public.facts",_fs_sql,
+            ["formation_date/state not provided by Middesk — entity match failed",
+             "Entity is a foreign company with no US formation state"],
+            f'{{"name":"formation_state","value":{json.dumps(form_state or None)},"source":{{"platformId":16,"name":"middesk","confidence":{mdsk_conf}}}}}')
+    tax_haven=form_state.upper() in ("DE","NV","WY")
 
     r1,r2,r3,r4,r5=st.tabs(["🏛️ SOS","🗺️ Dom/Foreign","🔐 TIN","🪪 IDV","🔗 Cross-Analysis"])
 
@@ -2522,16 +2594,39 @@ elif tab=="🏭 Classification & KYB":
     naics_conf=gc(facts,"naics_code"); naics_src=gp(facts,"naics_code")
     is_fallback=naics=="561499"
 
+    _naics_sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS naics, JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid, JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS conf FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='naics_code';"
+    alts_n=len(get_alts(facts,"naics_code"))
     c1,c2,c3,c4,c5=st.columns(5)
-    with c1: kpi("NAICS",naics or "N/A",f"{'⚠️ Fallback code' if is_fallback else 'Industry code'} · {pid_info(naics_src)[0]}",
-                 "#ef4444" if is_fallback else "#22c55e" if naics else "#64748b")
-    with c2: kpi("NAICS Conf",f"{naics_conf:.4f}","0=no match · 1=perfect · formula varies by vendor",
-                 "#22c55e" if naics_conf>0.70 else "#f59e0b" if naics_conf>0.40 else "#ef4444")
-    with c3: kpi("MCC",mcc or "N/A",f"Merchant Category Code · {pid_info(gp(facts,'mcc_code'))[0]}","#3B82F6")
-    with c4: kpi("Industry",str(gv(facts,"industry") or "N/A")[:22],"2-digit NAICS sector group","#8B5CF6")
+    with c1:
+        kpi_detail("NAICS",naics or "N/A",f"{'⚠️ Fallback code' if is_fallback else 'Industry code'} · {pid_info(naics_src)[0]}",
+                   "#ef4444" if is_fallback else "#22c55e" if naics else "#64748b",
+                   "naics_code",naics or None,"rds_warehouse_public.facts",_naics_sql,
+                   ["All vendors failed to match entity — no commercial NAICS data","AI fired as last resort but also returned 561499","website fact missing — AI could not search business website"],
+                   f'{{"name":"naics_code","value":{json.dumps(naics or None)},"source":{{"platformId":{naics_src or "null"},"confidence":{naics_conf}}},"ruleApplied":{{"name":"factWithHighestConfidence"}}}}',
+                   f"GET /integration/api/v1/facts/business/{bid}/kyb → data.naics_code")
+    with c2:
+        kpi_detail("NAICS Conf",f"{naics_conf:.4f}","0=no match · 1=perfect · formula varies by vendor",
+                   "#22c55e" if naics_conf>0.70 else "#f59e0b" if naics_conf>0.40 else "#ef4444",
+                   "naics_code.source.confidence",naics_conf,"rds_warehouse_public.facts (nested)","-- conf is inside the JSON: JSON_EXTRACT_PATH_TEXT(value,'source','confidence')",
+                   ["conf=0 means vendor returned null or entity match failed","OC/ZI/EFX: conf = match.index ÷ 55 — low conf = poor entity match rank"],
+                   f'{{"formula":"match.index ÷ 55 (OC/ZI/EFX) OR 0.15+0.20×tasks (Middesk) OR self-reported (AI)","current":{naics_conf}}}')
+    with c3:
+        kpi_detail("MCC",mcc or "N/A",f"Merchant Category Code · {pid_info(gp(facts,'mcc_code'))[0]}","#3B82F6",
+                   "mcc_code",mcc or None,"rds_warehouse_public.facts",
+                   f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS mcc FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='mcc_code';",
+                   ["NAICS=561499 → MCC defaults to 5614","mcc_code is derived (pid=-1) — not independently verified"],
+                   f'{{"name":"mcc_code","value":{json.dumps(mcc or None)},"derivation":"mcc_code_found ?? mcc_from_naics(naics_code) ?? 5614"}}')
+    with c4:
+        kpi_detail("Industry",str(gv(facts,"industry") or "N/A")[:22],"2-digit NAICS sector group","#8B5CF6",
+                   "industry",str(gv(facts,"industry") or None),"rds_warehouse_public.facts",
+                   f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS industry FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='industry';",
+                   None,'{"name":"industry","note":"2-digit NAICS sector derived from naics_code first 2 digits"}')
     with c5:
-        alts_n=len(get_alts(facts,"naics_code"))
-        kpi("Alt Sources",str(alts_n),f"Other vendors that also classified","#60A5FA" if alts_n>0 else "#64748b")
+        kpi_detail("Alt Sources",str(alts_n),"Other vendors that also classified","#60A5FA" if alts_n>0 else "#64748b",
+                   "naics_code.alternatives",alts_n,"rds_warehouse_public.facts (alternatives[] array)",
+                   "-- alternatives are nested inside the JSON value column\nSELECT JSON_EXTRACT_PATH_TEXT(value,'alternatives') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='naics_code';",
+                   ["0 alternatives = only one vendor returned a classification","All other vendors returned null or did not match entity"],
+                   f'{{"alternatives_count":{alts_n},"note":"See alternatives[] array in the naics_code JSON for each losing vendor"}}')
 
     if is_fallback:
         flag("🚨 NAICS 561499 = fallback code ('All Other Business Support Services'). "
@@ -2906,12 +3001,33 @@ elif tab=="⚠️ Risk & Watchlist":
     ju=int(float(gv(facts,"num_judgements") or 0))
     li=int(float(gv(facts,"num_liens") or 0))
 
+    _wl_sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='watchlist_hits';"
+    _pr_sql=f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS cnt FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('num_bankruptcies','num_judgements','num_liens');"
     c1,c2,c3,c4,c5=st.columns(5)
-    with c1: kpi("Watchlist Hits",str(wl),"PEP+Sanctions (adverse_media separate)","#ef4444" if wl>0 else "#22c55e")
-    with c2: kpi("Adverse Media",str(am),"Separate from watchlist","#f59e0b" if am>0 else "#22c55e")
-    with c3: kpi("Bankruptcies",str(bk),"num_bankruptcies","#8B5CF6" if bk>0 else "#22c55e")
-    with c4: kpi("Judgments",str(ju),"num_judgements","#8B5CF6" if ju>0 else "#22c55e")
-    with c5: kpi("Liens",str(li),"num_liens","#8B5CF6" if li>0 else "#22c55e")
+    with c1:
+        kpi_detail("Watchlist Hits",str(wl),"PEP+Sanctions (adverse_media separate)","#ef4444" if wl>0 else "#22c55e",
+                   "watchlist_hits",wl,"rds_warehouse_public.facts",_wl_sql,
+                   ["watchlist_hits=0 does NOT mean clean — it means no PEP/SANCTIONS hits","Adverse media is EXCLUDED from this count (see adverse_media_hits)"],
+                   f'{{"name":"watchlist_hits","value":{wl},"source":{{"platformId":-1,"name":"dependent"}},"dependencies":["watchlist"]}}',
+                   f"GET /integration/api/v1/facts/business/{bid}/kyb → data.watchlist_hits")
+    with c2:
+        kpi_detail("Adverse Media",str(am),"Tracked separately from watchlist","#f59e0b" if am>0 else "#22c55e",
+                   "adverse_media_hits",am,"rds_warehouse_public.facts",_wl_sql.replace("watchlist_hits","adverse_media_hits"),
+                   ["adverse_media is deliberately EXCLUDED from consolidated watchlist (filterOutAdverseMedia in consolidatedWatchlist.ts)"],
+                   f'{{"name":"adverse_media_hits","value":{am}}}')
+    with c3:
+        kpi_detail("Bankruptcies",str(bk),"num_bankruptcies · Worth Score: −40pts each","#8B5CF6" if bk>0 else "#22c55e",
+                   "num_bankruptcies",bk,"rds_warehouse_public.facts",_pr_sql,
+                   ["num_bankruptcies=0 means Equifax found no records OR could not match entity","Very new / micro businesses have no Equifax coverage"],
+                   f'{{"name":"num_bankruptcies","value":{bk},"source":{{"platformId":17,"name":"equifax"}}}}')
+    with c4:
+        kpi_detail("Judgments",str(ju),"num_judgements · Worth Score: −20pts each","#8B5CF6" if ju>0 else "#22c55e",
+                   "num_judgements",ju,"rds_warehouse_public.facts",_pr_sql,None,
+                   f'{{"name":"num_judgements","value":{ju}}}')
+    with c5:
+        kpi_detail("Liens",str(li),"num_liens · Worth Score: −10pts each","#8B5CF6" if li>0 else "#22c55e",
+                   "num_liens",li,"rds_warehouse_public.facts",_pr_sql,None,
+                   f'{{"name":"num_liens","value":{li}}}')
     if wl>0: flag(f"🚨 {wl} watchlist hit(s). SANCTIONS=hard stop · PEP=Enhanced Due Diligence · Other=manual review.","red")
 
     rw1,rw2,rw3=st.tabs(["🔍 Watchlist Detail","📜 Public Records","🔗 Risk Combinations"])
@@ -3201,22 +3317,159 @@ customer_files.worth_score: from warehouse.latest_score (datascience schema) —
         score=None
         if score_df is not None and not score_df.empty:
             row=score_df.iloc[0]
-            score=float(row.get("score_850") or 0)
-            score_100=float(row.get("score_100") or 0) if "score_100" in row else (score-300)/550*100
+            score_raw=row.get("score_850")
+            score=float(score_raw or 0)
+            score_100=float(row.get("score_100") or 0) if "score_100" in row else (score-300)/550*100 if score>300 else 0.0
             risk=str(row.get("risk_level","") or "")
             dec=str(row.get("score_decision","") or "")
             scored_at=str(row.get("created_at",""))[:16]
-            # Reverse-compute probability
-            prob=round((score-300)/550,4) if score>0 else 0
+            prob=round((score-300)/550,4) if score>300 else 0.0
             rc={"HIGH":"#ef4444","MODERATE":"#f59e0b","MEDIUM":"#f59e0b","LOW":"#22c55e"}.get(risk.upper(),"#64748b")
             dc={"APPROVE":"#22c55e","FURTHER_REVIEW_NEEDED":"#f59e0b","DECLINE":"#ef4444"}.get(dec,"#64748b")
 
+            # Detect score=0 / score=300 (model returned minimum — not a real score)
+            score_is_zero = score <= 300
+
+            if score_is_zero:
+                flag("🔴 Worth Score = 0 (or ≤300). This means the model returned its minimum possible output. "
+                     "This is almost always caused by missing model inputs — see diagnosis below.", "red")
+
             c1,c2,c3,c4,c5=st.columns(5)
-            with c1: kpi("Worth Score (850)",f"{score:.0f}","score_300_850 = p × 550 + 300","#3B82F6")
-            with c2: kpi("Score (100)",f"{score_100:.1f}","score_0_100 = p × 100","#3B82F6")
-            with c3: kpi("Model Probability",f"{prob:.4f}","final_proba from calibrated ensemble","#8B5CF6")
-            with c4: kpi("Risk Level",risk or "Unknown","from score_decision_matrix",rc)
-            with c5: kpi("Decision",dec.replace("_"," ")[:16] or "Unknown","configurable per customer",dc)
+            score_sql=f"""SELECT bs.weighted_score_850, bs.weighted_score_100,
+       bs.risk_level, bs.score_decision, bs.created_at
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+WHERE cs.business_id='{bid}' ORDER BY bs.created_at DESC LIMIT 1;"""
+            score_json=f"""{{\n  "weighted_score_850": {score},\n  "weighted_score_100": {score_100:.1f},\n  "risk_level": "{risk}",\n  "score_decision": "{dec}",\n  "created_at": "{scored_at}"\n}}"""
+            null_reasons=[
+                "weighted_score_850=0 — the model returned its minimum output (probability≈0)",
+                "Critical features are null: no Plaid banking data, no revenue, no formation_date",
+                "Entity matching failed — ZI/EFX/OC could not match → most firmographic features are null",
+                "Business too new — not yet in vendor bulk datasets (updated monthly)",
+                "Score pipeline ran but model output was below 300 floor → stored as 0 or 300",
+            ]
+            with c1:
+                kpi_detail("Worth Score (850)",f"{score:.0f}","score_300_850 = p × 550 + 300","#ef4444" if score_is_zero else "#3B82F6",
+                           "weighted_score_850",score,"rds_manual_score_public.business_scores",score_sql,
+                           null_reasons if score_is_zero else None, score_json,
+                           f"GET /integration/api/v1/score/business/{bid}")
+            with c2:
+                kpi_detail("Score (100)",f"{score_100:.1f}","score_0_100 = p × 100","#ef4444" if score_is_zero else "#3B82F6",
+                           "weighted_score_100",score_100,"rds_manual_score_public.business_scores",score_sql,
+                           None, score_json)
+            with c3:
+                kpi_detail("Model Probability",f"{prob:.4f}","final_proba from calibrated ensemble","#ef4444" if score_is_zero else "#8B5CF6",
+                           "probablity (sic)",prob,"ai-score-service Kafka message",
+                           "-- Probability is not stored directly in Redshift.\n-- Reverse-compute: prob = (score_850 - 300) / 550\n-- Raw scores in: awsdatacatalog.scores_ai_dataplatform_v1",
+                           null_reasons if score_is_zero else None, score_json)
+            with c4:
+                kpi_detail("Risk Level",risk or "Unknown","from score_decision_matrix",rc,
+                           "risk_level",risk or None,"rds_manual_score_public.business_scores",
+                           "SELECT range_start, range_end, risk_level, decision FROM score_decision_matrix ORDER BY range_start;\n-- Default: 0-549=HIGH, 550-699=MODERATE, 700-850=LOW",
+                           ["Score ≤549 → HIGH", "Score 550-699 → MODERATE","Score ≥700 → LOW"],
+                           f'{{"risk_level": "{risk}", "range": "0-549 if score≤549"}}')
+            with c5:
+                kpi_detail("Decision",dec.replace("_"," ")[:16] or "Unknown","configurable per customer",dc,
+                           "score_decision",dec or None,"rds_manual_score_public.business_scores",
+                           "SELECT decision FROM score_decision_matrix WHERE range_start <= score AND range_end >= score;\n-- Configurable per customer_id in score_decision_matrix table",
+                           ["Score=0 → DECLINE (below threshold)","Thresholds are per-customer configurable"],
+                           f'{{"score_decision": "{dec}"}}')
+
+            # ── Score=0 root cause diagnosis ──────────────────────────────────
+            if score_is_zero:
+                st.markdown("---")
+                st.markdown("### 🔴 Why is the Worth Score 0? — Root Cause Diagnosis")
+                st.markdown("""<div style="background:#1f0a0a;border:1px solid #ef4444;border-radius:12px;padding:16px 20px;margin:8px 0">
+<div style="color:#fca5a5;font-weight:700;font-size:.90rem;margin-bottom:10px">
+  Score = 0 means one of these conditions is true:
+</div>""",unsafe_allow_html=True)
+
+                # Check which KYB facts are available
+                bk_d=int(float(gv(facts,"num_bankruptcies") or 0))
+                has_rev=gv(facts,"revenue") is not None
+                has_fd=bool(gv(facts,"formation_date"))
+                has_emp=gv(facts,"num_employees") is not None
+                naics_d=str(gv(facts,"naics_code") or "")
+                sos_d=str(gv(facts,"sos_active") or "").lower()
+                tin_d=str(gv(facts,"tin_match_boolean") or "").lower()
+
+                diag_rows=[
+                    ("Entity matching failed — no firmographic data",
+                     not has_rev and not has_emp,
+                     "ZI/EFX/OC could not match this entity → revenue, employees, NAICS all null → firmographic model gets all default values → very low probability",
+                     "Check if business is in ZI/EFX databases. Run entity re-match or wait for next bulk update (monthly)."),
+                    ("No Plaid banking data connected",
+                     True,  # always possible
+                     "Financial sub-model (PyTorch) requires: balance sheet, P&L, cash flow ratios from Plaid. "
+                     "If Plaid not connected → all financial features are null → financial model outputs minimum → drags ensemble score to 0.",
+                     "Verify if Plaid banking is connected for this business. Check rds_integration_data.plaid_* tables."),
+                    ("NAICS = 561499 (fallback code)",
+                     naics_d=="561499" or not naics_d,
+                     f"Current NAICS={naics_d or '(null)'}. Industry unknown → naics6 feature = null → company_profile category score is penalized.",
+                     "Industry classification failure reduces company_profile contribution. Fix NAICS first."),
+                    ("Business too new (< 2 weeks old)",
+                     not has_fd,
+                     "Formation date unknown → age_business = null → imputed to default (often 0) → low operations score.",
+                     f"formation_date fact is {'missing' if not has_fd else 'present'}. Check if date was provided on onboarding form."),
+                    ("Score pipeline ran but probability < 0.0001",
+                     score==0,
+                     "The model returned a probability extremely close to 0. This is mathematically possible when: BK history + watchlist + no banking + no revenue all combine.",
+                     "Review all negative signals simultaneously. Score = max(actual_prob × 550 + 300, 300) — if probability rounds to 0 → stored as 0."),
+                ]
+
+                for title, flagged, cause, action in diag_rows:
+                    color="#ef4444" if flagged else "#334155"
+                    prefix="🔴" if flagged else "⚪"
+                    st.markdown(f"""<div style="background:#1E293B;border-left:3px solid {color};
+                        border-radius:8px;padding:10px 14px;margin:4px 0">
+                      <div style="color:{color};font-weight:700;font-size:.80rem">{prefix} {title}</div>
+                      <div style="color:#94A3B8;font-size:.73rem;margin-top:3px">{cause}</div>
+                      <div style="color:#60A5FA;font-size:.72rem;margin-top:4px">⚡ {action}</div>
+                    </div>""",unsafe_allow_html=True)
+
+                st.markdown("</div>",unsafe_allow_html=True)
+
+                # Available vs missing features
+                st.markdown("##### Available vs Missing Model Input Features")
+                feat_status=[
+                    ("sos_active",sos_d or "(null)",bool(sos_d),"Company Profile"),
+                    ("tin_match_boolean",tin_d or "(null)",bool(tin_d),"Company Profile"),
+                    ("formation_date",str(gv(facts,"formation_date") or "(null)"),has_fd,"Company Profile → age_business"),
+                    ("naics_code",naics_d or "(null)",bool(naics_d) and naics_d!="561499","Company Profile → naics6"),
+                    ("revenue",str(gv(facts,"revenue") or "(null)")[:40],has_rev,"Business Operations"),
+                    ("num_employees",str(gv(facts,"num_employees") or "(null)"),has_emp,"Company Profile → count_employees"),
+                    ("num_bankruptcies",str(bk_d),"n/a" not in str(bk_d),"Public Records → count_bankruptcy"),
+                    ("watchlist_hits",str(gv(facts,"watchlist_hits") or "0"),True,"Used in cross-field checks"),
+                ]
+                st.dataframe(pd.DataFrame([{
+                    "Fact":f,"Value":v,"Present":"✅" if ok else "❌ NULL — imputed","Model Category":cat
+                } for f,v,ok,cat in feat_status]),use_container_width=True,hide_index=True)
+
+                st.markdown("##### SQL — Verify Score & Check What Triggered the 0")
+                st.code(f"""-- 1. Confirm the score record exists:
+SELECT bs.weighted_score_850, bs.weighted_score_100, bs.risk_level,
+       bs.score_decision, bs.created_at
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+WHERE cs.business_id = '{bid}' ORDER BY bs.created_at DESC LIMIT 5;
+
+-- 2. Check which features were available (Worth Score audit):
+SELECT * FROM warehouse.worth_score_input_audit ORDER BY score_date DESC LIMIT 3;
+
+-- 3. Check Plaid banking connection:
+SELECT * FROM rds_integration_data.plaid_items WHERE business_id='{bid}';
+
+-- 4. Check if entity was matched by ZI/EFX:
+SELECT name, JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid,
+       JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS conf
+FROM rds_warehouse_public.facts
+WHERE business_id='{bid}'
+  AND name IN ('revenue','num_employees','naics_code','formation_date')
+ORDER BY name;
+
+-- 5. Raw score from data platform:
+SELECT business_id, score, score_date
+FROM warehouse.latest_score WHERE business_id='{bid}';""",language="sql")
 
             # Score gauge
             score_pct=int((score-300)/550*100)
