@@ -394,74 +394,172 @@ def load_bert(bid):
 def load_audit():
     return run_sql("SELECT * FROM warehouse.worth_score_input_audit ORDER BY score_date DESC LIMIT 30")
 
-# ── Cached Home-tab population queries (keyed by date range) ─────────────────
+# ── Cached Home-tab population queries ───────────────────────────────────────
+# SOURCE: rds_cases_public.rel_business_customer_monitoring (created_at = true onboarding date)
+# This is the authoritative source for "when was this business onboarded".
+# rds_warehouse_public.facts.received_at is NOT the onboarding date — it's when facts were
+# last written by the Fact Engine, which can be days/weeks after onboarding.
+# Reference query: uses rbcm.created_at filtered by date range, joins facts for KYB signals.
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_home_recent(date_from, date_to):
+    """
+    Load recently onboarded businesses using rel_business_customer_monitoring as the
+    authoritative onboarding date source (rbcm.created_at).
+    No LIMIT — returns all businesses in the date range.
+    Falls back to facts table if rbcm is not accessible.
+    """
     parts=[]
-    if date_from: parts.append(f"received_at >= '{date_from}'")
-    if date_to:   parts.append(f"received_at <= '{date_to} 23:59:59'")
+    if date_from: parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
+    if date_to:   parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
     dc=(" AND "+" AND ".join(parts)) if parts else ""
+
+    # Primary: use correct onboarding source (rel_business_customer_monitoring)
+    sql = f"""
+        SELECT DISTINCT
+            rbcm.business_id,
+            MIN(rbcm.created_at)           AS first_seen,
+            MAX(rbcm.created_at)           AS last_updated,
+            COUNT(DISTINCT f.name)         AS fact_count
+        FROM rds_cases_public.rel_business_customer_monitoring rbcm
+        LEFT JOIN rds_warehouse_public.facts f
+            ON f.business_id = rbcm.business_id
+        WHERE 1=1{dc}
+        GROUP BY rbcm.business_id
+        ORDER BY first_seen DESC
+    """
+    df, err = run_sql(sql)
+    if df is not None and not df.empty:
+        return df, None
+
+    # Fallback: facts table if rbcm not accessible
+    parts2=[]
+    if date_from: parts2.append(f"received_at >= '{date_from}'")
+    if date_to:   parts2.append(f"received_at <= '{date_to} 23:59:59'")
+    dc2=(" AND "+" AND ".join(parts2)) if parts2 else ""
     return run_sql(f"""
         SELECT business_id, MIN(received_at) AS first_seen, MAX(received_at) AS last_updated,
                COUNT(DISTINCT name) AS fact_count
         FROM rds_warehouse_public.facts
-        WHERE 1=1{dc}
+        WHERE 1=1{dc2}
         GROUP BY business_id
         ORDER BY first_seen DESC
-        LIMIT 200
     """)
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_home_kyb_stats(date_from, date_to):
-    """One bulk query returning all KYB health metrics per business for the dashboard."""
+    """
+    KYB health metrics for all onboarded businesses in the date range.
+    Uses rel_business_customer_monitoring for the business list (correct onboarding date),
+    then joins to facts for KYB signal values.
+    """
     parts=[]
-    if date_from: parts.append(f"received_at >= '{date_from}'")
-    if date_to:   parts.append(f"received_at <= '{date_to} 23:59:59'")
+    if date_from: parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
+    if date_to:   parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
     dc=(" AND "+" AND ".join(parts)) if parts else ""
-    # Pivot scalar KYB facts into columns using conditional aggregation
-    return run_sql(f"""
+
+    sql = f"""
+        WITH onboarded AS (
+            SELECT DISTINCT business_id
+            FROM rds_cases_public.rel_business_customer_monitoring
+            WHERE 1=1{dc}
+        )
         SELECT
-            business_id,
-            MAX(CASE WHEN name='sos_active'          THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS sos_active,
-            MAX(CASE WHEN name='tin_match_boolean'   THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS tin_match,
-            MAX(CASE WHEN name='idv_passed_boolean'  THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS idv_passed,
-            MAX(CASE WHEN name='naics_code'          THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS naics_code,
-            MAX(CASE WHEN name='watchlist_hits'      THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS watchlist_hits,
-            MAX(CASE WHEN name='num_bankruptcies'    THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_bankruptcies,
-            MAX(CASE WHEN name='num_judgements'      THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_judgements,
-            MAX(CASE WHEN name='num_liens'           THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_liens,
-            MAX(CASE WHEN name='adverse_media_hits'  THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS adverse_media,
-            MAX(CASE WHEN name='revenue'             THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS revenue,
-            MAX(CASE WHEN name='formation_date'      THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS formation_date,
-            MAX(CASE WHEN name='formation_state'     THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS formation_state,
-            MAX(received_at) AS last_seen,
-            MIN(received_at) AS first_seen,
-            COUNT(DISTINCT name) AS fact_count
-        FROM rds_warehouse_public.facts
-        WHERE name IN (
+            f.business_id,
+            MAX(CASE WHEN f.name='sos_active'          THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_active,
+            MAX(CASE WHEN f.name='tin_match_boolean'   THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS tin_match,
+            MAX(CASE WHEN f.name='idv_passed_boolean'  THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS idv_passed,
+            MAX(CASE WHEN f.name='naics_code'          THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS naics_code,
+            MAX(CASE WHEN f.name='watchlist_hits'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS watchlist_hits,
+            MAX(CASE WHEN f.name='num_bankruptcies'    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_bankruptcies,
+            MAX(CASE WHEN f.name='num_judgements'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_judgements,
+            MAX(CASE WHEN f.name='num_liens'           THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_liens,
+            MAX(CASE WHEN f.name='adverse_media_hits'  THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS adverse_media,
+            MAX(CASE WHEN f.name='revenue'             THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS revenue,
+            MAX(CASE WHEN f.name='formation_date'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_date,
+            MAX(CASE WHEN f.name='formation_state'     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_state,
+            MAX(f.received_at) AS last_seen,
+            MIN(f.received_at) AS first_seen,
+            COUNT(DISTINCT f.name) AS fact_count
+        FROM rds_warehouse_public.facts f
+        JOIN onboarded o ON o.business_id = f.business_id
+        WHERE f.name IN (
             'sos_active','tin_match_boolean','idv_passed_boolean','naics_code',
             'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
             'adverse_media_hits','revenue','formation_date','formation_state'
-        ){dc}
+        )
+        GROUP BY f.business_id
+    """
+    df, err = run_sql(sql)
+    if df is not None and not df.empty:
+        return df, None
+
+    # Fallback to facts-only if rbcm not accessible
+    parts2=[]
+    if date_from: parts2.append(f"received_at >= '{date_from}'")
+    if date_to:   parts2.append(f"received_at <= '{date_to} 23:59:59'")
+    dc2=(" AND "+" AND ".join(parts2)) if parts2 else ""
+    return run_sql(f"""
+        SELECT business_id,
+            MAX(CASE WHEN name='sos_active'         THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS sos_active,
+            MAX(CASE WHEN name='tin_match_boolean'  THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS tin_match,
+            MAX(CASE WHEN name='idv_passed_boolean' THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS idv_passed,
+            MAX(CASE WHEN name='naics_code'         THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS naics_code,
+            MAX(CASE WHEN name='watchlist_hits'     THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS watchlist_hits,
+            MAX(CASE WHEN name='num_bankruptcies'   THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_bankruptcies,
+            MAX(CASE WHEN name='num_judgements'     THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_judgements,
+            MAX(CASE WHEN name='num_liens'          THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_liens,
+            MAX(CASE WHEN name='adverse_media_hits' THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS adverse_media,
+            MAX(CASE WHEN name='revenue'            THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS revenue,
+            MAX(CASE WHEN name='formation_date'     THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS formation_date,
+            MAX(CASE WHEN name='formation_state'    THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS formation_state,
+            MAX(received_at) AS last_seen, MIN(received_at) AS first_seen,
+            COUNT(DISTINCT name) AS fact_count
+        FROM rds_warehouse_public.facts
+        WHERE name IN ('sos_active','tin_match_boolean','idv_passed_boolean','naics_code',
+            'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
+            'adverse_media_hits','revenue','formation_date','formation_state'){dc2}
         GROUP BY business_id
     """)
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_home_flags(date_from, date_to):
+    """Flag scoring facts — uses rel_business_customer_monitoring for business list."""
     parts=[]
-    if date_from: parts.append(f"received_at >= '{date_from}'")
-    if date_to:   parts.append(f"received_at <= '{date_to} 23:59:59'")
+    if date_from: parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
+    if date_to:   parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
     dc=(" AND "+" AND ".join(parts)) if parts else ""
-    return run_sql(f"""
-        SELECT business_id, name,
-               JSON_EXTRACT_PATH_TEXT(value,'value') AS val,
-               received_at
-        FROM rds_warehouse_public.facts
-        WHERE name IN (
+    sql = f"""
+        WITH onboarded AS (
+            SELECT DISTINCT business_id
+            FROM rds_cases_public.rel_business_customer_monitoring
+            WHERE 1=1{dc}
+        )
+        SELECT f.business_id, f.name,
+               JSON_EXTRACT_PATH_TEXT(f.value,'value') AS val,
+               f.received_at
+        FROM rds_warehouse_public.facts f
+        JOIN onboarded o ON o.business_id = f.business_id
+        WHERE f.name IN (
             'sos_active','tin_match_boolean','watchlist_hits',
             'naics_code','idv_passed_boolean','num_bankruptcies',
             'num_judgements','num_liens','sos_match_boolean'
-        ){dc}
+        )
+        ORDER BY f.business_id, f.name, f.received_at DESC
+    """
+    df, err = run_sql(sql)
+    if df is not None and not df.empty:
+        return df, None
+    # Fallback
+    parts2=[]
+    if date_from: parts2.append(f"received_at >= '{date_from}'")
+    if date_to:   parts2.append(f"received_at <= '{date_to} 23:59:59'")
+    dc2=(" AND "+" AND ".join(parts2)) if parts2 else ""
+    return run_sql(f"""
+        SELECT business_id, name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val, received_at
+        FROM rds_warehouse_public.facts
+        WHERE name IN ('sos_active','tin_match_boolean','watchlist_hits','naics_code',
+            'idv_passed_boolean','num_bankruptcies','num_judgements','num_liens','sos_match_boolean'){dc2}
         ORDER BY business_id, name, received_at DESC
     """)
 
@@ -1436,16 +1534,96 @@ if tab=="🏠 Home":
     # PORTFOLIO OVERVIEW DASHBOARD
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("### 📊 Portfolio Overview")
-    st.caption(f"📅 **{period_label}** · {total_biz:,} businesses · data from `rds_warehouse_public.facts`")
 
-    # ── Row 1: KPI cards ─────────────────────────────────────────────────────
+    # Source attribution banner
+    _src_primary = "rds_cases_public.rel_business_customer_monitoring (created_at = true onboarding date)"
+    _src_facts   = "rds_warehouse_public.facts (KYB signal values)"
+    st.markdown(
+        f"<div style='background:#0c1a2e;border-left:3px solid #3B82F6;border-radius:6px;"
+        f"padding:8px 14px;margin:4px 0;font-size:.76rem'>"
+        f"📅 <strong style='color:#CBD5E1'>{period_label}</strong> · "
+        f"<strong style='color:#60A5FA'>{total_biz:,} businesses</strong> · "
+        f"Onboarding date source: <code style='color:#22c55e'>rds_cases_public.rel_business_customer_monitoring.created_at</code> · "
+        f"KYB signals: <code style='color:#22c55e'>rds_warehouse_public.facts</code>"
+        f"</div>",
+        unsafe_allow_html=True
+    )
+    _home_sql_ref = f"""-- Correct onboarding count query (mirrors app logic):
+WITH onboarded AS (
+    SELECT DISTINCT business_id, MIN(created_at) AS onboarded_at
+    FROM rds_cases_public.rel_business_customer_monitoring
+    WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}'
+    GROUP BY business_id
+)
+SELECT COUNT(*) AS total_businesses FROM onboarded;
+-- NOTE: The app previously used rds_warehouse_public.facts.received_at which is NOT
+-- the onboarding date. It is the fact write timestamp (can be days/weeks after onboarding).
+-- This caused undercounting vs queries using rel_business_customer_monitoring."""
+
+    # ── Row 1: KPI cards with detail_panel ────────────────────────────────────
     c1,c2,c3,c4,c5,c6 = st.columns(6)
-    with c1: kpi("Total","" + f"{total_biz:,}","businesses","#3B82F6")
-    with c2: kpi("🚨 Red Flags",f"{len(flagged_biz):,}",rate(len(flagged_biz),total_biz)+" flagged","#ef4444" if flagged_biz.shape[0]>0 else "#22c55e")
-    with c3: kpi("SOS Active",f"{sos_ok:,}",rate(sos_ok,n)+" pass rate","#22c55e" if sos_ok/max(n,1)>0.8 else "#f97316")
-    with c4: kpi("TIN Verified",f"{tin_ok:,}",rate(tin_ok,n)+" pass rate","#22c55e" if tin_ok/max(n,1)>0.8 else "#f59e0b")
-    with c5: kpi("IDV Passed",f"{idv_ok:,}",rate(idv_ok,n)+" pass rate","#22c55e" if idv_ok/max(n,1)>0.7 else "#f59e0b")
-    with c6: kpi("Watchlist Hits",f"{wl_biz:,}",rate(wl_biz,n)+" affected","#ef4444" if wl_biz>0 else "#22c55e")
+    _kpi_sql = f"SELECT COUNT(DISTINCT business_id) AS total FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}';"
+    with c1:
+        kpi("Total",f"{total_biz:,}","businesses","#3B82F6")
+        detail_panel("Total Businesses",str(total_biz),
+            what_it_means="Count of distinct businesses onboarded in the selected period. Source: rds_cases_public.rel_business_customer_monitoring.created_at — this is the AUTHORITATIVE onboarding date. The old query used facts.received_at which is the fact write timestamp (not the onboarding date), causing undercounting.",
+            source_table="rds_cases_public.rel_business_customer_monitoring",
+            source_file="customer_table.sql", source_file_line="rel_business_customer_monitoring · created_at = onboarding timestamp",
+            api_endpoint="No API — Redshift internal table",
+            json_obj={"total_businesses":total_biz,"date_range":f"{hub_date_from} → {hub_date_to}","source_table":"rds_cases_public.rel_business_customer_monitoring","date_field":"created_at","previous_bug":"Used facts.received_at — wrong source, caused undercounting vs 543 in your reference query"},
+            sql=_home_sql_ref,
+            links=[("customer_table.sql","warehouse-service customer_table.sql")],
+            color="#3B82F6", icon="🏢")
+    with c2:
+        kpi("🚨 Red Flags",f"{len(flagged_biz):,}",rate(len(flagged_biz),total_biz)+" flagged","#ef4444" if flagged_biz.shape[0]>0 else "#22c55e")
+        detail_panel("Red Flags",str(len(flagged_biz)),
+            what_it_means="Count of businesses with at least one red flag detected (SOS inactive/missing, TIN failed, Watchlist hit, IDV failed, NAICS fallback, Bankruptcy). This is a CUSTOM HEURISTIC — not a regulatory score. See scoring weights in the Home tab methodology card.",
+            source_table="rds_warehouse_public.facts (computed cross-field from KYB scalar facts)",
+            source_file="facts/kyb/index.ts", source_file_line="Heuristic: sos_active + tin_match_boolean + watchlist_hits + idv_passed_boolean + naics_code + num_bankruptcies",
+            json_obj={"flagged_businesses":len(flagged_biz),"total_businesses":total_biz,"pct_flagged":round(len(flagged_biz)/max(total_biz,1)*100,1),"note":"Custom additive heuristic — not a regulatory score"},
+            sql=f"SELECT COUNT(DISTINCT business_id) AS flagged FROM rds_warehouse_public.facts WHERE business_id IN (SELECT DISTINCT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') AND name='watchlist_hits' AND JSON_EXTRACT_PATH_TEXT(value,'value')::int > 0;",
+            links=[("facts/kyb/index.ts","KYB scalar facts"),("consolidatedWatchlist.ts","Watchlist architecture")],
+            color="#ef4444" if flagged_biz.shape[0]>0 else "#22c55e", icon="🚨")
+    with c3:
+        kpi("SOS Active",f"{sos_ok:,}",rate(sos_ok,n)+" pass rate","#22c55e" if sos_ok/max(n,1)>0.8 else "#f97316")
+        detail_panel("SOS Active",str(sos_ok),
+            what_it_means="Count of businesses where sos_active=true (entity in good standing with Secretary of State). sos_active is a DEPENDENT fact derived from sos_filings[].active. Source: Middesk (pid=16). Null = Middesk could not match entity or sos_filings not yet loaded.",
+            source_table="rds_warehouse_public.facts · name='sos_active'",
+            source_file="facts/kyb/index.ts", source_file_line="sosActive · dependent · ANY(sos_filings[].active)",
+            json_obj={"sos_active_count":sos_ok,"sos_fail_count":sos_fail,"sos_missing_count":sos_miss,"total":n,"pass_rate":rate(sos_ok,n)},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS sos_active, COUNT(*) FROM rds_warehouse_public.facts WHERE name='sos_active' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1;",
+            links=[("facts/kyb/index.ts","sosActive fact"),("integrations.constant.ts","MIDDESK=16")],
+            color="#22c55e" if sos_ok/max(n,1)>0.8 else "#f97316", icon="🏛️")
+    with c4:
+        kpi("TIN Verified",f"{tin_ok:,}",rate(tin_ok,n)+" pass rate","#22c55e" if tin_ok/max(n,1)>0.8 else "#f59e0b")
+        detail_panel("TIN Verified",str(tin_ok),
+            what_it_means="Count of businesses where tin_match_boolean=true (IRS confirmed EIN+name match). Source: Middesk (pid=16) TIN review task — direct IRS query. Null = EIN not submitted or Middesk TIN task not yet run.",
+            source_table="rds_warehouse_public.facts · name='tin_match_boolean'",
+            source_file="facts/kyb/index.ts", source_file_line="tinMatchBoolean · dependent · tin_match.value.status==='success'",
+            json_obj={"tin_verified_count":tin_ok,"tin_failed_count":tin_fail,"tin_missing":n-tin_ok-tin_fail,"pass_rate":rate(tin_ok,n)},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS tin_boolean, COUNT(*) FROM rds_warehouse_public.facts WHERE name='tin_match_boolean' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1;",
+            links=[("facts/kyb/index.ts","tinMatchBoolean fact"),("integrations.constant.ts","MIDDESK=16")],
+            color="#22c55e" if tin_ok/max(n,1)>0.8 else "#f59e0b", icon="🔐")
+    with c5:
+        kpi("IDV Passed",f"{idv_ok:,}",rate(idv_ok,n)+" pass rate","#22c55e" if idv_ok/max(n,1)>0.7 else "#f59e0b")
+        detail_panel("IDV Passed",str(idv_ok),
+            what_it_means="Count of businesses where idv_passed_boolean=true (at least 1 Plaid IDV session with SUCCESS status). Source: Plaid (pid=18=PLAID_IDV). Null = IDV not triggered (sole prop) or webhook not yet received.",
+            source_table="rds_warehouse_public.facts · name='idv_passed_boolean'",
+            source_file="facts/kyb/index.ts", source_file_line="idvPassedBoolean · dependent · idv_passed>=1",
+            json_obj={"idv_passed_count":idv_ok,"idv_failed_count":idv_fail,"pass_rate":rate(idv_ok,n)},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS idv_boolean, COUNT(*) FROM rds_warehouse_public.facts WHERE name='idv_passed_boolean' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1;",
+            links=[("facts/kyb/index.ts","idvPassedBoolean fact"),("integrations.constant.ts","PLAID_IDV=18")],
+            color="#22c55e" if idv_ok/max(n,1)>0.7 else "#f59e0b", icon="🪪")
+    with c6:
+        kpi("Watchlist Hits",f"{wl_biz:,}",rate(wl_biz,n)+" affected","#ef4444" if wl_biz>0 else "#22c55e")
+        detail_panel("Watchlist Hits",str(wl_biz),
+            what_it_means="Count of businesses with watchlist_hits > 0 (PEP or SANCTIONS match). DOES NOT include adverse_media (tracked separately). Source: Trulioo PSC + Middesk (merged by consolidatedWatchlist.ts). Any hit = compliance review required.",
+            source_table="rds_warehouse_public.facts · name='watchlist_hits'",
+            source_file="consolidatedWatchlist.ts", source_file_line="watchlistHits · COUNT(watchlist.metadata[])",
+            json_obj={"watchlist_affected_businesses":wl_biz,"total_businesses":n,"pct_affected":rate(wl_biz,n),"note":"PEP+SANCTIONS only. adverse_media excluded by filterOutAdverseMedia()"},
+            sql=f"SELECT COUNT(DISTINCT business_id) AS wl_hits FROM rds_warehouse_public.facts WHERE name='watchlist_hits' AND JSON_EXTRACT_PATH_TEXT(value,'value')::int > 0 AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}');",
+            links=[("consolidatedWatchlist.ts","Watchlist architecture"),("integrations.constant.ts","TRULIOO=38, MIDDESK=16")],
+            color="#ef4444" if wl_biz>0 else "#22c55e", icon="⚠️")
 
     st.markdown("---")
 
@@ -1461,6 +1639,13 @@ if tab=="🏠 Home":
             ("NAICS Classified", naics_ok, naics_fb, naics_ms, n, "#22c55e","#f59e0b"),
             ("Revenue Known", has_rev,  0, n-has_rev, n, "#22c55e","#64748b"),
         ]
+        HEALTH_META = {
+            "SOS Active":("sos_active","rds_warehouse_public.facts","facts/kyb/index.ts","sosActive · dependent · Middesk pid=16","true when entity in good standing with Secretary of State"),
+            "TIN Verified":("tin_match_boolean","rds_warehouse_public.facts","facts/kyb/index.ts","tinMatchBoolean · Middesk IRS check pid=16","true when IRS confirmed EIN+name match"),
+            "IDV Passed":("idv_passed_boolean","rds_warehouse_public.facts","plaid/plaidIdv.ts","idvPassedBoolean · Plaid IDV pid=18","true when at least 1 SUCCESS IDV session"),
+            "NAICS Classified":("naics_code","rds_warehouse_public.facts","facts/kyb/index.ts","naicsCode · factWithHighestConfidence","true when naics_code ≠ 561499 and not null"),
+            "Revenue Known":("revenue","rds_warehouse_public.facts","facts/kyb/index.ts","revenue · ZI pid=24 / EFX pid=17","present when ZI or EFX matched the entity"),
+        }
         for label,ok_n,fail_n,miss_n,total_n,ok_col,fail_col in metrics:
             ok_pct   = int(ok_n/max(total_n,1)*100)
             fail_pct = int(fail_n/max(total_n,1)*100)
@@ -1484,6 +1669,16 @@ if tab=="🏠 Home":
                 <span>? {miss_n:,}</span>
               </div>
             </div>""", unsafe_allow_html=True)
+            m = HEALTH_META.get(label,())
+            detail_panel(f"KYB Health: {label}", f"{ok_pct}% pass ({ok_n:,}/{total_n:,})",
+                what_it_means=f"Pass: {ok_n:,} · Fail: {fail_n:,} · Missing: {miss_n:,}\n\n{m[4] if len(m)>4 else ''}\n\nFail means the check ran and returned false. Missing means the fact is null (vendor did not match entity, or check not yet run).",
+                source_table=f"{m[1] if len(m)>1 else 'rds_warehouse_public.facts'} · name='{m[0] if m else label}'",
+                source_file=m[2] if len(m)>2 else "facts/kyb/index.ts",
+                source_file_line=m[3] if len(m)>3 else "",
+                json_obj={"metric":label,"pass":ok_n,"fail":fail_n,"missing":miss_n,"total":total_n,"pass_rate_pct":ok_pct,"date_range":f"{hub_date_from}→{hub_date_to}","source_table":m[1] if len(m)>1 else "rds_warehouse_public.facts"},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS val, COUNT(*) FROM rds_warehouse_public.facts WHERE name='{m[0] if m else label}' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1;",
+                links=[(m[2] if len(m)>2 else "facts/kyb/index.ts", m[3] if len(m)>3 else label)],
+                color=ok_col, icon="🩺")
 
     with col_timeline:
         st.markdown("#### 📈 Onboarding Timeline")
@@ -1495,6 +1690,14 @@ if tab=="🏠 Home":
                                 line=dict(width=2))
             fig_t.update_layout(height=260, margin=dict(t=40,b=20,l=10,r=10))
             st.plotly_chart(dark_chart(fig_t), use_container_width=True)
+            detail_panel("Onboarding Timeline",f"{len(timeline)} days · {total_biz:,} total businesses",
+                what_it_means="Daily count of newly onboarded businesses. Source: rds_cases_public.rel_business_customer_monitoring.created_at — the TRUE onboarding date. Peaks may reflect customer onboarding campaigns. Gaps may indicate data pipeline delays.",
+                source_table="rds_cases_public.rel_business_customer_monitoring",
+                source_file="customer_table.sql", source_file_line="rel_business_customer_monitoring · created_at",
+                json_obj={"chart_type":"area","x":"created_at (daily)","y":"distinct business_id count","source":"rds_cases_public.rel_business_customer_monitoring","date_range":f"{hub_date_from}→{hub_date_to}","data_points":len(timeline)},
+                sql=f"SELECT DATE(created_at) AS onboarding_date, COUNT(DISTINCT business_id) AS new_businesses FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}' GROUP BY 1 ORDER BY 1;",
+                links=[("customer_table.sql","rel_business_customer_monitoring source")],
+                color="#3B82F6", icon="📈")
         else:
             st.info("Timeline requires date-filtered data. Enable 'Filter by date' in sidebar.")
 
@@ -5403,6 +5606,120 @@ OPENAI_API_KEY = "sk-svcacct-your-key-here"
         st.session_state["agent_history"].extend([{"role":"user","content":user_q},{"role":"assistant","content":ans}]); st.rerun()
     if st.session_state["agent_history"]:
         if st.button("🗑️ Clear chat"): st.session_state["agent_history"]=[]; st.rerun()
+
+    st.markdown("---")
+    st.markdown("### 🔬 Interactive SQL & Python Runner")
+    st.markdown("Run any SQL or Python code directly against the Redshift database. Results appear inline.")
+    st.caption(f"Credentials: `{os.getenv('REDSHIFT_USER','readonly_all_access')}` · `{os.getenv('REDSHIFT_HOST','...')[:50]}` · port 5439")
+
+    runner_tab1, runner_tab2 = st.tabs(["🗄️ SQL Runner", "🐍 Python Runner"])
+
+    with runner_tab1:
+        st.markdown("**Write and run SQL directly against Redshift:**")
+        default_sql = f"""-- Example: onboarded businesses this week with KYB signals
+WITH onboarded AS (
+    SELECT DISTINCT business_id, MIN(created_at) AS onboarded_at
+    FROM rds_cases_public.rel_business_customer_monitoring
+    WHERE DATE(created_at) >= CURRENT_DATE - 7
+    GROUP BY business_id
+)
+SELECT
+    o.business_id,
+    o.onboarded_at::date                                                          AS onboarded_date,
+    JSON_EXTRACT_PATH_TEXT(f_sos.value,'value')                                   AS sos_active,
+    JSON_EXTRACT_PATH_TEXT(f_tin.value,'value')                                   AS tin_match_boolean,
+    JSON_EXTRACT_PATH_TEXT(f_wl.value,'value')                                    AS watchlist_hits,
+    JSON_EXTRACT_PATH_TEXT(f_naics.value,'value')                                 AS naics_code
+FROM onboarded o
+LEFT JOIN rds_warehouse_public.facts f_sos   ON f_sos.business_id=o.business_id   AND f_sos.name='sos_active'
+LEFT JOIN rds_warehouse_public.facts f_tin   ON f_tin.business_id=o.business_id   AND f_tin.name='tin_match_boolean'
+LEFT JOIN rds_warehouse_public.facts f_wl    ON f_wl.business_id=o.business_id    AND f_wl.name='watchlist_hits'
+LEFT JOIN rds_warehouse_public.facts f_naics ON f_naics.business_id=o.business_id AND f_naics.name='naics_code'
+ORDER BY o.onboarded_at DESC
+LIMIT 50;""" if not bid else f"""-- Facts for business {bid}:
+SELECT name,
+    JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,
+    JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS winning_pid,
+    JSON_EXTRACT_PATH_TEXT(value,'source','confidence')  AS confidence,
+    received_at
+FROM rds_warehouse_public.facts
+WHERE business_id = '{bid}'
+ORDER BY name;"""
+
+        sql_input = st.text_area("SQL Query:", value=default_sql, height=200, key="sql_runner_input")
+        run_col, clear_col = st.columns([2,1])
+        with run_col:
+            if st.button("▶ Run SQL", type="primary", key="run_sql_btn"):
+                with st.spinner("Running query…"):
+                    result_df, result_err = run_sql(sql_input)
+                if result_df is not None and not result_df.empty:
+                    st.success(f"✅ {len(result_df)} rows returned")
+                    st.dataframe(result_df, use_container_width=True)
+                    # Download button
+                    csv = result_df.to_csv(index=False)
+                    st.download_button("⬇️ Download CSV", csv, "query_result.csv", "text/csv")
+                elif result_df is not None and result_df.empty:
+                    st.info("Query returned 0 rows.")
+                else:
+                    st.error(f"❌ Query error: {result_err}")
+        with clear_col:
+            if st.button("🗑️ Clear", key="clear_sql"):
+                st.rerun()
+
+    with runner_tab2:
+        st.markdown("**Write Python code that runs against Redshift. `conn` is pre-opened, `pd` is available.**")
+        default_py = f"""import pandas as pd
+import psycopg2, os, json
+
+conn = psycopg2.connect(
+    dbname=os.getenv('REDSHIFT_DB','dev'),
+    user=os.getenv('REDSHIFT_USER','readonly_all_access'),
+    password=os.getenv('REDSHIFT_PASSWORD',''),
+    host=os.getenv('REDSHIFT_HOST',''),
+    port=int(os.getenv('REDSHIFT_PORT','5439')),
+    connect_timeout=15
+)
+
+# Example: load facts for a business and parse JSON
+bid = "{bid or 'PASTE-UUID-HERE'}"
+df = pd.read_sql(f\"\"\"
+    SELECT name,
+           JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,
+           JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid,
+           JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence,
+           received_at
+    FROM rds_warehouse_public.facts
+    WHERE business_id = '{{bid}}'
+    ORDER BY name
+\"\"\", conn)
+conn.close()
+
+print(f"Loaded {{len(df)}} facts")
+print(df.head(20).to_string())"""
+
+        py_input = st.text_area("Python Code:", value=default_py, height=250, key="py_runner_input")
+        if st.button("▶ Run Python", type="primary", key="run_py_btn"):
+            with st.spinner("Running Python…"):
+                import io, contextlib, traceback
+                stdout_capture = io.StringIO()
+                local_vars = {"pd": pd, "json": json, "os": os}
+                try:
+                    with contextlib.redirect_stdout(stdout_capture):
+                        exec(py_input, local_vars)
+                    output = stdout_capture.getvalue()
+                    st.success("✅ Execution complete")
+                    if output:
+                        st.code(output, language="text")
+                    # If script left a DataFrame in local_vars named 'df' or 'result', show it
+                    for var_name in ["df","result","out","data"]:
+                        if var_name in local_vars and isinstance(local_vars[var_name], pd.DataFrame):
+                            st.markdown(f"**DataFrame `{var_name}` ({len(local_vars[var_name])} rows):**")
+                            st.dataframe(local_vars[var_name], use_container_width=True)
+                            csv = local_vars[var_name].to_csv(index=False)
+                            st.download_button(f"⬇️ Download {var_name}.csv", csv, f"{var_name}.csv", "text/csv")
+                except Exception:
+                    st.error("❌ Python error:")
+                    st.code(traceback.format_exc(), language="text")
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("---")
