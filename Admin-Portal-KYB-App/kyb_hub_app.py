@@ -3205,6 +3205,15 @@ elif tab=="🏭 Classification & KYB":
                 <strong>Rule:</strong> factWithHighestConfidence (highest conf×weight, WEIGHT_THRESHOLD=0.05)
               </div>
             </div>""",unsafe_allow_html=True)
+            detail_panel(f"NAICS Winner: {win_name}", f"NAICS={naics or 'null'} · conf={naics_conf:.4f}",
+                what_it_means=f"Winning vendor: {win_name} (platformId={naics_src}). Confidence formula: {conf_formula}. Rule: factWithHighestConfidence — picks vendor with highest confidence×weight. If two vendors within 5% (WEIGHT_THRESHOLD=0.05) of each other, higher platform weight wins. Weights: Middesk=2.0 > OC=0.9 > ZI=0.8 = Trulioo=0.8 > EFX=0.7 > SERP=0.3 > AI=0.1",
+                source_table="rds_warehouse_public.facts · name='naics_code'",
+                source_file="facts/rules.ts", source_file_line="factWithHighestConfidence L36–59 · WEIGHT_THRESHOLD=0.05 L9",
+                api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.naics_code",
+                json_obj={"name":"naics_code","value":naics or None,"source":{"platformId":int(naics_src) if naics_src.lstrip('-').isdigit() else naics_src,"name":win_name.lower(),"confidence":naics_conf},"ruleApplied":{"name":"factWithHighestConfidence","description":"Get the fact with the highest confidence and weight if the same confidence"}},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS naics,JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid,JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS conf FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='naics_code';",
+                links=[("facts/rules.ts","factWithHighestConfidence algorithm"),("facts/sources.ts","vendor source definitions"),("integrations.constant.ts","platform weights")],
+                color="#22c55e", icon="✅")
 
         # ── Fact lineage table ────────────────────────────────────────────────
         render_lineage(facts,["naics_code","mcc_code","naics_description","mcc_description","industry"])
@@ -3598,6 +3607,12 @@ elif tab=="⚠️ Risk & Watchlist":
         if bert_df is not None and not bert_df.empty: st.dataframe(bert_df,use_container_width=True,hide_index=True)
         else: flag(f"BERT table not accessible. {bert_err or ''}","blue")
 
+        WATCHLIST_TYPE_DETAILS = {
+            "SANCTIONS": ("watchlist hits where type='SANCTIONS'","OFAC/UN/EU/HMT. Any SANCTIONS hit = HARD STOP. Cannot approve without Compliance clearance. File SAR report if required.",f"SELECT hit->>'type',hit->>'entity_name',hit->>'list_url' FROM rds_warehouse_public.facts CROSS JOIN jsonb_array_elements(value->'value'->'metadata') AS hit WHERE name='watchlist' AND business_id='{bid}' AND hit->>'type'='SANCTIONS';",{"type":"SANCTIONS","action":"HARD_STOP","sources":["OFAC SDN","UN Consolidated List","EU Consolidated List","HMT UK"],"regulatory_basis":"Bank Secrecy Act / OFAC regulations"}),
+            "PEP": ("watchlist hits where type='PEP'","Politically Exposed Person. NOT automatic denial. Requires Enhanced Due Diligence (EDD): source of funds, purpose of business relationship, ongoing monitoring.",f"SELECT hit->>'type',hit->>'entity_name' FROM rds_warehouse_public.facts CROSS JOIN jsonb_array_elements(value->'value'->'metadata') AS hit WHERE name='watchlist' AND business_id='{bid}' AND hit->>'type'='PEP';",{"type":"PEP","action":"ENHANCED_DUE_DILIGENCE","definition":"Current or former senior public official + immediate family + close associates"}),
+            "ADVERSE_MEDIA": ("adverse_media_hits fact (NOT in watchlist)","Deliberately excluded from consolidated watchlist by filterOutAdverseMedia() in consolidatedWatchlist.ts. Tracked separately in adverse_media_hits. Requires qualitative assessment — negative press ≠ automatic denial.",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS adverse_media_count FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='adverse_media_hits';",{"type":"ADVERSE_MEDIA","excluded_from":"watchlist fact","stored_in":"adverse_media_hits fact","source_code":"integration-service/lib/facts/kyb/consolidatedWatchlist.ts — filterOutAdverseMedia()"}),
+            "OTHER": ("watchlist hits where type='OTHER'","Other compliance lists (e.g. CFTC, FinCEN, state-level lists). Manual review required. Assess relevance to business relationship.",f"SELECT hit->>'type',hit->>'list_type' FROM rds_warehouse_public.facts CROSS JOIN jsonb_array_elements(value->'value'->'metadata') AS hit WHERE name='watchlist' AND business_id='{bid}' AND hit->>'type' NOT IN ('SANCTIONS','PEP','ADVERSE_MEDIA');",{"type":"OTHER","action":"MANUAL_REVIEW"}),
+        }
         for hit_type,icon,label,desc in [
             ("SANCTIONS","🔴","OFAC/UN/EU/HMT sanctions","HARD STOP — cannot approve without compliance clearance"),
             ("PEP","🟠","Politically Exposed Person","Enhanced Due Diligence required — NOT automatic denial"),
@@ -3610,6 +3625,18 @@ elif tab=="⚠️ Risk & Watchlist":
               <span style="color:{color};font-weight:700">{icon} {hit_type}: {label}</span>
               <div style="color:#94A3B8;font-size:.74rem;margin-top:3px">{desc}</div>
             </div>""",unsafe_allow_html=True)
+            det = WATCHLIST_TYPE_DETAILS.get(hit_type,())
+            if det:
+                detail_panel(f"{hit_type}: {label}", desc,
+                    what_it_means=det[1],
+                    source_table=det[0],
+                    source_file="consolidatedWatchlist.ts" if hit_type=="ADVERSE_MEDIA" else "facts/kyb/index.ts",
+                    source_file_line="filterOutAdverseMedia() L57" if hit_type=="ADVERSE_MEDIA" else "watchlist fact computation",
+                    api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.watchlist.value.metadata[].type",
+                    json_obj=det[3],
+                    sql=det[2],
+                    links=[("consolidatedWatchlist.ts","consolidatedWatchlist.ts"),("facts/kyb/index.ts","watchlist_hits fact"),("integrations.constant.ts","TRULIOO=38, MIDDESK=16")],
+                    color=color, icon=icon)
 
         ai_popup("Watchlist",f"wl_hits:{wl} adverse_media:{am}",[
             "Why is adverse media excluded from the consolidated watchlist?",
@@ -3656,6 +3683,7 @@ SELECT watchlist_count,watchlist_verification FROM clients.customer_table WHERE 
              "−10 pts per lien (cap: −40 pts)","Tax liens (IRS) or mechanic liens. Business owes money secured against assets.",
              "Public Records","#f59e0b" if li>0 else "#22c55e"),
         ]
+        _fact_name_map={"Bankruptcies":"num_bankruptcies","Judgments":"num_judgements","Liens":"num_liens"}
         for label,count,feat_count,feat_age,impact,desc,cat,color in impact_data:
             st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
                 border-radius:10px;padding:12px 16px;margin:6px 0">
@@ -3668,6 +3696,16 @@ SELECT watchlist_count,watchlist_verification FROM clients.customer_table WHERE 
                 Model features: <code>{feat_count}</code> + <code>{feat_age}</code> · Category: {cat}
               </div>
             </div>""",unsafe_allow_html=True)
+            _fn = _fact_name_map.get(label, label.lower())
+            detail_panel(label, str(count),
+                what_it_means=f"{desc} | Worth Score impact: {impact} | Model features: {feat_count} (count) + {feat_age} (age of most recent filing) | Category: {cat}",
+                source_table=f"rds_warehouse_public.facts · name='{_fn}' (scalar count, Redshift OK)\nFull array: name='{_fn.replace('num_','')}' (too large — PostgreSQL RDS port 5432 required)",
+                source_file="facts/kyb/index.ts", source_file_line=f"{_fn} · dependent from {_fn.replace('num_','')}[] array · Equifax (pid=17)",
+                api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.{_fn}",
+                json_obj={"name":_fn,"value":count,"source":{"platformId":17,"name":"equifax"},"note":f"Scalar count. Full details in '{_fn.replace('num_','')}' fact (too large for Redshift)","worth_score_impact":impact,"model_features":[feat_count,feat_age],"model_category":cat},
+                sql=f"-- Scalar count (Redshift OK):\nSELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS {_fn} FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='{_fn}';\n-- Full array (PostgreSQL RDS port 5432 only):\n-- SELECT value->'value' FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='{_fn.replace('num_','')}';",
+                links=[("facts/kyb/index.ts",f"{_fn} definition"),("worth_score_model.py","Worth Score feature impact"),("integrations.constant.ts","INTEGRATION_ID.EQUIFAX=17")],
+                color=color, icon="📜")
 
         if bk==0 and ju==0 and li==0:
             flag("✅ No bankruptcies, judgments, or liens found. Public Records category contributes positively to Worth Score.", "green")
@@ -3759,6 +3797,15 @@ WHERE name='liens' AND business_id='{bid}';
                 <span style="color:#94A3B8;font-size:.74rem">{action}</span>
               </div>
             </div>""",unsafe_allow_html=True)
+            detail_panel(title, sev,
+                what_it_means=f"{detail} | Required action: {action}",
+                source_table="rds_warehouse_public.facts (watchlist_hits, adverse_media_hits, num_bankruptcies, num_judgements, num_liens)",
+                source_file="consolidatedWatchlist.ts" if "Watchlist" in title else "facts/kyb/index.ts",
+                source_file_line="watchlist fact architecture · filterOutAdverseMedia()",
+                json_obj={"combination":title,"severity":sev,"detected":detail,"required_action":action,"signals":{"watchlist_hits":wl,"adverse_media_hits":am,"num_bankruptcies":bk,"num_judgements":ju,"num_liens":li}},
+                sql=f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('watchlist_hits','adverse_media_hits','num_bankruptcies','num_judgements','num_liens') ORDER BY name;",
+                links=[("consolidatedWatchlist.ts","Watchlist architecture"),("facts/kyb/index.ts","Risk fact definitions"),("lookups.py","Worth Score public records features")],
+                color=color, icon={"CRITICAL":"🔴","HIGH":"🟠","MEDIUM":"🟡","CLEAN":"✅"}.get(sev,"⚠️"))
 
         # Risk signal summary bar chart
         risk_vals=[("Watchlist Hits",wl,"#ef4444"),("Adverse Media",am,"#f59e0b"),
@@ -4286,7 +4333,8 @@ ORDER BY ABS(weighted_score_850) DESC;""",language="sql")
             f"- [{src_link('worth_score_model.py','worth_score_model.py — model prediction + feature extraction')}]({GITHUB_LINKS.get('worth_score_model.py','')})\n"
             f"- [{src_link('lookups.py','lookups.py — FIRMOGRAPHIC/FINANCIAL/ECONOMIC feature lists')}]({GITHUB_LINKS.get('lookups.py','')})"
         )
-        ai_popup("WorthScoreWaterfall",f"Score:{score_v if score_df is not None and not score_df.empty else 'N/A'}",[
+        _ws2_score = score_v if (score_df is not None and not score_df.empty and 'score_v' in dir()) else (float(score_df.iloc[0]["score_850"] or 0) if score_df is not None and not score_df.empty else "N/A")
+        ai_popup("WorthScoreWaterfall",f"Score:{_ws2_score}",[
             "What is the exact SHAP calculation that produces the waterfall contributions?",
             "Which feature category has the highest negative impact for this business?",
             "What would improve this business's Worth Score the most?",
@@ -4990,22 +5038,77 @@ OPENAI_API_KEY = "sk-svcacct-your-key-here"
             st.code('export OPENAI_API_KEY="sk-svcacct-your-key-here"\nstreamlit run kyb_hub_app.py',language="bash")
         st.caption("After adding the key, click 🔄 Refresh in the sidebar or restart the app.")
 
-    st.markdown("#### 💡 Quick Questions")
-    quick={"🏛️ Registry":["How is sos_match_boolean determined?","Why might Middesk confidence be low?","What is the entity resolution gap for tax-haven states?"],
-           "🔐 TIN":["How is tin_match_boolean derived?","What does 'associated with different Business Name' mean?"],
-           "🏭 NAICS":["What sources provide NAICS codes and in what priority order?","What causes the 561499 fallback?"],
-           "⚠️ Watchlist":["Why is adverse media excluded from consolidated watchlist?","What is the difference between SANCTIONS and PEP?"],
-           "💰 Worth Score":["How is the 300-850 score calculated?","What are the 3 model components?"],
-           "🗄️ SQL":["Write SQL to get all facts for a business","Write SQL to get the Worth Score","Write Python code to load KYB facts from Redshift"]}
-    for section,questions in quick.items():
+    st.markdown("#### 💡 Quick Questions — Manager / Underwriting Expert Level")
+    st.caption("Each answer will include: source file reference, SQL/Python code, JSON structure, and GitHub links to verify the information.")
+    QUICK = {
+        "🏛️ Registry & SOS Verification": [
+            "Why is sos_match_boolean=false even though the business is legitimately registered? What are all possible root causes and how do I verify each one?",
+            "How is Middesk confidence calculated? What does a confidence of 0.35 mean operationally — how many review tasks passed and what does it imply for the SOS match quality?",
+            "What is the entity resolution gap for tax-haven states (DE/NV/WY)? How does the address-based Middesk search produce a false negative for businesses incorporated in Delaware but operating in Texas?",
+            "A business has sos_active=false. What are the underwriting implications, what state actions typically cause this, and what SQL do I run to investigate?",
+            "What is the difference between sos_match, sos_match_boolean, sos_active, and sos_filings? How do they relate to each other in the Fact Engine dependency chain?",
+        ],
+        "🔐 TIN / EIN Verification": [
+            "How is tin_match_boolean derived from tin_match? What is the exact code path in integration-service and what does it check?",
+            "A business has tin_match_boolean=false with message 'associated with a different Business Name'. What does this mean, what is the fraud risk, and what immediate action should I take as an underwriter?",
+            "When does the IRS TIN check fail with 'does not have a record'? Is this always fraud or are there legitimate causes? What follow-up documentation should I request?",
+            "tin_match_boolean=true but tin_match.status is not 'success'. Is this a data integrity bug or an expected state? How do I verify this in Redshift?",
+            "What is the fallback for TIN verification when Middesk has no TIN review task? How does Trulioo's BusinessRegistrationNumber comparison differ from the IRS direct check?",
+        ],
+        "🏭 NAICS & Industry Classification": [
+            "A business received NAICS 561499 (fallback). What are the 3 root cause gaps (G1/G2/G3), how do I confirm which gap applies to this specific business, and what SQL helps me diagnose it?",
+            "In what order do vendors compete for the NAICS code? Explain the factWithHighestConfidence rule — when does Equifax beat ZoomInfo even with lower weight?",
+            "How is MCC derived from NAICS? What is the rel_naics_mcc lookup and what happens when NAICS=561499? Provide the SQL to check this mapping.",
+            "The NAICS code confidence is 0.18. What does this mean operationally — how was the confidence calculated and how reliable is this classification?",
+            "How does the AI enrichment (GPT-4o-mini) classify NAICS when all vendors fail? What inputs does it receive, what is its weight, and how does the website URL affect its ability to classify?",
+        ],
+        "⚠️ Watchlist & Compliance": [
+            "What is the difference between watchlist_hits, adverse_media_hits, pep_hits, and sanctions_hits? Which ones trigger a hard stop vs enhanced due diligence?",
+            "Why is adverse media deliberately excluded from the consolidated watchlist fact? Where in the codebase is this filtering implemented and what compliance rationale justifies it?",
+            "A business has 13 watchlist hits. What is the complete step-by-step compliance workflow required — who needs to be notified, what documentation is needed, and what SQL shows the hit details?",
+            "How does the Trulioo PSC (Person Screening Compliance) flow differ from the Middesk watchlist review task? Which facts does each vendor populate?",
+            "What is the risk_score (0-100) fact and how is it calculated from watchlist_hits and high_risk_people? How does it differ from the Worth Score?",
+        ],
+        "💰 Worth Score & Decisioning": [
+            "A business has Worth Score=0. What are all the possible root causes? Explain the model pipeline — what happens when firmographic, financial, and economic features are all null?",
+            "What is the exact formula for converting model probability to the 300-850 scale? Where is this implemented in the codebase and what are the default APPROVE/REVIEW/DECLINE thresholds?",
+            "Explain the 3-model ensemble: Firmographic XGBoost, Financial PyTorch, and Economic model. What features feed each model and how are they combined?",
+            "Which SHAP feature categories have the highest impact on the Worth Score? What is the maximum negative impact from public records (BK, judgments, liens)?",
+            "A business has Worth Score=520 (FURTHER_REVIEW). What specific factors are most likely causing the score to fall below the APPROVE threshold of 700? Write SQL to check the factor contributions.",
+        ],
+        "🔗 Data Lineage & Architecture": [
+            "Explain the complete data flow from business onboarding form submission to the Admin Portal showing a verified badge. Include all services, databases, APIs, and Kafka messages involved.",
+            "What is the Fact Engine and how does factWithHighestConfidence work with WEIGHT_THRESHOLD=0.05? Give a concrete example where two vendors compete for sos_match.",
+            "Why can't sos_filings, watchlist, and bankruptcies be queried from Redshift? What is the VARCHAR(65535) federation limit and how do I query these facts from PostgreSQL RDS instead?",
+            "What is the difference between Pipeline A (Fact Engine / integration-service) and Pipeline B (warehouse-service / batch)? Which tables does each pipeline write to?",
+            "How does Redis caching affect the KYB facts returned by the API? What is the TTL and how do I force a cache refresh?",
+        ],
+        "🗄️ SQL & Data Access": [
+            "Write complete SQL to get every KYB fact for a business with winning source, confidence, rule applied, and all alternatives. Include both Redshift and PostgreSQL RDS versions.",
+            "Write SQL to diagnose why a business received NAICS 561499 — show all vendor NAICS attempts, their confidence scores, and whether the website fact is populated.",
+            "Write SQL to get the full Worth Score history for a business including factor contributions by category (public_records, company_profile, financial_trends, business_operations, performance_measures).",
+            "Write Python code using psycopg2 to connect to Redshift and load all KYB facts for a business, parsing the JSON value column correctly.",
+            "Write SQL to identify all businesses in the last 30 days with: (a) watchlist hits, (b) sos_active=false, (c) NAICS=561499, and (d) tin_match_boolean=false. Include cross-portfolio counts.",
+        ],
+    }
+    import hashlib as _hashlib
+    for section, questions in QUICK.items():
         with st.expander(section):
             for q in questions:
-                if st.button(q,key=f"aqq_{q[:20]}"): st.session_state["agent_q"]=q; st.session_state["agent_pending"]=True
+                q_hash = _hashlib.md5(q.encode()).hexdigest()[:8]
+                if st.button(q, key=f"aqq_{q_hash}"):
+                    st.session_state["agent_q"] = q
+                    st.session_state["agent_pending"] = True
 
     st.markdown("---")
     if "agent_history" not in st.session_state: st.session_state["agent_history"]=[]
+
+    # Render chat history with markdown (so source links are clickable)
     for msg in st.session_state["agent_history"]:
-        st.markdown(f"**{'🧑' if msg['role']=='user' else '🤖'} {'You' if msg['role']=='user' else 'Agent'}:** {msg['content']}")
+        role_icon = "🧑" if msg["role"]=="user" else "🤖"
+        role_name = "You" if msg["role"]=="user" else "Agent"
+        st.markdown(f"**{role_icon} {role_name}:**")
+        st.markdown(msg["content"])   # full markdown: links, code blocks, etc.
         st.markdown("---")
 
     if st.session_state.get("agent_pending"):
@@ -5015,7 +5118,7 @@ OPENAI_API_KEY = "sk-svcacct-your-key-here"
             st.session_state["agent_history"].extend([{"role":"user","content":q},{"role":"assistant","content":ans}]); st.rerun()
 
     col1,col2=st.columns([5,1])
-    with col1: user_q=st.text_input("Your question:",key="agent_input",placeholder="e.g. Why does this business have NAICS 561499?")
+    with col1: user_q=st.text_input("Your question:",key="agent_input",placeholder="e.g. Why does this business have Worth Score=0? What should I check?")
     with col2: st.markdown("<br>",unsafe_allow_html=True); send=st.button("Send ▶",type="primary")
     if send and user_q:
         with st.spinner("Thinking…"): ans=ask_ai(user_q,f"Business ID: {bid}",st.session_state["agent_history"])
