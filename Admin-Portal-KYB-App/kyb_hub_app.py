@@ -536,10 +536,13 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
             "Rule": rule_label,
             "Dependencies / Alternatives": dep_display or alt_str,
             "Updated": f.get("_received_at",""),
+            "_raw_fact": f,       # kept for JSON panel — stripped before display
+            "_name": name,
         })
 
     if rows:
-        df = pd.DataFrame(rows)
+        display_rows = [{k: v for k,v in r.items() if not k.startswith("_")} for r in rows]
+        df = pd.DataFrame(display_rows)
         st.dataframe(df, use_container_width=True, hide_index=True,
                      column_config={
                          "Fact": st.column_config.TextColumn("Fact", width="medium"),
@@ -550,7 +553,107 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
                          "Dependencies / Alternatives": st.column_config.TextColumn("Deps / Alternatives", width="large"),
                      })
 
-        # Rule legend below the table
+        # ── Per-fact JSON panels ──────────────────────────────────────────────
+        st.caption("▼ Click any fact below to see its full JSON value, all alternatives, and field-by-field annotations")
+        for r in rows:
+            fname = r["_name"]
+            f_obj = r["_raw_fact"]
+            dv_disp = r["Value"]
+            v = f_obj.get("value")
+            src = f_obj.get("source") or {}
+            alts_raw = f_obj.get("alternatives") or []
+            deps_raw2 = f_obj.get("dependencies") or []
+            rule_raw2 = safe_get(f_obj,"ruleApplied","name") or "null"
+            rule_desc2 = safe_get(f_obj,"ruleApplied","description") or ""
+            too_large = f_obj.get("_too_large", False)
+
+            # Build value block
+            if too_large:
+                val_display = '"[too large for Redshift federation — query PostgreSQL RDS port 5432]"'
+            elif v is None:
+                val_display = "null"
+            elif isinstance(v, (dict, list)):
+                val_display = json.dumps(v, default=str, indent=4)
+            else:
+                val_display = json.dumps(v, default=str)
+
+            # Build source block
+            pid_disp = src.get("platformId","null") if isinstance(src,dict) else "null"
+            conf_disp = src.get("confidence","null") if isinstance(src,dict) else "null"
+            src_name_disp = src.get("name","null") if isinstance(src,dict) else "null"
+            pid_annotation = {
+                "16":"← Middesk (weight=2.0, highest priority)", "23":"← OpenCorporates (weight=0.9)",
+                "24":"← ZoomInfo (weight=0.8)", "17":"← Equifax (weight=0.7)",
+                "38":"← Trulioo (weight=0.8)", "31":"← AI GPT-4o-mini (weight=0.1, last resort)",
+                "22":"← SERP/Google (weight=0.3)", "40":"← Plaid (weight=1.0)",
+                "0":"← Applicant (businessDetails, confidence=1.0 by convention)",
+                "-1":"← System computed (dependent fact, no vendor)",
+            }.get(str(pid_disp),"")
+
+            # Build alternatives block
+            if alts_raw:
+                alts_lines = []
+                for i,a in enumerate(alts_raw):
+                    a_src = a.get("source")
+                    if isinstance(a_src, dict):
+                        a_pid = a_src.get("platformId","?"); a_conf = a_src.get("confidence","?")
+                    else:
+                        a_pid = a_src; a_conf = a.get("confidence","?")
+                    a_val = a.get("value")
+                    a_val_str = json.dumps(a_val, default=str)[:120] if isinstance(a_val,(list,dict)) else json.dumps(a_val, default=str)
+                    a_vendor = _pid_label(str(a_pid)) if a_pid is not None else "Unknown"
+                    alts_lines.append(f'    // [{i}] {a_vendor} (pid={a_pid}, conf={a_conf})')
+                    alts_lines.append(f'    {{"value": {a_val_str}, "source": {a_pid}, "confidence": {a_conf}}}{"," if i<len(alts_raw)-1 else ""}')
+                alts_block = "\n".join(alts_lines)
+            else:
+                alts_block = "    // No alternative sources — only one vendor provided this fact"
+
+            deps_block = json.dumps(deps_raw2) if deps_raw2 else "[]"
+
+            # Header color by value type
+            if too_large:
+                h_color = "#f59e0b"; h_icon = "📦"
+            elif v is None:
+                h_color = "#64748b"; h_icon = "⚪"
+            elif isinstance(v, list):
+                h_color = "#3B82F6"; h_icon = "📋"
+            elif isinstance(v, dict):
+                h_color = "#8B5CF6"; h_icon = "🗂️"
+            else:
+                h_color = "#22c55e"; h_icon = "✅"
+
+            summary_label = f'{h_icon} <code style="color:#60A5FA">{fname}</code> — {dv_disp[:60]}'
+            if isinstance(v, list): summary_label += f' &nbsp;<span style="color:#3B82F6;font-size:.68rem">({len(v)} items — expand to see all)</span>'
+            elif isinstance(v, dict): summary_label += f' &nbsp;<span style="color:#8B5CF6;font-size:.68rem">({len(v)} keys)</span>'
+
+            json_block = f'''{{{"\n"}  "name": "{fname}",
+  "value": {val_display},                {f"← {dv_disp[:60]}" if not isinstance(v,(list,dict,type(None))) else ("← list with " + str(len(v)) + " items, all shown above" if isinstance(v,list) else ("← object with " + str(len(v)) + " keys" if isinstance(v,dict) else "← null = no vendor provided data"))}
+  "source": {{
+    "confidence": {conf_disp},           {f"← {_rule_label(rule_raw2)} confidence formula" if conf_disp not in (None,"null") else "← null = dependent/computed fact, no vendor query"}
+    "platformId": {pid_disp},            {pid_annotation}
+    "name": "{src_name_disp}"
+  }},
+  "ruleApplied": {{
+    "name": "{rule_raw2}",               ← {rule_raw2}: {rule_desc2 or _rule_label(rule_raw2)}
+  }},
+  "dependencies": {deps_block},          {f"← computed from: {', '.join(deps_raw2)}" if deps_raw2 else "← no dependencies (vendor-supplied fact)"}
+  "alternatives": [
+{alts_block}
+  ]
+}}'''
+
+            st.markdown(
+                f"<details style='background:#0A0F1E;border-left:3px solid {h_color};"
+                f"border-radius:8px;padding:6px 12px;margin:3px 0'>"
+                f"<summary style='color:{h_color};font-size:.75rem;cursor:pointer;list-style:none'>"
+                f"📄 {summary_label}</summary>"
+                f"<pre style='color:#CBD5E1;font-size:.70rem;background:#0f172a;padding:10px;"
+                f"border-radius:6px;overflow:auto;margin:6px 0;max-height:400px'>{json_block}</pre>"
+                f"</details>",
+                unsafe_allow_html=True
+            )
+
+        # Rule legend below
         used_rules = set(r["Rule"] for r in rows if r["Rule"] not in ("","—","n/a (computed fact)"))
         if used_rules:
             st.markdown("<div style='margin-top:6px'>", unsafe_allow_html=True)
