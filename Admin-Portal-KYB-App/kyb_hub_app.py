@@ -172,16 +172,13 @@ def kpi(label, value, sub="", color="#3B82F6"):
 def kpi_detail(label, value, sub, color, fact_name, fact_value_raw,
                source_table, source_sql, why_null_reasons=None,
                json_snippet=None, api_path=None):
-    """KPI card + collapsible expander with JSON (st.code), lineage, SQL, and source links."""
+    """KPI card + collapsible expander with JSON, lineage, SQL, and Python code."""
     kpi(label, value, sub, color)
 
     is_null = str(value) in ("Unknown","⚠️ Unknown","N/A","None","","0","0.0")
 
-    with st.expander(f"📊 {label} — source, lineage & JSON"):
+    with st.expander(f"📊 {label} — source, lineage, JSON, SQL & Python"):
         # ── Source badges ─────────────────────────────────────────────────────
-        facts_link = GITHUB_LINKS.get("facts/kyb/index.ts","")
-        bd_link    = GITHUB_LINKS.get("facts/businessDetails","")
-        api_link   = GITHUB_LINKS.get("openapi/integration","")
         badges = src_links_html([
             ("facts/kyb/index.ts", "facts/kyb/index.ts"),
             ("facts/businessDetails", "businessDetails/index.ts"),
@@ -226,9 +223,28 @@ def kpi_detail(label, value, sub, color, fact_name, fact_value_raw,
             clean_json = json.dumps({"value": fact_value_raw, "fact": fact_name, "source_table": source_table}, indent=2, default=str)
             st.code(clean_json, language="json")
 
-        # ── SQL ───────────────────────────────────────────────────────────────
-        st.markdown("**SQL to verify this value from Redshift:**")
-        st.code(source_sql, language="sql")
+        # ── SQL + Python side by side ─────────────────────────────────────────
+        _py = _make_python_from_sql(source_sql)
+        if source_sql and _py:
+            sc, pc = st.columns(2)
+            with sc:
+                st.markdown("**SQL (Redshift):**")
+                st.code(source_sql, language="sql")
+            with pc:
+                st.markdown("**Python (paste into 🐍 Runner):**")
+                st.code(_py, language="python")
+        elif source_sql:
+            st.markdown("**SQL to verify this value from Redshift:**")
+            st.code(source_sql, language="sql")
+            # Hard fallback Python
+            _fallback = (
+                "# Paste into 🐍 Python Runner — conn is pre-injected\n"
+                f"df = pd.read_sql(\"\"\"\n{source_sql.strip()}\n\"\"\", conn)\n"
+                "print(f'{len(df):,} rows')\n"
+                "print(df.to_string(index=False))"
+            )
+            st.markdown("**Python (paste into 🐍 Runner):**")
+            st.code(_fallback, language="python")
 
 def flag(text, level="blue"):
     _icons = {"red":"🚨","amber":"⚠️","green":"✅","blue":"ℹ️"}
@@ -1071,9 +1087,8 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
                 st.markdown("**Full JSON (as stored in `rds_warehouse_public.facts.value`):**")
                 st.code(json_str, language="json")
 
-                # 4) SQL
-                st.markdown("**SQL to retrieve this fact from Redshift:**")
-                st.code(
+                # 4) SQL + Python side by side
+                _fact_sql = (
                     f"SELECT\n"
                     f"  name,\n"
                     f"  JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,\n"
@@ -1085,18 +1100,62 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
                     f"WHERE business_id = '{bid}'\n"
                     f"  AND name = '{fname}'\n"
                     f"ORDER BY received_at DESC\n"
-                    f"LIMIT 5;",
-                    language="sql"
+                    f"LIMIT 5;"
                 )
+                _fact_py = (
+                    f"# Paste into 🐍 Python Runner — conn is pre-injected\n"
+                    f"df = pd.read_sql(\"\"\"\n"
+                    f"SELECT name,\n"
+                    f"       JSON_EXTRACT_PATH_TEXT(value,'value')               AS fact_value,\n"
+                    f"       JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS winning_pid,\n"
+                    f"       JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence,\n"
+                    f"       JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name')  AS rule_applied,\n"
+                    f"       received_at\n"
+                    f"FROM rds_warehouse_public.facts\n"
+                    f"WHERE business_id = '{bid}'\n"
+                    f"  AND name = '{fname}'\n"
+                    f"ORDER BY received_at DESC LIMIT 5\n"
+                    f"\"\"\", conn)\n"
+                    f"print(f'{{len(df)}} rows for fact: {fname}')\n"
+                    f"print(df.to_string(index=False))"
+                )
+                _sc, _pc = st.columns(2)
+                with _sc:
+                    st.markdown("**SQL (Redshift):**")
+                    st.code(_fact_sql, language="sql")
+                with _pc:
+                    st.markdown("**Python (paste into 🐍 Runner):**")
+                    st.code(_fact_py, language="python")
+
                 if too_large:
-                    st.markdown("**⚠️ This fact is too large for Redshift federation — query from PostgreSQL RDS (port 5432):**")
-                    st.code(
+                    st.markdown("**⚠️ Too large for Redshift — query from PostgreSQL RDS (port 5432):**")
+                    _rds_sql = (
                         f"-- PostgreSQL RDS (native JSONB, no VARCHAR size limit):\n"
                         f"SELECT value -> 'value'\n"
                         f"FROM rds_warehouse_public.facts\n"
-                        f"WHERE business_id = '{bid}' AND name = '{fname}';",
-                        language="sql"
+                        f"WHERE business_id = '{bid}' AND name = '{fname}';"
                     )
+                    _rds_py = (
+                        f"# PostgreSQL RDS requires a separate psycopg2 connection on port 5432\n"
+                        f"import psycopg2, json, os\n"
+                        f"rds_conn = psycopg2.connect(\n"
+                        f"    dbname=os.getenv('REDSHIFT_DB','dev'),\n"
+                        f"    user=os.getenv('REDSHIFT_USER','readonly_all_access'),\n"
+                        f"    password=os.getenv('REDSHIFT_PASSWORD',''),\n"
+                        f"    host=os.getenv('REDSHIFT_HOST',''),\n"
+                        f"    port=5432  # PostgreSQL RDS port\n"
+                        f")\n"
+                        f"cur = rds_conn.cursor()\n"
+                        f"cur.execute(\"SELECT value->>'value' FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='{fname}';\")\n"
+                        f"rows = cur.fetchall()\n"
+                        f"print(f'{{len(rows)}} rows'); print(rows[0][0] if rows else 'empty')\n"
+                        f"rds_conn.close()"
+                    )
+                    _rsc, _rpc = st.columns(2)
+                    with _rsc:
+                        st.code(_rds_sql, language="sql")
+                    with _rpc:
+                        st.code(_rds_py, language="python")
 
         # Rule legend
         used_rules = set(r["Rule"] for r in rows if r["Rule"] not in ("","—","n/a (computed fact)"))
@@ -2677,7 +2736,15 @@ elif tab=="🏛️ Registry & Identity":
 
         with st.expander("📋 SQL & Python — how to load this data"):
             st.markdown("**Redshift (VPN required) — scalar SOS facts:**")
-            st.code(sql_for(bid,["sos_active","sos_match","sos_match_boolean","formation_state","middesk_confidence"]),language="sql")
+            _sql_b = sql_for(bid,["sos_active","sos_match","sos_match_boolean","formation_state","middesk_confidence"])
+            _py_b = _make_python_from_sql(_sql_b)
+            _sc2, _pc2 = st.columns(2)
+            with _sc2:
+                st.markdown('**SQL (Redshift):**')
+                st.code(_sql_b, language='sql')
+            with _pc2:
+                st.markdown('**Python (paste into 🐍 Runner):**')
+                st.code(_py_b or '# see SQL on the left', language='python')
             st.markdown("**PostgreSQL RDS port 5432 — sos_filings array (too large for Redshift federation):**")
             st.code(f"""-- Run on PostgreSQL RDS (native JSONB, no VARCHAR(65535) limit):
 SELECT
@@ -3231,7 +3298,15 @@ LIMIT 100;""", language="sql")
             "Why might tin_match_boolean be null even though tin_submitted is not empty?"],bid)
 
         with st.expander("📋 SQL & Python — how to load TIN data"):
-            st.code(sql_for(bid,["tin","tin_submitted","tin_match","tin_match_boolean"]),language="sql")
+            _sql_b = sql_for(bid,["tin","tin_submitted","tin_match","tin_match_boolean"])
+            _py_b = _make_python_from_sql(_sql_b)
+            _sc2, _pc2 = st.columns(2)
+            with _sc2:
+                st.markdown('**SQL (Redshift):**')
+                st.code(_sql_b, language='sql')
+            with _pc2:
+                st.markdown('**Python (paste into 🐍 Runner):**')
+                st.code(_py_b or '# see SQL on the left', language='python')
             st.code(f"""-- Redshift: get TIN match details
 SELECT
     JSON_EXTRACT_PATH_TEXT(value,'value','status')   AS irs_status,
@@ -3466,8 +3541,16 @@ ORDER BY received_at DESC LIMIT 5;""",language="sql")
 }
 ```""")
 
-        with st.expander("📋 SQL — how to query IDV data"):
-            st.code(sql_for(bid,["idv_status","idv_passed","idv_passed_boolean","is_sole_prop"]),language="sql")
+        with st.expander("📋 SQL & Python — IDV data"):
+            _sql_b = sql_for(bid,["idv_status","idv_passed","idv_passed_boolean","is_sole_prop"])
+            _py_b = _make_python_from_sql(_sql_b)
+            _sc2, _pc2 = st.columns(2)
+            with _sc2:
+                st.markdown('**SQL (Redshift):**')
+                st.code(_sql_b, language='sql')
+            with _pc2:
+                st.markdown('**Python (paste into 🐍 Runner):**')
+                st.code(_py_b or '# see SQL on the left', language='python')
             st.code(f"""-- Plaid IDV session history (rds_integration_data):
 SELECT piv.business_id, piv.status, piv.created_at, piv.updated_at
 FROM rds_integration_data.plaid_identity_verification piv
@@ -3894,7 +3977,15 @@ elif tab=="🏭 Classification & KYB":
             "What SQL shows NAICS history and all alternative sources?"],bid)
 
         with st.expander("📋 SQL & Python"):
-            st.code(sql_for(bid,["naics_code","mcc_code","naics_description","mcc_description","industry"]),language="sql")
+            _sql_b = sql_for(bid,["naics_code","mcc_code","naics_description","mcc_description","industry"])
+            _py_b = _make_python_from_sql(_sql_b)
+            _sc2, _pc2 = st.columns(2)
+            with _sc2:
+                st.markdown('**SQL (Redshift):**')
+                st.code(_sql_b, language='sql')
+            with _pc2:
+                st.markdown('**Python (paste into 🐍 Runner):**')
+                st.code(_py_b or '# see SQL on the left', language='python')
             st.code(f"""-- NAICS history (all versions, including alternatives):
 SELECT
     name,
@@ -4037,9 +4128,17 @@ ORDER BY name, received_at DESC;""",language="sql")
             "How does revenue data from ZoomInfo affect the Worth Score?",
             "What does kyb_complete=false mean and what is blocking it?"],bid)
 
-        with st.expander("📋 SQL"):
-            st.code(sql_for(bid,["business_name","legal_name","dba_found","corporation",
-                                  "formation_date","revenue","num_employees","kyb_submitted","kyb_complete"]),language="sql")
+        with st.expander("📋 SQL & Python"):
+            _sql_b = sql_for(bid,["business_name","legal_name","dba_found","corporation",
+                                  "formation_date","revenue","num_employees","kyb_submitted","kyb_complete"])
+            _py_b = _make_python_from_sql(_sql_b)
+            _sc2, _pc2 = st.columns(2)
+            with _sc2:
+                st.markdown('**SQL (Redshift):**')
+                st.code(_sql_b, language='sql')
+            with _pc2:
+                st.markdown('**Python (paste into 🐍 Runner):**')
+                st.code(_py_b or '# see SQL on the left', language='python')
 
     with cl3:
         st.markdown("#### 📬 Contact & Address Verification")
@@ -4137,10 +4236,18 @@ ORDER BY name, received_at DESC;""",language="sql")
             "What does address_registered_agent warning mean for underwriting?",
             "How is name_match_boolean determined?"],bid)
 
-        with st.expander("📋 SQL"):
-            st.code(sql_for(bid,["primary_address","addresses","address_match_boolean",
+        with st.expander("📋 SQL & Python"):
+            _sql_b = sql_for(bid,["primary_address","addresses","address_match_boolean",
                                   "address_verification","addresses_deliverable","address_registered_agent",
-                                  "name_match","name_match_boolean"]),language="sql")
+                                  "name_match","name_match_boolean"])
+            _py_b = _make_python_from_sql(_sql_b)
+            _sc2, _pc2 = st.columns(2)
+            with _sc2:
+                st.markdown('**SQL (Redshift):**')
+                st.code(_sql_b, language='sql')
+            with _pc2:
+                st.markdown('**Python (paste into 🐍 Runner):**')
+                st.code(_py_b or '# see SQL on the left', language='python')
 
     with cl4:
         st.markdown("#### 🌐 Website & Digital Presence")
@@ -4221,8 +4328,16 @@ ORDER BY name, received_at DESC;""",language="sql")
           </div>
         </div>""",unsafe_allow_html=True)
 
-        with st.expander("📋 SQL"):
-            st.code(sql_for(bid,["website","website_found","serp_id","review_rating","review_count"]),language="sql")
+        with st.expander("📋 SQL & Python"):
+            _sql_b = sql_for(bid,["website","website_found","serp_id","review_rating","review_count"])
+            _py_b = _make_python_from_sql(_sql_b)
+            _sc2, _pc2 = st.columns(2)
+            with _sc2:
+                st.markdown('**SQL (Redshift):**')
+                st.code(_sql_b, language='sql')
+            with _pc2:
+                st.markdown('**Python (paste into 🐍 Runner):**')
+                st.code(_py_b or '# see SQL on the left', language='python')
         st.markdown("**🔗 Source references:**")
         st.markdown(
             f"- [{src_link('facts/kyb/index.ts','website / website_found / serp_id fact definitions')}]({GITHUB_LINKS.get('facts/kyb/index.ts','')})\n"
@@ -4360,8 +4475,16 @@ elif tab=="⚠️ Risk & Watchlist":
             "How is watchlist_hits count calculated?",
             "What SQL shows watchlist data from clients.customer_table?",],bid)
 
-        with st.expander("📋 SQL"):
-            st.code(sql_for(bid,["watchlist_hits","adverse_media_hits"]),language="sql")
+        with st.expander("📋 SQL & Python"):
+            _sql_b = sql_for(bid,["watchlist_hits","adverse_media_hits"])
+            _py_b = _make_python_from_sql(_sql_b)
+            _sc2, _pc2 = st.columns(2)
+            with _sc2:
+                st.markdown('**SQL (Redshift):**')
+                st.code(_sql_b, language='sql')
+            with _pc2:
+                st.markdown('**Python (paste into 🐍 Runner):**')
+                st.code(_py_b or '# see SQL on the left', language='python')
             st.code(f"""-- BERT detailed hits:
 SELECT bert.status,bert.sublabel,bert.created_at
 FROM rds_integration_data.business_entity_review_task bert
@@ -4546,7 +4669,7 @@ WHERE name='liens' AND business_id='{bid}';
                 links=[("consolidatedWatchlist.ts","Watchlist architecture"),("facts/kyb/index.ts","Risk fact definitions"),("integrations.constant.ts","TRULIOO=38, EQUIFAX=17")],
                 color="#ef4444" if wl>0 else "#22c55e", icon="📊")
 
-        with st.expander("📋 SQL — risk signal queries"):
+        with st.expander("📋 SQL & Python — risk signal queries"):
             st.code(f"""-- All risk signals in one query:
 SELECT
     JSON_EXTRACT_PATH_TEXT(value,'value') AS count_value,
@@ -4994,7 +5117,7 @@ SELECT worth_score, score_date FROM warehouse.latest_score WHERE business_id='{b
             "What is the most impactful action this business could take to improve its score?",
             "How does the score_decision_matrix work and can thresholds be customized?"],bid)
 
-        with st.expander("📋 SQL — Worth Score queries"):
+        with st.expander("📋 SQL & Python — Worth Score queries"):
             st.code(f"""-- Current score + decision:
 SELECT bs.weighted_score_850, bs.weighted_score_100, bs.risk_level, bs.score_decision,
        bs.created_at, bs.id AS score_id
@@ -5117,7 +5240,7 @@ SELECT range_start, range_end, risk_level, decision FROM score_decision_matrix O
         else:
             st.info("Score data not available for waterfall chart.")
 
-        with st.expander("📋 SQL — factor contributions"):
+        with st.expander("📋 SQL & Python — factor contributions"):
             st.code(f"""-- Exact factor contributions (SHAP values) per category:
 SELECT
     category_id,
