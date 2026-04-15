@@ -1267,13 +1267,39 @@ ORDER BY name;
 
 # ── Universal detail panel ────────────────────────────────────────────────────
 def _make_python_from_sql(sql: str, fact_name: str = "") -> str:
-    """Auto-generate a Python equivalent of a SQL query for the Python Runner."""
-    if not sql or sql.strip().startswith("--"):
+    """Auto-generate Python code for the Python Runner from any SQL string.
+    Strips leading comment lines so the actual SELECT is wrapped correctly.
+    Always returns a usable snippet — never returns empty for non-empty SQL.
+    """
+    if not sql or not sql.strip():
         return ""
+    # Strip leading comment-only lines to find the first real SQL statement
+    lines = sql.strip().splitlines()
+    sql_body_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("--") and not sql_body_lines:
+            continue  # skip leading comments
+        sql_body_lines.append(line)
+    sql_body = "\n".join(sql_body_lines).strip()
+    if not sql_body:
+        # All lines were comments — wrap the full sql anyway
+        sql_body = sql.strip()
+
+    # Keep leading comments as a Python comment for context
+    comments = []
+    for line in lines:
+        if line.strip().startswith("--"):
+            comments.append("# " + line.strip()[2:].strip())
+        else:
+            break
+    comment_block = "\n".join(comments) + "\n" if comments else ""
+
     return (
-        f"# Paste into 🐍 Python Runner — conn is pre-injected\n"
-        f"df = pd.read_sql(\"\"\"\n{sql.strip()}\n\"\"\", conn)\n"
-        f"print(f'{{len(df)}} rows')\n"
+        f"{comment_block}"
+        f"# Paste into 🐍 Python Runner — conn is pre-injected, pd is available\n"
+        f"df = pd.read_sql(\"\"\"\n{sql_body}\n\"\"\", conn)\n"
+        f"print(f'{{len(df):,}} rows returned')\n"
         f"print(df.to_string(index=False))"
     )
 
@@ -1332,8 +1358,10 @@ def detail_panel(
             st.markdown("**JSON (as stored / returned by API):**")
             st.code(json.dumps(json_obj, indent=2, default=str, ensure_ascii=False), language="json")
 
-        # ── SQL + Python side by side ─────────────────────────────────────────
-        _py = python_code or (sql and _make_python_from_sql(sql)) or ""
+        # ── SQL + Python always shown together ────────────────────────────────
+        # Always auto-generate Python from SQL (even when SQL has leading comments)
+        _py = python_code or _make_python_from_sql(sql) or ""
+
         if sql and _py:
             sc, pc = st.columns(2)
             with sc:
@@ -1345,6 +1373,15 @@ def detail_panel(
         elif sql:
             st.markdown("**SQL to verify (Redshift):**")
             st.code(sql.strip(), language="sql")
+            # Fallback: always show Python even if auto-gen was somehow empty
+            _fallback_py = (
+                "# Paste into 🐍 Python Runner — conn is pre-injected\n"
+                f"df = pd.read_sql(\"\"\"\n{sql.strip()}\n\"\"\", conn)\n"
+                "print(f'{len(df):,} rows')\n"
+                "print(df.to_string(index=False))"
+            )
+            st.markdown("**Python (paste into 🐍 Runner):**")
+            st.code(_fallback_py, language="python")
         elif _py:
             st.markdown("**Python (paste into 🐍 Runner):**")
             st.code(_py, language="python")
