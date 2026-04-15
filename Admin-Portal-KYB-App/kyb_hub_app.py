@@ -622,15 +622,21 @@ def rag_search(q,top_k=8):
 def get_openai():
     try:
         from openai import OpenAI
-        # Try env var first, then Streamlit secrets
+        # 1. Environment variable
         key = os.getenv("OPENAI_API_KEY","")
+        # 2. Streamlit secrets (secrets.toml or Streamlit Cloud secrets)
         if not key:
-            try: key = st.secrets.get("OPENAI_API_KEY","")
-            except: pass
-        if not key or not key.startswith("sk-"):
+            try:
+                key = st.secrets["OPENAI_API_KEY"]
+            except Exception:
+                pass
+        # 3. Hardcoded fallback for local dev (do not commit real keys to git)
+        if not key:
+            key = ""
+        if not key or not str(key).startswith("sk-"):
             return None
-        return OpenAI(api_key=key)
-    except Exception as e:
+        return OpenAI(api_key=str(key))
+    except Exception:
         return None
 
 SYSTEM="""You are the KYB Intelligence Hub AI — expert on Worth AI's KYB data pipeline.
