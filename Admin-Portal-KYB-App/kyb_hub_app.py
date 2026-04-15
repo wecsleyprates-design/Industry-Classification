@@ -576,9 +576,53 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
             "Rule": rule_label,
             "Dependencies / Alternatives": dep_display or alt_str,
             "Updated": f.get("_received_at",""),
-            "_raw_fact": f,       # kept for JSON panel — stripped before display
+            "_raw_fact": f,
             "_name": name,
         })
+
+    # ── Source reference map (fact → code location) ──────────────────────────
+    FACT_SOURCE_REF = {
+        # format: fact_name → (repo_path, function/variable, line_hint, description)
+        "sos_active":         ("integration-service/lib/facts/kyb/index.ts","sosActive","factEngine.register","Derived from sos_filings[].active"),
+        "sos_match":          ("integration-service/lib/facts/kyb/index.ts","sosMatch","factWithHighestConfidence","Middesk SOS match result"),
+        "sos_match_boolean":  ("integration-service/lib/facts/kyb/index.ts","sosMatchBoolean","dependent","Derived from sos_match.value==='success'"),
+        "sos_filings":        ("integration-service/lib/middesk/","middeskResultsStorage.ts","pid=16","Raw SOS filing array from Middesk API"),
+        "tin":                ("integration-service/lib/facts/kyb/index.ts","tin","factWithHighestConfidence","Raw EIN from applicant (pid=0)"),
+        "tin_submitted":      ("integration-service/lib/facts/kyb/index.ts","tinSubmitted","factWithHighestConfidence","Masked EIN (XXXXX1234)"),
+        "tin_match":          ("integration-service/lib/facts/kyb/index.ts","tinMatch","factWithHighestConfidence","Middesk IRS TIN verification result"),
+        "tin_match_boolean":  ("integration-service/lib/facts/kyb/index.ts","tinMatchBoolean","dependent","Derived from tin_match.value.status==='success'"),
+        "naics_code":         ("integration-service/lib/facts/kyb/index.ts","naicsCode","factWithHighestConfidence","Industry code — vendors cascade"),
+        "mcc_code":           ("integration-service/lib/facts/kyb/index.ts","mccCode","dependent","Derived from naics_code via rel_naics_mcc"),
+        "idv_status":         ("integration-service/lib/plaid/","plaidIdv.ts","pid=18","Plaid IDV session status object"),
+        "idv_passed":         ("integration-service/lib/facts/kyb/index.ts","idvPassed","dependent","Count of SUCCESS sessions"),
+        "idv_passed_boolean": ("integration-service/lib/facts/kyb/index.ts","idvPassedBoolean","dependent","true when idv_passed >= 1"),
+        "watchlist":          ("integration-service/lib/facts/kyb/consolidatedWatchlist.ts","consolidatedWatchlist","combineWatchlistMetadata","PEP+SANCTIONS merged, adverse_media excluded"),
+        "watchlist_hits":     ("integration-service/lib/facts/kyb/index.ts","watchlistHits","dependent","COUNT of watchlist.metadata[]"),
+        "watchlist_raw":      ("integration-service/lib/facts/kyb/index.ts","watchlistRaw","combineWatchlistMetadata","Raw vendor watchlist output"),
+        "adverse_media_hits": ("integration-service/lib/facts/kyb/index.ts","adverseMediaHits","dependent","Adverse media count (separate from watchlist)"),
+        "num_bankruptcies":   ("integration-service/lib/facts/kyb/index.ts","numBankruptcies","dependent","COUNT from bankruptcies array (Equifax)"),
+        "num_judgements":     ("integration-service/lib/facts/kyb/index.ts","numJudgements","dependent","COUNT from judgements array"),
+        "num_liens":          ("integration-service/lib/facts/kyb/index.ts","numLiens","dependent","COUNT from liens array"),
+        "formation_state":    ("integration-service/lib/facts/kyb/index.ts","formationState","factWithHighestConfidence","Middesk primary, OC fallback"),
+        "formation_date":     ("integration-service/lib/facts/kyb/index.ts","formationDate","factWithHighestConfidence","ISO-8601 incorporation date"),
+        "addresses":          ("integration-service/lib/facts/kyb/index.ts","addresses","combineFacts","All vendor addresses merged"),
+        "primary_address":    ("integration-service/lib/facts/kyb/index.ts","primaryAddress","dependent","First entry from addresses[]"),
+        "name_match":         ("integration-service/lib/facts/kyb/index.ts","nameMatch","factWithHighestConfidence","Middesk business name match"),
+        "name_match_boolean": ("integration-service/lib/facts/kyb/index.ts","nameMatchBoolean","dependent","true when name_match.status==='success'"),
+        "website":            ("integration-service/lib/facts/kyb/index.ts","website","factWithHighestConfidence","Applicant URL or SERP-found URL"),
+        "revenue":            ("integration-service/lib/facts/kyb/index.ts","revenue","factWithHighestConfidence","ZI/EFX bulk firmographic"),
+        "num_employees":      ("integration-service/lib/facts/kyb/index.ts","numEmployees","factWithHighestConfidence","ZI/EFX bulk firmographic"),
+        "screened_people":    ("integration-service/lib/trulioo/","truliooPSCScreening.ts","pid=38","PSC watchlist screening per person"),
+        "people":             ("integration-service/lib/middesk/","middeskResultsStorage.ts","pid=16","Officers/directors from Middesk"),
+        "dba_found":          ("integration-service/lib/facts/kyb/index.ts","dbaFound","combineFacts","DBA names from all vendors"),
+        "legal_name":         ("integration-service/lib/facts/kyb/index.ts","legalName","factWithHighestConfidence","Applicant then Middesk/OC"),
+        "middesk_confidence": ("integration-service/lib/middesk/","middeskResultsStorage.ts","computed","0.15+0.20×tasks"),
+        "is_sole_prop":       ("integration-service/lib/facts/kyb/index.ts","isSoleProp","dependent","true when tin_submitted=null AND idv_passed_boolean=true"),
+        "address_verification":("integration-service/lib/middesk/","middeskResultsStorage.ts","pid=16","Middesk USPS address verification"),
+        "risk_score":         ("integration-service/lib/facts/kyb/index.ts","riskScore","dependent","0-100 based on watchlist + high_risk_people"),
+        "kyb_submitted":      ("integration-service/lib/facts/kyb/index.ts","kybSubmitted","dependent","true when addresses[] not empty"),
+        "kyb_complete":       ("integration-service/lib/facts/kyb/index.ts","kybComplete","dependent","business_verified AND screened_people"),
+    }
 
     if rows:
         display_rows = [{k: v for k,v in r.items() if not k.startswith("_")} for r in rows]
@@ -593,8 +637,8 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
                          "Dependencies / Alternatives": st.column_config.TextColumn("Deps / Alternatives", width="large"),
                      })
 
-        # ── Per-fact JSON panels ──────────────────────────────────────────────
-        st.caption("▼ Click any fact below to see its full JSON value, all alternatives, and field-by-field annotations")
+        st.caption("▼ Click any fact to see: valid JSON value · source code reference · API endpoint · Redshift SQL · field-by-field annotations")
+
         for r in rows:
             fname = r["_name"]
             f_obj = r["_raw_fact"]
@@ -606,113 +650,184 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
             rule_raw2 = safe_get(f_obj,"ruleApplied","name") or "null"
             rule_desc2 = safe_get(f_obj,"ruleApplied","description") or ""
             too_large = f_obj.get("_too_large", False)
+            pid_str = str(src.get("platformId","")) if isinstance(src,dict) else ""
 
-            # Build value block
-            if too_large:
-                val_display = '"[too large for Redshift federation — query PostgreSQL RDS port 5432]"'
-            elif v is None:
-                val_display = "null"
-            elif isinstance(v, (dict, list)):
-                val_display = json.dumps(v, default=str, indent=4)
+            # ── Build CLEAN valid JSON (no inline comments) ───────────────────
+            clean_fact = {
+                "name": fname,
+                "value": ("[too large — query PostgreSQL RDS port 5432]" if too_large
+                          else v),
+                "source": {
+                    "confidence": src.get("confidence") if isinstance(src,dict) else None,
+                    "platformId": src.get("platformId") if isinstance(src,dict) else None,
+                    "name": src.get("name") if isinstance(src,dict) else None,
+                },
+                "ruleApplied": f_obj.get("ruleApplied"),
+                "dependencies": deps_raw2 or None,
+                "alternatives": [],
+            }
+            for a in alts_raw:
+                a_src = a.get("source")
+                clean_fact["alternatives"].append({
+                    "value": a.get("value"),
+                    "source": a_src if isinstance(a_src,dict) else {"platformId": a_src},
+                    "confidence": (a_src.get("confidence") if isinstance(a_src,dict)
+                                   else a.get("confidence")),
+                })
+            json_str = json.dumps(clean_fact, default=str, indent=2, ensure_ascii=False)
+
+            # ── Annotations table (separate from JSON) ────────────────────────
+            PID_ANN = {
+                "16":"Middesk — US SOS live query · weight=2.0 · formula: 0.15+0.20×tasks",
+                "23":"OpenCorporates — global registry · weight=0.9 · formula: match.index÷55",
+                "24":"ZoomInfo — firmographic bulk · weight=0.8 · formula: match.index÷55",
+                "17":"Equifax — firmographic bulk · weight=0.7 · formula: match.index÷55",
+                "38":"Trulioo — KYB/PSC · weight=0.8 · formula: status-based (0.70/0.40/0.20)",
+                "31":"AI GPT-4o-mini — LAST RESORT · weight=0.1 · formula: self-reported",
+                "22":"SERP/Google — web scraping · weight=0.3 · formula: heuristic",
+                "40":"Plaid — banking/IDV · weight=1.0",
+                "0": "Applicant (businessDetails) — self-submitted · confidence=1.0 by convention",
+                "-1":"System computed — dependent/derived fact · no vendor involved",
+                "":  "Unknown source — platformId not stored",
+            }
+            RULE_ANN = {
+                "factWithHighestConfidence": "Picks the vendor with highest confidence. If within 5% (WEIGHT_THRESHOLD=0.05), uses platform weight as tiebreaker. Source: integration-service/lib/facts/rules.ts L36–59",
+                "combineFacts": "Merges values from ALL vendors into one deduplicated array. No single winner. Source: rules.ts L76–96",
+                "combineWatchlistMetadata": "Merges business + person watchlist hits, deduplicates by ID, removes adverse_media. Source: rules.ts L253+",
+                "null": "No rule = dependent/computed fact. Derived from dependencies[] listed above. Source: rules.ts L98–107",
+            }
+
+            anns = [
+                ("value", dv_disp, "What the Admin Portal shows" + (" — full array/object in JSON above" if isinstance(v,(list,dict)) else "")),
+                ("source.platformId", str(src.get("platformId","null") if isinstance(src,dict) else "null"),
+                 PID_ANN.get(pid_str, "See PID map in code")),
+                ("source.confidence", str(src.get("confidence","null") if isinstance(src,dict) else "null"),
+                 "null = dependent fact (no vendor). Otherwise = vendor match quality score (0–1)."),
+                ("ruleApplied", rule_raw2, RULE_ANN.get(rule_raw2, rule_desc2 or "See integration-service/lib/facts/rules.ts")),
+                ("dependencies", json.dumps(deps_raw2) if deps_raw2 else "[]",
+                 ("Computed FROM these facts: " + ", ".join(deps_raw2)) if deps_raw2 else "Vendor-supplied — not derived from other facts"),
+                ("alternatives[]", str(len(alts_raw)) + " competing vendor(s)",
+                 ("Other vendors that also returned data but LOST to the winner via " + rule_raw2) if alts_raw else "No competing sources — only one vendor returned data for this fact"),
+            ]
+
+            # ── Source code reference ─────────────────────────────────────────
+            src_ref = FACT_SOURCE_REF.get(fname)
+            src_ref_html = ""
+            if src_ref:
+                repo_path, fn_name, mechanism, desc = src_ref
+                src_ref_html = (
+                    f"<div style='background:#052e16;border-left:3px solid #22c55e;padding:8px 12px;"
+                    f"border-radius:6px;margin:6px 0;font-size:.72rem'>"
+                    f"<div style='color:#86efac;font-weight:600;margin-bottom:4px'>📁 Source Code Reference</div>"
+                    f"<div style='color:#CBD5E1'><strong>File:</strong> "
+                    f"<code style='color:#22c55e'>{repo_path}</code></div>"
+                    f"<div style='color:#CBD5E1'><strong>Fact definition:</strong> "
+                    f"<code style='color:#60A5FA'>{fn_name}</code> "
+                    f"· mechanism: <code style='color:#a5b4fc'>{mechanism}</code></div>"
+                    f"<div style='color:#94A3B8;margin-top:2px'>{desc}</div>"
+                    f"</div>"
+                )
             else:
-                val_display = json.dumps(v, default=str)
+                src_ref_html = (
+                    f"<div style='background:#0f172a;border-left:3px solid #334155;padding:6px 12px;"
+                    f"border-radius:6px;margin:6px 0;font-size:.71rem;color:#64748b'>"
+                    f"📁 Source: integration-service/lib/facts/kyb/index.ts "
+                    f"· fact name: <code style='color:#60A5FA'>{fname}</code>"
+                    f"</div>"
+                )
 
-            # Build source block
-            pid_disp = src.get("platformId","null") if isinstance(src,dict) else "null"
-            conf_disp = src.get("confidence","null") if isinstance(src,dict) else "null"
-            src_name_disp = src.get("name","null") if isinstance(src,dict) else "null"
-            pid_annotation = {
-                "16":"← Middesk (weight=2.0, highest priority)", "23":"← OpenCorporates (weight=0.9)",
-                "24":"← ZoomInfo (weight=0.8)", "17":"← Equifax (weight=0.7)",
-                "38":"← Trulioo (weight=0.8)", "31":"← AI GPT-4o-mini (weight=0.1, last resort)",
-                "22":"← SERP/Google (weight=0.3)", "40":"← Plaid (weight=1.0)",
-                "0":"← Applicant (businessDetails, confidence=1.0 by convention)",
-                "-1":"← System computed (dependent fact, no vendor)",
-            }.get(str(pid_disp),"")
-
-            # Build alternatives block
-            if alts_raw:
-                alts_lines = []
-                for i,a in enumerate(alts_raw):
-                    a_src = a.get("source")
-                    if isinstance(a_src, dict):
-                        a_pid = a_src.get("platformId","?"); a_conf = a_src.get("confidence","?")
-                    else:
-                        a_pid = a_src; a_conf = a.get("confidence","?")
-                    a_val = a.get("value")
-                    a_val_str = json.dumps(a_val, default=str)[:120] if isinstance(a_val,(list,dict)) else json.dumps(a_val, default=str)
-                    a_vendor = _pid_label(str(a_pid)) if a_pid is not None else "Unknown"
-                    alts_lines.append(f'    // [{i}] {a_vendor} (pid={a_pid}, conf={a_conf})')
-                    alts_lines.append(f'    {{"value": {a_val_str}, "source": {a_pid}, "confidence": {a_conf}}}{"," if i<len(alts_raw)-1 else ""}')
-                alts_block = "\n".join(alts_lines)
-            else:
-                alts_block = "    // No alternative sources — only one vendor provided this fact"
-
-            deps_block = json.dumps(deps_raw2) if deps_raw2 else "[]"
-
-            # Header color by value type
-            if too_large:
-                h_color = "#f59e0b"; h_icon = "📦"
-            elif v is None:
-                h_color = "#64748b"; h_icon = "⚪"
-            elif isinstance(v, list):
-                h_color = "#3B82F6"; h_icon = "📋"
-            elif isinstance(v, dict):
-                h_color = "#8B5CF6"; h_icon = "🗂️"
-            else:
-                h_color = "#22c55e"; h_icon = "✅"
-
-            summary_label = f'{h_icon} <code style="color:#60A5FA">{fname}</code> — {dv_disp[:60]}'
-            if isinstance(v, list): summary_label += f' &nbsp;<span style="color:#3B82F6;font-size:.68rem">({len(v)} items — expand to see all)</span>'
-            elif isinstance(v, dict): summary_label += f' &nbsp;<span style="color:#8B5CF6;font-size:.68rem">({len(v)} keys)</span>'
-
-            # Pre-compute all annotation strings (no backslashes inside f-string expressions)
-            _val_ann = ("← list with " + str(len(v)) + " items" if isinstance(v,list)
-                        else ("← object with " + str(len(v)) + " keys" if isinstance(v,dict)
-                        else ("← null = no vendor provided data" if v is None
-                        else "← " + str(dv_disp[:60]))))
-            _conf_ann = ("← " + _rule_label(rule_raw2) + " confidence formula"
-                         if conf_disp not in (None,"null")
-                         else "← null = dependent/computed fact, no vendor query")
-            _dep_ann = ("← computed from: " + ", ".join(deps_raw2)
-                        if deps_raw2 else "← no dependencies (vendor-supplied fact)")
-            _rule_ann = rule_raw2 + ": " + (rule_desc2 or _rule_label(rule_raw2))
-
-            json_block = (
-                '{\n'
-                '  "name": "' + fname + '",\n'
-                '  "value": ' + val_display + ',                ' + _val_ann + '\n'
-                '  "source": {\n'
-                '    "confidence": ' + str(conf_disp) + ',           ' + _conf_ann + '\n'
-                '    "platformId": ' + str(pid_disp) + ',            ' + pid_annotation + '\n'
-                '    "name": "' + str(src_name_disp) + '"\n'
-                '  },\n'
-                '  "ruleApplied": {\n'
-                '    "name": "' + str(rule_raw2) + '",               \u2190 ' + _rule_ann + '\n'
-                '  },\n'
-                '  "dependencies": ' + str(deps_block) + ',          ' + _dep_ann + '\n'
-                '  "alternatives": [\n'
-                + alts_block + '\n'
-                '  ]\n'
-                '}'
+            # ── Storage + API reference ───────────────────────────────────────
+            storage_html = (
+                f"<div style='background:#0c1a2e;border-left:3px solid #3B82F6;padding:8px 12px;"
+                f"border-radius:6px;margin:6px 0;font-size:.72rem'>"
+                f"<div style='color:#93c5fd;font-weight:600;margin-bottom:4px'>🗄️ Where to find this data</div>"
+                f"<div style='color:#CBD5E1'><strong>Redshift table:</strong> "
+                f"<code style='color:#60A5FA'>rds_warehouse_public.facts</code> "
+                f"WHERE business_id='{bid[:8]}...' AND name='{fname}'</div>"
+                f"<div style='color:#CBD5E1;margin-top:3px'><strong>API endpoint:</strong> "
+                f"<code style='color:#f59e0b'>GET /integration/api/v1/facts/business/{{bid}}/kyb</code>"
+                f" → <code>data.{fname}</code></div>"
+                f"<div style='color:#CBD5E1;margin-top:3px'><strong>Redis cache:</strong> "
+                f"<code>integration-express-cache::{{bid}}::/api/v1/facts/business/{{bid}}/kyb</code> "
+                f"(TTL: 2 min)</div>"
+                f"</div>"
             )
 
-            st.markdown(
-                f"<details style='background:#0A0F1E;border-left:3px solid {h_color};"
-                f"border-radius:8px;padding:6px 12px;margin:3px 0'>"
-                f"<summary style='color:{h_color};font-size:.75rem;cursor:pointer;list-style:none'>"
-                f"📄 {summary_label}</summary>"
-                f"<pre style='color:#CBD5E1;font-size:.70rem;background:#0f172a;padding:10px;"
-                f"border-radius:6px;overflow:auto;margin:6px 0;max-height:400px'>{json_block}</pre>"
-                f"</details>",
-                unsafe_allow_html=True
+            # ── Annotation rows as HTML table ─────────────────────────────────
+            ann_rows_html = "".join(
+                f"<tr>"
+                f"<td style='padding:4px 8px;color:#60A5FA;font-family:monospace;font-size:.70rem;white-space:nowrap'>{field}</td>"
+                f"<td style='padding:4px 8px;color:#CBD5E1;font-size:.70rem'>{val}</td>"
+                f"<td style='padding:4px 8px;color:#94A3B8;font-size:.69rem'>{note}</td>"
+                f"</tr>"
+                for field,val,note in anns
+            )
+            ann_table_html = (
+                f"<table style='width:100%;border-collapse:collapse;margin:6px 0'>"
+                f"<tr style='border-bottom:1px solid #1e293b'>"
+                f"<th style='text-align:left;padding:4px 8px;color:#475569;font-size:.68rem'>Field</th>"
+                f"<th style='text-align:left;padding:4px 8px;color:#475569;font-size:.68rem'>Value</th>"
+                f"<th style='text-align:left;padding:4px 8px;color:#475569;font-size:.68rem'>What it means</th>"
+                f"</tr>"
+                + ann_rows_html +
+                f"</table>"
             )
 
-        # Rule legend below
+            # ── Header colour ─────────────────────────────────────────────────
+            if too_large: h_color="#f59e0b"; h_icon="📦"
+            elif v is None: h_color="#64748b"; h_icon="⚪"
+            elif isinstance(v,list): h_color="#3B82F6"; h_icon="📋"
+            elif isinstance(v,dict): h_color="#8B5CF6"; h_icon="🗂️"
+            else: h_color="#22c55e"; h_icon="✅"
+
+            v_summary = (f"{len(v)} items" if isinstance(v,list)
+                         else (f"{len(v)} keys" if isinstance(v,dict)
+                         else dv_disp[:50]))
+
+            # ── Render via expander (not raw HTML) ────────────────────────────
+            with st.expander(f"{h_icon} {fname}  ·  {v_summary}  ·  source: {r['Winning Source']}"):
+                # 1) Source reference
+                st.markdown(src_ref_html + storage_html, unsafe_allow_html=True)
+
+                # 2) Annotations table
+                st.markdown("**Field-by-field annotations:**")
+                st.markdown(ann_table_html, unsafe_allow_html=True)
+
+                # 3) Valid JSON rendered as code
+                st.markdown("**Full JSON (as stored in `rds_warehouse_public.facts.value`):**")
+                st.code(json_str, language="json")
+
+                # 4) SQL
+                st.markdown("**SQL to retrieve this fact from Redshift:**")
+                st.code(
+                    f"SELECT\n"
+                    f"  name,\n"
+                    f"  JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,\n"
+                    f"  JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS winning_pid,\n"
+                    f"  JSON_EXTRACT_PATH_TEXT(value,'source','confidence')  AS confidence,\n"
+                    f"  JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name')   AS rule_applied,\n"
+                    f"  received_at\n"
+                    f"FROM rds_warehouse_public.facts\n"
+                    f"WHERE business_id = '{bid}'\n"
+                    f"  AND name = '{fname}'\n"
+                    f"ORDER BY received_at DESC\n"
+                    f"LIMIT 5;",
+                    language="sql"
+                )
+                if too_large:
+                    st.markdown("**⚠️ This fact is too large for Redshift federation — query from PostgreSQL RDS (port 5432):**")
+                    st.code(
+                        f"-- PostgreSQL RDS (native JSONB, no VARCHAR size limit):\n"
+                        f"SELECT value -> 'value'\n"
+                        f"FROM rds_warehouse_public.facts\n"
+                        f"WHERE business_id = '{bid}' AND name = '{fname}';",
+                        language="sql"
+                    )
+
+        # Rule legend
         used_rules = set(r["Rule"] for r in rows if r["Rule"] not in ("","—","n/a (computed fact)"))
         if used_rules:
-            st.markdown("<div style='margin-top:6px'>", unsafe_allow_html=True)
-            for rule_key, (rl, rd) in RULE_EXPLAIN.items():
+            for rule_key,(rl,rd) in RULE_EXPLAIN.items():
                 if rl in used_rules:
                     st.markdown(
                         f"<div style='background:#0f172a;border-left:3px solid #3B82F6;padding:6px 10px;"
@@ -720,7 +835,6 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
                         f"<span style='color:#60A5FA;font-weight:600'>{rl}:</span> "
                         f"<span style='color:#94A3B8'>{rd}</span></div>",
                         unsafe_allow_html=True)
-            st.markdown("</div>", unsafe_allow_html=True)
     return rows
 
 def sql_for(bid,names):
