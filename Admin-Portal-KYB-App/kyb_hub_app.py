@@ -2085,66 +2085,319 @@ ORDER BY received_at DESC LIMIT 5;""",language="sql")
         ])
 
     with r4:
-        st.markdown("#### IDV — Identity Verification (Plaid)")
+        st.markdown("#### 🪪 IDV — Identity Verification (Plaid)")
+        st.caption("""**Vendor:** Plaid Identity Verification (pid=40, platformId=18 in some contexts) ·
+        **Trigger:** Sent via link when onboarding form submitted ·
+        **Stored in:** `rds_warehouse_public.facts` (idv_status, idv_passed, idv_passed_boolean) ·
+        **Admin Portal path:** KYB → Identity Verification tab · badge shows idv_passed_boolean""")
+
+        # ── Data pipeline diagram ─────────────────────────────────────────────
+        IDV_PIPELINE=[
+            ("1","Onboarding form submitted","Applicant","Merchant submits onboarding form. If not sole_prop (has EIN), IDV flow is triggered for beneficial owners.","#f59e0b"),
+            ("2","Plaid IDV link sent","Plaid (pid=40)","Unique IDV session link sent to owner. Session expires in 15–30 min (configurable). Statuses: PENDING immediately.","#06b6d4"),
+            ("3","Owner completes IDV","Plaid biometrics engine","Owner: (a) scans government-issued ID, (b) takes selfie, (c) liveness check, (d) ID data extraction + match.","#06b6d4"),
+            ("4","Plaid webhook received","integration-service","Plaid sends webhook with final status (SUCCESS/FAILED/CANCELED/EXPIRED). Stored in rds_integration_data.","#8B5CF6"),
+            ("5","idv_status fact computed","Fact Engine","Object: {SUCCESS:N, PENDING:N, FAILED:N, CANCELED:N, EXPIRED:N}. Counts of ALL sessions ever, not just latest.","#22c55e"),
+            ("6","idv_passed_boolean derived","Fact Engine (dependent)","true when idv_passed >= 1 (at least one SUCCESS session). platformId=-1, ruleApplied=null.","#22c55e"),
+            ("7","Admin Portal display","microsites IDV tab","Shows latest session status. Badge: ✅ Verified (passed) or ❌ Not Verified (failed/pending).","#60A5FA"),
+        ]
+        for num,title,src,desc,color in IDV_PIPELINE:
+            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
+                border-radius:8px;padding:8px 14px;margin:3px 0">
+              <div style="display:flex;justify-content:space-between">
+                <span style="color:{color};font-weight:700;font-size:.83rem">Step {num}: {title}</span>
+                <span style="color:#64748b;font-size:.68rem">{src}</span>
+              </div>
+              <div style="color:#94A3B8;font-size:.74rem;margin-top:3px">{desc}</div>
+            </div>""",unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # ── KPI cards ────────────────────────────────────────────────────────
+        sole_prop=str(gv(facts,"is_sole_prop") or "").lower()
+        c1,c2,c3,c4=st.columns(4)
+        with c1: kpi("IDV Passed","✅ Yes" if idv_val=="true" else "❌ No" if idv_val=="false" else "⚠️ Unknown",
+                     "idv_passed_boolean","#22c55e" if idv_val=="true" else "#ef4444" if idv_val=="false" else "#64748b")
+        with c2:
+            idv_raw=facts.get("idv_status",{}).get("value",{})
+            total_sessions=sum(idv_raw.values()) if isinstance(idv_raw,dict) else 0
+            kpi("Total Sessions",str(total_sessions),"All IDV sessions ever sent","#3B82F6")
+        with c3:
+            success_n=idv_raw.get("SUCCESS",0) if isinstance(idv_raw,dict) else 0
+            kpi("Successful",str(success_n),"Sessions with SUCCESS status","#22c55e" if success_n>0 else "#64748b")
+        with c4: kpi("Sole Prop","✅ Yes" if sole_prop=="true" else "❌ No" if sole_prop=="false" else "⚠️ Unknown",
+                     "is_sole_prop — skips IDV if true","#f59e0b" if sole_prop=="true" else "#3B82F6")
+
+        if sole_prop=="true":
+            flag("is_sole_prop=true: business has no EIN or EIN was not submitted. IDV is skipped for sole proprietors in some configurations. idv_passed_boolean may be null or false — this is expected.", "amber")
+
+        # ── Session status breakdown ──────────────────────────────────────────
+        st.markdown("##### IDV Session Status Breakdown")
+        IDV_INFO={
+            "SUCCESS":("✅","#22c55e",
+                "Government-issued ID scanned, selfie taken, liveness confirmed, name extracted matches record. "
+                "idv_passed += 1. If idv_passed >= 1 → idv_passed_boolean=true."),
+            "PENDING":("⏳","#f59e0b",
+                "Session created but not yet completed by the owner. Link may still be active. "
+                "Send a reminder after 24h. Does NOT increment idv_passed."),
+            "FAILED":("❌","#ef4444",
+                "Common failure causes: (1) Expired/damaged ID, (2) Selfie/ID face mismatch, "
+                "(3) Liveness check fail (blinking/moving required), (4) Unsupported ID type, "
+                "(5) Poor lighting. Owner can retry — a new session link is needed."),
+            "CANCELED":("🚫","#f97316",
+                "Owner clicked 'Cancel' or exited the flow without completing. Possible UX friction, "
+                "technical issue, or deliberate avoidance. Requires re-engagement."),
+            "EXPIRED":("⌛","#64748b",
+                "Session link expired (Plaid default: 15–30 min). A new session link must be issued. "
+                "Common for delayed owners."),
+        }
+        if isinstance(idv_raw,dict) and idv_raw:
+            # Chart
+            idv_chart_df=pd.DataFrame([{"Status":k,"Count":v} for k,v in idv_raw.items() if v>=0])
+            col_chart,col_cards=st.columns([1,2])
+            with col_chart:
+                fig_idv=go.Figure(go.Pie(
+                    labels=idv_chart_df["Status"],values=idv_chart_df["Count"],
+                    marker=dict(colors=["#22c55e","#f59e0b","#ef4444","#f97316","#64748b"]),
+                    hole=0.5,textinfo="label+value",
+                ))
+                fig_idv.update_layout(height=220,showlegend=False,margin=dict(t=10,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_idv),use_container_width=True)
+            with col_cards:
+                for status,count in sorted(idv_raw.items(),key=lambda x:-x[1]):
+                    info=IDV_INFO.get(status.upper(),("❓","#94a3b8","Unknown status"))
+                    st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {info[1]};
+                        border-radius:8px;padding:8px 14px;margin:3px 0">
+                      <div style="display:flex;justify-content:space-between">
+                        <span style="color:{info[1]};font-weight:700">{info[0]} {status}: {count} session(s)</span>
+                      </div>
+                      <div style="color:#94A3B8;font-size:.72rem;margin-top:3px">{info[2]}</div>
+                    </div>""",unsafe_allow_html=True)
+        else:
+            flag(f"idv_status fact is null. idv_passed_boolean={idv_val}. "
+                 "Possible causes: (1) Sole proprietor — IDV not triggered, "
+                 "(2) Business onboarded before Plaid IDV was enabled, "
+                 "(3) Plaid webhook not yet received.", "blue")
+
+        # ── Fact lineage ─────────────────────────────────────────────────────
+        st.markdown("---")
         render_lineage(facts,["idv_status","idv_passed","idv_passed_boolean","is_sole_prop"])
 
-        idv_raw=facts.get("idv_status",{}).get("value",{})
-        IDV_INFO={"SUCCESS":("✅","#22c55e","Government ID + selfie confirmed. Identity verified."),
-                  "PENDING":("⏳","#f59e0b","Session not yet completed. Send reminder after 24h."),
-                  "FAILED":("❌","#ef4444","Expired ID, selfie mismatch, liveness fail, or unsupported ID type."),
-                  "CANCELED":("🚫","#f97316","User exited. Possible UX friction or deliberate avoidance."),
-                  "EXPIRED":("⌛","#64748b","Session link expired (15-30min). Re-issue new link.")}
-        if isinstance(idv_raw,dict) and idv_raw:
-            for status,count in sorted(idv_raw.items(),key=lambda x:-x[1]):
-                info=IDV_INFO.get(status.upper(),("❓","#94a3b8","Unknown"))
-                st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {info[1]};
-                    border-radius:8px;padding:9px 14px;margin:3px 0">
-                  <span style="color:{info[1]};font-weight:700">{info[0]} {status}: {count} sessions</span>
-                  <div style="color:#94A3B8;font-size:.75rem;margin-top:3px">{info[2]}</div>
-                </div>""",unsafe_allow_html=True)
-        else:
-            flag(f"idv_passed_boolean={idv_val}. Full IDV status dict not available (may be null).","blue")
+        # ── JSON structure ───────────────────────────────────────────────────
+        with st.expander("📄 JSON structure — idv_status in API response"):
+            st.markdown("""```json
+{
+  "idv_status": {
+    "value": {
+      "SUCCESS": 1,    ← count of successful IDV sessions
+      "PENDING": 0,
+      "CANCELED": 0,
+      "EXPIRED": 0,
+      "FAILED": 0
+    },
+    "source": {
+      "confidence": null,
+      "platformId": 18,    ← 18 = Plaid IDV (note: differs from pid=40 Plaid banking)
+      "name": "plaidIdv"
+    },
+    "ruleApplied": { "name": "factWithHighestConfidence" }
+  },
+  "idv_passed": {
+    "value": 1,            ← COUNT of successful sessions (idv_status.SUCCESS)
+    "source": { "platformId": -1, "name": "dependent" },
+    "dependencies": ["idv_status"]
+  },
+  "idv_passed_boolean": {
+    "value": true,         ← true when idv_passed >= 1
+    "source": { "platformId": -1, "name": "dependent" },
+    "dependencies": ["idv_passed"]
+  },
+  "is_sole_prop": {
+    "value": false,        ← true when tin_submitted=null AND idv_passed_boolean=true
+    "source": { "platformId": -1, "name": "dependent" },
+    "dependencies": ["tin_submitted", "idv_passed_boolean"]
+  }
+}
+```""")
 
-        ai_popup("IDV",f"IDV passed:{idv_val}",[
-            "What are the most common reasons IDV fails?",
-            "How is idv_passed_boolean calculated from idv_status?",
-            "What does is_sole_prop=true mean for IDV interpretation?",
-            "How do I query IDV data from Redshift?",],bid)
-
-        with st.expander("📋 SQL"):
+        with st.expander("📋 SQL — how to query IDV data"):
             st.code(sql_for(bid,["idv_status","idv_passed","idv_passed_boolean","is_sole_prop"]),language="sql")
+            st.code(f"""-- Plaid IDV session history (rds_integration_data):
+SELECT piv.business_id, piv.status, piv.created_at, piv.updated_at
+FROM rds_integration_data.plaid_identity_verification piv
+WHERE piv.business_id = '{bid}'
+ORDER BY piv.created_at DESC;
+
+-- Or via BERT review tasks:
+SELECT bert.status, bert.sublabel, bert.created_at
+FROM rds_integration_data.business_entity_review_task bert
+JOIN rds_integration_data.business_entity_verification bev
+  ON bev.id = bert.business_entity_verification_id
+WHERE bev.business_id = '{bid}' AND bert.key IN ('idv','identity_verification')
+ORDER BY bert.created_at DESC;""",language="sql")
+
+        analyst_card("🔬 IDV — Full Engineering Analysis",[
+            f"idv_passed_boolean={idv_val}: This is the single boolean the Admin Portal displays as the IDV badge. "
+            f"It is a DERIVED fact (platformId=-1, dependent) computed as: idv_passed >= 1. "
+            f"idv_passed = COUNT(sessions where status=SUCCESS). Both are dependent facts — NOT direct vendor queries.",
+            "idv_status is the primary Plaid fact (platformId=18, name='plaidIdv'). It stores an OBJECT (not array) "
+            "of status counts: {SUCCESS:N, PENDING:N, FAILED:N, CANCELED:N, EXPIRED:N}. It counts ALL sessions ever, "
+            "not just the most recent. A business with 2 FAILED and 1 SUCCESS has idv_passed_boolean=true.",
+            f"is_sole_prop={sole_prop}: Derived from tin_submitted=null AND idv_passed_boolean=true. "
+            "When true, some IDV configurations skip the flow. This is why sole proprietors may have "
+            "idv_passed_boolean=null even though no error occurred — IDV was not triggered.",
+            "IDV flow: Link sent → owner opens on mobile → (1) scan front+back of government ID, "
+            "(2) take selfie, (3) liveness check, (4) data extraction + name/DOB match vs submitted info. "
+            "Session expires in 15-30 min. Multiple sessions per business are possible (retries, multiple owners).",
+            "Admin Portal path: KYB tab → Identity Verification → Verified/Not Verified badge. "
+            "Rendered by microsites/packages/case/src/page/Cases/KYB/IdentityVerification.tsx. "
+            "Badge = idv_passed_boolean. Detail = idv_status object breakdown.",
+        ])
+
+        ai_popup("IDV",f"IDV passed:{idv_val} sessions:{total_sessions} SUCCESS:{success_n} sole_prop:{sole_prop}",[
+            "What are the most common reasons IDV fails?",
+            "How is idv_passed_boolean derived from idv_status?",
+            "What does is_sole_prop=true mean for IDV and why is it skipped?",
+            "How do I query Plaid IDV session history from the database?",
+            "Can a business with FAILED sessions still have idv_passed_boolean=true?"],bid)
 
     with r5:
-        st.markdown("#### Cross-Field Anomaly Detection")
+        st.markdown("#### 🔗 Cross-Field Consistency & Anomaly Detection")
+        st.caption("Each check compares facts from different vendors to detect inconsistencies, data integrity bugs, and high-risk patterns. "
+                   "CRITICAL = likely data bug · HIGH = compliance/underwriting action needed · MEDIUM = investigate further · NOTICE = informational")
+
         name_m=str(gv(facts,"name_match_boolean") or "").lower()
-        wl_hits=int(float(gv(facts,"watchlist_hits") or 0))
+        wl_hits_n=int(float(gv(facts,"watchlist_hits") or 0))
         mdsk_c=gc(facts,"sos_match")
         oc_c=gc(facts,"sos_match_boolean") if gp(facts,"sos_match_boolean")=="23" else 0.0
+        am_n=int(float(gv(facts,"adverse_media_hits") or 0))
+        bk_n=int(float(gv(facts,"num_bankruptcies") or 0))
+        naics_v=str(gv(facts,"naics_code") or "")
+        website_v=str(gv(facts,"website") or "")
 
-        checks=[
-            ("SOS Active + TIN Failed",sos_act=="true" and tin_status=="failure","MEDIUM",
-             "Entity is registered but EIN-name mismatch. Likely cause: DBA submitted instead of legal name."),
-            ("SOS Inactive + TIN Verified",sos_act=="false" and tin_bool=="true","HIGH",
-             "EIN valid but entity cannot legally operate. Requires reinstatement before approval."),
-            ("IDV Passed + Name Match Failed",idv_val=="true" and name_m=="false","MEDIUM",
-             "Person identity confirmed but business name doesn't match registry. Expected for sole props with DBA."),
-            ("TIN bool/status inconsistency",tin_bool=="true" and tin_status not in ("success",""),"CRITICAL",
-             f"DATA INTEGRITY BUG: boolean=true but status='{tin_status}'. File bug report for integration-service."),
-            ("No vendor confirmation",mdsk_c==0.0 and oc_c==0.0,"HIGH",
-             "Neither Middesk nor OC matched this business. Entity existence completely unverified."),
-            ("Tax haven formation state",tax_haven,"NOTICE",
-             f"{form_state} = tax-haven state. Verify domestic AND foreign SOS filings separately."),
+        # Extended check set with root cause + action + source reference
+        CHECKS=[
+            # (name, condition, severity, description, root_cause, action, source_ref)
+            ("TIN bool/status inconsistency",
+             tin_bool=="true" and tin_status not in ("success",""),
+             "CRITICAL",
+             f"tin_match_boolean=true BUT tin_match.value.status='{tin_status}'",
+             "tin_match_boolean is derived from tin_match.status='success'. If the boolean is true but status is not success, the derivation rule is broken.",
+             "File bug report for integration-service. Check lib/facts/kyb/tin_match_boolean.ts. This is a data integrity issue — the value shown in Admin Portal may be wrong.",
+             "integration-service/lib/facts/kyb/tin_match_boolean.ts"),
+            ("SOS Active + TIN Failed",
+             sos_act=="true" and tin_status=="failure",
+             "MEDIUM",
+             f"sos_active=true (entity registered) BUT tin_match.status=failure",
+             "Entity IS registered and legally operating (SOS confirms). However, the EIN-name combination did not match IRS records. Common cause: DBA submitted instead of legal name on EIN certificate.",
+             "Request applicant's IRS EIN confirmation letter (SS-4 notice). Verify legal name matches exactly. Do NOT approve until TIN is verified.",
+             "rds_warehouse_public.facts: sos_active, tin_match"),
+            ("SOS Inactive + TIN Verified",
+             sos_act=="false" and tin_bool=="true",
+             "HIGH",
+             f"sos_active=false (not in good standing) BUT tin_match_boolean=true",
+             "EIN is valid and matches IRS records. BUT the entity is not in good standing with its Secretary of State — possibly dissolved, administratively revoked, or has unpaid fees.",
+             "Block approval until SOS standing is reinstated. Entity cannot legally operate in this state.",
+             "rds_warehouse_public.facts: sos_active, tin_match_boolean"),
+            ("IDV Passed + Name Match Failed",
+             idv_val=="true" and name_m=="false",
+             "MEDIUM",
+             f"idv_passed_boolean=true (person verified) BUT name_match_boolean=false",
+             "The owner's identity was confirmed by Plaid (government ID + selfie). However, the business name doesn't match SOS registry. Expected pattern: sole prop with DBA submitted instead of legal name.",
+             "Check if business is a sole prop operating under a DBA. If DBA — acceptable. If not — investigate name discrepancy.",
+             "rds_warehouse_public.facts: idv_passed_boolean, name_match_boolean"),
+            ("No vendor confirmation",
+             mdsk_c==0.0 and oc_c==0.0,
+             "HIGH",
+             "Both Middesk AND OpenCorporates have confidence=0 for sos_match",
+             "Neither primary (Middesk, w=2.0) nor fallback (OC, w=0.9) vendor could match this entity in any SOS registry. Entity existence is COMPLETELY UNVERIFIED.",
+             "Manual review required. Check if entity is very new (<2 weeks), operates under a DBA, or is incorporated in a state not covered by submitted address search.",
+             "rds_warehouse_public.facts: sos_match (pid=16 conf), sos_match_boolean (pid=23 conf)"),
+            ("Tax haven formation state",
+             tax_haven,
+             "NOTICE",
+             f"formation_state={form_state} is a tax-haven state (DE/NV/WY)",
+             "Tax-haven states create entity resolution gaps. The domestic filing in DE/NV/WY may differ from the submitted address state. Middesk address-based search may have found the WRONG record.",
+             "Verify both domestic (formation state) and foreign (operating state) SOS filings separately. Consider re-running Middesk with formation_state as jurisdiction.",
+             "rds_warehouse_public.facts: formation_state + primary_address.state"),
+            ("Website but no NAICS",
+             website_v and naics_v in ("","561499"),
+             "MEDIUM",
+             f"website='{website_v[:40]}' is set BUT naics_code={'561499 (fallback)' if naics_v=='561499' else 'missing'}",
+             "Gap G2: The AI enrichment (last resort vendor) had access to the website URL but could not classify the industry. Possible cause: the website URL was not passed to the AI as a searchable parameter.",
+             "Check integration-service/lib/aiEnrichment/aiEnrichment.ts — verify params.website is being passed. Consider re-running AI enrichment with web_search enabled.",
+             "integration-service/lib/aiEnrichment/aiEnrichment.ts"),
+            ("Watchlist hit with low SOS confidence",
+             wl_hits_n>0 and mdsk_c<0.5,
+             "HIGH",
+             f"watchlist_hits={wl_hits_n} AND Middesk confidence={mdsk_c:.3f} (<0.50)",
+             "The entity has watchlist hits AND Middesk couldn't confidently match it. The entity being screened may not be the same legal entity as the one being operated.",
+             "Enhanced due diligence: verify entity identity via manual document review before acting on watchlist hits. The watchlist hit may belong to a different entity with a similar name.",
+             "rds_warehouse_public.facts: watchlist_hits, sos_match confidence"),
+            ("Adverse media but no watchlist",
+             am_n>0 and wl_hits_n==0,
+             "NOTICE",
+             f"adverse_media_hits={am_n} BUT watchlist_hits=0",
+             "Adverse media (negative news) exists but no formal sanctions/PEP list hits. Adverse media is deliberately excluded from the consolidated watchlist fact.",
+             "Review adverse_media_hits detail. Negative press may indicate reputational risk even without formal sanctions.",
+             "integration-service/lib/facts/kyb/consolidatedWatchlist.ts (filterOutAdverseMedia)"),
+            ("Bankruptcy with active SOS",
+             bk_n>0 and sos_act=="true",
+             "MEDIUM",
+             f"num_bankruptcies={bk_n} BUT sos_active=true",
+             "Entity is currently in good standing (SOS active) but has bankruptcy history. May be a discharged bankruptcy — entity survived restructuring.",
+             "Check bankruptcy age and type (Chapter 7=liquidation vs Chapter 11=reorganization). Discharged BK with active SOS is manageable; recent BK requires enhanced review.",
+             "rds_warehouse_public.facts: num_bankruptcies, sos_active"),
         ]
-        found=[(t,s,d) for t,cond,s,d in checks if cond]
-        if found:
-            for title,sev,desc in sorted(found,key=lambda x:{"CRITICAL":0,"HIGH":1,"MEDIUM":2,"NOTICE":3}.get(x[1],4)):
+
+        found_checks=[(name,sev,desc,root,action,src) for name,cond,sev,desc,root,action,src in CHECKS if cond]
+        not_found=[(name,sev) for name,cond,sev,desc,root,action,src in CHECKS if not cond]
+
+        if found_checks:
+            st.markdown(f"**{len(found_checks)} issue(s) detected** (ordered by severity):")
+            for name,sev,desc,root,action,src in sorted(found_checks,
+                key=lambda x:{"CRITICAL":0,"HIGH":1,"MEDIUM":2,"NOTICE":3}.get(x[1],4)):
                 col={"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b","NOTICE":"#3B82F6"}.get(sev,"#64748b")
                 st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {col};
-                    border-radius:8px;padding:12px 16px;margin:8px 0">
-                  <div style="color:{col};font-weight:700">{sev} — {title}</div>
-                  <div style="color:#CBD5E1;font-size:.79rem;margin-top:6px">{desc}</div>
+                    border-radius:10px;padding:14px 18px;margin:8px 0">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                    <span style="color:{col};font-weight:700;font-size:.88rem">{sev} — {name}</span>
+                    <span style="color:#475569;font-size:.68rem;font-family:monospace">{src}</span>
+                  </div>
+                  <div style="color:#CBD5E1;font-size:.78rem;margin-bottom:6px"><strong>Detected:</strong> {desc}</div>
+                  <div style="color:#94A3B8;font-size:.75rem;margin-bottom:4px"><strong>Root cause:</strong> {root}</div>
+                  <div style="color:#60A5FA;font-size:.75rem">⚡ <strong>Action:</strong> {action}</div>
                 </div>""",unsafe_allow_html=True)
-        else: flag("✅ No cross-field anomalies detected.","green")
+        else:
+            flag("✅ No cross-field anomalies detected across all checks.","green")
+
+        # Checks that passed (green)
+        with st.expander(f"✅ {len(not_found)} checks passed — click to see"):
+            for name,sev in not_found:
+                st.markdown(f"<span style='color:#22c55e;font-size:.75rem'>✅ {name}</span>",unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # Summary matrix
+        st.markdown("##### Key Field Consistency Matrix")
+        matrix_rows=[]
+        for field_a,field_b,val_a,val_b,expected,ok in [
+            ("sos_active","sos_match_boolean",sos_act,sos_match,"Should agree (both true or both false)",sos_act==sos_match or sos_act=="true"),
+            ("tin_match_boolean","tin_match.status",tin_bool,tin_status,"bool=true only when status='success'",not(tin_bool=="true" and tin_status not in ("success",""))),
+            ("idv_passed_boolean","idv_status.SUCCESS",idv_val,str(success_n if isinstance(idv_raw,dict) else "?"),"boolean=true requires SUCCESS>0",not(idv_val=="true" and success_n==0)),
+            ("sos_active","formation_state",sos_act,form_state,"active entity should have formation state",(sos_act!="true") or bool(form_state)),
+            ("naics_code","mcc_code",naics_v,str(gv(facts,"mcc_code") or ""),"both should be set if classification succeeded",not(bool(naics_v) and not gv(facts,"mcc_code"))),
+        ]:
+            matrix_rows.append({"Field A":field_a,"Value A":val_a or "(null)","Field B":field_b,"Value B":val_b or "(null)","Expected":expected,"Status":"✅ OK" if ok else "⚠️ CHECK"})
+        st.dataframe(pd.DataFrame(matrix_rows),use_container_width=True,hide_index=True)
+
+        analyst_card("🔬 Cross-Analysis — Engineering Interpretation",[
+            "Cross-field checks detect three types of issues: (1) Data integrity bugs in integration-service derivation logic, (2) Genuine business risk patterns (BK+active, watchlist+low_conf), (3) Expected patterns that look like errors (IDV passed + name_match=false for sole props with DBA).",
+            "TIN bool/status inconsistency is the most critical check — if triggered, the Admin Portal is showing WRONG data. The derivation in lib/facts/kyb/tin_match_boolean.ts may have a bug or the wrong fact is being read.",
+            "No vendor confirmation (Middesk conf=0 + OC conf=0) means the entity existence is completely unverified. All subsequent KYB facts (SOS filings, TIN, IDV) may belong to the wrong entity or be fabricated.",
+            f"Current status: {len(found_checks)} issue(s) detected, {len(not_found)} checks passed. "
+            f"{'⚠️ Manual review recommended.' if len(found_checks)>0 else '✅ No anomalies detected.'}",
+        ])
 
 # ════════════════════════════════════════════════════════════════════════════════
 # CLASSIFICATION & KYB
@@ -2161,98 +2414,373 @@ elif tab=="🏭 Classification & KYB":
     naics=str(gv(facts,"naics_code") or "")
     mcc=str(gv(facts,"mcc_code") or "")
     naics_conf=gc(facts,"naics_code"); naics_src=gp(facts,"naics_code")
+    is_fallback=naics=="561499"
 
-    c1,c2,c3,c4=st.columns(4)
-    with c1: kpi("NAICS",naics or "N/A",f"561499=fallback · {pid_info(naics_src)[0]}",
-                 "#f59e0b" if naics=="561499" else "#22c55e")
-    with c2: kpi("NAICS Conf",f"{naics_conf:.3f}","0=no match 1=perfect","#22c55e" if naics_conf>0.70 else "#f59e0b")
-    with c3: kpi("MCC",mcc or "N/A",pid_info(gp(facts,"mcc_code"))[0],"#3B82F6")
-    with c4: kpi("Industry",str(gv(facts,"industry") or "N/A")[:20],"2-digit NAICS sector","#8B5CF6")
+    c1,c2,c3,c4,c5=st.columns(5)
+    with c1: kpi("NAICS",naics or "N/A",f"{'⚠️ Fallback code' if is_fallback else 'Industry code'} · {pid_info(naics_src)[0]}",
+                 "#ef4444" if is_fallback else "#22c55e" if naics else "#64748b")
+    with c2: kpi("NAICS Conf",f"{naics_conf:.4f}","0=no match · 1=perfect · formula varies by vendor",
+                 "#22c55e" if naics_conf>0.70 else "#f59e0b" if naics_conf>0.40 else "#ef4444")
+    with c3: kpi("MCC",mcc or "N/A",f"Merchant Category Code · {pid_info(gp(facts,'mcc_code'))[0]}","#3B82F6")
+    with c4: kpi("Industry",str(gv(facts,"industry") or "N/A")[:22],"2-digit NAICS sector group","#8B5CF6")
+    with c5:
+        alts_n=len(get_alts(facts,"naics_code"))
+        kpi("Alt Sources",str(alts_n),f"Other vendors that also classified","#60A5FA" if alts_n>0 else "#64748b")
 
-    cl1,cl2,cl3,cl4=st.tabs(["🏭 NAICS/MCC","🏢 Background","📬 Contact","🌐 Website"])
+    if is_fallback:
+        flag("🚨 NAICS 561499 = fallback code ('All Other Business Support Services'). "
+             "This business's industry could NOT be determined. All vendors failed to classify. "
+             "This impacts Worth Score (company_profile feature = low confidence) and MCC (defaults to 5614).", "red")
+    elif not naics:
+        flag("⚠️ No NAICS code stored. Classification has not been run or all vendors returned null.", "amber")
+
+    cl1,cl2,cl3,cl4=st.tabs(["🏭 NAICS/MCC Pipeline","🏢 Background & Firmographic","📬 Contact & Address","🌐 Website & Digital"])
 
     with cl1:
-        st.markdown("#### NAICS/MCC Classification — Full Source Lineage")
+        st.markdown("#### 🏭 NAICS/MCC Classification — Complete Pipeline")
+        st.caption("""**Fact name:** `naics_code` · **Table:** `rds_warehouse_public.facts` ·
+        **Rule:** `factWithHighestConfidence` · **Worth Score impact:** `naics6` feature in Company Profile category ·
+        **Admin Portal:** KYB → Background tab → Industry field""")
+
+        # ── Vendor pipeline ───────────────────────────────────────────────────
+        st.markdown("##### How NAICS is Determined — Vendor Cascade (ordered by priority)")
         SOURCE_PRIORITY=pd.DataFrame([
-            ("Equifax","17","0.7","efx_primnaicscode","warehouse.equifax_us_latest"),
-            ("ZoomInfo","24","0.8","zi_c_naics6","zoominfo.comp_standard_global"),
-            ("OpenCorporates","23","0.9","industry_code_uids → parse us_naics-XXXXXX","OC API"),
-            ("SERP","22","0.3","businessLegitimacyClassification.naics_code","Google/web"),
-            ("Trulioo","38","0.7","extractStandardizedIndustriesFromTruliooResponse","Trulioo API"),
-            ("businessDetails","0","0.2","applicant naics_code (6-digit validated)","onboarding form"),
-            ("AI (GPT)","31","0.1","AINaicsEnrichment.response.naics_code","GPT-4o-mini LAST RESORT"),
-        ],columns=["Vendor","pid","Weight","Data Field","Data Source"])
-        SOURCE_PRIORITY["Won?"]=[("✅ YES" if r["pid"]==naics_src else "—") for _,r in SOURCE_PRIORITY.iterrows()]
+            ("Equifax","17","0.7","efx_primnaicscode","warehouse.equifax_us_latest","Bulk firmographic — matched by EFX entity model"),
+            ("ZoomInfo","24","0.8","zi_c_naics6","zoominfo.comp_standard_global","Bulk firmographic — matched by ZI entity model"),
+            ("OpenCorporates","23","0.9","industry_code_uids → us_naics-XXXXXX","OC company API","Parsed from OC industry tags: 'us_naics-541512' → NAICS 541512"),
+            ("SERP (Google)","22","0.3","businessLegitimacyClassification.naics_code","Google Business Profile","Google My Business category → mapped to NAICS"),
+            ("Trulioo","38","0.7","extractStandardizedIndustriesFromTruliooResponse","Trulioo KYB API","Industry field from Trulioo company verification response"),
+            ("Applicant","0","0.2","naics_code (6-digit, validated)","Onboarding form","Self-reported by merchant — lowest trust"),
+            ("AI (GPT-4o-mini)","31","0.1","AINaicsEnrichment.response.naics_code","integration-service/lib/aiEnrichment","LAST RESORT: fires only when ALL vendors fail. Prompts GPT with name+address+(website if available)"),
+        ],columns=["Vendor","pid","Weight","Data Field","Data Source","How it works"])
+        SOURCE_PRIORITY["Won?"]=["✅ YES" if r["pid"]==naics_src else "—" for _,r in SOURCE_PRIORITY.iterrows()]
+        SOURCE_PRIORITY["Conf formula"]=[
+            "match.index ÷ 55 (MAX=55)","match.index ÷ 55","match.index ÷ 55",
+            "heuristic","status-based","1.0 (self-reported)","self-reported (LOW=0.3 MED=0.6 HIGH=0.9)"
+        ]
         st.dataframe(SOURCE_PRIORITY,use_container_width=True,hide_index=True)
 
+        # ── Winner detail ─────────────────────────────────────────────────────
+        if naics_src:
+            win_name=pid_info(naics_src)[0]
+            conf_formula={"23":"match.index ÷ 55 (where match.index = rank of OC search result, max=55)",
+                          "24":"match.index ÷ 55 (ZI entity match rank)",
+                          "17":"XGBoost entity match score OR match.index ÷ 55",
+                          "16":"0.15 + 0.20 × passing Middesk review tasks (max 4)",
+                          "38":"status-based: SUCCESS=0.70 · PARTIAL=0.40 · FAILED=0.20",
+                          "31":"self-reported: LOW=0.30 · MEDIUM=0.60 · HIGH=0.90",
+                          "0":"1.00 by convention (applicant self-reported)",
+                          "22":"heuristic based on SERP result quality"}.get(naics_src,"see Fact Engine")
+            st.markdown(f"""<div style="background:#052e16;border-left:4px solid #22c55e;border-radius:10px;padding:12px 16px;margin:8px 0">
+              <div style="color:#22c55e;font-weight:700;font-size:.88rem">✅ Winner: {win_name} (pid={naics_src})</div>
+              <div style="color:#CBD5E1;font-size:.78rem;margin-top:6px">
+                <strong>NAICS code:</strong> {naics or '(null)'} · 
+                <strong>Confidence:</strong> {naics_conf:.4f} ({conf_formula}) ·
+                <strong>Rule:</strong> factWithHighestConfidence (highest conf×weight, WEIGHT_THRESHOLD=0.05)
+              </div>
+            </div>""",unsafe_allow_html=True)
+
+        # ── Fact lineage table ────────────────────────────────────────────────
         render_lineage(facts,["naics_code","mcc_code","naics_description","mcc_description","industry"])
 
+        # ── Alternatives ──────────────────────────────────────────────────────
         alts=get_alts(facts,"naics_code")
         if alts:
-            st.markdown("##### Alternative NAICS Sources (lost to Fact Engine)")
-            st.dataframe(pd.DataFrame([{"Vendor":pid_info(a["pid"])[0],"pid":a["pid"],
-                "Alt NAICS":str(a["value"])[:20] if a["value"] else "(null)",
-                "Conf":f"{a['conf']:.3f}",
-                "Why lost?":f"Conf {a['conf']:.3f} < winner {naics_conf:.3f}" if a["conf"]<naics_conf else "Lower weight"}
-               for a in alts]),use_container_width=True,hide_index=True)
+            st.markdown("##### Alternative NAICS Sources (competed but lost)")
+            alt_rows=[]
+            for a in alts:
+                vname=pid_info(a["pid"])[0]
+                why=(f"Confidence {a['conf']:.4f} < winner {naics_conf:.4f}"
+                     if a["conf"]<naics_conf
+                     else f"Lower platform weight (tie-break) — same conf range ±0.05")
+                alt_rows.append({"Vendor":vname,"pid":a["pid"],
+                    "NAICS code":str(a.get("value",""))[:20] if a.get("value") else "(null)",
+                    "Confidence":f"{a['conf']:.4f}","Why lost":why})
+            st.dataframe(pd.DataFrame(alt_rows),use_container_width=True,hide_index=True)
+            st.caption("These are the exact values from alternatives[] in the JSON stored in rds_warehouse_public.facts")
+        else:
+            st.info("No alternative NAICS sources — only one vendor returned a classification for this business.")
 
-        if naics=="561499":
-            st.markdown("#### ⚠️ 561499 Root Cause")
-            flag("All vendors failed to classify industry. AI fired as last resort but also couldn't determine it.","amber")
-            website_v=gv(facts,"website")
-            if website_v and naics=="561499":
-                flag(f"🚨 Gap G2 CONFIRMED: website='{str(website_v)[:50]}' exists but NAICS=561499. "
-                     "AI had the URL but web_search was not enabled (params.website not passed).","red")
-            for g,d in [("G1: Entity matching failed","All ZI/EFX/OC/Middesk failed to match — no commercial NAICS available"),
-                        ("G2: AI web_search not used","params.website null → AI couldn't search the website"),
-                        ("G3: Name keyword missing","AI prompt doesn't check name keywords before defaulting to 561499")]:
-                st.markdown(f'<div class="flow-step"><strong>{g}</strong><br><span style="color:#94A3B8;font-size:.73rem">{d}</span></div>',unsafe_allow_html=True)
+        # ── MCC derivation ────────────────────────────────────────────────────
+        st.markdown("##### MCC Derivation")
+        st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid #3B82F6;border-radius:8px;padding:12px 16px;margin:8px 0;font-size:.78rem">
+          <div style="color:#60A5FA;font-weight:600;margin-bottom:6px">How MCC is computed (two-step logic):</div>
+          <div style="color:#CBD5E1">
+            Step 1 — Direct AI classification: if AI (pid=31) returned an MCC code directly → use <code>mcc_code_found</code><br>
+            Step 2 — NAICS→MCC lookup: if no direct MCC → look up <code>naics_code</code> in <code>rel_naics_mcc</code> mapping table → <code>mcc_code_from_naics</code><br>
+            Step 3 — Fallback: if NAICS=561499 (fallback) → MCC defaults to <strong>5614</strong> (Business Services NEC)<br>
+            <br><strong>Current:</strong> NAICS={naics or '(null)'} → MCC={mcc or '(null)'}
+          </div>
+        </div>""",unsafe_allow_html=True)
 
-        ai_popup("NAICS",f"NAICS:{naics} conf:{naics_conf:.3f} src:{pid_info(naics_src)[0]}",[
-            "Why did this vendor win the NAICS classification?",
-            "What are the root causes of NAICS 561499 fallback?",
-            "How does the Fact Engine select the winning NAICS source?",
-            "What SQL shows NAICS data from Redshift?",
-            "What is the relationship between NAICS and MCC codes?",],bid)
+        # ── 561499 root cause ─────────────────────────────────────────────────
+        if is_fallback:
+            st.markdown("---")
+            st.markdown("#### 🚨 561499 Root Cause Analysis")
+            st.markdown("NAICS 561499 = 'All Other Business Support Services' — the industry the Fact Engine assigns when ALL other options fail.")
+            website_v=str(gv(facts,"website") or "")
+            for gap,desc,is_present,evidence in [
+                ("G1: Entity matching failed — no commercial NAICS available",
+                 "None of ZI, EFX, OC, Middesk could match this entity in their database. "
+                 "The entity may be too new (<2 weeks), too small (no commercial database presence), "
+                 "or submitted with a name/address that doesn't match any registry record.",
+                 len(alts)==0 and naics_conf<0.1,
+                 f"Alternatives: {len(alts)} source(s) | Winner conf: {naics_conf:.4f}"),
+                ("G2: AI web_search not triggered (Gap G2)",
+                 "The AI enrichment (last resort) received the business name+address but NOT the website URL. "
+                 "The AI cannot search the web without the website parameter. "
+                 "Source: integration-service/lib/aiEnrichment/aiEnrichment.ts — params.website must be non-null.",
+                 bool(website_v) and is_fallback,
+                 f"website fact = '{website_v[:50]}' (not empty — URL exists but was not passed to AI)"),
+                ("G3: AI classification failed — insufficient signals",
+                 "AI received name+address (and possibly website) but could not confidently classify. "
+                 "Common causes: generic name ('ABC LLC'), no web presence, or website with insufficient content. "
+                 "AI prompt requires sufficient business description to return a specific NAICS.",
+                 naics_src=="31" and is_fallback,
+                 f"Winner is AI (pid={naics_src}) with conf={naics_conf:.4f} → returned 561499 anyway"),
+            ]:
+                color="#ef4444" if is_present else "#334155"
+                prefix="🔴 CONFIRMED" if is_present else "⚪ Not confirmed"
+                st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
+                    border-radius:8px;padding:10px 14px;margin:4px 0">
+                  <div style="color:{color};font-weight:700;font-size:.82rem">{prefix} — {gap}</div>
+                  <div style="color:#94A3B8;font-size:.74rem;margin-top:4px">{desc}</div>
+                  <div style="color:#475569;font-size:.68rem;margin-top:2px">Evidence: {evidence}</div>
+                </div>""",unsafe_allow_html=True)
+
+        # ── JSON structure ────────────────────────────────────────────────────
+        with st.expander("📄 JSON structure — naics_code in API response"):
+            st.markdown(f"""```json
+{{
+  "naics_code": {{
+    "name": "naics_code",
+    "value": "{naics or 'null'}",           ← shown in Admin Portal KYB → Background → Industry
+    "source": {{
+      "confidence": {naics_conf:.4f},        ← formula varies by vendor (see table above)
+      "platformId": {naics_src or 'null'},   ← winning vendor
+      "name": "{pid_info(naics_src)[0].lower()}"
+    }},
+    "ruleApplied": {{ "name": "factWithHighestConfidence" }},
+    "alternatives": [
+      // All other vendors that returned a NAICS code, with their confidence
+      // {{ "value": "541512", "source": 23, "confidence": 0.8182 }}
+      // {{ "value": "722511", "source": 24, "confidence": 0.5455 }}
+    ]
+  }},
+  "mcc_code": {{
+    "value": "{mcc or 'null'}",             ← mcc_code_found ?? mcc_code_from_naics
+    "source": {{ "platformId": -1, "name": "dependent" }}  ← derived fact
+  }}
+}}
+```""")
+
+        ai_popup("NAICS",f"NAICS:{naics} conf:{naics_conf:.4f} src:{pid_info(naics_src)[0]} MCC:{mcc} fallback:{is_fallback}",[
+            "Why did this specific vendor win the NAICS classification?",
+            "What is the exact algorithm for factWithHighestConfidence with WEIGHT_THRESHOLD=0.05?",
+            "What are all 3 root causes of NAICS 561499 and how to fix each?",
+            "How does the rel_naics_mcc lookup table map NAICS to MCC?",
+            "What SQL shows NAICS history and all alternative sources?"],bid)
 
         with st.expander("📋 SQL & Python"):
             st.code(sql_for(bid,["naics_code","mcc_code","naics_description","mcc_description","industry"]),language="sql")
+            st.code(f"""-- NAICS history (all versions, including alternatives):
+SELECT
+    name,
+    JSON_EXTRACT_PATH_TEXT(value,'value')               AS naics_code,
+    JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS winning_pid,
+    JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence,
+    JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name')  AS rule,
+    received_at
+FROM rds_warehouse_public.facts
+WHERE business_id='{bid}' AND name IN ('naics_code','mcc_code','naics_description','industry')
+ORDER BY name, received_at DESC;""",language="sql")
             st.code(py_for(bid,["naics_code","mcc_code"]),language="python")
 
-        analyst_card("NAICS Classification — Full Interpretation",[
-            f"Winning source: {pid_info(naics_src)[0]} (pid={naics_src}) · confidence {naics_conf:.3f}. "
-            f"{'Confidence formula: match.index÷55 (MAX_CONFIDENCE_INDEX=55).' if naics_src in ('23','24','17') else 'AI self-reported confidence (LOW/MED/HIGH).' if naics_src=='31' else '0.15+0.20×tasks (Middesk).' if naics_src=='16' else 'Status-based (Trulioo).'}",
-            f"NAICS confidence {naics_conf:.3f}: {'above 0.70 — reliable classification' if naics_conf>0.70 else 'between 0.40-0.70 — moderate confidence, verify' if naics_conf>0.40 else 'below 0.40 — low confidence, may be wrong'}",
-            "MCC = mcc_code_found (AI direct) ?? mcc_code_from_naics (rel_naics_mcc lookup). If NAICS=561499 → MCC defaults to 5614.",
-            f"{'⚠️ 561499 fallback: vendor entity matching failed for this business.' if naics=='561499' else ''}",
+        analyst_card("🔬 NAICS Classification — Complete Engineering Analysis",[
+            f"Winning source: {pid_info(naics_src)[0]} (pid={naics_src}) · "
+            f"confidence {naics_conf:.4f} · rule: factWithHighestConfidence (WEIGHT_THRESHOLD=0.05). "
+            f"{'⚠️ AI wins only when ALL commercial vendors fail.' if naics_src=='31' else '✅ Commercial vendor won.'}",
+            f"Confidence interpretation: {naics_conf:.4f} → "
+            f"{'Reliable (>0.70)' if naics_conf>0.70 else 'Moderate (0.40–0.70), verify with alternatives' if naics_conf>0.40 else 'LOW (<0.40) — classification may be wrong'}. "
+            f"For OC/ZI/EFX: conf = entity_match_rank ÷ 55 where 55=MAX_CONFIDENCE_INDEX. "
+            f"A conf of 0.35 means the entity was the 35th-ranked result in the vendor search.",
+            "MCC derivation: (1) AI direct MCC if returned → (2) rel_naics_mcc lookup from NAICS → (3) 5614 if NAICS=561499. "
+            "MCC is a DERIVED fact (pid=-1, dependent). It is NOT independently verified by any vendor.",
+            f"{'⚠️ 561499 fallback: this code impacts Worth Score (naics6 feature in Company Profile category). ' if is_fallback else ''}"
+            "naics6 is a Worth Score model input — unknown NAICS reduces model confidence and may lower score.",
+            f"Alternatives found: {len(alts)} other vendor(s) also provided NAICS codes. "
+            f"{'They are visible in alternatives[] of the JSON. The Fact Engine rejected them because their confidence×weight was lower.' if alts else 'No alternatives — only one vendor returned a classification.'}",
         ])
 
     with cl2:
-        render_lineage(facts,["business_name","legal_name","dba_found","corporation",
-                               "formation_date","year_established","revenue","num_employees","kyb_submitted"])
-        ai_popup("Background","firmographic data",[
-            "What is the source for business_name vs legal_name?","How is dba_found determined?",
-            "Where does revenue data come from?","What does kyb_submitted=true mean?"],bid)
+        st.markdown("#### 🏢 Background & Firmographic Data")
+        st.caption("""**Sources:** ZoomInfo (pid=24, w=0.8), Equifax (pid=17, w=0.7), Middesk (pid=16, w=2.0), Applicant (pid=0) ·
+        **Admin Portal:** KYB → Background tab · **Worth Score features:** revenue, count_employees, age_business""")
+
+        # KPIs
+        biz_name=str(gv(facts,"business_name") or "")
+        legal_name_v=str(gv(facts,"legal_name") or "")
+        revenue_v=str(gv(facts,"revenue") or "")
+        emp_v=str(gv(facts,"num_employees") or "")
+        kyb_sub=str(gv(facts,"kyb_submitted") or "").lower()
+        kyb_comp=str(gv(facts,"kyb_complete") or "").lower()
+
+        c1,c2,c3,c4=st.columns(4)
+        with c1: kpi("KYB Submitted","✅ Yes" if kyb_sub=="true" else "❌ No","Onboarding form submitted","#22c55e" if kyb_sub=="true" else "#f59e0b")
+        with c2: kpi("KYB Complete","✅ Yes" if kyb_comp=="true" else "❌ No","Business verified + people screened","#22c55e" if kyb_comp=="true" else "#f59e0b")
+        with c3: kpi("Revenue",revenue_v[:18] if revenue_v else "Not available","ZI/EFX bulk data · Worth Score input","#3B82F6" if revenue_v else "#64748b")
+        with c4: kpi("Employees",emp_v if emp_v else "Not available","num_employees · Worth Score feature: count_employees","#3B82F6" if emp_v else "#64748b")
+
+        # Name lineage
+        st.markdown("##### Name Lineage — business_name vs legal_name")
+        st.markdown("""<div style="background:#0c1a2e;border-left:3px solid #f59e0b;border-radius:8px;padding:10px 14px;margin:6px 0;font-size:.78rem">
+          <div style="color:#fde68a;font-weight:600">⚠️ business_name ≠ legal_name — understand the difference:</div>
+          <div style="color:#CBD5E1;margin-top:4px">
+            <strong>business_name</strong> = what the merchant submitted on the onboarding form (may be DBA / trade name)<br>
+            <strong>legal_name</strong> = the entity's legal name as registered with the Secretary of State (from Middesk/OC)<br>
+            <strong>names_found</strong> = combineFacts array of ALL names found across ALL vendors (merged, deduplicated)<br>
+            <strong>dba_found</strong> = DBA names from applicant submission + registry filings (also combineFacts)<br>
+            A mismatch between business_name and legal_name is expected for DBAs. It does NOT indicate fraud.
+          </div>
+        </div>""",unsafe_allow_html=True)
+
+        render_lineage(facts,["business_name","legal_name","names_found","dba_found","corporation",
+                               "formation_date","year_established","revenue","num_employees",
+                               "kyb_submitted","kyb_complete","compliance_status","risk_score"])
+
+        # Worth Score features
+        st.markdown("##### Worth Score Feature Mapping — Firmographic inputs")
+        try:
+            fd_str=str(gv(facts,"formation_date") or "")
+            biz_age=datetime.now(timezone.utc).year-int(fd_str[:4]) if fd_str and fd_str[:4].isdigit() else None
+        except: biz_age=None
+
+        feat_rows=[
+            ("age_business",f"{biz_age} years" if biz_age else "Unknown","formation_date → current year minus formation year","Company Profile","Older businesses = lower default risk"),
+            ("revenue",revenue_v or "null","revenue fact from ZI/EFX","Business Operations","Primary P&L input to financial sub-model"),
+            ("count_employees",emp_v or "null","num_employees fact from ZI/EFX","Company Profile","Proxy for business scale and stability"),
+            ("naics6",naics or "null","naics_code fact (6-digit)","Company Profile","Industry risk classification — 561499 = penalty"),
+            ("bus_struct",str(gv(facts,"corporation") or ""),"corporation fact","Company Profile","LLC vs Corp vs Sole Prop — different risk profiles"),
+        ]
+        st.dataframe(pd.DataFrame(feat_rows,columns=["Worth Score Feature","Current Value","Source fact","Model Category","Why it matters"]),
+                     use_container_width=True,hide_index=True)
+
+        ai_popup("Background",f"revenue:{revenue_v} employees:{emp_v} kyb_submitted:{kyb_sub}",[
+            "What is the difference between business_name and legal_name?",
+            "How is dba_found determined and what sources contribute?",
+            "How does revenue data from ZoomInfo affect the Worth Score?",
+            "What does kyb_complete=false mean and what is blocking it?"],bid)
+
         with st.expander("📋 SQL"):
-            st.code(sql_for(bid,["business_name","legal_name","dba_found","corporation","formation_date","revenue","num_employees"]),language="sql")
+            st.code(sql_for(bid,["business_name","legal_name","dba_found","corporation",
+                                  "formation_date","revenue","num_employees","kyb_submitted","kyb_complete"]),language="sql")
 
     with cl3:
-        render_lineage(facts,["primary_address","business_phone","email","address_match",
-                               "address_match_boolean","addresses_deliverable","name_match","name_match_boolean"])
-        ai_popup("Contact","contact facts",[
-            "How is name_match_boolean derived?","What does addresses_deliverable mean?",
-            "How is address_match determined?"],bid)
+        st.markdown("#### 📬 Contact & Address Verification")
+        st.caption("""**Address winner:** Middesk (pid=16) for primary, combineFacts for all addresses ·
+        **Name match winner:** Middesk (pid=16) · **Admin Portal:** KYB → Contact Information tab""")
+
+        am_bool=str(gv(facts,"address_match_boolean") or "").lower()
+        nm_bool=str(gv(facts,"name_match_boolean") or "").lower()
+        ra_v=facts.get("address_registered_agent",{}).get("value",{})
+
+        c1,c2,c3,c4=st.columns(4)
+        with c1: kpi("Address Match","✅ Matched" if am_bool=="true" else "❌ No match" if am_bool=="false" else "⚠️ Unknown",
+                     "address_match_boolean","#22c55e" if am_bool=="true" else "#ef4444")
+        with c2: kpi("Name Match","✅ Matched" if nm_bool=="true" else "❌ No match" if nm_bool=="false" else "⚠️ Unknown",
+                     "name_match_boolean","#22c55e" if nm_bool=="true" else "#ef4444")
+        with c3: kpi("Deliverable Address","✅ Yes" if gv(facts,"addresses_deliverable") else "⚠️ Unknown",
+                     "USPS confirmed deliverable","#22c55e" if gv(facts,"addresses_deliverable") else "#64748b")
+        with c4:
+            ra_status=ra_v.get("status","") if isinstance(ra_v,dict) else ""
+            kpi("Registered Agent Addr","⚠️ WARNING" if ra_status=="warning" else "✅ OK",
+                "address_registered_agent","#f59e0b" if ra_status=="warning" else "#22c55e")
+
+        if ra_status=="warning":
+            ra_msg=ra_v.get("message","") if isinstance(ra_v,dict) else ""
+            flag(f"⚠️ address_registered_agent WARNING: '{ra_msg}'. "
+                 "The submitted office address matches a known registered agent (e.g. a law firm or incorporation service). "
+                 "This is common for tax-haven incorporations (DE/NV/WY) and may indicate the entity is not physically operating at this address.", "amber")
+
+        render_lineage(facts,["primary_address","addresses","addresses_submitted","addresses_found",
+                               "addresses_deliverable","address_match","address_match_boolean",
+                               "address_verification","address_verification_boolean","address_registered_agent",
+                               "business_phone","phone_found","email",
+                               "name_match","name_match_boolean"])
+
+        st.markdown("##### Address Verification Pipeline")
+        for step,src,desc,color in [
+            ("1. Applicant submits address","Onboarding form (pid=0)","addresses_submitted fact — what the merchant claims their address is","#f59e0b"),
+            ("2. Middesk verifies address","Middesk API (pid=16, w=2.0)","Middesk searches SOS registry and USPS for the submitted address. Returns: status (success/failure), matched addresses, deliverable subset.","#f59e0b"),
+            ("3. address_verification stored","rds_warehouse_public.facts","Object: {addresses[], baseAddresses[], status, message, label, sublabel}. Winner: Middesk via factWithHighestConfidence.","#22c55e"),
+            ("4. address_match_boolean derived","Fact Engine (dependent, pid=-1)","true when address_verification.status='success'. Dependencies: ['address_verification'].","#22c55e"),
+            ("5. addresses_deliverable stored","Middesk (pid=16)","Subset of addresses confirmed deliverable by USPS via Middesk. Used for mail-based verification.","#3B82F6"),
+            ("6. Admin Portal display","microsites ContactInformation.tsx","Shows primary_address (derived from addresses). Address verification badge = address_match_boolean.","#60A5FA"),
+        ]:
+            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};border-radius:6px;
+                padding:7px 12px;margin:3px 0;font-size:.73rem">
+              <strong style="color:{color}">{step}</strong>
+              <span style="color:#64748b;margin-left:8px">{src}</span>
+              <div style="color:#94A3B8;margin-top:2px">{desc}</div>
+            </div>""",unsafe_allow_html=True)
+
+        ai_popup("Contact",f"addr_match:{am_bool} name_match:{nm_bool} reg_agent:{ra_status}",[
+            "How is address_match_boolean derived from address_verification?",
+            "What does addresses_deliverable mean and how is it different from addresses_found?",
+            "What does address_registered_agent warning mean for underwriting?",
+            "How is name_match_boolean determined?"],bid)
+
+        with st.expander("📋 SQL"):
+            st.code(sql_for(bid,["primary_address","addresses","address_match_boolean",
+                                  "address_verification","addresses_deliverable","address_registered_agent",
+                                  "name_match","name_match_boolean"]),language="sql")
 
     with cl4:
-        render_lineage(facts,["website","website_found","serp_id","review_rating","review_count"])
-        website_v=gv(facts,"website"); web_found=str(gv(facts,"website_found") or "").lower()
-        c1,c2=st.columns(2)
-        with c1: kpi("Website Found","✅ Yes" if web_found=="true" else "❌ No",
-                     str(website_v)[:40] if website_v else "No URL","#22c55e" if web_found=="true" else "#f59e0b")
-        with c2: kpi("SERP ID","✅ Found" if gv(facts,"serp_id") else "❌ Not found","Google My Business",
-                     "#22c55e" if gv(facts,"serp_id") else "#64748b")
-        if web_found=="true" and naics=="561499":
-            flag("🚨 Website found but NAICS=561499. Gap G2 confirmed — AI had URL but web_search not triggered.","red")
+        st.markdown("#### 🌐 Website & Digital Presence")
+        st.caption("""**Website source:** Applicant (pid=0) or SERP (pid=22) · 
+        **SERP data:** Google My Business via SERP API · **NAICS link:** AI uses website for classification (Gap G2 if missing)""")
+
+        website_v=str(gv(facts,"website") or "")
+        web_found_v=gv(facts,"website_found")
+        web_found_str=str(web_found_v or "").lower() if not isinstance(web_found_v,list) else "true" if web_found_v else "false"
+        serp_id=str(gv(facts,"serp_id") or "")
+        rating=str(gv(facts,"review_rating") or "")
+        rev_count=str(gv(facts,"review_count") or "")
+
+        c1,c2,c3,c4=st.columns(4)
+        with c1: kpi("Website",website_v[:30] if website_v else "❌ Not submitted","Applicant-submitted URL","#22c55e" if website_v else "#f59e0b")
+        with c2: kpi("Website Found","✅ Yes" if web_found_str=="true" else "❌ No","Verified by SERP/Middesk","#22c55e" if web_found_str=="true" else "#64748b")
+        with c3: kpi("SERP/GMB ID","✅ Found" if serp_id else "❌ Not found","Google My Business presence","#22c55e" if serp_id else "#64748b")
+        with c4: kpi("Review Rating",rating if rating else "N/A",f"{rev_count} reviews" if rev_count else "No reviews","#3B82F6" if rating else "#64748b")
+
+        # NAICS-website link warning
+        if website_v and is_fallback:
+            flag("🚨 Gap G2 CONFIRMED: website is set but NAICS=561499. "
+                 "The AI enrichment (last resort) had access to the website URL in the facts table BUT "
+                 "integration-service/lib/aiEnrichment/aiEnrichment.ts did not pass params.website to the AI prompt. "
+                 "Fix: pass website URL as a parameter so AI can use web_search to determine industry.", "red")
+        elif not website_v and is_fallback:
+            flag("Gap G1/G3: No website submitted AND NAICS=561499. AI had no URL to search. "
+                 "Common for micro-businesses, sole props, and new businesses.", "amber")
+        elif website_v and not is_fallback:
+            flag(f"✅ Website present ('{website_v[:40]}') and NAICS classified ({naics}). "
+                 "No Gap G2 detected.", "green")
+
+        render_lineage(facts,["website","website_found","serp_id","all_google_place_ids",
+                               "review_rating","review_count","google_review_count","google_review_rating"])
+
+        st.markdown("""<div style="background:#0c1a2e;border-left:3px solid #8B5CF6;border-radius:8px;padding:10px 14px;margin:8px 0;font-size:.78rem">
+          <div style="color:#a5b4fc;font-weight:600">How website data feeds NAICS classification (the G2 gap)</div>
+          <div style="color:#CBD5E1;margin-top:4px">
+            <code>website</code> fact (pid=0 or pid=22) → passed to AI enrichment as <code>params.website</code><br>
+            AI prompt: "Given business name=X, address=Y, website=Z, what is the 6-digit NAICS code?"<br>
+            If <code>params.website=null</code> → AI cannot use web_search → classifies from name+address only → often returns 561499<br>
+            <strong>Source:</strong> integration-service/lib/aiEnrichment/aiEnrichment.ts · lib/aiEnrichment/constants.ts
+          </div>
+        </div>""",unsafe_allow_html=True)
+
+        with st.expander("📋 SQL"):
+            st.code(sql_for(bid,["website","website_found","serp_id","review_rating","review_count"]),language="sql")
 
 # ════════════════════════════════════════════════════════════════════════════════
 # RISK & WATCHLIST
@@ -2349,29 +2877,164 @@ SELECT watchlist_count,watchlist_verification FROM clients.customer_table WHERE 
         ])
 
     with rw2:
+        st.markdown("#### 📜 Public Records — Bankruptcies, Judgments & Liens")
+        st.caption("""**Sources:** Equifax (pid=17) public records database · **Stored in:** `rds_warehouse_public.facts` ·
+        **Worth Score impact:** Public Records category — highest negative impact features ·
+        **Admin Portal:** KYB → Public Records tab""")
+
         render_lineage(facts,["num_bankruptcies","num_judgements","num_liens"])
-        if bk>0 or ju>0 or li>0:
-            st.dataframe(pd.DataFrame({
-                "Type":["BK","Judgments","Liens"],"Count":[bk,ju,li],
-                "Model Feature":["count_bankruptcy+age_bankruptcy","count_judgment+age_judgment","count_lien+age_lien"],
-                "Score Impact (est)":["−40pts each (cap−120)","−20pts each (cap−60)","−10pts each (cap−40)"],
-            }),use_container_width=True,hide_index=True)
-        with st.expander("📋 SQL"):
-            st.code(sql_for(bid,["num_bankruptcies","num_judgements","num_liens"]),language="sql")
+
+        # Impact table
+        st.markdown("##### Worth Score Impact — Public Records Features")
+        impact_data=[
+            ("Bankruptcies",bk,"count_bankruptcy","age_bankruptcy",
+             "−40 pts per filing (cap: −120 pts)","Chapter 7=liquidation · Chapter 11=reorganization · Chapter 13=personal debt adjustment",
+             "Public Records","#ef4444" if bk>0 else "#22c55e"),
+            ("Judgments",ju,"count_judgment","age_judgment",
+             "−20 pts per filing (cap: −60 pts)","Civil court judgments — creditor won lawsuit against business. Indicates payment disputes.",
+             "Public Records","#f97316" if ju>0 else "#22c55e"),
+            ("Liens",li,"count_lien","age_lien",
+             "−10 pts per lien (cap: −40 pts)","Tax liens (IRS) or mechanic liens. Business owes money secured against assets.",
+             "Public Records","#f59e0b" if li>0 else "#22c55e"),
+        ]
+        for label,count,feat_count,feat_age,impact,desc,cat,color in impact_data:
+            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
+                border-radius:10px;padding:12px 16px;margin:6px 0">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:{color};font-weight:700;font-size:.88rem">{label}: {count}</span>
+                <span style="color:#64748b;font-size:.70rem">Worth Score: {impact}</span>
+              </div>
+              <div style="color:#94A3B8;font-size:.74rem;margin-top:4px">{desc}</div>
+              <div style="color:#475569;font-size:.70rem;margin-top:2px">
+                Model features: <code>{feat_count}</code> + <code>{feat_age}</code> · Category: {cat}
+              </div>
+            </div>""",unsafe_allow_html=True)
+
+        if bk==0 and ju==0 and li==0:
+            flag("✅ No bankruptcies, judgments, or liens found. Public Records category contributes positively to Worth Score.", "green")
+
+        st.markdown("##### What the Raw Arrays Contain (PostgreSQL RDS required — too large for Redshift)")
+        st.code(f"""-- bankruptcies array (PostgreSQL RDS port 5432):
+SELECT
+    filing->>'type'         AS bankruptcy_type,     -- Chapter 7, 11, 13
+    filing->>'status'       AS status,              -- open, closed, discharged
+    filing->>'filed_at'     AS filed_date,
+    filing->>'closed_at'    AS closed_date,
+    filing->>'assets'       AS assets,
+    filing->>'liabilities'  AS liabilities
+FROM rds_warehouse_public.facts
+CROSS JOIN jsonb_array_elements(value->'value') AS filing
+WHERE name='bankruptcies' AND business_id='{bid}';
+
+-- judgements array:
+SELECT
+    j->>'plaintiff', j->>'amount', j->>'status', j->>'filed_at'
+FROM rds_warehouse_public.facts
+CROSS JOIN jsonb_array_elements(value->'value') AS j
+WHERE name='judgements' AND business_id='{bid}';
+
+-- liens array:
+SELECT
+    l->>'type', l->>'amount', l->>'status', l->>'filed_at'
+FROM rds_warehouse_public.facts
+CROSS JOIN jsonb_array_elements(value->'value') AS l
+WHERE name='liens' AND business_id='{bid}';
+
+-- Scalar counts (Redshift OK):
+{sql_for(bid,["num_bankruptcies","num_judgements","num_liens"])}""",language="sql")
+
+        analyst_card("🔬 Public Records — Engineering Analysis",[
+            f"Current: BK={bk}, Judgments={ju}, Liens={li}. "
+            f"Estimated Worth Score impact: ~{-(min(bk*40,120)+min(ju*20,60)+min(li*10,40))} points from public records alone.",
+            "Source: Equifax (pid=17) public records. Equifax queries court records, IRS tax liens, and civil judgment databases. These are updated monthly in bulk — not real-time.",
+            "num_bankruptcies/judgements/liens are SCALAR COUNTS extracted from the large arrays (bankruptcies, judgements, liens). The scalar counts are safe to query from Redshift. The full arrays (with dates, amounts, types) must be queried from PostgreSQL RDS.",
+            "Worth Score features use BOTH count AND age: count_bankruptcy (how many) + age_bankruptcy (years since most recent filing). A 10-year-old bankruptcy carries less weight than a 6-month-old one.",
+            "CRITICAL: num_bankruptcies=0 does not mean the business has no bankruptcy history — it means Equifax found no records OR Equifax could not match this entity. Very new businesses and micro-businesses often have no Equifax coverage.",
+        ])
 
     with rw3:
-        combos=[]
-        if wl>0 and bk>0: combos.append(("🔴 CRITICAL","Watchlist+BK","Compliance+credit both flagged. Manual underwriting mandatory."))
-        if wl>0 and am>0: combos.append(("🔴 HIGH","Watchlist+Adverse Media","Compliance hit + negative press. Verify if related."))
-        if bk>0 and ju>0 and li>0: combos.append(("🔴 HIGH","BK+Judgment+Lien","Worst financial profile. Thorough document review required."))
-        if wl==0 and bk==0: combos.append(("✅ CLEAN","No compliance or credit issues","Neither watchlist nor public record concerns."))
-        for sev,title,desc in combos:
-            col={"🔴 CRITICAL":"#ef4444","🔴 HIGH":"#f97316","✅ CLEAN":"#22c55e"}.get(sev,"#f59e0b")
-            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {col};
-                border-radius:8px;padding:12px 16px;margin:8px 0">
-              <div style="color:{col};font-weight:700">{sev} — {title}</div>
-              <div style="color:#CBD5E1;font-size:.79rem;margin-top:6px">{desc}</div>
+        st.markdown("#### 🔗 Risk Combination Analysis")
+        st.caption("Cross-signal analysis — identifying which combinations of risk signals require specific underwriting actions")
+
+        RISK_COMBOS=[
+            # (condition, severity, title, detail, action)
+            (wl>0 and bk>0,
+             "CRITICAL","🔴 Watchlist + Bankruptcy",
+             f"Watchlist hits={wl} AND bankruptcies={bk}. Both compliance AND credit risk are flagged simultaneously.",
+             "Hard stop on compliance side (watchlist). Cannot approve regardless of credit. File SAR if SANCTIONS hit. Manual underwriting required."),
+            (wl>0 and am>0,
+             "HIGH","🔴 Watchlist + Adverse Media",
+             f"Watchlist hits={wl} AND adverse_media_hits={am}. Formal compliance hit plus negative press coverage.",
+             "Verify if adverse media is related to the watchlist hit entity. Enhanced due diligence required. Both signals point to the same risk."),
+            (wl>0 and bk==0 and am==0,
+             "HIGH","🔴 Watchlist Only",
+             f"Watchlist hits={wl} with no bankruptcy or adverse media.",
+             "Compliance review required. Determine hit type: SANCTIONS=hard stop, PEP=enhanced DD, OTHER=manual review."),
+            (bk>0 and ju>0 and li>0,
+             "HIGH","🔴 Full Public Records Trifecta",
+             f"BK={bk}, Judgments={ju}, Liens={li}. Worst possible public records profile.",
+             "Thorough financial document review. May indicate ongoing distress or poor payment history. High Worth Score penalty: estimated {-(min(bk*40,120)+min(ju*20,60)+min(li*10,40))} pts."),
+            (bk>0 and ju==0 and li==0,
+             "MEDIUM","🟡 Bankruptcy Only",
+             f"bankruptcy={bk}, no judgments or liens.",
+             f"Check bankruptcy type and age. Discharged BK > 5 years ago is manageable. Recent BK (< 2 years) requires enhanced review."),
+            (am>0 and wl==0,
+             "MEDIUM","🟡 Adverse Media Only",
+             f"adverse_media_hits={am} but no formal watchlist hits.",
+             "Adverse media is tracked separately. Review content. Negative press ≠ automatic denial. Requires qualitative assessment."),
+            (wl==0 and bk==0 and ju==0 and li==0 and am==0,
+             "CLEAN","✅ No Risk Signals",
+             "No watchlist hits, no bankruptcies, no judgments, no liens, no adverse media.",
+             "Clean profile. Standard underwriting proceeds. Monitor via risk monitoring alerts."),
+        ]
+
+        found_combos=[(sev,title,detail,action) for cond,sev,title,detail,action in RISK_COMBOS if cond]
+        for sev,title,detail,action in found_combos:
+            color={"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b","CLEAN":"#22c55e"}.get(sev,"#64748b")
+            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
+                border-radius:10px;padding:14px 18px;margin:8px 0">
+              <div style="color:{color};font-weight:700;font-size:.90rem;margin-bottom:6px">{title}</div>
+              <div style="color:#CBD5E1;font-size:.79rem;margin-bottom:8px">{detail}</div>
+              <div style="background:#0f172a;border-radius:6px;padding:8px 12px">
+                <span style="color:#60A5FA;font-size:.74rem;font-weight:600">⚡ Required action: </span>
+                <span style="color:#94A3B8;font-size:.74rem">{action}</span>
+              </div>
             </div>""",unsafe_allow_html=True)
+
+        # Risk signal summary bar chart
+        risk_vals=[("Watchlist Hits",wl,"#ef4444"),("Adverse Media",am,"#f59e0b"),
+                   ("Bankruptcies",bk,"#8B5CF6"),("Judgments",ju,"#8B5CF6"),("Liens",li,"#6366f1")]
+        if any(v>0 for _,v,_ in risk_vals):
+            fig_risk=go.Figure(go.Bar(
+                x=[r[0] for r in risk_vals],y=[r[1] for r in risk_vals],
+                marker_color=[r[2] for r in risk_vals],
+                text=[str(r[1]) for r in risk_vals],textposition="outside",
+            ))
+            fig_risk.update_layout(title="Risk Signal Counts for this Business",
+                                   height=280,xaxis_title="",yaxis_title="Count",
+                                   margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_risk),use_container_width=True)
+
+        with st.expander("📋 SQL — risk signal queries"):
+            st.code(f"""-- All risk signals in one query:
+SELECT
+    JSON_EXTRACT_PATH_TEXT(value,'value') AS count_value,
+    received_at
+FROM rds_warehouse_public.facts
+WHERE business_id='{bid}'
+  AND name IN ('watchlist_hits','adverse_media_hits','num_bankruptcies','num_judgements','num_liens')
+ORDER BY name;
+
+-- Watchlist detail (clients.customer_table):
+SELECT watchlist_count, watchlist_verification, adverse_media_hits
+FROM clients.customer_table
+WHERE business_id='{bid}';
+
+-- Worth Score public records feature impact:
+SELECT category_id, score_100, weighted_score_850
+FROM rds_manual_score_public.business_score_factors
+WHERE score_id=(SELECT score_id FROM rds_manual_score_public.data_current_scores WHERE business_id='{bid}' LIMIT 1)
+  AND category_id='public_records';""",language="sql")
 
 # ════════════════════════════════════════════════════════════════════════════════
 # WORTH SCORE
@@ -2388,115 +3051,355 @@ elif tab=="💰 Worth Score":
     with st.spinner("Loading Worth Score…"):
         score_df,score_err=load_score(bid)
 
-    ws1,ws2,ws3=st.tabs(["💰 Score","📊 Waterfall","📊 Audit"])
+    ws1,ws2,ws3=st.tabs(["💰 Score & Architecture","📊 Waterfall & Features","📊 Feature Fill Rates"])
 
     with ws1:
+        # ── Model architecture explainer ──────────────────────────────────────
+        st.markdown("#### Worth Score Model Architecture")
+        st.markdown("""<div style="background:#0c1a2e;border:1px solid #1e3a5f;border-radius:12px;padding:16px 20px;margin:8px 0">
+<div style="color:#60A5FA;font-weight:700;font-size:.92rem;margin-bottom:10px">📐 How the Worth Score is Built</div>
+<div style="color:#CBD5E1;font-size:.80rem;line-height:1.8">
+
+<strong style="color:#a5b4fc">Step 1 — Feature extraction from KYB facts</strong><br>
+ai-score-service reads from rds_warehouse_public.facts → extracts model inputs (age_business, count_bankruptcy, 
+naics6, revenue, bs_total_liabilities, ratio_debt_to_equity, gdp_pch, etc.)
+
+<br><br><strong style="color:#a5b4fc">Step 2 — 3-component ensemble model (worth_score_model.py)</strong><br>
+■ Firmographic XGBoost — features: age, NAICS, state, employees, entity type, SIC, public records counts/ages<br>
+■ Financial neural net (PyTorch) — features: P&L, balance sheet, cash flow, profitability/solvency ratios from Plaid banking<br>
+■ Economic model — features: macro indicators (GDP, CPI, interest rates, unemployment, VIX, dollar index, etc.)<br>
+All three produce a probability → combined via ensemble → isotonic calibrator → final_proba ∈ [0,1]
+
+<br><br><strong style="color:#a5b4fc">Step 3 — Score scaling</strong><br>
+<code>score_300_850 = final_proba × 550 + 300</code> (source: aiscore.py L44)<br>
+<code>score_0_100 = final_proba × 100</code><br>
+Example: probability=0.72 → score_300_850 = 0.72×550+300 = <strong>696</strong>
+
+<br><br><strong style="color:#a5b4fc">Step 4 — Decision thresholds (score_decision_matrix table)</strong><br>
+Default cutoffs (configurable per customer in score_decision_matrix):<br>
+■ <span style="color:#22c55e">700–850 → LOW risk → APPROVE</span><br>
+■ <span style="color:#f59e0b">550–699 → MODERATE risk → FURTHER_REVIEW_NEEDED</span><br>
+■ <span style="color:#ef4444">0–549 → HIGH risk → DECLINE</span><br>
+Source: manual-score-service/db/migrations/.../20240109130303-initial-tables-up.sql
+
+<br><br><strong style="color:#a5b4fc">Step 5 — Storage</strong><br>
+Score → Kafka message → manual-score-service → PostgreSQL (rds_manual_score_public.business_scores)<br>
+Federated view in Redshift: rds_manual_score_public.data_current_scores JOIN business_scores<br>
+customer_files.worth_score: from warehouse.latest_score (datascience schema) — uses score from awsdatacatalog
+
+</div></div>""",unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # ── Score KPIs ────────────────────────────────────────────────────────
+        score=None
         if score_df is not None and not score_df.empty:
             row=score_df.iloc[0]
-            score=float(row.get("score_850") or 0); risk=str(row.get("risk_level","") or "")
-            dec=str(row.get("score_decision","") or ""); scored_at=str(row.get("created_at",""))[:16]
+            score=float(row.get("score_850") or 0)
+            score_100=float(row.get("score_100") or 0) if "score_100" in row else (score-300)/550*100
+            risk=str(row.get("risk_level","") or "")
+            dec=str(row.get("score_decision","") or "")
+            scored_at=str(row.get("created_at",""))[:16]
+            # Reverse-compute probability
+            prob=round((score-300)/550,4) if score>0 else 0
             rc={"HIGH":"#ef4444","MODERATE":"#f59e0b","MEDIUM":"#f59e0b","LOW":"#22c55e"}.get(risk.upper(),"#64748b")
             dc={"APPROVE":"#22c55e","FURTHER_REVIEW_NEEDED":"#f59e0b","DECLINE":"#ef4444"}.get(dec,"#64748b")
-            c1,c2,c3,c4=st.columns(4)
-            with c1: kpi("Worth Score",f"{score:.0f}","300–850","#3B82F6")
-            with c2: kpi("Risk Level",risk or "Unknown","",rc)
-            with c3: kpi("Decision",dec.replace("_"," ") or "Unknown","",dc)
-            with c4: kpi("Scored At",scored_at,"rds_manual_score_public","#8B5CF6")
 
-            for lv,ex in [("LOW","✅ 650–850: entity passes major factors. Standard approval."),
-                          ("MODERATE","🟡 500–649: some risk factors. Review before approving."),
-                          ("HIGH","🔴 300–499: significant risk signals. Manual underwriting required.")]:
-                if lv==risk.upper(): flag(f"Risk Level={risk}: {ex}","blue"); break
+            c1,c2,c3,c4,c5=st.columns(5)
+            with c1: kpi("Worth Score (850)",f"{score:.0f}","score_300_850 = p × 550 + 300","#3B82F6")
+            with c2: kpi("Score (100)",f"{score_100:.1f}","score_0_100 = p × 100","#3B82F6")
+            with c3: kpi("Model Probability",f"{prob:.4f}","final_proba from calibrated ensemble","#8B5CF6")
+            with c4: kpi("Risk Level",risk or "Unknown","from score_decision_matrix",rc)
+            with c5: kpi("Decision",dec.replace("_"," ")[:16] or "Unknown","configurable per customer",dc)
 
-            DECISIONS={"APPROVE":"Model probability ABOVE acceptance threshold. Business meets risk criteria for the product.",
-                       "FURTHER_REVIEW_NEEDED":"Score near threshold — uncertain zone. Human analyst must review before decision.",
-                       "DECLINE":"Model probability BELOW minimum threshold. Business exceeds maximum acceptable risk."}
-            if dec in DECISIONS: flag(f"Decision={dec.replace('_',' ')}: {DECISIONS[dec]}","blue")
+            # Score gauge
+            score_pct=int((score-300)/550*100)
+            gauge_color=dc
+            st.markdown(f"""<div style="margin:12px 0">
+              <div style="display:flex;justify-content:space-between;font-size:.75rem;color:#94A3B8">
+                <span>300 (min)</span><span>DECLINE &lt;550</span><span>REVIEW 550-699</span><span>APPROVE ≥700</span><span>850 (max)</span>
+              </div>
+              <div style="position:relative;background:linear-gradient(90deg,#ef4444 0%,#ef4444 45%,#f59e0b 45%,#f59e0b 73%,#22c55e 73%,#22c55e 100%);
+                border-radius:8px;height:14px;margin:4px 0">
+                <div style="position:absolute;left:{score_pct}%;top:-4px;width:3px;height:22px;
+                  background:white;border-radius:2px;transform:translateX(-50%)"></div>
+              </div>
+              <div style="text-align:left;margin-left:{score_pct}%;font-size:.78rem;color:white;font-weight:700;margin-top:2px">
+                {score:.0f}
+              </div>
+            </div>""",unsafe_allow_html=True)
 
+            # Decision explanation
+            DECISION_DETAIL={
+                "APPROVE":(
+                    "✅ APPROVE",
+                    f"Score {score:.0f} ≥ 700 threshold. "
+                    "Model probability {:.4f} is above the acceptance threshold. "
+                    "Business passes major risk factors. Standard approval process.",
+                    f"Thresholds are stored in score_decision_matrix table (configurable per customer). "
+                    "Default: 700=APPROVE threshold.",
+                ),
+                "FURTHER_REVIEW_NEEDED":(
+                    "🔎 FURTHER REVIEW NEEDED",
+                    f"Score {score:.0f} is in the uncertain zone (550–699). "
+                    "Model cannot confidently approve or decline. "
+                    "A human analyst must review before making a decision.",
+                    "Typical profile: entity is legitimate but has some risk factors. "
+                    "May have bankruptcy history, moderate public records, or limited banking data.",
+                ),
+                "DECLINE":(
+                    "❌ DECLINE",
+                    f"Score {score:.0f} < 550 threshold. "
+                    "Model probability {:.4f} is below the minimum acceptance threshold. "
+                    "Business exceeds maximum acceptable risk for this product.",
+                    "Do NOT approve without Compliance override. Document decline reason. "
+                    "Check if decline is due to watchlist (compliance issue) or credit (financial issue).",
+                ),
+            }
+            if dec in DECISION_DETAIL:
+                title,detail,action=DECISION_DETAIL[dec]
+                col_dec=dc
+                st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {col_dec};
+                    border-radius:10px;padding:14px 18px;margin:10px 0">
+                  <div style="color:{col_dec};font-weight:700;font-size:.90rem;margin-bottom:6px">{title}</div>
+                  <div style="color:#CBD5E1;font-size:.79rem;margin-bottom:6px">{detail}</div>
+                  <div style="color:#94A3B8;font-size:.74rem">{action}</div>
+                </div>""",unsafe_allow_html=True)
+
+            # Factor contributions
             factors_df,_=load_score_factors(bid)
             if factors_df is not None and not factors_df.empty:
-                st.markdown("##### Factor Contributions (business_score_factors)"); st.dataframe(factors_df,use_container_width=True,hide_index=True)
-            else: flag("business_score_factors not accessible — showing estimated waterfall in next tab.","blue")
+                st.markdown("##### SHAP Factor Contributions by Category")
+                st.caption("Each row = one model category's contribution to the final score. "
+                           "Positive = adds to score. Negative = reduces score. "
+                           "Source: rds_manual_score_public.business_score_factors")
+                # Add category names
+                CAT_NAMES={
+                    "public_records":"📜 Public Records (BK/Judgments/Liens)",
+                    "company_profile":"🏢 Company Profile (Age/NAICS/State/Structure)",
+                    "financial_trends":"📈 Financial Trends (Economics/Ratios)",
+                    "business_operations":"💼 Business Operations (Revenue/P&L/Balance Sheet)",
+                    "performance_measures":"📊 Performance Measures (Profitability/Risk flags)",
+                }
+                factors_df["Category"]=factors_df["category_id"].map(lambda c: CAT_NAMES.get(c,c))
+                factors_df["Impact (pts)"]=factors_df["weighted_score_850"].apply(lambda v: f"{v:+.1f}")
+                factors_df["Score (0-100)"]=factors_df["score_100"].apply(lambda v: f"{v:.1f}" if pd.notna(v) else "n/a")
+                st.dataframe(factors_df[["Category","Score (0-100)","Impact (pts)"]],
+                             use_container_width=True,hide_index=True)
+            else:
+                flag("business_score_factors not accessible from Redshift federation. "
+                     "See waterfall tab for estimated factor breakdown.", "blue")
         else:
-            flag(f"No score found. {score_err or ''}","amber")
-            st.code(f"""SELECT bs.weighted_score_850,bs.risk_level,bs.score_decision,bs.created_at
+            flag(f"No score found for this business. {score_err or ''} "
+                 "Possible causes: (1) score not yet computed, (2) business too new, (3) insufficient features.", "amber")
+            st.code(f"""-- Check Worth Score:
+SELECT bs.weighted_score_850, bs.weighted_score_100, bs.risk_level, bs.score_decision, bs.created_at
 FROM rds_manual_score_public.data_current_scores cs
-JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
-WHERE cs.business_id='{bid}' ORDER BY bs.created_at DESC LIMIT 1;""",language="sql")
-            score=None
+JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+WHERE cs.business_id = '{bid}'
+ORDER BY bs.created_at DESC LIMIT 5;
 
-        ai_popup("WorthScore",f"Score:{score}",[
-            "Why is this business's Worth Score at this level?",
-            "How is the 300-850 scale calculated from model output?",
-            "What SQL shows factor contributions for this business?",
-            "What would improve this business's score the most?",
-            "What are the 3 model components of the Worth Score?",],bid)
+-- Alternative (warehouse):
+SELECT worth_score, score_date FROM warehouse.latest_score WHERE business_id='{bid}';""",language="sql")
 
-        analyst_card("Worth Score Architecture",[
-            "Score = prediction × 550 + 300. Raw model output (0–1 probability) scaled to 300–850.",
-            "3-model ensemble: (1) Firmographic XGBoost, (2) Financial neural net (PyTorch), (3) Economic model. Combined via ensemble → calibrator.",
-            "business_score_factors: SHAP-equivalent contributions per category (Public Records, Company Profile, Financials, Banking, Economic).",
-            "NOTE: score_status column does NOT exist in current schema. Filter by score_decision instead.",
-        ])
+        ai_popup("WorthScore",f"Score:{score} risk:{risk if score else 'N/A'} prob:{prob if score else 'N/A'}",[
+            "Explain the exact formula for converting model probability to 300-850 score",
+            "What are the 5 feature categories and which facts feed each one?",
+            "What SQL shows factor contributions for this specific business?",
+            "What is the most impactful action this business could take to improve its score?",
+            "How does the score_decision_matrix work and can thresholds be customized?"],bid)
+
+        with st.expander("📋 SQL — Worth Score queries"):
+            st.code(f"""-- Current score + decision:
+SELECT bs.weighted_score_850, bs.weighted_score_100, bs.risk_level, bs.score_decision,
+       bs.created_at, bs.id AS score_id
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+WHERE cs.business_id = '{bid}'
+ORDER BY bs.created_at DESC LIMIT 1;
+
+-- Factor contributions by category:
+SELECT category_id, score_100, weighted_score_850
+FROM rds_manual_score_public.business_score_factors
+WHERE score_id = (SELECT score_id FROM rds_manual_score_public.data_current_scores
+                  WHERE business_id = '{bid}' LIMIT 1)
+ORDER BY ABS(weighted_score_850) DESC;
+
+-- Score history (all versions):
+SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, bs.created_at
+FROM rds_manual_score_public.business_scores bs
+WHERE bs.id IN (SELECT score_id FROM rds_manual_score_public.data_current_scores WHERE business_id='{bid}')
+ORDER BY bs.created_at DESC LIMIT 10;
+
+-- Decision thresholds (global config):
+SELECT range_start, range_end, risk_level, decision FROM score_decision_matrix ORDER BY range_start;""",language="sql")
 
     with ws2:
+        st.markdown("#### 📊 Score Waterfall — Factor Contributions")
+        st.caption("Estimated from KYB facts. The waterfall approximates the model's contribution breakdown. "
+                   "Exact SHAP values are in business_score_factors (Score tab).")
+
         if score_df is not None and not score_df.empty:
             score_v=float(score_df.iloc[0]["score_850"])
-            bk=int(float(gv(facts,"num_bankruptcies") or 0))
-            ju=int(float(gv(facts,"num_judgements") or 0))
-            li=int(float(gv(facts,"num_liens") or 0))
+            bk_w=int(float(gv(facts,"num_bankruptcies") or 0))
+            ju_w=int(float(gv(facts,"num_judgements") or 0))
+            li_w=int(float(gv(facts,"num_liens") or 0))
             sos_a=str(gv(facts,"sos_active") or "").lower()=="true"
             tin_ok=str(gv(facts,"tin_match_boolean") or "").lower()=="true"
             wl_n=int(float(gv(facts,"watchlist_hits") or 0))
             has_rev=gv(facts,"revenue") is not None and str(gv(facts,"revenue") or "") not in ("","None","[too large")
             naics_ok=str(gv(facts,"naics_code") or "561499")!="561499"
-            fd=str(gv(facts,"formation_date") or "")
-            try: age=datetime.now(timezone.utc).year-int(fd[:4]) if fd else None
-            except: age=None
+            fd_w=str(gv(facts,"formation_date") or "")
+            try: age_w=datetime.now(timezone.utc).year-int(fd_w[:4]) if fd_w and fd_w[:4].isdigit() else None
+            except: age_w=None
 
-            BASE=300
-            pr=-(min(bk*40,120)+min(ju*20,60)+min(li*10,40))
-            perf=(10 if sos_a else 0)+(10 if tin_ok else 0)-min(wl_n*20,80)
-            fin=25 if has_rev else 0; ops=(30 if (age or 0)>=5 else 20 if (age or 0)>=2 else 10 if (age or 0)>=1 else 0)
-            profile=15 if naics_ok else 5; explained=pr+perf+fin+ops+profile
-            fin+=score_v-BASE-explained
+            # Estimated contributions
+            pr_est=-(min(bk_w*40,120)+min(ju_w*20,60)+min(li_w*10,40))
+            perf_est=(10 if sos_a else -10)+(10 if tin_ok else -5)-min(wl_n*25,100)
+            fin_est=30 if has_rev else -10
+            ops_est=(40 if (age_w or 0)>=5 else 25 if (age_w or 0)>=2 else 10 if (age_w or 0)>=1 else -5)
+            profile_est=20 if naics_ok else -10
+            # Residual goes to Financial Trends (macro/banking)
+            explained=pr_est+perf_est+fin_est+ops_est+profile_est
+            trends_est=score_v-300-explained
 
-            cats=["Base Score","Performance\n(SOS/TIN/WL)","Financial\n(Plaid/Revenue)",
-                  "Public Records\n(BK/Judg/Lien)","Operations\n(Age/Employees)","Company Profile\n(NAICS)","Final Score"]
-            conts=[BASE,perf,fin,pr,ops,profile,0]
-            running=BASE; bases=[]; colors=[]; texts=[]
+            cats=["📦 Base\n(300 floor)","📜 Public Records\n(BK/Judg/Lien)","⚖️ KYB Performance\n(SOS/TIN/WL)",
+                  "💼 Business Ops\n(Revenue/Banking)","🕐 Operations\n(Age/Scale)","🏢 Company Profile\n(NAICS/State)",
+                  "📈 Financial Trends\n(Macro/Ratios)","🎯 Final Score"]
+            conts=[300,pr_est,perf_est,fin_est,ops_est,profile_est,trends_est,0]
+            running=300; bases=[]; colors=[]; texts=[]; tooltips=[]
             for i,(c,ct) in enumerate(zip(cats,conts)):
                 if i==0:
-                    bases.append(0); colors.append("#C4A8FF"); texts.append(str(int(ct)))
+                    bases.append(0); colors.append("#6366f1"); texts.append("300")
+                    tooltips.append("Base score (model intercept). All scores start here.")
                 elif i==len(cats)-1:
-                    bases.append(0); colors.append("#EC4899"); texts.append(str(int(score_v)))
+                    bases.append(0); colors.append("#EC4899"); texts.append(f"{score_v:.0f}")
+                    tooltips.append(f"Final Worth Score: {score_v:.0f}/850")
                 else:
                     bases.append(running if ct>=0 else running+ct); running+=ct
                     colors.append("#22c55e" if ct>=0 else "#ef4444")
                     texts.append(f"{'+' if ct>=0 else ''}{int(ct)}")
 
-            fig=go.Figure(go.Bar(x=cats,y=[abs(c) if i not in (0,len(conts)-1) else c for i,c in enumerate(conts)],
-                base=bases,marker_color=colors,text=texts,textposition="outside",
-                textfont=dict(color="#E2E8F0",size=12)))
-            fig.update_layout(title=f"Worth Score Waterfall (estimated) — {score_v:.0f}/850",yaxis=dict(range=[250,870]),height=420)
-            st.plotly_chart(dark_chart(fig),use_container_width=True)
-            st.caption("Estimated from available facts. Exact values in business_score_factors.")
-        else: st.info("Score data not available for waterfall chart.")
+            fig_wf=go.Figure(go.Bar(
+                x=cats,
+                y=[abs(c) if i not in (0,len(conts)-1) else c for i,c in enumerate(conts)],
+                base=bases,marker_color=colors,
+                text=texts,textposition="outside",textfont=dict(color="#E2E8F0",size=11),
+                hovertext=[f"{c}: {'+' if v>=0 and i>0 else ''}{int(v)}"
+                           for i,(c,v) in enumerate(zip(cats,conts))],
+                hoverinfo="text",
+            ))
+            fig_wf.update_layout(
+                title=f"Worth Score Factor Waterfall — {score_v:.0f}/850 (estimated)",
+                yaxis=dict(range=[200,920],title="Score"),height=440,
+                xaxis_tickangle=-10,
+            )
+            st.plotly_chart(dark_chart(fig_wf),use_container_width=True)
+            st.caption("⚠️ This waterfall is ESTIMATED from KYB facts using simplified model weights. "
+                       "For exact SHAP values, see Score tab → Factor Contributions table.")
+
+            # Factor table
+            st.markdown("##### Estimated Factor Breakdown — Source Facts & Model Features")
+            factor_table=[
+                ("📜 Public Records",f"{pr_est:+.0f}",
+                 "count_bankruptcy, count_judgment, count_lien, age_bankruptcy, age_judgment, age_lien",
+                 "num_bankruptcies, num_judgements, num_liens (Redshift) + detail arrays (PostgreSQL RDS)",
+                 f"BK={bk_w} (est. {min(bk_w*40,120):.0f}pts), Judg={ju_w} (est. {min(ju_w*20,60):.0f}pts), Liens={li_w} (est. {min(li_w*10,40):.0f}pts)"),
+                ("⚖️ KYB Performance",f"{perf_est:+.0f}",
+                 "sos_active, tin_match_boolean, watchlist_hits",
+                 "sos_active, tin_match_boolean, watchlist_hits facts",
+                 f"SOS={'✅' if sos_a else '❌'}, TIN={'✅' if tin_ok else '❌'}, WL={wl_n} hit(s)"),
+                ("💼 Business Operations",f"{fin_est:+.0f}",
+                 "revenue, is_net_income, cf_cash_at_end_of_period, bs_total_liabilities",
+                 "revenue, net_income facts + Plaid banking facts",
+                 f"Revenue={'available' if has_rev else 'missing'} — Plaid banking features drive this"),
+                ("🕐 Operations",f"{ops_est:+.0f}",
+                 "age_business, count_employees",
+                 "formation_date (→ age), num_employees facts",
+                 f"Business age: {f'{age_w} years' if age_w else 'unknown'}, Employees: {str(gv(facts,'num_employees') or 'unknown')[:20]}"),
+                ("🏢 Company Profile",f"{profile_est:+.0f}",
+                 "naics6, primsic, state, bus_struct, indicator_* flags",
+                 "naics_code, formation_state, corporation facts",
+                 f"NAICS={'561499 (fallback⚠️)' if not naics_ok else naics}, state={form_state}"),
+                ("📈 Financial Trends",f"{trends_est:+.0f}",
+                 "gdp_pch, cpi, vix, t10y2y, unemployment, ratio_debt_to_equity, ...",
+                 "Macro: Liberty/Fed data · Ratios: Plaid balance sheet computation",
+                 "Macro indicators (residual from other categories)"),
+            ]
+            st.dataframe(pd.DataFrame(factor_table,
+                columns=["Category","Est. Impact (pts)","Model Features","Source Facts","This Business"]),
+                use_container_width=True,hide_index=True)
+        else:
+            st.info("Score data not available for waterfall chart.")
+
+        with st.expander("📋 SQL — factor contributions"):
+            st.code(f"""-- Exact factor contributions (SHAP values) per category:
+SELECT
+    category_id,
+    score_100          AS category_score_0_100,
+    weighted_score_850 AS category_impact_pts
+FROM rds_manual_score_public.business_score_factors
+WHERE score_id = (
+    SELECT score_id FROM rds_manual_score_public.data_current_scores
+    WHERE business_id = '{bid}' LIMIT 1
+)
+ORDER BY ABS(weighted_score_850) DESC;""",language="sql")
 
     with ws3:
+        st.markdown("#### 📊 Feature Fill Rates — Model Input Data Quality")
+        st.caption("""**Source:** `warehouse.worth_score_input_audit` · 
+        **What it shows:** For each model input feature, what % of scored businesses have a non-null value ·
+        **Why it matters:** Null features are imputed with defaults, reducing model accuracy for that business""")
+
         audit_df,audit_err=load_audit()
         if audit_df is not None and not audit_df.empty:
             fill_cols=[c for c in audit_df.columns if c.startswith("fill_")]
             lr=audit_df.iloc[0]
-            fd2=[{"Feature":c.replace("fill_",""),"Fill %":float(lr[c])} for c in fill_cols if c in audit_df.columns]
+            fd2=[{"Feature":c.replace("fill_",""),
+                  "Fill %":round(float(lr[c]),1),
+                  "Category":"📜 Public Records" if any(x in c for x in ["bankruptcy","judgment","lien","reviews"])
+                            else "🏢 Company Profile" if any(x in c for x in ["age_business","state","naics","primsic","struct","employee","indicator"])
+                            else "📈 Financial Trends" if any(x in c for x in ["gdp","cpi","vix","t10y","unemp","ratio","wag","usd","ppi","brent","wti","csentiment","dolindx","ccdelinq"])
+                            else "💼 Business Ops" if any(x in c for x in ["revenue","net_income","cf_","bs_","is_"])
+                            else "📊 Performance" if any(x in c for x in ["ratio_return","ratio_gross","ratio_net","ratio_equity","ratio_income","flag_"])
+                            else "Other"
+                  }
+                 for c in fill_cols if c in audit_df.columns]
             fdf=pd.DataFrame(fd2).sort_values("Fill %",ascending=True)
-            fdf["Status"]=fdf["Fill %"].apply(lambda v:"Good" if v>=80 else("Medium" if v>=30 else"Low"))
-            fig=px.bar(fdf.tail(30),x="Fill %",y="Feature",orientation="h",color="Status",
-                       color_discrete_map={"Good":"#22c55e","Medium":"#f59e0b","Low":"#ef4444"},
-                       title=f"Feature Fill Rates ({lr['score_date']})")
-            fig.update_layout(height=600)
-            st.plotly_chart(dark_chart(fig),use_container_width=True)
-        else: flag(f"Audit table not accessible. {audit_err or ''}","amber")
+            fdf["Status"]=fdf["Fill %"].apply(lambda v:"🟢 Good" if v>=80 else("🟡 Medium" if v>=30 else"🔴 Low"))
+
+            # Category summary
+            cat_summary=fdf.groupby("Category")["Fill %"].mean().reset_index()
+            cat_summary.columns=["Category","Avg Fill %"]
+            cat_summary["Avg Fill %"]=cat_summary["Avg Fill %"].round(1)
+            cat_summary["Status"]=cat_summary["Avg Fill %"].apply(lambda v:"🟢 Good" if v>=80 else("🟡 Medium" if v>=30 else"🔴 Low"))
+
+            col_cat,col_chart=st.columns([1,2])
+            with col_cat:
+                st.markdown("**Category averages:**")
+                st.dataframe(cat_summary,use_container_width=True,hide_index=True)
+                st.markdown(f"**Score date:** {lr.get('score_date','N/A')}")
+                st.caption("Low fill rate = feature is imputed with default value → less accurate prediction for this category")
+            with col_chart:
+                fig_fill=px.bar(fdf.tail(40),x="Fill %",y="Feature",orientation="h",
+                                color="Status",
+                                color_discrete_map={"🟢 Good":"#22c55e","🟡 Medium":"#f59e0b","🔴 Low":"#ef4444"},
+                                title=f"Model Feature Fill Rates (top 40)")
+                fig_fill.update_layout(height=700,showlegend=True,
+                                       margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_fill),use_container_width=True)
+
+            # Low fill rate features
+            low_fill=fdf[fdf["Fill %"]<30].sort_values("Fill %")
+            if not low_fill.empty:
+                st.markdown("##### ⚠️ Features with Low Fill Rate (<30%) — Imputed with defaults")
+                st.markdown("These features are null for most businesses. When null, the model uses imputed defaults from lookups.py. "
+                            "This reduces model confidence and may cause the Worth Score to be less accurate.")
+                st.dataframe(low_fill[["Feature","Fill %","Category"]],use_container_width=True,hide_index=True)
+        else:
+            flag(f"Audit table not accessible. {audit_err or ''}", "amber")
+            st.code("""-- Try directly:
+SELECT * FROM warehouse.worth_score_input_audit ORDER BY score_date DESC LIMIT 5;""",language="sql")
 
 # ════════════════════════════════════════════════════════════════════════════════
 # ALL FACTS — grouped, enriched, with lineage
