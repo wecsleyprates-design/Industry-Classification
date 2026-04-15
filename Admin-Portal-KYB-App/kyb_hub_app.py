@@ -658,18 +658,21 @@ def ask_ai(question, context="", history=None):
     except Exception as e: return f"⚠️ AI error: {e}"
 
 def ai_popup(key, context, questions, bid):
+    import hashlib
     with st.popover("✨ Ask AI"):
         st.markdown(f"**🤖 AI — {key}**")
         for q in questions:
-            if st.button(q,key=f"q_{key}_{q[:15]}"):
-                st.session_state[f"pending_q_{key}"]=q
-        custom=st.text_input("Custom question:",key=f"cust_{key}")
-        if custom and st.button("Send",key=f"csend_{key}",type="primary"):
-            st.session_state[f"pending_q_{key}"]=custom
-        pending=st.session_state.pop(f"pending_q_{key}",None)
+            # Use full question hash so keys are always unique even with identical prefixes
+            q_hash = hashlib.md5(f"{key}|{q}".encode()).hexdigest()[:8]
+            if st.button(q, key=f"qaip_{q_hash}"):
+                st.session_state[f"pending_q_{key}"] = q
+        custom = st.text_input("Custom question:", key=f"cust_{key}")
+        if custom and st.button("Send", key=f"csend_{key}", type="primary"):
+            st.session_state[f"pending_q_{key}"] = custom
+        pending = st.session_state.pop(f"pending_q_{key}", None)
         if pending:
             with st.spinner("Thinking…"):
-                ans=ask_ai(pending,f"Business: {bid}\n{context}")
+                ans = ask_ai(pending, f"Business: {bid}\n{context}")
             st.markdown(f"**Q:** {pending}")
             st.markdown(f"**A:** {ans}")
 
