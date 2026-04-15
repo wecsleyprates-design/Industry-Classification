@@ -1092,6 +1092,69 @@ Rules: cite exact source (file, table, fact name, API endpoint). Always provide 
 Never invent fact names or table names. Platform IDs: 16=Middesk,23=OC,24=ZI,17=EFX,38=Trulioo,31=AI,22=SERP,40=Plaid.
 Redshift: use JSON_EXTRACT_PATH_TEXT, never ::json or ->> (fails on federation)."""
 
+# ── Universal detail panel ────────────────────────────────────────────────────
+def detail_panel(
+    label: str,
+    value_display: str,
+    *,
+    what_it_means: str = "",
+    source_table: str = "",
+    source_file: str = "",
+    source_file_line: str = "",
+    api_endpoint: str = "",
+    json_obj: dict = None,
+    sql: str = "",
+    links: list = None,          # [(key_in_GITHUB_LINKS, display_label), ...]
+    color: str = "#3B82F6",
+    icon: str = "📊",
+):
+    """
+    Universal collapsible detail panel — attach to ANY card, table row, pipeline step,
+    or chart. Shows: source file (linked), table, API endpoint, JSON, SQL.
+    """
+    with st.expander(f"{icon} **{label}** — {value_display[:80]}  ·  click for source, JSON & SQL"):
+
+        # ── Source badges ──────────────────────────────────────────────────────
+        all_links = list(links or [])
+        if source_file:
+            key = next((k for k in GITHUB_LINKS if k in source_file or source_file in k), "")
+            url = GITHUB_LINKS.get(key, "") or GITHUB_LINKS.get(source_file, "")
+            all_links = [(source_file, source_file_line or source_file)] + all_links
+        badge_html = src_links_html(all_links) if all_links else ""
+        if badge_html:
+            st.markdown(f"<div style='margin-bottom:8px'>{badge_html}</div>", unsafe_allow_html=True)
+
+        # ── Info grid ─────────────────────────────────────────────────────────
+        rows_html = ""
+        meta = [
+            ("💡 What it means", what_it_means),
+            ("🗄️ Stored in",      source_table),
+            ("📁 Source file",    (source_file + (" · " + source_file_line if source_file_line else "")) if source_file else ""),
+            ("🌐 API endpoint",   api_endpoint),
+        ]
+        for lbl, val in meta:
+            if not val: continue
+            rows_html += (
+                f"<tr><td style='padding:5px 10px;color:#60A5FA;font-size:.78rem;white-space:nowrap;vertical-align:top'>{lbl}</td>"
+                f"<td style='padding:5px 10px;color:#CBD5E1;font-size:.78rem'>{val}</td></tr>"
+            )
+        if rows_html:
+            st.markdown(
+                f"<table style='width:100%;border-collapse:collapse;background:#0f172a;border-radius:6px;margin:4px 0'>{rows_html}</table>",
+                unsafe_allow_html=True
+            )
+
+        # ── JSON ───────────────────────────────────────────────────────────────
+        if json_obj is not None:
+            st.markdown("**JSON:**")
+            st.code(json.dumps(json_obj, indent=2, default=str, ensure_ascii=False), language="json")
+
+        # ── SQL ────────────────────────────────────────────────────────────────
+        if sql:
+            st.markdown("**SQL to verify:**")
+            st.code(sql.strip(), language="sql")
+
+
 def ask_ai(question, context="", history=None):
     client=get_openai()
     if not client: return "⚠️ Set OPENAI_API_KEY env var to enable AI responses."
@@ -1102,7 +1165,23 @@ def ask_ai(question, context="", history=None):
     msgs.append({"role":"user","content":f"RAG:\n{rag}\n\nContext:\n{context}\n\nQuestion: {question}"})
     try:
         r=get_openai().chat.completions.create(model="gpt-4o-mini",messages=msgs,max_tokens=1200,temperature=0.2)
-        return r.choices[0].message.content
+        answer = r.choices[0].message.content
+        # Append source citations from RAG chunks
+        if chunks:
+            cited = []
+            for c in chunks[:4]:
+                src_type = c.get("source_type","")
+                desc = c.get("description","")[:80]
+                cited.append(f"- `{src_type}`: {desc}")
+            answer += "\n\n---\n**📁 Sources used for this answer:**\n" + "\n".join(cited)
+            answer += (
+                "\n\n**🔗 Key references:**\n"
+                f"- [facts/kyb/index.ts]({GITHUB_LINKS.get('facts/kyb/index.ts','')}) — fact definitions\n"
+                f"- [facts/rules.ts]({GITHUB_LINKS.get('facts/rules.ts','')}) — Fact Engine selection rules\n"
+                f"- [integrations.constant.ts]({GITHUB_LINKS.get('integrations.constant.ts','')}) — vendor IDs\n"
+                f"- [API Reference]({GITHUB_LINKS.get('openapi/integration','')}) — /kyb endpoint schema"
+            )
+        return answer
     except Exception as e: return f"⚠️ AI error: {e}"
 
 def ai_popup(key, context, questions, bid):
@@ -1110,7 +1189,6 @@ def ai_popup(key, context, questions, bid):
     with st.popover("✨ Ask AI"):
         st.markdown(f"**🤖 AI — {key}**")
         for q in questions:
-            # Use full question hash so keys are always unique even with identical prefixes
             q_hash = hashlib.md5(f"{key}|{q}".encode()).hexdigest()[:8]
             if st.button(q, key=f"qaip_{q_hash}"):
                 st.session_state[f"pending_q_{key}"] = q
@@ -1122,7 +1200,7 @@ def ai_popup(key, context, questions, bid):
             with st.spinner("Thinking…"):
                 ans = ask_ai(pending, f"Business: {bid}\n{context}")
             st.markdown(f"**Q:** {pending}")
-            st.markdown(f"**A:** {ans}")
+            st.markdown(ans)   # render markdown so links are clickable
 
 # ════════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
@@ -2175,21 +2253,63 @@ Authorization: Bearer <token>
         states_differ = form_state_up and op_state and form_state_up != op_state
         is_th = form_state_up in TAX_HAVENS
 
-        # KPI row
+        # KPI row with detail panels
+        _dom_sql = f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS formation_state FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='formation_state';"
+        _op_sql  = f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','state') AS operating_state FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='primary_address';"
         c1,c2,c3,c4 = st.columns(4)
-        with c1: kpi("Formation State (domestic)",form_state or "⚠️ Unknown","Where entity was incorporated","#3B82F6")
-        with c2: kpi("Operating State",op_state or "⚠️ Unknown","primary_address.state","#3B82F6")
+        with c1:
+            kpi("Formation State (domestic)",form_state or "⚠️ Unknown","Where entity was incorporated","#3B82F6")
+            detail_panel("Formation State",form_state or "Unknown",
+                what_it_means="The US state where this entity was legally incorporated (domestic state). Middesk (pid=16) is the primary source. If different from operating state, entity likely has BOTH domestic and foreign filings.",
+                source_table="rds_warehouse_public.facts · name='formation_state'",
+                source_file="facts/kyb/index.ts", source_file_line="formationState · factWithHighestConfidence rule",
+                api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.formation_state",
+                json_obj={"name":"formation_state","value":form_state or None,"source":{"platformId":16,"name":"middesk","confidence":mdsk_conf},"ruleApplied":{"name":"factWithHighestConfidence"}},
+                sql=_dom_sql,
+                links=[("facts/kyb/index.ts","formation_state fact"),("integrations.constant.ts","INTEGRATION_ID.MIDDESK=16")],
+                color="#3B82F6",icon="🗺️")
+        with c2:
+            kpi("Operating State",op_state or "⚠️ Unknown","primary_address.state","#3B82F6")
+            detail_panel("Operating State",op_state or "Unknown",
+                what_it_means="The state where the business operates, derived from primary_address.state. This is the state Middesk searches by default, which may find the FOREIGN filing instead of the DOMESTIC one.",
+                source_table="rds_warehouse_public.facts · name='primary_address' → value.state",
+                source_file="facts/kyb/index.ts", source_file_line="primaryAddress · dependent from addresses[]",
+                api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.primary_address.value.state",
+                json_obj={"name":"primary_address","value":{"state":op_state or None},"source":{"platformId":-1,"name":"dependent"},"dependencies":["addresses"]},
+                sql=_op_sql,
+                links=[("facts/kyb/index.ts","primary_address fact"),("middesk","Middesk SOS search uses this address")],
+                color="#3B82F6",icon="📍")
         with c3:
             if states_differ:
                 kpi("State Match","❌ Different",f"{form_state_up} ≠ {op_state} — foreign qual. likely","#f59e0b")
+                _match_color="#f59e0b"
             elif form_state_up:
                 kpi("State Match","✅ Same state","No foreign qualification needed","#22c55e")
+                _match_color="#22c55e"
             else:
                 kpi("State Match","⚠️ Unknown","formation_state missing","#64748b")
+                _match_color="#64748b"
+            detail_panel("State Match","Different" if states_differ else ("Same" if form_state_up else "Unknown"),
+                what_it_means=("formation_state ≠ operating_state. Business almost certainly has: (1) Domestic filing in " + form_state_up + ", (2) Foreign qualification in " + op_state + ". Middesk address search finds the FOREIGN record, potentially missing the DOMESTIC primary." if states_differ else ("Same state = entity incorporated and operating in the same state. Middesk address search will find the correct domestic record." if form_state_up else "Formation state unknown — cannot assess domestic vs foreign risk.")),
+                source_table="Computed from formation_state vs primary_address.state (both from rds_warehouse_public.facts)",
+                source_file="facts/businessDetails/index.ts", source_file_line="Proxy analysis — not a stored fact",
+                json_obj={"formation_state":form_state_up or None,"operating_state":op_state or None,"states_match":not states_differ,"entity_resolution_gap_risk":states_differ},
+                sql=f"-- Compare both states:\nSELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS formation_state FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='formation_state';\n-- vs:\n{_op_sql}",
+                links=[("facts/kyb/index.ts","sos_match_boolean — affected by entity resolution gap")],
+                color=_match_color,icon="🔍")
         with c4:
-            kpi("Tax Haven?","⚠️ YES — "+form_state_up if is_th else "✅ No",
+            _th_val = "YES — " + form_state_up if is_th else "No"
+            kpi("Tax Haven?","⚠️ " + _th_val if is_th else "✅ " + _th_val,
                 "DE/NV/WY/SD/MT/NM = entity resolution gap risk" if is_th else "Low entity resolution risk",
                 "#f59e0b" if is_th else "#22c55e")
+            detail_panel("Tax Haven State","YES" if is_th else "No",
+                what_it_means=("DE/NV/WY/SD/MT/NM are preferred for incorporation due to: no state income tax (DE,NV,WY), flexible corporate law (DE Court of Chancery), LLC privacy (WY). Businesses incorporate here but operate elsewhere, creating the entity resolution gap. Middesk searches by operating address → finds foreign qualification → misses domestic filing." if is_th else "Formation state " + (form_state_up or "?") + " is not a tax-haven state. Lower probability of entity resolution gap from state mismatch."),
+                source_table="Derived from formation_state value — no separate fact stored",
+                source_file="facts/kyb/index.ts", source_file_line="formation_state fact · Middesk pid=16",
+                json_obj={"formation_state":form_state_up or None,"is_tax_haven_state":is_th,"tax_haven_states":["DE","NV","WY","SD","MT","NM"]},
+                sql=_dom_sql,
+                links=[("facts/kyb/index.ts","formation_state"),("middesk","Middesk SOS search implementation")],
+                color="#f59e0b" if is_th else "#22c55e",icon="⚠️" if is_th else "✅")
 
         if is_th:
             flag(f"🚨 **ENTITY RESOLUTION GAP RISK:** This business is incorporated in **{form_state_up}** "
@@ -2229,9 +2349,32 @@ Authorization: Bearer <token>
              not (states_differ and sos_match!="true"),
              "sos_match=false AND states differ = likely false negative"),
         ]
+        _CHECK_DETAILS = {
+            "sos_match_boolean value": ("sos_match_boolean","rds_warehouse_public.facts · name='sos_match_boolean'","facts/kyb/index.ts","sosMatchBoolean · dependent from sos_match.value==='success'",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='sos_match_boolean';"),
+            "Formation state known":   ("formation_state","rds_warehouse_public.facts · name='formation_state'","facts/kyb/index.ts","formationState · Middesk pid=16",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='formation_state';"),
+            "Operating state known":   ("primary_address.state","rds_warehouse_public.facts · name='primary_address' → value.state","facts/kyb/index.ts","primaryAddress · dependent from addresses[]",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','state') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='primary_address';"),
+            "States are the same":     ("formation_state vs primary_address.state","Computed proxy — not a stored fact","facts/businessDetails/index.ts","Proxy: formation_state === operating_state","-- See both queries above"),
+            "Not a tax-haven state":   ("formation_state","rds_warehouse_public.facts · name='formation_state'","facts/kyb/index.ts","Tax-haven: DE/NV/WY/SD/MT/NM",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='formation_state';"),
+            "Gap risk present":        ("sos_match_boolean + states_differ","Cross-field computed check","facts/kyb/index.ts","sos_match=false AND states differ = likely false negative",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS sos_match FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='sos_match_boolean';"),
+        }
         st.dataframe(pd.DataFrame([{
-            "Check":c,"Result":r,"Status":"✅ OK" if ok else "🔴 Flag","Interpretation":d
+            "Check":c,"Result":str(r),"Status":"✅ OK" if ok else "🔴 Flag","Interpretation":d
         } for c,r,ok,d in checks_dom]), use_container_width=True, hide_index=True)
+        st.caption("▼ Click any check below to see source, JSON, and SQL")
+        for chk,result,ok,interp in checks_dom:
+            det = _CHECK_DETAILS.get(chk,())
+            detail_panel(
+                chk, str(result),
+                what_it_means=interp,
+                source_table=det[1] if len(det)>1 else "",
+                source_file=det[2] if len(det)>2 else "facts/kyb/index.ts",
+                source_file_line=det[3] if len(det)>3 else "",
+                sql=det[4] if len(det)>4 else "",
+                json_obj={"check":chk,"result":str(result),"status":"OK" if ok else "Flag","interpretation":interp},
+                links=[("facts/kyb/index.ts","Fact definition"),("integrations.constant.ts","INTEGRATION_ID.MIDDESK=16")],
+                color="#22c55e" if ok else "#ef4444",
+                icon="✅" if ok else "🔴"
+            )
 
         if states_differ and sos_match!="true":
             flag("🚨 **High confidence this is a false negative:** "
@@ -2599,6 +2742,15 @@ ORDER BY received_at DESC LIMIT 5;""",language="sql")
             ("6","idv_passed_boolean derived","Fact Engine (dependent)","true when idv_passed >= 1 (at least one SUCCESS session). platformId=-1, ruleApplied=null.","#22c55e"),
             ("7","Admin Portal display","microsites IDV tab","Shows latest session status. Badge: ✅ Verified (passed) or ❌ Not Verified (failed/pending).","#60A5FA"),
         ]
+        IDV_STEP_LINKS = {
+            "1": [("facts/kyb/index.ts","kyb_submitted fact"),("integrations.constant.ts","businessDetails pid=0")],
+            "2": [("plaid/plaidIdv.ts","Plaid IDV link generation"),("integrations.constant.ts","PLAID_IDV=18")],
+            "3": [("plaid/plaidIdv.ts","Plaid biometric verification")],
+            "4": [("plaid/plaidIdv.ts","Plaid webhook handler"),("facts/kyb/index.ts","idv_status fact")],
+            "5": [("facts/kyb/index.ts","idv_status fact definition"),("facts/sources.ts","sources.plaidIdv")],
+            "6": [("facts/kyb/index.ts","idv_passed_boolean · dependent"),("facts/rules.ts","dependentFact rule")],
+            "7": [("KYB UI","microsites IDV tab rendering")],
+        }
         for num,title,src,desc,color in IDV_PIPELINE:
             st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
                 border-radius:8px;padding:8px 14px;margin:3px 0">
@@ -2608,23 +2760,67 @@ ORDER BY received_at DESC LIMIT 5;""",language="sql")
               </div>
               <div style="color:#94A3B8;font-size:.74rem;margin-top:3px">{desc}</div>
             </div>""",unsafe_allow_html=True)
+            detail_panel(f"Step {num}: {title}", src,
+                what_it_means=desc,
+                source_file="plaid/plaidIdv.ts" if num in ("2","3","4") else "facts/kyb/index.ts",
+                source_file_line=src,
+                source_table="rds_warehouse_public.facts · name='idv_status'" if num in ("5","6","7") else "rds_integration_data.plaid_*" if num in ("2","3","4") else "",
+                json_obj={"step":num,"title":title,"source_system":src,"description":desc},
+                links=IDV_STEP_LINKS.get(str(num),[]),
+                color=color, icon="🔄")
 
         st.markdown("---")
 
         # ── KPI cards ────────────────────────────────────────────────────────
         sole_prop=str(gv(facts,"is_sole_prop") or "").lower()
+        idv_raw=facts.get("idv_status",{}).get("value",{})
+        total_sessions=sum(idv_raw.values()) if isinstance(idv_raw,dict) else 0
+        success_n=idv_raw.get("SUCCESS",0) if isinstance(idv_raw,dict) else 0
+        _idv_sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS idv_passed FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='idv_passed_boolean';"
         c1,c2,c3,c4=st.columns(4)
-        with c1: kpi("IDV Passed","✅ Yes" if idv_val=="true" else "❌ No" if idv_val=="false" else "⚠️ Unknown",
+        with c1:
+            kpi("IDV Passed","✅ Yes" if idv_val=="true" else "❌ No" if idv_val=="false" else "⚠️ Unknown",
                      "idv_passed_boolean","#22c55e" if idv_val=="true" else "#ef4444" if idv_val=="false" else "#64748b")
+            detail_panel("IDV Passed",idv_val or "Unknown",
+                what_it_means="idv_passed_boolean=true when at least 1 IDV session completed with SUCCESS status (idv_passed >= 1). This is a DEPENDENT fact — platformId=-1, computed from idv_passed which counts SUCCESS sessions in idv_status.",
+                source_table="rds_warehouse_public.facts · name='idv_passed_boolean'",
+                source_file="facts/kyb/index.ts",source_file_line="idvPassedBoolean · dependent from idv_passed",
+                api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.idv_passed_boolean",
+                json_obj={"name":"idv_passed_boolean","value":idv_val=="true" if idv_val else None,"source":{"platformId":-1,"name":"dependent"},"dependencies":["idv_passed"]},
+                sql=_idv_sql,
+                links=[("facts/kyb/index.ts","idv_passed_boolean"),("plaid/plaidIdv.ts","Plaid IDV source"),("integrations.constant.ts","PLAID_IDV=18")],
+                color="#22c55e" if idv_val=="true" else "#ef4444" if idv_val=="false" else "#64748b",icon="🪪")
         with c2:
-            idv_raw=facts.get("idv_status",{}).get("value",{})
-            total_sessions=sum(idv_raw.values()) if isinstance(idv_raw,dict) else 0
             kpi("Total Sessions",str(total_sessions),"All IDV sessions ever sent","#3B82F6")
+            detail_panel("Total Sessions",str(total_sessions),
+                what_it_means="Sum of all sessions across all statuses in idv_status object. idv_status = {SUCCESS:N, PENDING:N, FAILED:N, CANCELED:N, EXPIRED:N}. Counts ALL sessions ever created for this business, not just the most recent.",
+                source_table="rds_warehouse_public.facts · name='idv_status'",
+                source_file="facts/kyb/index.ts",source_file_line="idvStatus · factWithHighestConfidence · Plaid IDV (pid=18)",
+                json_obj={"name":"idv_status","value":idv_raw if isinstance(idv_raw,dict) else None,"source":{"platformId":18,"name":"plaidIdv"}},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS idv_status_obj FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='idv_status';",
+                links=[("plaid/plaidIdv.ts","Plaid IDV session handler"),("integrations.constant.ts","PLAID_IDV=18")],
+                color="#3B82F6",icon="📊")
         with c3:
-            success_n=idv_raw.get("SUCCESS",0) if isinstance(idv_raw,dict) else 0
             kpi("Successful",str(success_n),"Sessions with SUCCESS status","#22c55e" if success_n>0 else "#64748b")
-        with c4: kpi("Sole Prop","✅ Yes" if sole_prop=="true" else "❌ No" if sole_prop=="false" else "⚠️ Unknown",
+            detail_panel("Successful Sessions",str(success_n),
+                what_it_means="Number of IDV sessions where the owner completed: government ID scan + selfie + liveness check successfully. idv_passed_boolean=true requires SUCCESS >= 1.",
+                source_table="rds_warehouse_public.facts · name='idv_status' → value.SUCCESS",
+                source_file="facts/kyb/index.ts",source_file_line="idvPassed · dependent · COUNT of SUCCESS sessions",
+                json_obj={"idv_status_SUCCESS":success_n,"idv_passed":success_n,"idv_passed_boolean":success_n>=1},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','SUCCESS') AS success_count FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='idv_status';",
+                links=[("facts/kyb/index.ts","idvPassed computation")],
+                color="#22c55e" if success_n>0 else "#64748b",icon="✅")
+        with c4:
+            kpi("Sole Prop","✅ Yes" if sole_prop=="true" else "❌ No" if sole_prop=="false" else "⚠️ Unknown",
                      "is_sole_prop — skips IDV if true","#f59e0b" if sole_prop=="true" else "#3B82F6")
+            detail_panel("Sole Prop",sole_prop or "Unknown",
+                what_it_means="is_sole_prop=true when tin_submitted=null AND idv_passed_boolean=true. Indicates the owner is a sole proprietor — no EIN submitted. Some IDV configurations skip the flow for sole props, which is why idv_passed_boolean may be null even with no error.",
+                source_table="rds_warehouse_public.facts · name='is_sole_prop'",
+                source_file="facts/kyb/index.ts",source_file_line="isSoleProp · dependent from tin_submitted + idv_passed_boolean",
+                json_obj={"name":"is_sole_prop","value":sole_prop=="true" if sole_prop else None,"source":{"platformId":-1,"name":"dependent"},"dependencies":["tin_submitted","idv_passed_boolean"]},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='is_sole_prop';",
+                links=[("facts/kyb/index.ts","isSoleProp definition")],
+                color="#f59e0b" if sole_prop=="true" else "#3B82F6",icon="👤")
 
         if sole_prop=="true":
             flag("is_sole_prop=true: business has no EIN or EIN was not submitted. IDV is skipped for sole proprietors in some configurations. idv_passed_boolean may be null or false — this is expected.", "amber")
@@ -2866,6 +3062,15 @@ ORDER BY bert.created_at DESC;""",language="sql")
                   <div style="color:#94A3B8;font-size:.75rem;margin-bottom:4px"><strong>Root cause:</strong> {root}</div>
                   <div style="color:#60A5FA;font-size:.75rem">⚡ <strong>Action:</strong> {action}</div>
                 </div>""",unsafe_allow_html=True)
+                detail_panel(f"{sev} — {name}", desc,
+                    what_it_means=f"Root cause: {root}\n\nAction: {action}",
+                    source_table="rds_warehouse_public.facts (cross-field check across multiple fact names)",
+                    source_file=src.split(" ")[0] if src else "facts/kyb/index.ts",
+                    source_file_line=src,
+                    json_obj={"check":name,"severity":sev,"detected":desc,"root_cause":root,"recommended_action":action,"source_reference":src},
+                    sql=f"-- Verify the facts involved:\nSELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val\nFROM rds_warehouse_public.facts\nWHERE business_id='{bid}'\n  AND name IN ('sos_active','sos_match_boolean','tin_match_boolean','tin_match','idv_passed_boolean','naics_code','watchlist_hits')\nORDER BY name;",
+                    links=[("facts/kyb/index.ts","Fact definitions"),("facts/rules.ts","Fact Engine rules"),("consolidatedWatchlist.ts","Watchlist architecture")],
+                    color=col, icon={"CRITICAL":"🔴","HIGH":"🟠","MEDIUM":"🟡","NOTICE":"🔵"}.get(sev,"⚠️"))
         else:
             flag("✅ No cross-field anomalies detected across all checks.","green")
 
