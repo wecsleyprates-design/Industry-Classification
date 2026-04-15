@@ -1191,6 +1191,17 @@ Never invent fact names or table names. Platform IDs: 16=Middesk,23=OC,24=ZI,17=
 Redshift: use JSON_EXTRACT_PATH_TEXT, never ::json or ->> (fails on federation)."""
 
 # ── Universal detail panel ────────────────────────────────────────────────────
+def _make_python_from_sql(sql: str, fact_name: str = "") -> str:
+    """Auto-generate a Python equivalent of a SQL query for the Python Runner."""
+    if not sql or sql.strip().startswith("--"):
+        return ""
+    return (
+        f"# Paste into 🐍 Python Runner — conn is pre-injected\n"
+        f"df = pd.read_sql(\"\"\"\n{sql.strip()}\n\"\"\", conn)\n"
+        f"print(f'{{len(df)}} rows')\n"
+        f"print(df.to_string(index=False))"
+    )
+
 def detail_panel(
     label: str,
     value_display: str,
@@ -1202,21 +1213,20 @@ def detail_panel(
     api_endpoint: str = "",
     json_obj: dict = None,
     sql: str = "",
-    links: list = None,          # [(key_in_GITHUB_LINKS, display_label), ...]
+    python_code: str = "",   # explicit Python — auto-generated from sql if not provided
+    links: list = None,
     color: str = "#3B82F6",
     icon: str = "📊",
 ):
     """
-    Universal collapsible detail panel — attach to ANY card, table row, pipeline step,
-    or chart. Shows: source file (linked), table, API endpoint, JSON, SQL.
+    Universal collapsible detail panel — shows source file (linked), table,
+    API endpoint, JSON, SQL, and Python code for the Python Runner.
     """
-    with st.expander(f"{icon} **{label}** — {value_display[:80]}  ·  click for source, JSON & SQL"):
+    with st.expander(f"{icon} **{label}** — {value_display[:80]}  ·  click for source, JSON, SQL & Python"):
 
         # ── Source badges ──────────────────────────────────────────────────────
         all_links = list(links or [])
         if source_file:
-            key = next((k for k in GITHUB_LINKS if k in source_file or source_file in k), "")
-            url = GITHUB_LINKS.get(key, "") or GITHUB_LINKS.get(source_file, "")
             all_links = [(source_file, source_file_line or source_file)] + all_links
         badge_html = src_links_html(all_links) if all_links else ""
         if badge_html:
@@ -1244,13 +1254,25 @@ def detail_panel(
 
         # ── JSON ───────────────────────────────────────────────────────────────
         if json_obj is not None:
-            st.markdown("**JSON:**")
+            st.markdown("**JSON (as stored / returned by API):**")
             st.code(json.dumps(json_obj, indent=2, default=str, ensure_ascii=False), language="json")
 
-        # ── SQL ────────────────────────────────────────────────────────────────
-        if sql:
-            st.markdown("**SQL to verify:**")
+        # ── SQL + Python side by side ─────────────────────────────────────────
+        _py = python_code or (sql and _make_python_from_sql(sql)) or ""
+        if sql and _py:
+            sc, pc = st.columns(2)
+            with sc:
+                st.markdown("**SQL (Redshift):**")
+                st.code(sql.strip(), language="sql")
+            with pc:
+                st.markdown("**Python (paste into 🐍 Runner):**")
+                st.code(_py, language="python")
+        elif sql:
+            st.markdown("**SQL to verify (Redshift):**")
             st.code(sql.strip(), language="sql")
+        elif _py:
+            st.markdown("**Python (paste into 🐍 Runner):**")
+            st.code(_py, language="python")
 
 
 def ask_ai(question, context="", history=None):
@@ -1763,8 +1785,16 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
                 yaxis=dict(title="", tickfont=dict(size=12)),
             )
             st.plotly_chart(dark_chart(fig_f), use_container_width=True)
-            st.caption("Each bar = number of businesses with that specific issue. "
-                       "One business can appear in multiple bars.")
+            st.caption("Each bar = number of businesses with that specific issue. One business can appear in multiple bars.")
+            _rf_sql = f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val, COUNT(DISTINCT business_id) AS businesses FROM rds_warehouse_public.facts WHERE business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') AND name IN ('sos_active','tin_match_boolean','watchlist_hits','naics_code','idv_passed_boolean','num_bankruptcies') GROUP BY name, JSON_EXTRACT_PATH_TEXT(value,'value') ORDER BY name;"
+            detail_panel("Red Flag Distribution Chart", f"{len(flag_type_counts)} issue types detected",
+                what_it_means="Horizontal bar chart counting how many businesses have each type of issue. Source: scalar KYB facts from rds_warehouse_public.facts joined to rds_cases_public.rel_business_customer_monitoring for the date filter. 'Watchlist hits' consolidates all watchlist count variants. 'Bankruptcy' consolidates all BK count variants.",
+                source_table="rds_warehouse_public.facts (sos_active, tin_match_boolean, watchlist_hits, naics_code, idv_passed_boolean, num_bankruptcies)",
+                source_file="facts/kyb/index.ts", source_file_line="KYB scalar facts — dependent facts derived by Fact Engine",
+                json_obj={"chart_type":"horizontal_bar","issue_counts":flag_type_counts,"date_range":f"{hub_date_from}→{hub_date_to}","note":"One business can appear in multiple bars"},
+                sql=_rf_sql,
+                links=[("facts/kyb/index.ts","KYB scalar fact definitions"),("consolidatedWatchlist.ts","Watchlist architecture")],
+                color="#ef4444", icon="🚩")
         else:
             flag("✅ No red flags detected in this period","green")
 
@@ -1796,6 +1826,15 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
                 yaxis=dict(title="",tickfont=dict(size=11)),
             )
             st.plotly_chart(dark_chart(fig_n),use_container_width=True)
+            _naics_sql = f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS naics_code, COUNT(DISTINCT business_id) AS businesses FROM rds_warehouse_public.facts WHERE name='naics_code' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1 ORDER BY businesses DESC LIMIT 20;"
+            detail_panel("Top Industry Sectors Chart", f"{len(naics_sector)} sectors",
+                what_it_means="Horizontal bar showing count of businesses per 2-digit NAICS sector. The 2-digit sector is derived from the first 2 digits of naics_code (6-digit). Source: Equifax/ZI/OC/SERP/Trulioo/Applicant/AI — winner selected by factWithHighestConfidence. 561499 businesses excluded from sector chart (shown separately as NAICS Fallback).",
+                source_table="rds_warehouse_public.facts · name='naics_code' (6-digit NAICS code)",
+                source_file="facts/kyb/index.ts", source_file_line="naicsCode · factWithHighestConfidence · vendor cascade",
+                json_obj={"chart_type":"horizontal_bar_by_sector","sectors":naics_sector.to_dict("records") if not naics_sector.empty else [],"derivation":"naics_code[:2] → 2-digit NAICS sector group","source":"rds_warehouse_public.facts"},
+                sql=_naics_sql,
+                links=[("facts/kyb/index.ts","naicsCode fact"),("facts/rules.ts","factWithHighestConfidence rule"),("integrations.constant.ts","vendor IDs")],
+                color="#3B82F6", icon="🏭")
         else:
             st.info("No NAICS data available.")
 
@@ -1829,10 +1868,48 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
         review     = (ws_df["score_decision"]=="FURTHER_REVIEW_NEEDED").sum()
         declined   = (ws_df["score_decision"]=="DECLINE").sum()
         median_sc  = ws_df["weighted_score_850"].median()
+        _ws_sql = f"SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, bs.created_at FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id LIMIT 5000;"
         with wc1: kpi("Median Score",f"{median_sc:.0f}","300–850 scale","#3B82F6")
         with wc2: kpi("✅ Approve",f"{approved:,}",rate(approved,len(ws_df)),"#22c55e")
         with wc3: kpi("🔎 Review",f"{review:,}",rate(review,len(ws_df)),"#f59e0b")
         with wc4: kpi("❌ Decline",f"{declined:,}",rate(declined,len(ws_df)),"#ef4444")
+        # Detail panels below (separate row to avoid overlap)
+        _ws_dp = st.columns(4)
+        with _ws_dp[0]:
+            detail_panel("Median Worth Score",f"{median_sc:.0f}",
+                what_it_means="Median score across all scored businesses in the portfolio. Formula: probability × 550 + 300. 300=minimum (worst risk), 850=maximum (best risk). Median is more robust than mean — not skewed by extreme values.",
+                source_table="rds_manual_score_public.business_scores · weighted_score_850",
+                source_file="aiscore.py", source_file_line="score_300_850 = probability × 550 + 300 (L44)",
+                json_obj={"median_score_850":float(median_sc),"formula":"p × 550 + 300","scale":"300–850","decision_thresholds":{"APPROVE":"≥700","FURTHER_REVIEW":"550–699","DECLINE":"<550"}},
+                sql=_ws_sql, links=[("aiscore.py","Score formula"),("score_decision_matrix","Decision thresholds")],
+                color="#3B82F6", icon="💰")
+        with _ws_dp[1]:
+            detail_panel("Approve",str(approved),
+                what_it_means=f"score ≥ 700 → LOW risk → APPROVE. {approved:,} businesses ({rate(approved,len(ws_df))} of scored). Default threshold from score_decision_matrix seed migration. Configurable per customer.",
+                source_table="rds_manual_score_public.business_scores · score_decision='APPROVE'",
+                source_file="score_decision_matrix", source_file_line="range_start=700, range_end=850, risk_level='LOW', decision='APPROVE'",
+                json_obj={"decision":"APPROVE","threshold":"score≥700","risk_level":"LOW","count":int(approved),"pct":rate(approved,len(ws_df))},
+                sql=f"SELECT COUNT(*) AS approved FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE bs.score_decision='APPROVE';",
+                links=[("score_decision_matrix","Decision thresholds"),("aiscore.py","Score computation")],
+                color="#22c55e", icon="✅")
+        with _ws_dp[2]:
+            detail_panel("Further Review",str(review),
+                what_it_means=f"550 ≤ score < 700 → MODERATE risk → FURTHER_REVIEW_NEEDED. {review:,} businesses ({rate(review,len(ws_df))}). Human analyst must review. Score is in uncertain zone — model cannot confidently approve or decline.",
+                source_table="rds_manual_score_public.business_scores · score_decision='FURTHER_REVIEW_NEEDED'",
+                source_file="score_decision_matrix", source_file_line="range_start=550, range_end=699, risk_level='MODERATE'",
+                json_obj={"decision":"FURTHER_REVIEW_NEEDED","threshold":"550≤score<700","risk_level":"MODERATE","count":int(review),"pct":rate(review,len(ws_df))},
+                sql=f"SELECT COUNT(*) AS review FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE bs.score_decision='FURTHER_REVIEW_NEEDED';",
+                links=[("score_decision_matrix","Decision thresholds")],
+                color="#f59e0b", icon="🔎")
+        with _ws_dp[3]:
+            detail_panel("Decline",str(declined),
+                what_it_means=f"score < 550 → HIGH risk → DECLINE. {declined:,} businesses ({rate(declined,len(ws_df))}). Model probability below minimum acceptance threshold. Do NOT approve without Compliance override.",
+                source_table="rds_manual_score_public.business_scores · score_decision='DECLINE'",
+                source_file="score_decision_matrix", source_file_line="range_start=0, range_end=549, risk_level='HIGH', decision='DECLINE'",
+                json_obj={"decision":"DECLINE","threshold":"score<550","risk_level":"HIGH","count":int(declined),"pct":rate(declined,len(ws_df))},
+                sql=f"SELECT COUNT(*) AS declined FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE bs.score_decision='DECLINE';",
+                links=[("score_decision_matrix","Decision thresholds"),("aiscore.py","Score computation")],
+                color="#ef4444", icon="❌")
 
         wsc1, wsc2 = st.columns([2,1])
         with wsc1:
@@ -1851,6 +1928,13 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
             fig_ws.update_layout(height=300,legend=dict(orientation="h",y=-0.2),
                                  margin=dict(t=40,b=40,l=10,r=10))
             st.plotly_chart(dark_chart(fig_ws),use_container_width=True)
+            detail_panel("Worth Score Distribution (histogram)", f"n={len(ws_df):,} scored businesses",
+                what_it_means="Stacked histogram showing distribution of Worth Scores (300–850) coloured by decision outcome. Green=APPROVE(≥700), Amber=FURTHER_REVIEW(550-699), Red=DECLINE(<550). Peaks show where the portfolio clusters. Score formula: probability × 550 + 300.",
+                source_table="rds_manual_score_public.data_current_scores JOIN business_scores",
+                source_file="aiscore.py", source_file_line="score_300_850 = p × 550 + 300 (L44)",
+                json_obj={"chart_type":"histogram","x":"weighted_score_850","color":"score_decision","bins":40,"total_scored":len(ws_df),"median":float(median_sc),"decision_breakdown":{"APPROVE":int(approved),"FURTHER_REVIEW":int(review),"DECLINE":int(declined)}},
+                sql=_ws_sql, links=[("aiscore.py","Score formula"),("score_decision_matrix","Thresholds")],
+                color="#3B82F6", icon="📊")
         with wsc2:
             # Decision breakdown by risk_level
             rl_counts = ws_df.groupby(["risk_level","score_decision"]).size().reset_index(name="Count")
@@ -1865,6 +1949,14 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
                 fig_rl.update_layout(height=300,showlegend=False,
                                      margin=dict(t=40,b=10,l=10,r=10))
                 st.plotly_chart(dark_chart(fig_rl),use_container_width=True)
+                detail_panel("Worth Score by Risk Level (bar chart)", "HIGH / MODERATE / LOW breakdown",
+                    what_it_means="Stacked bar showing how many businesses fall into each risk level (HIGH/MODERATE/LOW) and their decision outcome. Risk level derives directly from score range: HIGH=<550, MODERATE=550-699, LOW=≥700. Source: score_decision_matrix table (configurable per customer).",
+                    source_table="rds_manual_score_public.business_scores · risk_level + score_decision",
+                    source_file="score_decision_matrix", source_file_line="risk_level and decision derived from score range",
+                    json_obj={"chart_type":"stacked_bar","x":"risk_level","y":"count","color":"score_decision","data":rl_counts.to_dict("records")},
+                    sql=f"SELECT risk_level, score_decision, COUNT(*) FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id GROUP BY 1,2 ORDER BY 1,2;",
+                    links=[("score_decision_matrix","Risk level thresholds"),("aiscore.py","Score pipeline")],
+                    color="#8B5CF6", icon="📊")
     else:
         st.info(f"Worth Score data not available. {ws_err or 'Check VPN / Redshift access.'}")
 
@@ -1894,8 +1986,15 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
             fig_dom.update_layout(height=220,showlegend=False,
                                   margin=dict(t=10,b=10,l=10,r=10))
             st.plotly_chart(dark_chart(fig_dom),use_container_width=True)
-            st.caption("Tax-haven states (DE, NV, WY, SD, MT, NM) are high-risk for entity resolution gaps: "
-                       "Middesk finds the FOREIGN filing, missing the DOMESTIC primary record.")
+            st.caption("Tax-haven states (DE, NV, WY, SD, MT, NM) are high-risk for entity resolution gaps: Middesk finds the FOREIGN filing, missing the DOMESTIC primary record.")
+            _dom_sql = f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS formation_state, COUNT(DISTINCT business_id) AS businesses FROM rds_warehouse_public.facts WHERE name='formation_state' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1 ORDER BY businesses DESC LIMIT 20;"
+            detail_panel("Domestic vs Foreign Registration (donut)", f"Tax-haven: {th_count:,} · Other: {non_th:,} · No data: {no_state:,}",
+                what_it_means="Donut showing how many businesses are incorporated in tax-haven states (DE/NV/WY/SD/MT/NM) vs other states vs missing. Tax-haven incorporations are HIGH RISK for entity resolution gaps because Middesk searches by operating address (submitted) and finds the FOREIGN qualification record, missing the DOMESTIC primary. Source: formation_state fact from Middesk (pid=16).",
+                source_table="rds_warehouse_public.facts · name='formation_state'",
+                source_file="facts/kyb/index.ts", source_file_line="formationState · factWithHighestConfidence · Middesk pid=16",
+                json_obj={"tax_haven_count":int(th_count),"other_state_count":int(non_th),"no_state_data":int(no_state),"total":n,"tax_haven_states":["DE","NV","WY","SD","MT","NM"],"risk":"Entity resolution gap — Middesk address search finds FOREIGN not DOMESTIC"},
+                sql=_dom_sql, links=[("facts/kyb/index.ts","formationState fact"),("consolidatedWatchlist.ts","Entity resolution architecture")],
+                color="#f59e0b", icon="🗺️")
 
             # Top states table
             if not state_counts.empty:
@@ -1903,6 +2002,13 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
                 sc2["Tax Haven"]=sc2["State"].isin(TAX_HAVENS).map({True:"⚠️ Yes",False:"No"})
                 st.dataframe(sc2[["State","Count","Tax Haven"]].head(8),
                              use_container_width=True,hide_index=True)
+                detail_panel("Formation States Table", f"Top {min(8,len(sc2))} states",
+                    what_it_means="Top formation states sorted by business count. Tax Haven=Yes means this state (DE/NV/WY/SD/MT/NM) is chosen for corporate law/tax benefits, not because the business operates there. When formation state ≠ operating state, Middesk's address search finds the WRONG SOS record → false negative in sos_match_boolean.",
+                    source_table="rds_warehouse_public.facts · name='formation_state'",
+                    source_file="facts/kyb/index.ts", source_file_line="formationState fact",
+                    json_obj={"top_states":sc2[["State","Count","Tax Haven"]].head(8).to_dict("records")},
+                    sql=_dom_sql, links=[("facts/kyb/index.ts","formationState"),("integrations.constant.ts","MIDDESK=16")],
+                    color="#3B82F6", icon="🗺️")
         else:
             st.info("No formation state data available.")
 
@@ -1925,6 +2031,14 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
             fig_tin.update_layout(height=220,showlegend=False,
                                   margin=dict(t=10,b=10,l=10,r=10))
             st.plotly_chart(dark_chart(fig_tin),use_container_width=True)
+            _tin_pop_sql = f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS tin_boolean, COUNT(DISTINCT business_id) AS businesses FROM rds_warehouse_public.facts WHERE name='tin_match_boolean' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1;"
+            detail_panel("TIN Verification Breakdown (donut)", f"Verified: {tin_true:,} · Failed: {tin_false:,} · Not checked: {tin_null:,}",
+                what_it_means="Donut showing TIN verification outcomes across all onboarded businesses. Source: tin_match_boolean fact (dependent — derived from tin_match.value.status==='success'). Middesk (pid=16) queries IRS directly via TIN review task. 'Not Checked' = EIN not submitted OR Middesk TIN task not yet triggered.",
+                source_table="rds_warehouse_public.facts · name='tin_match_boolean'",
+                source_file="facts/kyb/index.ts", source_file_line="tinMatchBoolean · dependent · Middesk IRS check pid=16",
+                json_obj={"tin_verified":int(tin_true),"tin_failed":int(tin_false),"tin_not_checked":int(tin_null),"total":n,"source":"Middesk pid=16 TIN review task → direct IRS query"},
+                sql=_tin_pop_sql, links=[("facts/kyb/index.ts","tinMatchBoolean"),("integrations.constant.ts","MIDDESK=16")],
+                color="#22c55e", icon="🔐")
 
             # Source concordance: SOS active vs TIN verified cross-tab
             st.markdown("**Source Concordance — SOS × TIN**")
@@ -1948,6 +2062,14 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
                 cross["Signal"]=cross.apply(_cross_color,axis=1)
                 st.dataframe(cross[["SOS","TIN","Count","Signal"]],
                              use_container_width=True,hide_index=True)
+                detail_panel("SOS × TIN Concordance Table", f"{len(cross)} combinations",
+                    what_it_means="Cross-tabulation of SOS status vs TIN verification status. ✅ Good = SOS Active + TIN Pass (ideal). 🔴 Review = either SOS Inactive OR TIN Fail (action required). 🟡 Check = ambiguous (one or both unknown). This table detects the most common inconsistency: entity is registered (SOS Active) but EIN doesn't match IRS.",
+                    source_table="rds_warehouse_public.facts · name IN ('sos_active','tin_match_boolean')",
+                    source_file="facts/kyb/index.ts", source_file_line="sosActive + tinMatchBoolean cross-field analysis",
+                    json_obj={"concordance_table":cross[["SOS","TIN","Count","Signal"]].to_dict("records"),"interpretation":{"Good":"SOS Active + TIN Pass","Review":"SOS Inactive or TIN Fail","Check":"One or both unknown"}},
+                    sql=f"SELECT JSON_EXTRACT_PATH_TEXT(a.value,'value') AS sos_active, JSON_EXTRACT_PATH_TEXT(b.value,'value') AS tin_match_boolean, COUNT(*) AS businesses FROM rds_warehouse_public.facts a JOIN rds_warehouse_public.facts b ON a.business_id=b.business_id AND b.name='tin_match_boolean' WHERE a.name='sos_active' AND a.business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1,2 ORDER BY businesses DESC;",
+                    links=[("facts/kyb/index.ts","sosActive + tinMatchBoolean")],
+                    color="#8B5CF6", icon="🔗")
         else:
             st.info("No TIN data available.")
 
@@ -1962,6 +2084,7 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
                 ("Adverse Media",am_count,"#f59e0b","Businesses with negative press coverage"),
                 ("Bankruptcies",bk_biz,"#8B5CF6","Businesses with ≥1 bankruptcy on file"),
             ]
+            PR_FACT_MAP = {"Watchlist hits":("watchlist_hits","Trulioo PSC + Middesk","consolidatedWatchlist.ts"),"Adverse Media":("adverse_media_hits","Trulioo adverse_media","facts/kyb/index.ts"),"Bankruptcies":("num_bankruptcies","Equifax pid=17","facts/kyb/index.ts")}
             for label,count,color,desc in pr_items:
                 pct=rate(count,n)
                 st.markdown(f"""<div style="background:#1E293B;border-left:3px solid {color};
@@ -1972,6 +2095,15 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
                   </div>
                   <div style="color:#64748b;font-size:.70rem;margin-top:2px">{pct} · {desc}</div>
                 </div>""",unsafe_allow_html=True)
+                _pr_m = PR_FACT_MAP.get(label,("","",""))
+                detail_panel(label, f"{count:,} businesses ({pct})",
+                    what_it_means=f"{desc}. Source: {_pr_m[1]}. Stored in: rds_warehouse_public.facts · name='{_pr_m[0]}'. This is a scalar count — the full detail array (with dates, amounts, types) is too large for Redshift federation and must be queried from PostgreSQL RDS (port 5432).",
+                    source_table=f"rds_warehouse_public.facts · name='{_pr_m[0]}' (scalar count, Redshift OK)",
+                    source_file=_pr_m[2], source_file_line=f"{_pr_m[0]} · dependent from {_pr_m[0].replace('num_','')}[] array",
+                    json_obj={"metric":label,"count":int(count),"pct":pct,"source":_pr_m[1],"scalar_fact":_pr_m[0],"full_array_fact":_pr_m[0].replace("_hits","").replace("num_","")},
+                    sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS count_val, COUNT(DISTINCT business_id) AS businesses FROM rds_warehouse_public.facts WHERE name='{_pr_m[0]}' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1 ORDER BY businesses DESC;",
+                    links=[(_pr_m[2],f"{_pr_m[0]} definition"),("integrations.constant.ts","TRULIOO=38, EQUIFAX=17")],
+                    color=color, icon="📜")
 
             # IDV source concordance
             st.markdown("**IDV × SOS Concordance**")
@@ -1989,6 +2121,14 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
             cross2["OK"]=cross2.apply(_c2,axis=1)
             st.dataframe(cross2[["SOS","IDV","Count","OK"]],
                          use_container_width=True,hide_index=True)
+            detail_panel("IDV × SOS Concordance Table", f"{len(cross2)} combinations",
+                what_it_means="Cross-tab of SOS status vs IDV verification. ✅ = SOS Active + IDV Pass (ideal). 🔴 = SOS Inactive OR IDV Fail (action required). 🟡 = unknown state (IDV not triggered for sole props, or SOS data missing). A business with SOS Active but IDV Fail means the entity is registered but the owner identity is not confirmed.",
+                source_table="rds_warehouse_public.facts · name IN ('sos_active','idv_passed_boolean')",
+                source_file="facts/kyb/index.ts", source_file_line="sosActive + idvPassedBoolean cross-field analysis",
+                json_obj={"concordance_table":cross2[["SOS","IDV","Count","OK"]].to_dict("records")},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(a.value,'value') AS sos_active, JSON_EXTRACT_PATH_TEXT(b.value,'value') AS idv_passed_boolean, COUNT(*) AS businesses FROM rds_warehouse_public.facts a JOIN rds_warehouse_public.facts b ON a.business_id=b.business_id AND b.name='idv_passed_boolean' WHERE a.name='sos_active' AND a.business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1,2 ORDER BY businesses DESC;",
+                links=[("facts/kyb/index.ts","sosActive + idvPassedBoolean")],
+                color="#8B5CF6", icon="🔗")
         else:
             st.info("No public records data available.")
 
@@ -5687,59 +5827,144 @@ ORDER BY name;"""
                 st.rerun()
 
     with runner_tab2:
-        st.markdown("**Write Python code that runs against Redshift. `conn` is pre-opened, `pd` is available.**")
-        default_py = f"""import pandas as pd
-import psycopg2, os, json
+        # Pre-build an already-open connection and inject it so user code
+        # doesn't need to re-supply credentials (and can't get them wrong)
+        import io, contextlib, traceback as _tb
+        try:
+            import psycopg2 as _psy
+            _runner_conn = _psy.connect(
+                dbname=os.getenv("REDSHIFT_DB","dev"),
+                user=os.getenv("REDSHIFT_USER","readonly_all_access"),
+                password=os.getenv("REDSHIFT_PASSWORD","Y7&.D3!09WvT4/nSqXS2>qbO"),
+                host=os.getenv("REDSHIFT_HOST","worthai-services-redshift-endpoint-k9sdhv2ja6lgojidri87.808338307022.us-east-1.redshift-serverless.amazonaws.com"),
+                port=int(os.getenv("REDSHIFT_PORT","5439")),
+                connect_timeout=15
+            )
+            _conn_ok = True
+        except Exception as _ce:
+            _runner_conn = None
+            _conn_ok = False
+            st.warning(f"⚠️ Could not pre-open Redshift connection: {_ce}. Check VPN. You can still write code that opens its own connection.")
 
-conn = psycopg2.connect(
-    dbname=os.getenv('REDSHIFT_DB','dev'),
-    user=os.getenv('REDSHIFT_USER','readonly_all_access'),
-    password=os.getenv('REDSHIFT_PASSWORD',''),
-    host=os.getenv('REDSHIFT_HOST',''),
-    port=int(os.getenv('REDSHIFT_PORT','5439')),
-    connect_timeout=15
-)
+        if _conn_ok:
+            st.success("🟢 Redshift connection pre-opened — use `conn` directly in your code, no credentials needed")
+        st.markdown("**`conn`** = pre-opened psycopg2 connection · **`pd`** = pandas · **`json`** = json · **`bid`** = current business UUID")
 
-# Example: load facts for a business and parse JSON
-bid = "{bid or 'PASTE-UUID-HERE'}"
+        _example_bid = bid or 'PASTE-UUID-HERE'
+        default_py = f"""# conn is already open — use it directly with pd.read_sql()
+# bid = current business UUID (pre-injected)
+
 df = pd.read_sql(f\"\"\"
     SELECT name,
-           JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,
-           JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid,
-           JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence,
+           JSON_EXTRACT_PATH_TEXT(value, 'value')                AS fact_value,
+           JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') AS winning_pid,
+           JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') AS confidence,
            received_at
     FROM rds_warehouse_public.facts
-    WHERE business_id = '{{bid}}'
+    WHERE business_id = '{_example_bid}'
     ORDER BY name
 \"\"\", conn)
-conn.close()
 
-print(f"Loaded {{len(df)}} facts")
-print(df.head(20).to_string())"""
+print(f"Loaded {{len(df)}} facts for {{bid}}")
+print(df.to_string(index=False))"""
 
-        py_input = st.text_area("Python Code:", value=default_py, height=250, key="py_runner_input")
-        if st.button("▶ Run Python", type="primary", key="run_py_btn"):
-            with st.spinner("Running Python…"):
-                import io, contextlib, traceback
-                stdout_capture = io.StringIO()
-                local_vars = {"pd": pd, "json": json, "os": os}
+        py_input = st.text_area("Python Code:", value=default_py, height=260, key="py_runner_input")
+
+        # Quick-load templates
+        with st.expander("📋 Quick templates — click to load"):
+            tmpl_cols = st.columns(3)
+            TEMPLATES = {
+                "Onboarded businesses (last 7 days)":
+                    f"""df = pd.read_sql(\"\"\"
+    SELECT DISTINCT business_id, MIN(created_at)::date AS onboarded_at
+    FROM rds_cases_public.rel_business_customer_monitoring
+    WHERE DATE(created_at) >= CURRENT_DATE - 7
+    GROUP BY business_id
+    ORDER BY onboarded_at DESC
+\"\"\", conn)
+print(f"Found {{len(df)}} businesses")""",
+                "Worth Score for current business":
+                    f"""df = pd.read_sql(f\"\"\"
+    SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, bs.created_at
+    FROM rds_manual_score_public.data_current_scores cs
+    JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+    WHERE cs.business_id = '{_example_bid}'
+    ORDER BY bs.created_at DESC LIMIT 5
+\"\"\", conn)
+print(df.to_string(index=False))""",
+                "All KYB facts + parse JSON":
+                    f"""import json as _json
+rows = []
+cur = conn.cursor()
+cur.execute(\"\"\"
+    SELECT name, value, received_at FROM rds_warehouse_public.facts
+    WHERE business_id = '{_example_bid}' ORDER BY name
+\"\"\")
+for name, val_str, ts in cur.fetchall():
+    try:
+        fact = _json.loads(val_str) if val_str else {{}}
+    except: fact = {{}}
+    rows.append({{
+        'fact': name,
+        'value': str(fact.get('value',''))[:60],
+        'pid':   fact.get('source',{{}}).get('platformId',''),
+        'conf':  fact.get('source',{{}}).get('confidence',''),
+        'ts':    str(ts)[:16]
+    }})
+cur.close()
+import pandas as _pd2; df = _pd2.DataFrame(rows)
+print(df.to_string(index=False))""",
+            }
+            for i,(tmpl_name,tmpl_code) in enumerate(TEMPLATES.items()):
+                with tmpl_cols[i % 3]:
+                    if st.button(f"📄 {tmpl_name}", key=f"tmpl_{i}"):
+                        st.session_state["py_runner_template"] = tmpl_code
+                        st.rerun()
+            if "py_runner_template" in st.session_state:
+                py_input = st.session_state.pop("py_runner_template")
+
+        run_c, clr_c = st.columns([2,1])
+        with run_c:
+            run_py = st.button("▶ Run Python", type="primary", key="run_py_btn")
+        with clr_c:
+            if st.button("🗑️ Clear output", key="clear_py"):
+                st.session_state.pop("py_output", None); st.rerun()
+
+        if run_py:
+            with st.spinner("Running Python against Redshift…"):
+                stdout_cap = io.StringIO()
+                # Inject: conn (pre-opened), pd, json, os, bid
+                _lvars = {
+                    "conn": _runner_conn,
+                    "pd": pd,
+                    "json": json,
+                    "os": os,
+                    "bid": bid or "",
+                }
                 try:
-                    with contextlib.redirect_stdout(stdout_capture):
-                        exec(py_input, local_vars)
-                    output = stdout_capture.getvalue()
-                    st.success("✅ Execution complete")
-                    if output:
-                        st.code(output, language="text")
-                    # If script left a DataFrame in local_vars named 'df' or 'result', show it
-                    for var_name in ["df","result","out","data"]:
-                        if var_name in local_vars and isinstance(local_vars[var_name], pd.DataFrame):
-                            st.markdown(f"**DataFrame `{var_name}` ({len(local_vars[var_name])} rows):**")
-                            st.dataframe(local_vars[var_name], use_container_width=True)
-                            csv = local_vars[var_name].to_csv(index=False)
-                            st.download_button(f"⬇️ Download {var_name}.csv", csv, f"{var_name}.csv", "text/csv")
+                    with contextlib.redirect_stdout(stdout_cap):
+                        exec(py_input, _lvars)  # noqa: S102
+                    output = stdout_cap.getvalue()
+                    st.session_state["py_output"] = ("ok", output, _lvars)
                 except Exception:
-                    st.error("❌ Python error:")
-                    st.code(traceback.format_exc(), language="text")
+                    st.session_state["py_output"] = ("err", _tb.format_exc(), _lvars)
+
+        if "py_output" in st.session_state:
+            status, output, _lvars = st.session_state["py_output"]
+            if status == "ok":
+                st.success("✅ Execution complete")
+                if output:
+                    st.code(output, language="text")
+                for var_name in ["df","result","out","data","df2"]:
+                    if var_name in _lvars and isinstance(_lvars[var_name], pd.DataFrame):
+                        st.markdown(f"**DataFrame `{var_name}` — {len(_lvars[var_name]):,} rows:**")
+                        st.dataframe(_lvars[var_name], use_container_width=True)
+                        csv = _lvars[var_name].to_csv(index=False)
+                        st.download_button(f"⬇️ Download {var_name}.csv", csv, f"{var_name}.csv", "text/csv", key=f"dl_{var_name}")
+            else:
+                st.error("❌ Python error:")
+                st.code(output, language="text")
+                st.caption("💡 Tip: use `conn` (pre-injected) instead of creating a new psycopg2.connect() — credentials are already loaded.")
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("---")
