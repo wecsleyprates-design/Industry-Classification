@@ -2576,17 +2576,57 @@ LIMIT 100;""", language="sql")
 
         render_lineage(facts,["tin","tin_submitted","tin_match","tin_match_boolean"])
 
-        # KPI row
+        # KPI row with detail panels
         tin_submitted_val=str(gv(facts,"tin_submitted") or "")
+        _tin_sql_base = f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val, JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('tin','tin_submitted','tin_match','tin_match_boolean') ORDER BY name;"
         c1,c2,c3,c4=st.columns(4)
-        with c1: kpi("EIN Submitted","✅ Yes" if tin_submitted_val else "❌ No",
-                     f"Masked: {tin_submitted_val[:9]}" if tin_submitted_val else "tin_submitted fact","#22c55e" if tin_submitted_val else "#ef4444")
-        with c2: kpi("IRS Status",tin_status.capitalize() or "⚠️ Unknown","tin_match.value.status",
-                     "#22c55e" if tin_status=="success" else "#ef4444" if tin_status=="failure" else "#f59e0b")
-        with c3: kpi("IRS Message",tin_msg[:30]+"…" if len(tin_msg)>30 else (tin_msg or "(none)"),
-                     "tin_match.value.message","#22c55e" if tin_status=="success" else "#ef4444")
-        with c4: kpi("Boolean Result",tin_bool or "⚠️ Unknown","Admin Portal shows this value",
-                     "#22c55e" if tin_bool=="true" else "#ef4444")
+        with c1:
+            kpi("EIN Submitted","✅ Yes" if tin_submitted_val else "❌ No",
+                f"Masked: {tin_submitted_val[:9]}" if tin_submitted_val else "tin_submitted fact","#22c55e" if tin_submitted_val else "#ef4444")
+            detail_panel("EIN Submitted", tin_submitted_val or "Not submitted",
+                what_it_means="tin_submitted stores the masked EIN (XXXXX1234) for display. The unmasked version is in the 'tin' fact. Both are sourced from the Applicant (pid=0, confidence=1.0 by convention). The IRS TIN check CANNOT run until an EIN is submitted.",
+                source_table="rds_warehouse_public.facts · name='tin_submitted'",
+                source_file="facts/kyb/index.ts", source_file_line="tinSubmitted · factWithHighestConfidence · Applicant pid=0",
+                api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.tin_submitted",
+                json_obj={"name":"tin_submitted","value":tin_submitted_val or None,"source":{"platformId":0,"name":"businessDetails","confidence":1.0},"ruleApplied":{"name":"factWithHighestConfidence"},"note":"Masked EIN. Unmasked in 'tin' fact."},
+                sql=_tin_sql_base,
+                links=[("facts/kyb/index.ts","tinSubmitted fact"),("integrations.constant.ts","pid=0=Applicant/businessDetails")],
+                color="#22c55e" if tin_submitted_val else "#ef4444", icon="🔐")
+        with c2:
+            kpi("IRS Status",tin_status.capitalize() or "⚠️ Unknown","tin_match.value.status",
+                "#22c55e" if tin_status=="success" else "#ef4444" if tin_status=="failure" else "#f59e0b")
+            detail_panel("IRS Status", tin_status or "Unknown",
+                what_it_means="tin_match.value.status = the IRS response status for the EIN+name combination check. 'success' = IRS confirmed match. 'failure' = IRS mismatch or no record. 'pending' = check in progress. This field drives tin_match_boolean (dependent fact).",
+                source_table="rds_warehouse_public.facts · name='tin_match' → value.status",
+                source_file="facts/kyb/index.ts", source_file_line="tinMatch · factWithHighestConfidence · Middesk pid=16",
+                api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.tin_match.value.status",
+                json_obj={"name":"tin_match","value":{"status":tin_status or None,"message":tin_msg or None,"sublabel":"Found" if tin_status=="success" else "Failed"},"source":{"platformId":16,"name":"middesk","confidence":gc(facts,"tin_match")}},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','status') AS irs_status, JSON_EXTRACT_PATH_TEXT(value,'value','message') AS irs_message FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match';",
+                links=[("facts/kyb/index.ts","tinMatch fact"),("integrations.constant.ts","INTEGRATION_ID.MIDDESK=16")],
+                color="#22c55e" if tin_status=="success" else "#ef4444" if tin_status=="failure" else "#f59e0b", icon="🏛️")
+        with c3:
+            kpi("IRS Message",tin_msg[:30]+"…" if len(tin_msg)>30 else (tin_msg or "(none)"),
+                "tin_match.value.message","#22c55e" if tin_status=="success" else "#ef4444")
+            detail_panel("IRS Message", tin_msg or "(none)",
+                what_it_means="The exact message returned by the IRS TIN verification system via Middesk. Common messages: 'The IRS has a record for the submitted TIN and Business Name combination' (success). 'The IRS does not have a record' (wrong EIN/name). 'associated with a different Business Name' (FRAUD SIGNAL). 'Duplicate request' (retry in 24h).",
+                source_table="rds_warehouse_public.facts · name='tin_match' → value.message",
+                source_file="facts/kyb/index.ts", source_file_line="tinMatch.value.message · IRS response via Middesk TIN review task",
+                json_obj={"tin_match_message":tin_msg or None,"tin_match_status":tin_status or None,"interpretation":{"does not have a record":"Wrong EIN or name — request SS-4 document","associated with a different":"FRAUD SIGNAL — escalate to Compliance","Duplicate request":"Retry in 24h","unavailable":"IRS outage — auto-retry"}},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','message') AS irs_msg FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match';",
+                links=[("facts/kyb/index.ts","tinMatch message field")],
+                color="#22c55e" if tin_status=="success" else "#ef4444", icon="💬")
+        with c4:
+            kpi("Boolean Result",tin_bool or "⚠️ Unknown","Admin Portal shows this value",
+                "#22c55e" if tin_bool=="true" else "#ef4444")
+            detail_panel("Boolean Result", tin_bool or "Unknown",
+                what_it_means="tin_match_boolean is a DEPENDENT fact (platformId=-1) derived from tin_match.value.status === 'success'. This is the value shown in the Admin Portal's 'Tax ID Number (EIN)' verified badge. CRITICAL: tin_match_boolean=true MUST only happen when status='success'. Any divergence = data integrity bug.",
+                source_table="rds_warehouse_public.facts · name='tin_match_boolean'",
+                source_file="facts/kyb/index.ts", source_file_line="tinMatchBoolean · dependent · tin_match.value.status==='success'",
+                api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.tin_match_boolean.value",
+                json_obj={"name":"tin_match_boolean","value":tin_bool=="true" if tin_bool else None,"source":{"platformId":-1,"name":"dependent"},"dependencies":["tin_match"],"note":"Admin Portal EIN Verified badge. true ONLY when tin_match.value.status='success'"},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS tin_match_boolean FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match_boolean';",
+                links=[("facts/kyb/index.ts","tinMatchBoolean dependent fact"),("facts/rules.ts","dependentFact rule")],
+                color="#22c55e" if tin_bool=="true" else "#ef4444", icon="✅" if tin_bool=="true" else "❌")
 
         if tin_msg: flag(f"Middesk TIN message: **\"{tin_msg}\"**","green" if tin_status=="success" else "amber")
 
@@ -2628,8 +2668,15 @@ LIMIT 100;""", language="sql")
         if tin_sources:
             st.dataframe(pd.DataFrame(tin_sources),use_container_width=True,hide_index=True)
 
-        # Consistency checks
+        # Consistency checks with detail panels
         st.markdown("##### Data Integrity Checks")
+        TIN_CHECK_META = {
+            "EIN submitted":               ("tin_submitted","rds_warehouse_public.facts · name='tin_submitted'","facts/kyb/index.ts","tinSubmitted · pid=0 Applicant",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_submitted';"),
+            "tin_match.status present":    ("tin_match.value.status","rds_warehouse_public.facts · name='tin_match' → value.status","facts/kyb/index.ts","tinMatch · Middesk IRS response",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','status') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match';"),
+            "tin_match_boolean set":       ("tin_match_boolean","rds_warehouse_public.facts · name='tin_match_boolean'","facts/kyb/index.ts","tinMatchBoolean · dependent from tin_match",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match_boolean';"),
+            "Boolean ↔ status consistent": ("tin_match_boolean vs tin_match.status","Cross-field computed check — not stored","facts/kyb/index.ts","CRITICAL: boolean MUST equal (status==='success')","-- Verify both:\nSELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS val FROM rds_warehouse_public.facts WHERE business_id='" + bid + "' AND name IN ('tin_match_boolean','tin_match') ORDER BY name;"),
+            "Winning source is Middesk":   ("tin_match.source.platformId","rds_warehouse_public.facts · name='tin_match' → source.platformId","facts/kyb/index.ts","Middesk pid=16 is only IRS-direct source",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match';"),
+        }
         checks=[
             ("EIN submitted", bool(tin_submitted_val), tin_submitted_val or "(null)", "EIN must be submitted before IRS check can run"),
             ("tin_match.status present", tin_status in ("success","failure","pending"), tin_status or "(missing)", "Must be 'success', 'failure', or 'pending'"),
@@ -2639,6 +2686,18 @@ LIMIT 100;""", language="sql")
         ]
         st.dataframe(pd.DataFrame([{"Check":l,"Result":v,"Status":"✅ OK" if ok else "❌ ISSUE","Explanation":d}
                                     for l,ok,v,d in checks]),use_container_width=True,hide_index=True)
+        st.caption("▼ Click any check below to see source, JSON, and SQL to verify")
+        for l,ok,v,d in checks:
+            m = TIN_CHECK_META.get(l,())
+            detail_panel(l, str(v),
+                what_it_means=d,
+                source_table=m[1] if len(m)>1 else "rds_warehouse_public.facts",
+                source_file=m[2] if len(m)>2 else "facts/kyb/index.ts",
+                source_file_line=m[3] if len(m)>3 else "",
+                sql=m[4] if len(m)>4 else "",
+                json_obj={"check":l,"result":str(v),"status":"OK" if ok else "ISSUE","explanation":d},
+                links=[("facts/kyb/index.ts","TIN fact definitions"),("integrations.constant.ts","INTEGRATION_ID.MIDDESK=16")],
+                color="#22c55e" if ok else "#ef4444", icon="✅" if ok else "❌")
 
         # Failure diagnosis
         if tin_status=="failure" and tin_msg:
@@ -2858,6 +2917,20 @@ ORDER BY received_at DESC LIMIT 5;""",language="sql")
                 fig_idv.update_layout(height=220,showlegend=False,margin=dict(t=10,b=10,l=10,r=10))
                 st.plotly_chart(dark_chart(fig_idv),use_container_width=True)
             with col_cards:
+                IDV_SQL = {
+                    "SUCCESS": f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','SUCCESS') AS success_count FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='idv_status';",
+                    "PENDING": f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','PENDING') AS pending_count FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='idv_status';",
+                    "FAILED":  f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','FAILED') AS failed_count FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='idv_status';",
+                    "EXPIRED": f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','EXPIRED') AS expired_count FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='idv_status';",
+                    "CANCELED":f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','CANCELED') AS canceled_count FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='idv_status';",
+                }
+                IDV_UNDERWRITING = {
+                    "SUCCESS":"idv_passed += 1. When idv_passed >= 1 → idv_passed_boolean=true. Underwriting: identity confirmed — owner completed full biometric verification.",
+                    "PENDING":"Session link sent but not yet completed. Link active for 15-30 min. Underwriting action: send reminder after 24h. Does NOT increment idv_passed.",
+                    "FAILED":"Owner could not complete verification. Common causes: (1) Expired/damaged ID, (2) Selfie/ID face mismatch, (3) Liveness check failure, (4) Unsupported ID type, (5) Poor lighting. Underwriting action: issue new session link, request resubmission.",
+                    "EXPIRED":"Session link timed out before owner completed it. Underwriting action: issue a new IDV session link. Common for delayed owners.",
+                    "CANCELED":"Owner exited the flow without completing. May indicate UX friction, deliberate avoidance, or technical issue. Underwriting action: re-engage owner, investigate reason for abandonment.",
+                }
                 for status,count in sorted(idv_raw.items(),key=lambda x:-x[1]):
                     info=IDV_INFO.get(status.upper(),("❓","#94a3b8","Unknown status"))
                     st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {info[1]};
@@ -2867,6 +2940,15 @@ ORDER BY received_at DESC LIMIT 5;""",language="sql")
                       </div>
                       <div style="color:#94A3B8;font-size:.72rem;margin-top:3px">{info[2]}</div>
                     </div>""",unsafe_allow_html=True)
+                    detail_panel(f"IDV {status}: {count} session(s)", str(count),
+                        what_it_means=IDV_UNDERWRITING.get(status, info[2]),
+                        source_table=f"rds_warehouse_public.facts · name='idv_status' → value.{status}",
+                        source_file="plaid/plaidIdv.ts", source_file_line=f"Plaid IDV webhook · status={status} · pid=18",
+                        api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.idv_status.value.{status}",
+                        json_obj={"idv_status_object":idv_raw,"status_meaning":{status:IDV_UNDERWRITING.get(status,"")},"source":{"platformId":18,"name":"plaidIdv"},"note":"This object counts ALL sessions ever, not just the most recent."},
+                        sql=IDV_SQL.get(status, f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS idv_status FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='idv_status';"),
+                        links=[("plaid/plaidIdv.ts","Plaid IDV session handler"),("facts/kyb/index.ts","idv_status / idv_passed_boolean"),("integrations.constant.ts","PLAID_IDV=18")],
+                        color=info[1], icon=info[0])
         else:
             flag(f"idv_status fact is null. idv_passed_boolean={idv_val}. "
                  "Possible causes: (1) Sole proprietor — IDV not triggered, "
@@ -3081,18 +3163,29 @@ ORDER BY bert.created_at DESC;""",language="sql")
 
         st.markdown("---")
 
-        # Summary matrix
+        # Summary matrix with detail panels
         st.markdown("##### Key Field Consistency Matrix")
+        MATRIX_CHECKS = [
+            ("sos_active","sos_match_boolean",sos_act,sos_match,"Should agree (both true or both false)",sos_act==sos_match or sos_act=="true","Both facts derive from sos_filings. sos_active=ANY(filing.active). sos_match_boolean=sos_match.value==='success'. They can diverge if Middesk matched the filing but the entity is inactive.",f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('sos_active','sos_match_boolean');"),
+            ("tin_match_boolean","tin_match.status",tin_bool,tin_status,"bool=true only when status='success'",not(tin_bool=="true" and tin_status not in ("success","")),"CRITICAL data integrity check. tin_match_boolean is derived from tin_match.value.status==='success'. Any divergence = bug in integration-service lib/facts/kyb/index.ts.",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS bool FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match_boolean';\nSELECT JSON_EXTRACT_PATH_TEXT(value,'value','status') AS status FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match';"),
+            ("idv_passed_boolean","idv_status.SUCCESS",idv_val,str(success_n if isinstance(idv_raw,dict) else "?"),"boolean=true requires SUCCESS>0",not(idv_val=="true" and success_n==0),"idv_passed_boolean is derived from idv_passed (COUNT of SUCCESS sessions). If boolean=true but SUCCESS=0, that's a computation error.",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS idv_bool FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='idv_passed_boolean';\nSELECT JSON_EXTRACT_PATH_TEXT(value,'value','SUCCESS') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='idv_status';"),
+            ("sos_active","formation_state",sos_act,form_state,"active entity should have formation state",(sos_act!="true") or bool(form_state),"If sos_active=true, the entity is registered and formation_state should be populated by Middesk. Missing formation_state with active SOS is unusual.",f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('sos_active','formation_state');"),
+            ("naics_code","mcc_code",naics_v,str(gv(facts,"mcc_code") or ""),"both should be set if classification succeeded",not(bool(naics_v) and not gv(facts,"mcc_code")),"mcc_code is computed from naics_code via rel_naics_mcc lookup. If naics_code is set but mcc_code is null, the lookup may have failed.",f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('naics_code','mcc_code');"),
+        ]
         matrix_rows=[]
-        for field_a,field_b,val_a,val_b,expected,ok in [
-            ("sos_active","sos_match_boolean",sos_act,sos_match,"Should agree (both true or both false)",sos_act==sos_match or sos_act=="true"),
-            ("tin_match_boolean","tin_match.status",tin_bool,tin_status,"bool=true only when status='success'",not(tin_bool=="true" and tin_status not in ("success",""))),
-            ("idv_passed_boolean","idv_status.SUCCESS",idv_val,str(success_n if isinstance(idv_raw,dict) else "?"),"boolean=true requires SUCCESS>0",not(idv_val=="true" and success_n==0)),
-            ("sos_active","formation_state",sos_act,form_state,"active entity should have formation state",(sos_act!="true") or bool(form_state)),
-            ("naics_code","mcc_code",naics_v,str(gv(facts,"mcc_code") or ""),"both should be set if classification succeeded",not(bool(naics_v) and not gv(facts,"mcc_code"))),
-        ]:
+        for field_a,field_b,val_a,val_b,expected,ok,*extra in MATRIX_CHECKS:
             matrix_rows.append({"Field A":field_a,"Value A":val_a or "(null)","Field B":field_b,"Value B":val_b or "(null)","Expected":expected,"Status":"✅ OK" if ok else "⚠️ CHECK"})
         st.dataframe(pd.DataFrame(matrix_rows),use_container_width=True,hide_index=True)
+        st.caption("▼ Click any row below for full lineage, JSON, and verification SQL")
+        for field_a,field_b,val_a,val_b,expected,ok,explanation,sql in MATRIX_CHECKS:
+            detail_panel(f"{field_a} ↔ {field_b}", f"{val_a or 'null'} vs {val_b or 'null'}",
+                what_it_means=f"Expected: {expected}\n\n{explanation}",
+                source_table=f"rds_warehouse_public.facts · name IN ('{field_a}', '{field_b.split('.')[0]}')",
+                source_file="facts/kyb/index.ts", source_file_line="Cross-field consistency check",
+                json_obj={"field_a":field_a,"value_a":val_a or None,"field_b":field_b,"value_b":val_b or None,"expected":expected,"consistent":ok},
+                sql=sql,
+                links=[("facts/kyb/index.ts","Fact definitions"),("facts/rules.ts","dependentFact rule for derived fields")],
+                color="#22c55e" if ok else "#ef4444", icon="✅" if ok else "⚠️")
 
         analyst_card("🔬 Cross-Analysis — Engineering Interpretation",[
             "Cross-field checks detect three types of issues: (1) Data integrity bugs in integration-service derivation logic, (2) Genuine business risk patterns (BK+active, watchlist+low_conf), (3) Expected patterns that look like errors (IDV passed + name_match=false for sole props with DBA).",
@@ -3185,6 +3278,20 @@ elif tab=="🏭 Classification & KYB":
             "heuristic","status-based","1.0 (self-reported)","self-reported (LOW=0.3 MED=0.6 HIGH=0.9)"
         ]
         st.dataframe(SOURCE_PRIORITY,use_container_width=True,hide_index=True)
+        st.caption("▼ Click any vendor row below to see its exact data field, confidence formula, and SQL")
+        for _,row in SOURCE_PRIORITY.iterrows():
+            _pid = row["pid"]; _won = row["Won?"]=="✅ YES"
+            _col = "#22c55e" if _won else "#64748b"
+            detail_panel(f"{row['Vendor']} (pid={_pid}, w={row['Weight']})", row["Won?"],
+                what_it_means=f"{row['How it works']}\n\nData field: {row['Data Field']}\nData source: {row['Data Source']}\nConfidence formula: {row['Conf formula']}\nWon this classification: {'YES' if _won else 'NO — lost to higher confidence×weight vendor'}",
+                source_table=row["Data Source"],
+                source_file="facts/businessDetails/index.ts" if _pid in ("31","0") else "facts/kyb/index.ts",
+                source_file_line=f"naicsCode · pid={_pid} · {row['Vendor']}",
+                api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.naics_code{'  (winner)' if _won else '.alternatives[]'}",
+                json_obj={"vendor":row["Vendor"],"platformId":int(_pid) if _pid.lstrip('-').isdigit() else _pid,"weight":float(row["Weight"]),"data_field":row["Data Field"],"conf_formula":row["Conf formula"],"won":_won},
+                sql=f"-- Winner:\nSELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS naics, JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid, JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS conf FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='naics_code';\n-- Alternatives:\n-- SELECT JSON_EXTRACT_PATH_TEXT(value,'alternatives') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='naics_code';",
+                links=[("facts/kyb/index.ts","NAICS fact definition"),("facts/rules.ts","factWithHighestConfidence rule"),("integrations.constant.ts",f"INTEGRATION_ID={_pid}")],
+                color=_col, icon="✅" if _won else "—")
 
         # ── Winner detail ─────────────────────────────────────────────────────
         if naics_src:
@@ -3361,10 +3468,46 @@ ORDER BY name, received_at DESC;""",language="sql")
         kyb_comp=str(gv(facts,"kyb_complete") or "").lower()
 
         c1,c2,c3,c4=st.columns(4)
-        with c1: kpi("KYB Submitted","✅ Yes" if kyb_sub=="true" else "❌ No","Onboarding form submitted","#22c55e" if kyb_sub=="true" else "#f59e0b")
-        with c2: kpi("KYB Complete","✅ Yes" if kyb_comp=="true" else "❌ No","Business verified + people screened","#22c55e" if kyb_comp=="true" else "#f59e0b")
-        with c3: kpi("Revenue",revenue_v[:18] if revenue_v else "Not available","ZI/EFX bulk data · Worth Score input","#3B82F6" if revenue_v else "#64748b")
-        with c4: kpi("Employees",emp_v if emp_v else "Not available","num_employees · Worth Score feature: count_employees","#3B82F6" if emp_v else "#64748b")
+        _bg_sql=f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val, JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('kyb_submitted','kyb_complete','revenue','num_employees') ORDER BY name;"
+        with c1:
+            kpi("KYB Submitted","✅ Yes" if kyb_sub=="true" else "❌ No","Onboarding form submitted","#22c55e" if kyb_sub=="true" else "#f59e0b")
+            detail_panel("KYB Submitted", kyb_sub or "Unknown",
+                what_it_means="kyb_submitted=true when the onboarding form has been submitted (addresses[] is not empty). This is a DEPENDENT fact (pid=-1) derived from the addresses fact. It means the merchant completed the onboarding form — it does NOT mean KYB verification is complete.",
+                source_table="rds_warehouse_public.facts · name='kyb_submitted'",
+                source_file="facts/kyb/index.ts", source_file_line="kybSubmitted · dependent · addresses[].length > 0",
+                json_obj={"name":"kyb_submitted","value":kyb_sub=="true","source":{"platformId":-1,"name":"dependent"},"dependencies":["addresses"]},
+                sql=_bg_sql, links=[("facts/kyb/index.ts","kybSubmitted definition")],
+                color="#22c55e" if kyb_sub=="true" else "#f59e0b", icon="📋")
+        with c2:
+            kpi("KYB Complete","✅ Yes" if kyb_comp=="true" else "❌ No","Business verified + people screened","#22c55e" if kyb_comp=="true" else "#f59e0b")
+            detail_panel("KYB Complete", kyb_comp or "Unknown",
+                what_it_means="kyb_complete=true when BOTH conditions are met: (1) business_verified=true AND (2) screened_people is not empty (at least one person has been screened). This is a DEPENDENT fact. kyb_complete=false means either the business entity has not been fully verified OR the PSC (Person Screening) has not been completed.",
+                source_table="rds_warehouse_public.facts · name='kyb_complete'",
+                source_file="facts/kyb/index.ts", source_file_line="kybComplete · dependent · business_verified AND screened_people",
+                json_obj={"name":"kyb_complete","value":kyb_comp=="true","source":{"platformId":-1,"name":"dependent"},"dependencies":["business_verified","screened_people"]},
+                sql=_bg_sql, links=[("facts/kyb/index.ts","kybComplete definition"),("trulioo","Trulioo PSC screening")],
+                color="#22c55e" if kyb_comp=="true" else "#f59e0b", icon="✅" if kyb_comp=="true" else "❌")
+        with c3:
+            kpi("Revenue",revenue_v[:18] if revenue_v else "Not available","ZI/EFX bulk data · Worth Score input","#3B82F6" if revenue_v else "#64748b")
+            detail_panel("Revenue", revenue_v or "Not available",
+                what_it_means="Annual revenue in USD. Primary source: ZoomInfo (pid=24, w=0.8) or Equifax (pid=17, w=0.7) bulk firmographic data — matched via internal entity-matching XGBoost model. This is a PRIMARY Worth Score feature (Business Operations category). Null = vendor could not match this entity.",
+                source_table="rds_warehouse_public.facts · name='revenue'",
+                source_file="facts/kyb/index.ts", source_file_line="revenue · factWithHighestConfidence · ZI pid=24 / EFX pid=17",
+                api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.revenue",
+                json_obj={"name":"revenue","value":revenue_v or None,"source":{"platformId":24,"name":"zoominfo","weight":0.8},"worth_score_feature":"revenue","worth_score_category":"Business Operations"},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS revenue FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='revenue';",
+                links=[("worth_score_model.py","Revenue as Worth Score feature"),("integrations.constant.ts","ZOOMINFO=24, EQUIFAX=17")],
+                color="#3B82F6" if revenue_v else "#64748b", icon="💰")
+        with c4:
+            kpi("Employees",emp_v if emp_v else "Not available","num_employees · Worth Score feature: count_employees","#3B82F6" if emp_v else "#64748b")
+            detail_panel("Employees", emp_v or "Not available",
+                what_it_means="Employee count from ZoomInfo (pid=24) or Equifax (pid=17) bulk firmographic data. Worth Score feature: count_employees (Company Profile category). Null = entity not found in vendor databases. Proxy for business scale and stability.",
+                source_table="rds_warehouse_public.facts · name='num_employees'",
+                source_file="facts/kyb/index.ts", source_file_line="numEmployees · factWithHighestConfidence · ZI pid=24 / EFX pid=17",
+                json_obj={"name":"num_employees","value":emp_v or None,"worth_score_feature":"count_employees","worth_score_category":"Company Profile"},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS num_employees FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='num_employees';",
+                links=[("worth_score_model.py","count_employees Worth Score feature"),("integrations.constant.ts","ZOOMINFO=24")],
+                color="#3B82F6" if emp_v else "#64748b", icon="👥")
 
         # Name lineage
         st.markdown("##### Name Lineage — business_name vs legal_name")
@@ -3399,6 +3542,24 @@ ORDER BY name, received_at DESC;""",language="sql")
         ]
         st.dataframe(pd.DataFrame(feat_rows,columns=["Worth Score Feature","Current Value","Source fact","Model Category","Why it matters"]),
                      use_container_width=True,hide_index=True)
+        st.caption("▼ Click any feature below for source, JSON, and Worth Score impact details")
+        FEAT_META={
+            "age_business":("formation_date","formation_date → current year − formation year. Source: Middesk (pid=16). If null → imputed to model default (often 0) → penalizes score.",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS formation_date FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='formation_date';"),
+            "revenue":("revenue","Annual revenue USD. Source: ZI (pid=24, w=0.8) / EFX (pid=17, w=0.7). If null → financial sub-model uses default imputation → less accurate prediction.",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS revenue FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='revenue';"),
+            "count_employees":("num_employees","Employee count. Source: ZI/EFX. Used as proxy for business scale. Null = entity not in vendor databases.",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS employees FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='num_employees';"),
+            "naics6":("naics_code","6-digit NAICS code. factWithHighestConfidence across ZI/EFX/OC/SERP/Trulioo/Applicant/AI. 561499 = fallback = industry penalty in Company Profile category.",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS naics FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='naics_code';"),
+            "bus_struct":("corporation","Entity type: LLC, Corp, Sole Prop, etc. Source: Middesk (pid=16) from SOS filing entity_type field. Different structures carry different default risk profiles.",f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS entity_type FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='corporation';"),
+        }
+        for feat,cur_val,src_fact,cat,why in feat_rows:
+            m=FEAT_META.get(feat,())
+            detail_panel(f"Worth Score: {feat}", str(cur_val),
+                what_it_means=f"Model Category: {cat}\nWhy it matters: {why}\n\n{m[1] if len(m)>1 else ''}",
+                source_table=f"rds_warehouse_public.facts · name='{m[0] if m else src_fact}'",
+                source_file="worth_score_model.py", source_file_line=f"{feat} feature · Category: {cat}",
+                json_obj={"worth_score_feature":feat,"current_value":cur_val,"source_fact":m[0] if m else src_fact,"model_category":cat,"why_it_matters":why},
+                sql=m[2] if len(m)>2 else f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='{m[0] if m else src_fact}';",
+                links=[("worth_score_model.py",f"{feat} in model"),("lookups.py","Feature defaults and imputation"),("aiscore.py","SHAP computation")],
+                color="#22c55e" if cur_val and cur_val not in ("null","Unknown") else "#ef4444", icon="📊")
 
         ai_popup("Background",f"revenue:{revenue_v} employees:{emp_v} kyb_submitted:{kyb_sub}",[
             "What is the difference between business_name and legal_name?",
@@ -3419,17 +3580,53 @@ ORDER BY name, received_at DESC;""",language="sql")
         nm_bool=str(gv(facts,"name_match_boolean") or "").lower()
         ra_v=facts.get("address_registered_agent",{}).get("value",{})
 
+        ra_status=ra_v.get("status","") if isinstance(ra_v,dict) else ""
         c1,c2,c3,c4=st.columns(4)
-        with c1: kpi("Address Match","✅ Matched" if am_bool=="true" else "❌ No match" if am_bool=="false" else "⚠️ Unknown",
+        _addr_sql=f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('address_match_boolean','name_match_boolean','addresses_deliverable','address_registered_agent') ORDER BY name;"
+        with c1:
+            kpi("Address Match","✅ Matched" if am_bool=="true" else "❌ No match" if am_bool=="false" else "⚠️ Unknown",
                      "address_match_boolean","#22c55e" if am_bool=="true" else "#ef4444")
-        with c2: kpi("Name Match","✅ Matched" if nm_bool=="true" else "❌ No match" if nm_bool=="false" else "⚠️ Unknown",
+            detail_panel("Address Match", am_bool or "Unknown",
+                what_it_means="address_match_boolean is a DEPENDENT fact derived from address_verification.value.status==='success'. Middesk (pid=16) searches SOS registry and USPS for the submitted address. true = Middesk found and verified the address. false = address not found or not verified.",
+                source_table="rds_warehouse_public.facts · name='address_match_boolean'",
+                source_file="facts/kyb/index.ts", source_file_line="addressMatchBoolean · dependent · address_verification.status==='success'",
+                json_obj={"name":"address_match_boolean","value":am_bool=="true" if am_bool else None,"source":{"platformId":-1,"name":"dependent"},"dependencies":["address_match"]},
+                sql=_addr_sql, links=[("facts/kyb/index.ts","addressMatchBoolean"),("integrations.constant.ts","MIDDESK=16")],
+                color="#22c55e" if am_bool=="true" else "#ef4444", icon="📍")
+        with c2:
+            kpi("Name Match","✅ Matched" if nm_bool=="true" else "❌ No match" if nm_bool=="false" else "⚠️ Unknown",
                      "name_match_boolean","#22c55e" if nm_bool=="true" else "#ef4444")
-        with c3: kpi("Deliverable Address","✅ Yes" if gv(facts,"addresses_deliverable") else "⚠️ Unknown",
+            detail_panel("Name Match", nm_bool or "Unknown",
+                what_it_means="name_match_boolean is derived from name_match.value.status==='success'. Middesk compares the submitted business name against the SOS registry name. false for DBAs is EXPECTED — the legal name in the SOS differs from the submitted trade name. Does NOT indicate fraud.",
+                source_table="rds_warehouse_public.facts · name='name_match_boolean'",
+                source_file="facts/kyb/index.ts", source_file_line="nameMatchBoolean · dependent · name_match.value.status==='success'",
+                json_obj={"name":"name_match_boolean","value":nm_bool=="true" if nm_bool else None,"source":{"platformId":-1,"name":"dependent"},"dependencies":["name_match"],"note":"false for DBAs is expected — not a fraud signal"},
+                sql=_addr_sql, links=[("facts/kyb/index.ts","nameMatchBoolean")],
+                color="#22c55e" if nm_bool=="true" else "#ef4444", icon="🏢")
+        with c3:
+            kpi("Deliverable Address","✅ Yes" if gv(facts,"addresses_deliverable") else "⚠️ Unknown",
                      "USPS confirmed deliverable","#22c55e" if gv(facts,"addresses_deliverable") else "#64748b")
+            detail_panel("Deliverable Address", "Yes" if gv(facts,"addresses_deliverable") else "Unknown",
+                what_it_means="addresses_deliverable is a subset of all known addresses that have been confirmed as USPS-deliverable by Middesk. Used for mail-based verification. An empty list means no address was confirmed deliverable — may indicate a PO box, virtual office, or address error.",
+                source_table="rds_warehouse_public.facts · name='addresses_deliverable'",
+                source_file="facts/kyb/index.ts", source_file_line="addressesDeliverable · Middesk pid=16 · USPS CASS verification",
+                json_obj={"name":"addresses_deliverable","source":{"platformId":16,"name":"middesk"},"note":"Subset of addresses confirmed USPS-deliverable"},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS deliverable FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='addresses_deliverable';",
+                links=[("facts/kyb/index.ts","addressesDeliverable"),("integrations.constant.ts","MIDDESK=16")],
+                color="#22c55e" if gv(facts,"addresses_deliverable") else "#64748b", icon="📮")
         with c4:
-            ra_status=ra_v.get("status","") if isinstance(ra_v,dict) else ""
             kpi("Registered Agent Addr","⚠️ WARNING" if ra_status=="warning" else "✅ OK",
                 "address_registered_agent","#f59e0b" if ra_status=="warning" else "#22c55e")
+            ra_msg=ra_v.get("message","") if isinstance(ra_v,dict) else ""
+            detail_panel("Registered Agent Addr", ra_status or "OK",
+                what_it_means=f"address_registered_agent.status='{ra_status or 'ok'}': {ra_msg or 'No warning — address is not a known registered agent address'}. WARNING means the submitted address is associated with a known registered agent (e.g. CT Corporation, The Corporation Trust Company). Common for DE/NV/WY tax-haven incorporations. Indicates entity may NOT physically operate at this address.",
+                source_table="rds_warehouse_public.facts · name='address_registered_agent'",
+                source_file="facts/kyb/index.ts", source_file_line="addressRegisteredAgent · Middesk pid=16",
+                api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.address_registered_agent.value.status",
+                json_obj={"name":"address_registered_agent","value":ra_v if isinstance(ra_v,dict) else {"status":ra_status},"source":{"platformId":16,"name":"middesk"}},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','status') AS ra_status, JSON_EXTRACT_PATH_TEXT(value,'value','message') AS ra_msg FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='address_registered_agent';",
+                links=[("facts/kyb/index.ts","addressRegisteredAgent"),("integrations.constant.ts","MIDDESK=16")],
+                color="#f59e0b" if ra_status=="warning" else "#22c55e", icon="⚠️" if ra_status=="warning" else "✅")
 
         if ra_status=="warning":
             ra_msg=ra_v.get("message","") if isinstance(ra_v,dict) else ""
@@ -3444,20 +3641,29 @@ ORDER BY name, received_at DESC;""",language="sql")
                                "name_match","name_match_boolean"])
 
         st.markdown("##### Address Verification Pipeline")
-        for step,src,desc,color in [
-            ("1. Applicant submits address","Onboarding form (pid=0)","addresses_submitted fact — what the merchant claims their address is","#f59e0b"),
-            ("2. Middesk verifies address","Middesk API (pid=16, w=2.0)","Middesk searches SOS registry and USPS for the submitted address. Returns: status (success/failure), matched addresses, deliverable subset.","#f59e0b"),
-            ("3. address_verification stored","rds_warehouse_public.facts","Object: {addresses[], baseAddresses[], status, message, label, sublabel}. Winner: Middesk via factWithHighestConfidence.","#22c55e"),
-            ("4. address_match_boolean derived","Fact Engine (dependent, pid=-1)","true when address_verification.status='success'. Dependencies: ['address_verification'].","#22c55e"),
-            ("5. addresses_deliverable stored","Middesk (pid=16)","Subset of addresses confirmed deliverable by USPS via Middesk. Used for mail-based verification.","#3B82F6"),
-            ("6. Admin Portal display","microsites ContactInformation.tsx","Shows primary_address (derived from addresses). Address verification badge = address_match_boolean.","#60A5FA"),
-        ]:
+        ADDR_PIPELINE = [
+            ("1. Applicant submits address","Onboarding form (pid=0)","addresses_submitted fact — what the merchant claims their address is","#f59e0b","facts/kyb/index.ts","addressesSubmitted · pid=0"),
+            ("2. Middesk verifies address","Middesk API (pid=16, w=2.0)","Middesk searches SOS registry and USPS for the submitted address. Returns: status (success/failure), matched addresses, deliverable subset.","#f59e0b","middesk","Middesk address verification API"),
+            ("3. address_verification stored","rds_warehouse_public.facts","Object: {addresses[], baseAddresses[], status, message, label, sublabel}. Winner: Middesk via factWithHighestConfidence.","#22c55e","facts/kyb/index.ts","addressVerification · factWithHighestConfidence · pid=16"),
+            ("4. address_match_boolean derived","Fact Engine (dependent, pid=-1)","true when address_verification.status='success'. Dependencies: ['address_verification'].","#22c55e","facts/kyb/index.ts","addressMatchBoolean · dependent"),
+            ("5. addresses_deliverable stored","Middesk (pid=16)","Subset of addresses confirmed deliverable by USPS via Middesk. Used for mail-based verification.","#3B82F6","facts/kyb/index.ts","addressesDeliverable · pid=16"),
+            ("6. Admin Portal display","microsites ContactInformation.tsx","Shows primary_address (derived from addresses). Address verification badge = address_match_boolean.","#60A5FA","KYB UI","microsites ContactInformation.tsx"),
+        ]
+        for step,src,desc,color,gh_key,gh_label in ADDR_PIPELINE:
             st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};border-radius:6px;
                 padding:7px 12px;margin:3px 0;font-size:.73rem">
               <strong style="color:{color}">{step}</strong>
               <span style="color:#64748b;margin-left:8px">{src}</span>
               <div style="color:#94A3B8;margin-top:2px">{desc}</div>
             </div>""",unsafe_allow_html=True)
+            detail_panel(step, src,
+                what_it_means=desc,
+                source_table="rds_warehouse_public.facts" if "facts" in src.lower() else src,
+                source_file=gh_key, source_file_line=gh_label,
+                json_obj={"pipeline_step":step,"system":src,"description":desc},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='address_verification';" if "address_verification" in desc else "",
+                links=[(gh_key,gh_label),("facts/kyb/index.ts","Address fact definitions"),("integrations.constant.ts","MIDDESK=16")],
+                color=color, icon="🔄")
 
         ai_popup("Contact",f"addr_match:{am_bool} name_match:{nm_bool} reg_agent:{ra_status}",[
             "How is address_match_boolean derived from address_verification?",
@@ -3483,10 +3689,45 @@ ORDER BY name, received_at DESC;""",language="sql")
         rev_count=str(gv(facts,"review_count") or "")
 
         c1,c2,c3,c4=st.columns(4)
-        with c1: kpi("Website",website_v[:30] if website_v else "❌ Not submitted","Applicant-submitted URL","#22c55e" if website_v else "#f59e0b")
-        with c2: kpi("Website Found","✅ Yes" if web_found_str=="true" else "❌ No","Verified by SERP/Middesk","#22c55e" if web_found_str=="true" else "#64748b")
-        with c3: kpi("SERP/GMB ID","✅ Found" if serp_id else "❌ Not found","Google My Business presence","#22c55e" if serp_id else "#64748b")
-        with c4: kpi("Review Rating",rating if rating else "N/A",f"{rev_count} reviews" if rev_count else "No reviews","#3B82F6" if rating else "#64748b")
+        _web_sql=f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('website','website_found','serp_id','review_rating','review_count') ORDER BY name;"
+        c1,c2,c3,c4=st.columns(4)
+        with c1:
+            kpi("Website",website_v[:30] if website_v else "❌ Not submitted","Applicant-submitted URL","#22c55e" if website_v else "#f59e0b")
+            detail_panel("Website", website_v or "Not submitted",
+                what_it_means="Business website URL submitted on the onboarding form (pid=0=Applicant) or found by SERP (pid=22). CRITICAL for NAICS classification: if null, AI enrichment (last resort) cannot use web_search → Gap G2 → likely NAICS=561499 fallback.",
+                source_table="rds_warehouse_public.facts · name='website'",
+                source_file="facts/kyb/index.ts", source_file_line="website · factWithHighestConfidence · pid=0 Applicant or pid=22 SERP",
+                api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.website",
+                json_obj={"name":"website","value":website_v or None,"source":{"platformId":0,"name":"businessDetails"},"naics_impact":"If null AND NAICS=561499 → Gap G2 confirmed"},
+                sql=_web_sql, links=[("facts/kyb/index.ts","website fact"),("aiEnrichment","AI uses website for NAICS")],
+                color="#22c55e" if website_v else "#f59e0b", icon="🌐")
+        with c2:
+            kpi("Website Found","✅ Yes" if web_found_str=="true" else "❌ No","Verified by SERP/Middesk","#22c55e" if web_found_str=="true" else "#64748b")
+            detail_panel("Website Found", web_found_str or "Unknown",
+                what_it_means="website_found = list of verified URLs found by SERP/Middesk. combineFacts rule — merges from all vendors. Empty list means no website was confirmed online. Different from 'website' fact (submitted URL) — website_found is what vendors actually found.",
+                source_table="rds_warehouse_public.facts · name='website_found'",
+                source_file="facts/kyb/index.ts", source_file_line="websiteFound · combineFacts · SERP pid=22 / Middesk pid=16",
+                json_obj={"name":"website_found","value":[],"source":{"platformId":None,"name":None},"ruleApplied":{"name":"combineFacts"}},
+                sql=_web_sql, links=[("facts/kyb/index.ts","websiteFound"),("integrations.constant.ts","SERP_SCRAPE=22")],
+                color="#22c55e" if web_found_str=="true" else "#64748b", icon="🔍")
+        with c3:
+            kpi("SERP/GMB ID","✅ Found" if serp_id else "❌ Not found","Google My Business presence","#22c55e" if serp_id else "#64748b")
+            detail_panel("SERP/GMB ID", serp_id[:30] if serp_id else "Not found",
+                what_it_means="serp_id = Google Business Profile place ID from SERP API (pid=22 or pid=39 SERP_GOOGLE_PROFILE). Presence indicates the business has a Google My Business listing — used for review_rating and review_count. Not found = no verified Google presence.",
+                source_table="rds_warehouse_public.facts · name='serp_id'",
+                source_file="facts/kyb/index.ts", source_file_line="serpId · factWithHighestConfidence · SERP_GOOGLE_PROFILE pid=39",
+                json_obj={"name":"serp_id","value":serp_id or None,"source":{"platformId":39,"name":"serpGoogleProfile"}},
+                sql=_web_sql, links=[("facts/kyb/index.ts","serpId"),("integrations.constant.ts","SERP_GOOGLE_PROFILE=39")],
+                color="#22c55e" if serp_id else "#64748b", icon="📍")
+        with c4:
+            kpi("Review Rating",rating if rating else "N/A",f"{rev_count} reviews" if rev_count else "No reviews","#3B82F6" if rating else "#64748b")
+            detail_panel("Review Rating", rating or "N/A",
+                what_it_means="Google My Business review rating (1-5 stars) from SERP API. Used as social proof signal. Only available when serp_id is found. review_count = number of Google reviews.",
+                source_table="rds_warehouse_public.facts · name='review_rating' + 'review_count'",
+                source_file="facts/kyb/index.ts", source_file_line="reviewRating · SERP pid=22/39",
+                json_obj={"review_rating":rating or None,"review_count":rev_count or None,"source":{"platformId":39,"name":"serpGoogleProfile"}},
+                sql=_web_sql, links=[("facts/kyb/index.ts","reviewRating"),("integrations.constant.ts","SERP_GOOGLE_PROFILE=39")],
+                color="#3B82F6" if rating else "#64748b", icon="⭐")
 
         # NAICS-website link warning
         if website_v and is_fallback:
@@ -3582,24 +3823,33 @@ elif tab=="⚠️ Risk & Watchlist":
         render_lineage(facts,["watchlist_hits","adverse_media_hits","screened_people"])
 
         st.markdown("##### Watchlist Data Flow (9 steps)")
-        for i,(s,src,d) in enumerate([
-            ("Vendor Screening","Trulioo PSC + Middesk review task","Screen business + UBOs against global watchlists"),
-            ("integration_data.business_entity_review_task","RDS PostgreSQL","key='watchlist',category='compliance',status='warning'|'success',metadata=JSONB hits"),
-            ("Facts Engine → watchlist_raw","integration-service","Direct vendor output (pid=38 Trulioo or pid=16 Middesk)"),
-            ("consolidatedWatchlist.ts","integration-service","Merge business + person hits, deduplicate, EXCLUDE adverse_media (filterOutAdverseMedia)"),
-            ("watchlist fact","rds_warehouse_public.facts","PEP + SANCTIONS only. metadata=[{type,entityName,url,listType}]"),
-            ("watchlist_hits fact","rds_warehouse_public.facts","COUNT of hits (watchlist.value.metadata.length)"),
-            ("adverse_media_hits fact","rds_warehouse_public.facts","SEPARATE count — Trulioo adverse_media + adverseMediaDetails.records"),
-            ("clients.customer_table","Redshift warehouse-service","watchlist_count, watchlist_verification (1=clean, 0=hits)"),
-            ("Admin Portal KYB → Watchlists tab","UI","Shows hits grouped by entity_name. Sanctions=🔴 PEP=🟠 Other=🟡"),
-        ]):
-            color=["#f59e0b","#ef4444","#8B5CF6","#8B5CF6","#22c55e","#22c55e","#22c55e","#3B82F6","#60a5fa"][i]
+        WL_PIPELINE = [
+            ("Vendor Screening","Trulioo PSC + Middesk review task","Screen business + UBOs against global watchlists","#f59e0b","trulioo","TRULIOO=38, MIDDESK=16"),
+            ("integration_data.business_entity_review_task","RDS PostgreSQL","key='watchlist',category='compliance',status='warning'|'success',metadata=JSONB hits","#ef4444","facts/kyb/index.ts","business_entity_review_task table"),
+            ("Facts Engine → watchlist_raw","integration-service","Direct vendor output (pid=38 Trulioo or pid=16 Middesk)","#8B5CF6","facts/kyb/index.ts","watchlist_raw · combineWatchlistMetadata"),
+            ("consolidatedWatchlist.ts","integration-service","Merge business + person hits, deduplicate, EXCLUDE adverse_media (filterOutAdverseMedia)","#8B5CF6","consolidatedWatchlist.ts","filterOutAdverseMedia() L57"),
+            ("watchlist fact","rds_warehouse_public.facts","PEP + SANCTIONS only. metadata=[{type,entityName,url,listType}]","#22c55e","facts/kyb/index.ts","watchlist · combineWatchlistMetadata"),
+            ("watchlist_hits fact","rds_warehouse_public.facts","COUNT of hits (watchlist.value.metadata.length)","#22c55e","facts/kyb/index.ts","watchlistHits · dependent"),
+            ("adverse_media_hits fact","rds_warehouse_public.facts","SEPARATE count — Trulioo adverse_media + adverseMediaDetails.records","#22c55e","facts/kyb/index.ts","adverseMediaHits · dependent"),
+            ("clients.customer_table","Redshift warehouse-service","watchlist_count, watchlist_verification (1=clean, 0=hits)","#3B82F6","customer_table.sql","watchlist_count column"),
+            ("Admin Portal KYB → Watchlists tab","UI","Shows hits grouped by entity_name. Sanctions=🔴 PEP=🟠 Other=🟡","#60a5fa","KYB UI","microsites Watchlists tab"),
+        ]
+        for i,(s,src,d,color,gh_key,gh_label) in enumerate(WL_PIPELINE):
             st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
                 border-radius:8px;padding:8px 14px;margin:2px 0;font-size:.74rem">
               <strong style="color:{color}">{i+1}. {s}</strong>
               <span style="color:#64748b;margin-left:8px;font-size:.68rem">{src}</span>
               <div style="color:#94A3B8;margin-top:2px">{d}</div>
             </div>""",unsafe_allow_html=True)
+            _wl_step_sql = (f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS wl_fact FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='watchlist';" if "watchlist fact" in s else f"SELECT watchlist_count, watchlist_verification FROM clients.customer_table WHERE business_id='{bid}';" if "customer_table" in s else "")
+            detail_panel(f"Step {i+1}: {s}", src,
+                what_it_means=d,
+                source_table=src if "facts" in src.lower() or "customer_table" in src.lower() else "integration-service pipeline",
+                source_file=gh_key, source_file_line=gh_label,
+                json_obj={"step":i+1,"name":s,"source_system":src,"description":d,"watchlist_hits_current":wl,"adverse_media_current":am},
+                sql=_wl_step_sql,
+                links=[(gh_key,gh_label),("facts/kyb/index.ts","watchlist_hits / adverse_media_hits"),("integrations.constant.ts","TRULIOO=38, MIDDESK=16")],
+                color=color, icon="🔄")
 
         # BERT live query (cached)
         st.markdown("##### Live BERT Query (rds_integration_data)")
@@ -3820,6 +4070,15 @@ WHERE name='liens' AND business_id='{bid}';
                                    height=280,xaxis_title="",yaxis_title="Count",
                                    margin=dict(t=40,b=10,l=10,r=10))
             st.plotly_chart(dark_chart(fig_risk),use_container_width=True)
+            detail_panel("Risk Signal Counts Chart",
+                f"WL={wl} · AM={am} · BK={bk} · Judg={ju} · Liens={li}",
+                what_it_means="Bar chart comparing all 5 risk signal counts for this business. watchlist_hits + adverse_media_hits = compliance signals. Bankruptcies + Judgments + Liens = credit/public records signals. Each bar sourced from a separate fact in rds_warehouse_public.facts.",
+                source_table="rds_warehouse_public.facts (watchlist_hits, adverse_media_hits, num_bankruptcies, num_judgements, num_liens)",
+                source_file="consolidatedWatchlist.ts", source_file_line="watchlist fact architecture",
+                json_obj={"watchlist_hits":wl,"adverse_media_hits":am,"num_bankruptcies":bk,"num_judgements":ju,"num_liens":li,"sources":{"watchlist_hits":"Trulioo PSC + Middesk (pid=38/16)","adverse_media_hits":"Trulioo adverse_media (separate from watchlist)","num_bankruptcies":"Equifax pid=17","num_judgements":"Equifax pid=17","num_liens":"Equifax pid=17"}},
+                sql=f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS count_value FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('watchlist_hits','adverse_media_hits','num_bankruptcies','num_judgements','num_liens') ORDER BY name;",
+                links=[("consolidatedWatchlist.ts","Watchlist architecture"),("facts/kyb/index.ts","Risk fact definitions"),("integrations.constant.ts","TRULIOO=38, EQUIFAX=17")],
+                color="#ef4444" if wl>0 else "#22c55e", icon="📊")
 
         with st.expander("📋 SQL — risk signal queries"):
             st.code(f"""-- All risk signals in one query:
@@ -4050,6 +4309,15 @@ WHERE cs.business_id='{bid}' ORDER BY bs.created_at DESC LIMIT 1;"""
                       <div style="color:#94A3B8;font-size:.73rem;margin-top:3px">{cause}</div>
                       <div style="color:#60A5FA;font-size:.72rem;margin-top:4px">⚡ {action}</div>
                     </div>""",unsafe_allow_html=True)
+                    if flagged:
+                        detail_panel(title, "CONFIRMED",
+                            what_it_means=f"Root cause: {cause}\n\nRecommended action: {action}",
+                            source_table="rds_manual_score_public.business_scores (Worth Score) + rds_warehouse_public.facts (KYB features)",
+                            source_file="worth_score_model.py", source_file_line="Feature extraction pipeline",
+                            json_obj={"root_cause":title,"detected":flagged,"cause":cause,"action":action,"current_score":score,"score_formula":"probability × 550 + 300 (aiscore.py L44)"},
+                            sql=f"-- Verify score:\nSELECT bs.weighted_score_850, bs.risk_level, bs.score_decision FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE cs.business_id='{bid}' ORDER BY bs.created_at DESC LIMIT 1;\n-- Verify features:\nSELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('revenue','num_employees','naics_code','formation_date','sos_active','tin_match_boolean') ORDER BY name;",
+                            links=[("aiscore.py","Score formula (p×550+300)"),("worth_score_model.py","Model pipeline"),("lookups.py","Feature imputation defaults")],
+                            color=color, icon="🔴")
 
                 st.markdown("</div>",unsafe_allow_html=True)
 
@@ -4068,6 +4336,16 @@ WHERE cs.business_id='{bid}' ORDER BY bs.created_at DESC LIMIT 1;"""
                 st.dataframe(pd.DataFrame([{
                     "Fact":f,"Value":v,"Present":"✅" if ok else "❌ NULL — imputed","Model Category":cat
                 } for f,v,ok,cat in feat_status]),use_container_width=True,hide_index=True)
+                st.caption("▼ Click any feature to see its lineage, JSON, and how null affects the Worth Score")
+                for f_name,f_val,f_ok,f_cat in feat_status:
+                    detail_panel(f"Model input: {f_name}", str(f_val),
+                        what_it_means=f"Worth Score model category: {f_cat}. Current value: {f_val}. {'Present — contributes to model accuracy.' if f_ok else 'NULL — the model will use the imputed default from lookups.py. This reduces prediction accuracy for this business.'}",
+                        source_table=f"rds_warehouse_public.facts · name='{f_name}'",
+                        source_file="lookups.py", source_file_line=f"{f_name} in INPUTS dict — imputation default",
+                        json_obj={"worth_score_feature":f_name,"current_value":f_val,"present":f_ok,"model_category":f_cat,"if_null":"imputed with default from lookups.py INPUTS dict"},
+                        sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS {f_name} FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='{f_name}';",
+                        links=[("lookups.py",f"{f_name} imputation default"),("worth_score_model.py","Feature extraction pipeline")],
+                        color="#22c55e" if f_ok else "#ef4444", icon="✅" if f_ok else "❌")
 
                 st.markdown("##### SQL — Verify Score & Check What Triggered the 0")
                 st.code(f"""-- 1. Confirm the score record exists:
