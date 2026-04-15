@@ -1186,9 +1186,84 @@ def get_openai():
         return None
 
 SYSTEM="""You are the KYB Intelligence Hub AI — expert on Worth AI's KYB data pipeline.
-Rules: cite exact source (file, table, fact name, API endpoint). Always provide SQL/Python.
-Never invent fact names or table names. Platform IDs: 16=Middesk,23=OC,24=ZI,17=EFX,38=Trulioo,31=AI,22=SERP,40=Plaid.
-Redshift: use JSON_EXTRACT_PATH_TEXT, never ::json or ->> (fails on federation)."""
+
+CRITICAL RULES — NEVER VIOLATE:
+1. ONLY reference tables and schemas that ACTUALLY EXIST in the database (listed below).
+   NEVER invent, guess, or hallucinate table names, schema names, column names, or fact names.
+   If a table does not appear in the verified list below, say "I don't have verified schema info for that — use the SQL Runner to explore."
+2. Always provide working SQL using ONLY the verified schemas below.
+3. Redshift SQL: use JSON_EXTRACT_PATH_TEXT(col, 'key'), NEVER use ->> or ::json (fails on federation).
+4. Always cite the exact source file, table, fact name, and API endpoint.
+5. Platform IDs (INTEGRATION_ID enum from integrations.constant.ts):
+   16=Middesk · 23=OpenCorporates · 24=ZoomInfo · 17=Equifax · 38=Trulioo · 31=AI(GPT) ·
+   22=SERP · 40=Plaid/KYX · 18=Plaid IDV · 0=Applicant · -1=System/Dependent
+
+VERIFIED REDSHIFT SCHEMAS AND TABLES (these ACTUALLY EXIST — use ONLY these):
+
+-- PRIMARY KYB DATA SOURCE:
+rds_warehouse_public.facts
+  Columns: business_id (VARCHAR), name (VARCHAR), value (VARCHAR/JSON), received_at (TIMESTAMP)
+  Note: value contains the full JSON fact object. Use JSON_EXTRACT_PATH_TEXT to extract fields.
+  Key fields inside value JSON:
+    JSON_EXTRACT_PATH_TEXT(value, 'value')                  → the actual fact value
+    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId')   → winning vendor ID
+    JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence')   → confidence score
+    JSON_EXTRACT_PATH_TEXT(value, 'ruleApplied', 'name')    → Fact Engine rule
+    JSON_EXTRACT_PATH_TEXT(value, 'alternatives')           → JSON array of losing vendors
+  CRITICAL: There is NO separate columns for source, confidence, rule_applied, alternatives, is_winning.
+  Everything is inside the 'value' JSON column. DO NOT reference non-existent columns.
+
+-- ONBOARDING DATE SOURCE (use for date filtering — NOT facts.received_at):
+rds_cases_public.rel_business_customer_monitoring
+  Columns: business_id, customer_id, created_at (true onboarding date), updated_at
+
+-- WORTH SCORE:
+rds_manual_score_public.data_current_scores
+  Columns: business_id, score_id
+rds_manual_score_public.business_scores
+  Columns: id (= score_id), weighted_score_850, weighted_score_100, risk_level, score_decision, created_at
+rds_manual_score_public.business_score_factors
+  Columns: score_id, category_id, score_100, weighted_score_850
+
+-- WATCHLIST / BERT:
+rds_integration_data.business_entity_review_task
+  Columns: id, business_entity_verification_id, key, status, sublabel, created_at, metadata (JSONB)
+rds_integration_data.business_entity_verification
+  Columns: id, business_id, created_at, updated_at
+
+-- CUSTOMER TABLE (aggregated):
+clients.customer_table
+  Columns: business_id, customer_id, worth_score, watchlist_count, watchlist_verification, etc.
+
+-- WORTH SCORE AUDIT:
+warehouse.worth_score_input_audit
+  Columns: score_date, fill_* columns (fill rate per feature)
+
+-- LARGE FACTS (too large for Redshift federation — query PostgreSQL RDS port 5432 instead):
+  Fact names: sos_filings, watchlist, watchlist_raw, bankruptcies, judgements, liens, people, addresses
+  Use: SELECT value->'value' FROM rds_warehouse_public.facts WHERE business_id='...' AND name='sos_filings';
+  (JSONB operators work on PostgreSQL RDS, not on Redshift federation)
+
+TABLES THAT DO NOT EXIST (never reference these):
+  - integration_data.kyb_facts  (DOES NOT EXIST — hallucinated schema)
+  - rds_warehouse_public.kyb_facts  (DOES NOT EXIST)
+  - Any table with columns: fact_name, winning_value, winning_source, winning_confidence, rule_applied, is_winning, alternatives (as separate columns — they do not exist, everything is in value JSON)
+
+CORRECT SQL PATTERN for all KYB facts with source lineage:
+SELECT
+    name                                                          AS fact_name,
+    JSON_EXTRACT_PATH_TEXT(value, 'value')                        AS fact_value,
+    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId')         AS winning_pid,
+    JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence')         AS confidence,
+    JSON_EXTRACT_PATH_TEXT(value, 'source', 'name')               AS vendor_name,
+    JSON_EXTRACT_PATH_TEXT(value, 'ruleApplied', 'name')          AS rule_applied,
+    received_at
+FROM rds_warehouse_public.facts
+WHERE business_id = '{{business_id}}'
+ORDER BY name;
+-- Note: alternatives[] are nested inside value JSON, not a separate column.
+-- To see alternatives: JSON_EXTRACT_PATH_TEXT(value, 'alternatives')
+"""
 
 # ── Universal detail panel ────────────────────────────────────────────────────
 def _make_python_from_sql(sql: str, fact_name: str = "") -> str:
@@ -5813,15 +5888,49 @@ ORDER BY name;"""
                 with st.spinner("Running query…"):
                     result_df, result_err = run_sql(sql_input)
                 if result_df is not None and not result_df.empty:
-                    st.success(f"✅ {len(result_df)} rows returned")
+                    st.success(f"✅ {len(result_df):,} rows · {len(result_df.columns)} columns")
                     st.dataframe(result_df, use_container_width=True)
-                    # Download button
-                    csv = result_df.to_csv(index=False)
-                    st.download_button("⬇️ Download CSV", csv, "query_result.csv", "text/csv")
+                    # Download buttons — CSV and XLSX
+                    dl1, dl2, dl3 = st.columns([1,1,3])
+                    csv_data = result_df.to_csv(index=False).encode("utf-8")
+                    with dl1:
+                        st.download_button(
+                            "⬇️ Download CSV", csv_data,
+                            file_name="query_result.csv", mime="text/csv",
+                            use_container_width=True, type="primary", key="dl_sql_csv"
+                        )
+                    with dl2:
+                        try:
+                            import io as _io2
+                            _xls_buf = _io2.BytesIO()
+                            result_df.to_excel(_xls_buf, index=False, engine="openpyxl")
+                            _xls_bytes = _xls_buf.getvalue()
+                            st.download_button(
+                                "⬇️ Download XLSX", _xls_bytes,
+                                file_name="query_result.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                use_container_width=True, key="dl_sql_xlsx"
+                            )
+                        except Exception:
+                            st.caption("pip install openpyxl for XLSX")
                 elif result_df is not None and result_df.empty:
                     st.info("Query returned 0 rows.")
                 else:
                     st.error(f"❌ Query error: {result_err}")
+                    # Suggest the correct pattern if schema error
+                    if result_err and ("does not exist" in result_err or "not exist" in result_err):
+                        st.markdown("""**💡 Schema error? Use only verified tables:**
+```sql
+-- KYB facts (correct schema):
+SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,
+       JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid
+FROM rds_warehouse_public.facts
+WHERE business_id = 'YOUR-UUID' ORDER BY name;
+
+-- Onboarding date (correct schema):
+SELECT business_id, created_at FROM rds_cases_public.rel_business_customer_monitoring
+WHERE DATE(created_at) >= CURRENT_DATE - 7;
+```""")
         with clear_col:
             if st.button("🗑️ Clear", key="clear_sql"):
                 st.rerun()
@@ -5957,10 +6066,26 @@ print(df.to_string(index=False))""",
                     st.code(output, language="text")
                 for var_name in ["df","result","out","data","df2"]:
                     if var_name in _lvars and isinstance(_lvars[var_name], pd.DataFrame):
-                        st.markdown(f"**DataFrame `{var_name}` — {len(_lvars[var_name]):,} rows:**")
-                        st.dataframe(_lvars[var_name], use_container_width=True)
-                        csv = _lvars[var_name].to_csv(index=False)
-                        st.download_button(f"⬇️ Download {var_name}.csv", csv, f"{var_name}.csv", "text/csv", key=f"dl_{var_name}")
+                        _vdf = _lvars[var_name]
+                        st.markdown(f"**DataFrame `{var_name}` — {len(_vdf):,} rows · {len(_vdf.columns)} columns:**")
+                        st.dataframe(_vdf, use_container_width=True)
+                        _pdl1, _pdl2 = st.columns(2)
+                        with _pdl1:
+                            _csv_b = _vdf.to_csv(index=False).encode("utf-8")
+                            st.download_button(f"⬇️ CSV — {var_name}", _csv_b,
+                                file_name=f"{var_name}.csv", mime="text/csv",
+                                use_container_width=True, type="primary", key=f"dl_{var_name}_csv")
+                        with _pdl2:
+                            try:
+                                import io as _io3
+                                _xb = _io3.BytesIO()
+                                _vdf.to_excel(_xb, index=False, engine="openpyxl")
+                                st.download_button(f"⬇️ XLSX — {var_name}", _xb.getvalue(),
+                                    file_name=f"{var_name}.xlsx",
+                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    use_container_width=True, key=f"dl_{var_name}_xlsx")
+                            except Exception:
+                                st.caption("pip install openpyxl for XLSX")
             else:
                 st.error("❌ Python error:")
                 st.code(output, language="text")
