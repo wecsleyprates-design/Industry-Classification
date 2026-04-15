@@ -1668,70 +1668,71 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
     with c5: kpi("IDV Passed",f"{idv_ok:,}",rate(idv_ok,n)+" pass rate","#22c55e" if idv_ok/max(n,1)>0.7 else "#f59e0b")
     with c6: kpi("Watchlist Hits",f"{wl_biz:,}",rate(wl_biz,n)+" affected","#ef4444" if wl_biz>0 else "#22c55e")
 
-    # ── Detail panels: FULL WIDTH below the KPI row — no column overlap ──────
+    # ── Detail panels: sequential full-width (NO columns — expanders in columns overlap) ──
     st.caption("▼ Click any metric below for source, JSON, SQL, and data lineage")
-    _dp_cols = st.columns(6)
 
-    with _dp_cols[0]:
-        detail_panel("Total Businesses",str(total_biz),
-            what_it_means="Count of distinct businesses onboarded in this period. Source: rds_cases_public.rel_business_customer_monitoring.created_at — the AUTHORITATIVE onboarding date. The old query used facts.received_at (fact write timestamp, NOT onboarding date), causing undercounting vs your reference query.",
-            source_table="rds_cases_public.rel_business_customer_monitoring",
-            source_file="customer_table.sql", source_file_line="created_at = true onboarding timestamp",
-            api_endpoint="No API — Redshift internal table",
-            json_obj={"total_businesses":total_biz,"date_range":f"{hub_date_from} → {hub_date_to}","source":"rds_cases_public.rel_business_customer_monitoring","date_field":"created_at"},
-            sql=_home_sql_ref,
-            links=[("customer_table.sql","warehouse-service customer_table.sql")],
-            color="#3B82F6", icon="🏢")
+    # Store panel args to render sequentially after the KPI row
+    _kpi_panels = [
+        ("🏢 Total Businesses", str(total_biz),
+         "Count of distinct businesses onboarded in this period. Source: rds_cases_public.rel_business_customer_monitoring.created_at — the AUTHORITATIVE onboarding date. facts.received_at is NOT the onboarding date (it is the fact write timestamp).",
+         "rds_cases_public.rel_business_customer_monitoring", "customer_table.sql", "created_at = true onboarding timestamp",
+         "No API — Redshift internal table",
+         {"total_businesses":total_biz,"date_range":f"{hub_date_from} → {hub_date_to}","source":"rel_business_customer_monitoring","date_field":"created_at"},
+         _home_sql_ref, [("customer_table.sql","customer_table.sql")], "#3B82F6"),
 
-    with _dp_cols[1]:
-        detail_panel("Red Flags",str(len(flagged_biz)),
-            what_it_means="Businesses with ≥1 red flag (SOS inactive/missing, TIN failed, Watchlist hit, IDV failed, NAICS fallback, Bankruptcy). CUSTOM HEURISTIC — not a regulatory score.",
-            source_table="rds_warehouse_public.facts (cross-field computed)",
-            source_file="facts/kyb/index.ts", source_file_line="sos_active + tin_match_boolean + watchlist_hits + idv_passed_boolean + naics_code + num_bankruptcies",
-            json_obj={"flagged":len(flagged_biz),"total":total_biz,"pct":round(len(flagged_biz)/max(total_biz,1)*100,1)},
-            sql=f"SELECT COUNT(DISTINCT b.business_id) AS flagged FROM rds_cases_public.rel_business_customer_monitoring b JOIN rds_warehouse_public.facts f ON f.business_id=b.business_id WHERE DATE(b.created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}' AND f.name='watchlist_hits' AND JSON_EXTRACT_PATH_TEXT(f.value,'value')::int>0;",
-            links=[("facts/kyb/index.ts","KYB scalar facts"),("consolidatedWatchlist.ts","Watchlist architecture")],
-            color="#ef4444" if flagged_biz.shape[0]>0 else "#22c55e", icon="🚨")
+        ("🚨 Red Flags", str(len(flagged_biz)),
+         "Businesses with ≥1 red flag (SOS inactive/missing, TIN failed, Watchlist hit, IDV failed, NAICS fallback, Bankruptcy). CUSTOM HEURISTIC — not a regulatory score.",
+         "rds_warehouse_public.facts (cross-field computed)", "facts/kyb/index.ts",
+         "sos_active + tin_match_boolean + watchlist_hits + idv_passed_boolean + naics_code + num_bankruptcies",
+         "",
+         {"flagged":len(flagged_biz),"total":total_biz,"pct":round(len(flagged_biz)/max(total_biz,1)*100,1)},
+         f"SELECT COUNT(DISTINCT b.business_id) AS flagged FROM rds_cases_public.rel_business_customer_monitoring b JOIN rds_warehouse_public.facts f ON f.business_id=b.business_id WHERE DATE(b.created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}' AND f.name='watchlist_hits' AND JSON_EXTRACT_PATH_TEXT(f.value,'value')::int>0;",
+         [("facts/kyb/index.ts","KYB scalar facts"),("consolidatedWatchlist.ts","Watchlist architecture")],
+         "#ef4444" if flagged_biz.shape[0]>0 else "#22c55e"),
 
-    with _dp_cols[2]:
-        detail_panel("SOS Active",str(sos_ok),
-            what_it_means="Businesses where sos_active=true (in good standing with SOS). DEPENDENT fact derived from sos_filings[].active. Source: Middesk pid=16. Null = entity not matched.",
-            source_table="rds_warehouse_public.facts · name='sos_active'",
-            source_file="facts/kyb/index.ts", source_file_line="sosActive · dependent · ANY(sos_filings[].active)",
-            json_obj={"sos_ok":sos_ok,"sos_fail":sos_fail,"sos_missing":sos_miss,"total":n,"pass_rate":rate(sos_ok,n)},
-            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS sos_active, COUNT(*) FROM rds_warehouse_public.facts WHERE name='sos_active' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1;",
-            links=[("facts/kyb/index.ts","sosActive fact"),("integrations.constant.ts","MIDDESK=16")],
-            color="#22c55e" if sos_ok/max(n,1)>0.8 else "#f97316", icon="🏛️")
+        ("🏛️ SOS Active", str(sos_ok),
+         "Businesses where sos_active=true (in good standing with SOS). DEPENDENT fact derived from sos_filings[].active. Source: Middesk pid=16. Null = entity not matched.",
+         "rds_warehouse_public.facts · name='sos_active'", "facts/kyb/index.ts",
+         "sosActive · dependent · ANY(sos_filings[].active)", "",
+         {"sos_ok":sos_ok,"sos_fail":sos_fail,"sos_missing":sos_miss,"total":n,"pass_rate":rate(sos_ok,n)},
+         f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS sos_active, COUNT(*) FROM rds_warehouse_public.facts WHERE name='sos_active' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1;",
+         [("facts/kyb/index.ts","sosActive fact"),("integrations.constant.ts","MIDDESK=16")],
+         "#22c55e" if sos_ok/max(n,1)>0.8 else "#f97316"),
 
-    with _dp_cols[3]:
-        detail_panel("TIN Verified",str(tin_ok),
-            what_it_means="Businesses where tin_match_boolean=true (IRS confirmed EIN+name). Source: Middesk pid=16 TIN review task — direct IRS query. Null = EIN not submitted or TIN task not yet run.",
-            source_table="rds_warehouse_public.facts · name='tin_match_boolean'",
-            source_file="facts/kyb/index.ts", source_file_line="tinMatchBoolean · dependent · tin_match.status==='success'",
-            json_obj={"tin_ok":tin_ok,"tin_fail":tin_fail,"tin_missing":n-tin_ok-tin_fail,"pass_rate":rate(tin_ok,n)},
-            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS tin_boolean, COUNT(*) FROM rds_warehouse_public.facts WHERE name='tin_match_boolean' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1;",
-            links=[("facts/kyb/index.ts","tinMatchBoolean fact"),("integrations.constant.ts","MIDDESK=16")],
-            color="#22c55e" if tin_ok/max(n,1)>0.8 else "#f59e0b", icon="🔐")
+        ("🔐 TIN Verified", str(tin_ok),
+         "Businesses where tin_match_boolean=true (IRS confirmed EIN+name). Source: Middesk pid=16 TIN review task — direct IRS query. Null = EIN not submitted or TIN task not yet run.",
+         "rds_warehouse_public.facts · name='tin_match_boolean'", "facts/kyb/index.ts",
+         "tinMatchBoolean · dependent · tin_match.status==='success'", "",
+         {"tin_ok":tin_ok,"tin_fail":tin_fail,"tin_missing":n-tin_ok-tin_fail,"pass_rate":rate(tin_ok,n)},
+         f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS tin_boolean, COUNT(*) FROM rds_warehouse_public.facts WHERE name='tin_match_boolean' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1;",
+         [("facts/kyb/index.ts","tinMatchBoolean fact"),("integrations.constant.ts","MIDDESK=16")],
+         "#22c55e" if tin_ok/max(n,1)>0.8 else "#f59e0b"),
 
-    with _dp_cols[4]:
-        detail_panel("IDV Passed",str(idv_ok),
-            what_it_means="Businesses where idv_passed_boolean=true (≥1 Plaid IDV SUCCESS session). Source: Plaid pid=18. Null = IDV not triggered (sole prop) or webhook not yet received.",
-            source_table="rds_warehouse_public.facts · name='idv_passed_boolean'",
-            source_file="facts/kyb/index.ts", source_file_line="idvPassedBoolean · dependent · idv_passed>=1",
-            json_obj={"idv_ok":idv_ok,"idv_fail":idv_fail,"pass_rate":rate(idv_ok,n)},
-            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS idv_boolean, COUNT(*) FROM rds_warehouse_public.facts WHERE name='idv_passed_boolean' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1;",
-            links=[("facts/kyb/index.ts","idvPassedBoolean fact"),("integrations.constant.ts","PLAID_IDV=18")],
-            color="#22c55e" if idv_ok/max(n,1)>0.7 else "#f59e0b", icon="🪪")
+        ("🪪 IDV Passed", str(idv_ok),
+         "Businesses where idv_passed_boolean=true (≥1 Plaid IDV SUCCESS session). Source: Plaid pid=18. Null = IDV not triggered (sole prop) or webhook not yet received.",
+         "rds_warehouse_public.facts · name='idv_passed_boolean'", "facts/kyb/index.ts",
+         "idvPassedBoolean · dependent · idv_passed>=1", "",
+         {"idv_ok":idv_ok,"idv_fail":idv_fail,"pass_rate":rate(idv_ok,n)},
+         f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS idv_boolean, COUNT(*) FROM rds_warehouse_public.facts WHERE name='idv_passed_boolean' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1;",
+         [("facts/kyb/index.ts","idvPassedBoolean fact"),("integrations.constant.ts","PLAID_IDV=18")],
+         "#22c55e" if idv_ok/max(n,1)>0.7 else "#f59e0b"),
 
-    with _dp_cols[5]:
-        detail_panel("Watchlist Hits",str(wl_biz),
-            what_it_means="Businesses with watchlist_hits>0 (PEP or SANCTIONS). Adverse media excluded (separate fact). Any hit = compliance review mandatory.",
-            source_table="rds_warehouse_public.facts · name='watchlist_hits'",
-            source_file="consolidatedWatchlist.ts", source_file_line="watchlistHits · COUNT(watchlist.metadata[])",
-            json_obj={"wl_biz":wl_biz,"total":n,"pct_affected":rate(wl_biz,n),"note":"PEP+SANCTIONS only. adverse_media excluded."},
-            sql=f"SELECT COUNT(DISTINCT business_id) FROM rds_warehouse_public.facts WHERE name='watchlist_hits' AND JSON_EXTRACT_PATH_TEXT(value,'value')::int>0 AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}');",
-            links=[("consolidatedWatchlist.ts","Watchlist architecture"),("integrations.constant.ts","TRULIOO=38, MIDDESK=16")],
-            color="#ef4444" if wl_biz>0 else "#22c55e", icon="⚠️")
+        ("⚠️ Watchlist Hits", str(wl_biz),
+         "Businesses with watchlist_hits>0 (PEP or SANCTIONS). Adverse media excluded (separate fact). Any hit = compliance review mandatory.",
+         "rds_warehouse_public.facts · name='watchlist_hits'", "consolidatedWatchlist.ts",
+         "watchlistHits · COUNT(watchlist.metadata[])", "",
+         {"wl_biz":wl_biz,"total":n,"pct_affected":rate(wl_biz,n),"note":"PEP+SANCTIONS only. adverse_media excluded."},
+         f"SELECT COUNT(DISTINCT business_id) FROM rds_warehouse_public.facts WHERE name='watchlist_hits' AND JSON_EXTRACT_PATH_TEXT(value,'value')::int>0 AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}');",
+         [("consolidatedWatchlist.ts","Watchlist architecture"),("integrations.constant.ts","TRULIOO=38, MIDDESK=16")],
+         "#ef4444" if wl_biz>0 else "#22c55e"),
+    ]
+
+    for _label,_val,_what,_tbl,_file,_line,_api,_json,_sql,_links,_color in _kpi_panels:
+        detail_panel(_label, _val,
+            what_it_means=_what, source_table=_tbl,
+            source_file=_file, source_file_line=_line,
+            api_endpoint=_api, json_obj=_json, sql=_sql,
+            links=_links, color=_color, icon=_label.split()[0])
 
     st.markdown("---")
 
@@ -1802,21 +1803,22 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
         else:
             st.info("Timeline requires date-filtered data. Enable 'Filter by date' in sidebar.")
 
-    # ── KYB Health detail panels — full width, outside columns ──────────────
-    with st.expander("🩺 KYB Health Rates — source, JSON & SQL for all metrics"):
-        st.caption("Each metric shows pass/fail/missing counts. Fail = fact returned false. Missing = fact is null (vendor did not match entity).")
-        for label,ok_n,fail_n,miss_n,total_n,ok_col,fail_col in metrics:
-            ok_pct2 = int(ok_n/max(total_n,1)*100)
-            m = HEALTH_META.get(label,())
-            detail_panel(f"KYB Health: {label}", f"{ok_pct2}% pass · {ok_n:,} pass · {fail_n:,} fail · {miss_n:,} missing",
-                what_it_means=f"Pass: {ok_n:,} · Fail: {fail_n:,} · Missing: {miss_n:,} (out of {total_n:,} businesses)\n\n{m[4] if len(m)>4 else ''}\n\nFail = fact ran and returned false/failure. Missing = fact is null — vendor could not match entity OR check not yet run.",
-                source_table=f"{m[1] if len(m)>1 else 'rds_warehouse_public.facts'} · name='{m[0] if m else label}'",
-                source_file=m[2] if len(m)>2 else "facts/kyb/index.ts",
-                source_file_line=m[3] if len(m)>3 else "",
-                json_obj={"metric":label,"pass":ok_n,"fail":fail_n,"missing":miss_n,"total":total_n,"pass_rate_pct":ok_pct2,"source_table":m[1] if len(m)>1 else "rds_warehouse_public.facts","date_range":f"{hub_date_from}→{hub_date_to}"},
-                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS val, COUNT(*) AS businesses FROM rds_warehouse_public.facts WHERE name='{m[0] if m else label.lower().replace(' ','_')}' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1 ORDER BY businesses DESC;",
-                links=[(m[2] if len(m)>2 else "facts/kyb/index.ts", m[3] if len(m)>3 else label)],
-                color=ok_col, icon="🩺")
+    # ── KYB Health detail panels — NO outer expander (nested expanders forbidden)
+    # Render directly as sequential full-width panels
+    st.markdown("**🩺 KYB Health Rates — click any metric below for source, JSON & SQL:**")
+    st.caption("Fail = fact returned false. Missing = fact is null (vendor did not match entity).")
+    for label,ok_n,fail_n,miss_n,total_n,ok_col,fail_col in metrics:
+        ok_pct2 = int(ok_n/max(total_n,1)*100)
+        m = HEALTH_META.get(label,())
+        detail_panel(f"🩺 {label}", f"{ok_pct2}% pass · {ok_n:,} pass · {fail_n:,} fail · {miss_n:,} missing",
+            what_it_means=f"Pass: {ok_n:,} · Fail: {fail_n:,} · Missing: {miss_n:,} (out of {total_n:,})\n\n{m[4] if len(m)>4 else ''}\n\nFail = fact returned false. Missing = null (vendor did not match entity or check not yet run).",
+            source_table=f"{m[1] if len(m)>1 else 'rds_warehouse_public.facts'} · name='{m[0] if m else label}'",
+            source_file=m[2] if len(m)>2 else "facts/kyb/index.ts",
+            source_file_line=m[3] if len(m)>3 else "",
+            json_obj={"metric":label,"pass":ok_n,"fail":fail_n,"missing":miss_n,"total":total_n,"pass_rate_pct":ok_pct2,"date_range":f"{hub_date_from}→{hub_date_to}"},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS val, COUNT(*) AS businesses FROM rds_warehouse_public.facts WHERE name='{m[0] if m else label.lower().replace(' ','_')}' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1 ORDER BY businesses DESC;",
+            links=[(m[2] if len(m)>2 else "facts/kyb/index.ts", m[3] if len(m)>3 else label)],
+            color=ok_col, icon="🩺")
 
     st.markdown("---")
 
@@ -1949,42 +1951,35 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
         with wc3: kpi("🔎 Review",f"{review:,}",rate(review,len(ws_df)),"#f59e0b")
         with wc4: kpi("❌ Decline",f"{declined:,}",rate(declined,len(ws_df)),"#ef4444")
         # Detail panels below (separate row to avoid overlap)
-        _ws_dp = st.columns(4)
-        with _ws_dp[0]:
-            detail_panel("Median Worth Score",f"{median_sc:.0f}",
-                what_it_means="Median score across all scored businesses in the portfolio. Formula: probability × 550 + 300. 300=minimum (worst risk), 850=maximum (best risk). Median is more robust than mean — not skewed by extreme values.",
-                source_table="rds_manual_score_public.business_scores · weighted_score_850",
-                source_file="aiscore.py", source_file_line="score_300_850 = probability × 550 + 300 (L44)",
-                json_obj={"median_score_850":float(median_sc),"formula":"p × 550 + 300","scale":"300–850","decision_thresholds":{"APPROVE":"≥700","FURTHER_REVIEW":"550–699","DECLINE":"<550"}},
-                sql=_ws_sql, links=[("aiscore.py","Score formula"),("score_decision_matrix","Decision thresholds")],
-                color="#3B82F6", icon="💰")
-        with _ws_dp[1]:
-            detail_panel("Approve",str(approved),
-                what_it_means=f"score ≥ 700 → LOW risk → APPROVE. {approved:,} businesses ({rate(approved,len(ws_df))} of scored). Default threshold from score_decision_matrix seed migration. Configurable per customer.",
-                source_table="rds_manual_score_public.business_scores · score_decision='APPROVE'",
-                source_file="score_decision_matrix", source_file_line="range_start=700, range_end=850, risk_level='LOW', decision='APPROVE'",
-                json_obj={"decision":"APPROVE","threshold":"score≥700","risk_level":"LOW","count":int(approved),"pct":rate(approved,len(ws_df))},
-                sql=f"SELECT COUNT(*) AS approved FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE bs.score_decision='APPROVE';",
-                links=[("score_decision_matrix","Decision thresholds"),("aiscore.py","Score computation")],
-                color="#22c55e", icon="✅")
-        with _ws_dp[2]:
-            detail_panel("Further Review",str(review),
-                what_it_means=f"550 ≤ score < 700 → MODERATE risk → FURTHER_REVIEW_NEEDED. {review:,} businesses ({rate(review,len(ws_df))}). Human analyst must review. Score is in uncertain zone — model cannot confidently approve or decline.",
-                source_table="rds_manual_score_public.business_scores · score_decision='FURTHER_REVIEW_NEEDED'",
-                source_file="score_decision_matrix", source_file_line="range_start=550, range_end=699, risk_level='MODERATE'",
-                json_obj={"decision":"FURTHER_REVIEW_NEEDED","threshold":"550≤score<700","risk_level":"MODERATE","count":int(review),"pct":rate(review,len(ws_df))},
-                sql=f"SELECT COUNT(*) AS review FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE bs.score_decision='FURTHER_REVIEW_NEEDED';",
-                links=[("score_decision_matrix","Decision thresholds")],
-                color="#f59e0b", icon="🔎")
-        with _ws_dp[3]:
-            detail_panel("Decline",str(declined),
-                what_it_means=f"score < 550 → HIGH risk → DECLINE. {declined:,} businesses ({rate(declined,len(ws_df))}). Model probability below minimum acceptance threshold. Do NOT approve without Compliance override.",
-                source_table="rds_manual_score_public.business_scores · score_decision='DECLINE'",
-                source_file="score_decision_matrix", source_file_line="range_start=0, range_end=549, risk_level='HIGH', decision='DECLINE'",
-                json_obj={"decision":"DECLINE","threshold":"score<550","risk_level":"HIGH","count":int(declined),"pct":rate(declined,len(ws_df))},
-                sql=f"SELECT COUNT(*) AS declined FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE bs.score_decision='DECLINE';",
-                links=[("score_decision_matrix","Decision thresholds"),("aiscore.py","Score computation")],
-                color="#ef4444", icon="❌")
+        # Worth Score detail panels — sequential full width (no columns, no overlap)
+        detail_panel("💰 Median Worth Score",f"{median_sc:.0f}",
+            what_it_means="Median score across all scored businesses. Formula: probability × 550 + 300. 300=worst risk, 850=best risk. Median is more robust than mean.",
+            source_table="rds_manual_score_public.business_scores · weighted_score_850",
+            source_file="aiscore.py", source_file_line="score_300_850 = probability × 550 + 300 (L44)",
+            json_obj={"median_score_850":float(median_sc),"formula":"p × 550 + 300","thresholds":{"APPROVE":"≥700","FURTHER_REVIEW":"550–699","DECLINE":"<550"}},
+            sql=_ws_sql, links=[("aiscore.py","Score formula"),("score_decision_matrix","Decision thresholds")],
+            color="#3B82F6", icon="💰")
+        detail_panel("✅ Approve",str(approved),
+            what_it_means=f"score ≥ 700 → LOW risk → APPROVE. {approved:,} businesses ({rate(approved,len(ws_df))}). Default threshold from score_decision_matrix. Configurable per customer.",
+            source_table="rds_manual_score_public.business_scores · score_decision='APPROVE'",
+            source_file="score_decision_matrix", source_file_line="range_start=700, range_end=850, risk_level='LOW'",
+            json_obj={"decision":"APPROVE","threshold":"score≥700","count":int(approved),"pct":rate(approved,len(ws_df))},
+            sql=f"SELECT COUNT(*) AS approved FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE bs.score_decision='APPROVE';",
+            links=[("score_decision_matrix","Decision thresholds")], color="#22c55e", icon="✅")
+        detail_panel("🔎 Further Review",str(review),
+            what_it_means=f"550 ≤ score < 700 → MODERATE → FURTHER_REVIEW_NEEDED. {review:,} businesses ({rate(review,len(ws_df))}). Human analyst must review before decision.",
+            source_table="rds_manual_score_public.business_scores · score_decision='FURTHER_REVIEW_NEEDED'",
+            source_file="score_decision_matrix", source_file_line="range_start=550, range_end=699, risk_level='MODERATE'",
+            json_obj={"decision":"FURTHER_REVIEW_NEEDED","threshold":"550≤score<700","count":int(review),"pct":rate(review,len(ws_df))},
+            sql=f"SELECT COUNT(*) AS review FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE bs.score_decision='FURTHER_REVIEW_NEEDED';",
+            links=[("score_decision_matrix","Decision thresholds")], color="#f59e0b", icon="🔎")
+        detail_panel("❌ Decline",str(declined),
+            what_it_means=f"score < 550 → HIGH risk → DECLINE. {declined:,} businesses ({rate(declined,len(ws_df))}). Do NOT approve without Compliance override.",
+            source_table="rds_manual_score_public.business_scores · score_decision='DECLINE'",
+            source_file="score_decision_matrix", source_file_line="range_start=0, range_end=549, risk_level='HIGH'",
+            json_obj={"decision":"DECLINE","threshold":"score<550","count":int(declined),"pct":rate(declined,len(ws_df))},
+            sql=f"SELECT COUNT(*) AS declined FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE bs.score_decision='DECLINE';",
+            links=[("score_decision_matrix","Decision thresholds")], color="#ef4444", icon="❌")
 
         wsc1, wsc2 = st.columns([2,1])
         with wsc1:
