@@ -381,8 +381,100 @@ def _pid_label(pid_str):
     if pid_str=="": return "Unknown"
     return pid_info(pid_str)[0]
 
-def render_lineage(facts, names, title="Fact Lineage"):
+# ── Fact Engine rule explanations (from integration-service/lib/facts/rules.ts)
+RULE_EXPLAIN = {
+    "factWithHighestConfidence": (
+        "factWithHighestConfidence",
+        "Winner = vendor with highest confidence score. "
+        "If two vendors are within 5% (WEIGHT_THRESHOLD=0.05) of each other, "
+        "the one with the higher platform weight wins (Middesk w=2.0 > OC w=0.9 > ZI w=0.8 > Trulioo w=0.8 > EFX w=0.7 > SERP w=0.3 > AI w=0.1). "
+        "Source: integration-service/lib/facts/rules.ts L36–59"
+    ),
+    "combineFacts": (
+        "combineFacts",
+        "Merges values from ALL vendors into one deduplicated array. "
+        "No single winner — every vendor contributes. Used for: addresses, names_found, dba_found. "
+        "Source: integration-service/lib/facts/rules.ts L76–96"
+    ),
+    "combineWatchlistMetadata": (
+        "combineWatchlistMetadata",
+        "Merges watchlist hits from business-level (Middesk) AND person-level (Trulioo PSC) screenings, "
+        "deduplicates by hit ID, excludes adverse_media category. "
+        "Source: integration-service/lib/facts/rules.ts L253+"
+    ),
+    "dependentFact": (
+        "Dependent (computed)",
+        "This fact is not queried from a vendor. It is computed by the Fact Engine from another fact. "
+        "platformId=-1, confidence=null. Example: sos_active ← derived from sos_filings[].active. "
+        "Source: integration-service/lib/facts/rules.ts L98–107"
+    ),
+    "—": (
+        "Dependent / No rule",
+        "ruleApplied=null means this fact is a dependent fact — computed from its listed dependencies[], "
+        "not won from a vendor competition. The source.platformId=-1 confirms this. "
+        "See the 'dependencies' field in the JSON to know which fact it derives from."
+    ),
+    "factWithHighestWeight": (
+        "factWithHighestWeight",
+        "Winner = vendor with the highest platform weight, regardless of confidence. "
+        "Rare rule used when confidence scores are not meaningful. "
+        "Source: integration-service/lib/facts/rules.ts L11–34"
+    ),
+    "manualOverride": (
+        "Manual Analyst Override",
+        "An analyst manually changed this fact in the Admin Portal. "
+        "The override value replaces the vendor-selected value for all downstream consumers. "
+        "Source: integration-service/lib/facts/rules.ts L112+"
+    ),
+}
+
+def _rule_label(rule_str):
+    return RULE_EXPLAIN.get(rule_str, (rule_str, ""))[0] if rule_str else "Dependent / No rule"
+
+def render_fact_engine_explainer():
+    """Render a comprehensive Fact Engine workflow card."""
+    st.markdown("""<div style="background:#0c1a2e;border:1px solid #1e3a5f;border-radius:12px;padding:16px 20px;margin:10px 0">
+<div style="color:#60A5FA;font-weight:700;font-size:.95rem;margin-bottom:10px">
+  ⚙️ How the Fact Engine Builds Every Row in This Table
+</div>
+<div style="color:#CBD5E1;font-size:.80rem;line-height:1.8">
+
+<strong style="color:#a5b4fc">Step 1 — Vendor data collection</strong><br>
+Multiple vendors (Middesk, OpenCorporates, ZoomInfo, Equifax, Trulioo, SERP, AI) each provide their 
+version of the same fact. All responses are stored as raw candidates.
+
+<br><br><strong style="color:#a5b4fc">Step 2 — Fact Engine rule selection</strong><br>
+For each fact, one rule is applied to determine the winner:<br>
+<span style="color:#22c55e">■ factWithHighestConfidence</span> — the vendor with the highest confidence wins. 
+If two vendors are within 5% of each other (WEIGHT_THRESHOLD=0.05), the one with the higher 
+<em>platform weight</em> wins. Weights: Middesk=2.0 · OC=0.9 · ZI=0.8 · Trulioo=0.8 · EFX=0.7 · SERP=0.3 · AI=0.1<br>
+<span style="color:#3B82F6">■ combineFacts</span> — all vendor values merged into one deduplicated array (used for addresses, names_found, dba_found)<br>
+<span style="color:#8B5CF6">■ Dependent fact</span> — computed from another fact. No vendor, no rule, no confidence (platformId=-1)
+
+<br><br><strong style="color:#a5b4fc">Step 3 — Winner stored in Redshift</strong><br>
+The winning vendor's value, source.platformId, source.confidence, and ruleApplied are written to 
+<code>rds_warehouse_public.facts</code> (received_at = write timestamp).<br>
+All losing vendors are stored in the <code>alternatives[]</code> array of the same JSON row.
+
+<br><br><strong style="color:#a5b4fc">Step 4 — Admin Portal reads from facts</strong><br>
+The Admin Portal calls <code>GET /api/v1/facts/business/{'{'}bid{'}'}/kyb</code> → returns the winning value 
+(and alternatives) for every fact. Cached in Redis for 2 minutes.
+
+<br><br><strong style="color:#a5b4fc">Confidence formulas by vendor:</strong><br>
+Middesk: <code>0.15 + 0.20 × (passing review tasks, max 4)</code> · 
+OC/ZI/EFX: <code>match.index ÷ 55</code> · 
+Trulioo: <code>0.70=SUCCESS · 0.40=FAILED · 0.20=OTHER</code> · 
+AI (pid=31): self-reported (LOW→0.3 · MED→0.6 · HIGH→0.9) · 
+Applicant (pid=0): <code>1.0</code> by convention · 
+Dependent (pid=-1): <code>null</code> (not applicable)
+
+</div>
+</div>""", unsafe_allow_html=True)
+
+def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False):
     st.markdown(f"##### {title}")
+    if show_rule_explainer:
+        render_fact_engine_explainer()
     rows=[]
     for name in names:
         f=facts.get(name,{})
@@ -398,28 +490,79 @@ def render_lineage(facts, names, title="Fact Lineage"):
         conf_raw = src.get("confidence") if isinstance(src,dict) else None
         conf = float(conf_raw) if conf_raw is not None else None
         win_name = _pid_label(pid)
-        conf_str = f"{conf:.4f}" if conf is not None else "n/a"
-        win_str  = f"{win_name} · {conf_str}"
+        src_name = f.get("source",{}).get("name","") if isinstance(f.get("source"),dict) else ""
 
-        # Rule applied
-        rule = safe_get(f,"ruleApplied","name") or safe_get(f,"ruleApplied","description") or "—"
+        # Meaningful source label
+        if pid == "-1":
+            # Dependent fact — get the dependency name if available
+            deps = f.get("dependencies") or f.get("source",{}).get("dependencies") if isinstance(f.get("source"),dict) else None
+            dep_str = ""
+            if isinstance(deps,list) and deps: dep_str = f" ← {deps[0]}"
+            win_str = f"📐 Computed{dep_str}"
+            conf_str = "n/a (derived)"
+        elif pid == "":
+            win_str = "❓ Unknown source"
+            conf_str = f"{conf:.4f}" if conf is not None else "n/a"
+        elif conf is None:
+            win_str = f"{win_name}"
+            conf_str = "n/a"
+        else:
+            win_str = f"{win_name}"
+            conf_str = f"{conf:.4f}"
+
+        # Rule applied — with human label
+        raw_rule = safe_get(f,"ruleApplied","name") or "—"
+        rule_label = _rule_label(raw_rule)
+        _, rule_desc = RULE_EXPLAIN.get(raw_rule, (raw_rule, "See integration-service/lib/facts/rules.ts"))
+
+        # Dependencies for dependent facts
+        deps_raw = f.get("dependencies")
+        if deps_raw and isinstance(deps_raw, list):
+            dep_display = " → ".join(deps_raw)
+        else:
+            dep_display = ""
 
         # Alternatives
         alts = get_alts(facts,name)
         alt_str = " | ".join(
             f"{_pid_label(a['pid'])}({a['conf']:.4f})" for a in alts[:4]
-        ) or "—"
+        ) or ("—" if pid!="-1" else "n/a (computed fact)")
 
         rows.append({
-            "Fact": f"`{name}`",
+            "Fact": name,
             "Value": dv,
             "Winning Source": win_str,
             "Confidence": conf_str,
-            "Rule": rule,
-            "Alternatives": alt_str,
+            "Rule": rule_label,
+            "Dependencies / Alternatives": dep_display or alt_str,
             "Updated": f.get("_received_at",""),
         })
-    if rows: st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+
+    if rows:
+        df = pd.DataFrame(rows)
+        st.dataframe(df, use_container_width=True, hide_index=True,
+                     column_config={
+                         "Fact": st.column_config.TextColumn("Fact", width="medium"),
+                         "Value": st.column_config.TextColumn("Value", width="medium"),
+                         "Winning Source": st.column_config.TextColumn("Winning Source", width="small"),
+                         "Confidence": st.column_config.TextColumn("Confidence", width="small"),
+                         "Rule": st.column_config.TextColumn("Rule Applied", width="medium"),
+                         "Dependencies / Alternatives": st.column_config.TextColumn("Deps / Alternatives", width="large"),
+                     })
+
+        # Rule legend below the table
+        used_rules = set(r["Rule"] for r in rows if r["Rule"] not in ("","—","n/a (computed fact)"))
+        if used_rules:
+            st.markdown("<div style='margin-top:6px'>", unsafe_allow_html=True)
+            for rule_key, (rl, rd) in RULE_EXPLAIN.items():
+                if rl in used_rules:
+                    st.markdown(
+                        f"<div style='background:#0f172a;border-left:3px solid #3B82F6;padding:6px 10px;"
+                        f"border-radius:6px;margin:2px 0;font-size:.70rem'>"
+                        f"<span style='color:#60A5FA;font-weight:600'>{rl}:</span> "
+                        f"<span style='color:#94A3B8'>{rd}</span></div>",
+                        unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
     return rows
 
 def sql_for(bid,names):
@@ -1431,7 +1574,8 @@ elif tab=="🏛️ Registry & Identity":
         **Rule applied:** `factWithHighestConfidence` — highest confidence×weight wins""")
 
         render_lineage(facts,["sos_active","sos_match","sos_match_boolean","middesk_confidence","middesk_id",
-                               "formation_state","formation_date","year_established","corporation"])
+                               "formation_state","formation_date","year_established","corporation"],
+                      show_rule_explainer=True)
 
         # Source concordance chart
         st.markdown("##### Vendor Confidence Comparison")
@@ -1528,46 +1672,206 @@ Authorization: Bearer <token>
         ])
 
     with r2:
-        st.markdown("#### Domestic vs Foreign Registration")
-        if tax_haven:
-            flag(f"Business incorporated in **{form_state}** (tax-haven state). It almost certainly has "
-                 f"a domestic filing in {form_state} AND foreign qualifications in operating states. "
-                 "Middesk searches by submitted address — it finds the FOREIGN record, missing the PRIMARY domestic. "
-                 "This causes sos_match_boolean=false as a FALSE NEGATIVE.", "amber")
+        st.markdown("#### 🗺️ Domestic vs Foreign Registration — Complete Analysis")
+        st.caption("**Source fact:** `sos_filings` (too large for Redshift — PostgreSQL RDS required) · "
+                   "**Proxy facts:** `formation_state` + `primary_address.state` (Redshift OK) · "
+                   "**Admin Portal path:** KYB → Business Registration → jurisdiction badges (Primary/Secondary)")
 
-        st.markdown("##### Complete Data Flow — How foreign_domestic is Determined")
-        FLOW=[
-            ("1","Merchant submits address","Onboarding form","Business submits operating address (e.g. Texas). This is what Middesk uses for its initial SOS search.","#f59e0b"),
-            ("2","Middesk SOS search by address","Middesk API (pid=16, w=2.0)","Middesk queries each state registry using the submitted address. Finds the Texas FOREIGN record first. May miss Delaware DOMESTIC record.","#f59e0b"),
-            ("3","OpenCorporates fallback","OC API (pid=23, w=0.9)","OC searches by company name globally. May find the Delaware domestic record that Middesk missed.","#3B82F6"),
-            ("4","sos_filings fact stored","rds_warehouse_public.facts","Array: [{id, state, active, foreign_domestic='domestic'/'foreign', entity_type, registration_date, officers[]}]. Source: pid=16 Middesk wins if conf > OC.","#22c55e"),
-            ("5","foreign_domestic field","sos_filings[].foreign_domestic","Middesk: set from API registrations[].foreignDomestic. OC: set by comparing home_jurisdiction_code to filing state.","#22c55e"),
-            ("6","Admin Portal display","microsites EntityJurisdictionCell.tsx","Domestic → 'Primary' badge (green). Foreign → 'Secondary' badge (grey). Sorted by active then by type.","#8B5CF6"),
+        # ── Per-business status ───────────────────────────────────────────────
+        op_state = ""
+        pa = facts.get("primary_address",{}).get("value",{})
+        if isinstance(pa, dict): op_state = str(pa.get("state","") or "").upper().strip()
+        form_state_up = form_state.upper().strip()
+        TAX_HAVENS = {"DE","NV","WY","SD","MT","NM"}
+        states_differ = form_state_up and op_state and form_state_up != op_state
+        is_th = form_state_up in TAX_HAVENS
+
+        # KPI row
+        c1,c2,c3,c4 = st.columns(4)
+        with c1: kpi("Formation State (domestic)",form_state or "⚠️ Unknown","Where entity was incorporated","#3B82F6")
+        with c2: kpi("Operating State",op_state or "⚠️ Unknown","primary_address.state","#3B82F6")
+        with c3:
+            if states_differ:
+                kpi("State Match","❌ Different",f"{form_state_up} ≠ {op_state} — foreign qual. likely","#f59e0b")
+            elif form_state_up:
+                kpi("State Match","✅ Same state","No foreign qualification needed","#22c55e")
+            else:
+                kpi("State Match","⚠️ Unknown","formation_state missing","#64748b")
+        with c4:
+            kpi("Tax Haven?","⚠️ YES — "+form_state_up if is_th else "✅ No",
+                "DE/NV/WY/SD/MT/NM = entity resolution gap risk" if is_th else "Low entity resolution risk",
+                "#f59e0b" if is_th else "#22c55e")
+
+        if is_th:
+            flag(f"🚨 **ENTITY RESOLUTION GAP RISK:** This business is incorporated in **{form_state_up}** "
+                 f"(a tax-haven state), but operating in **{op_state or '?'}**. "
+                 f"Middesk searches by submitted address ({op_state or '?'}) → finds the **FOREIGN qualification** record. "
+                 f"The PRIMARY DOMESTIC filing in {form_state_up} may be MISSED. "
+                 f"This can cause **sos_match_boolean=false as a FALSE NEGATIVE**.", "red")
+        elif states_differ:
+            flag(f"⚠️ Formation state ({form_state_up}) differs from operating state ({op_state}). "
+                 f"Business likely has both a domestic filing in {form_state_up} AND a foreign qualification in {op_state}. "
+                 "Verify both filings using the SQL below.", "amber")
+        else:
+            flag(f"✅ Formation state ({form_state_up}) matches operating state ({op_state or '?'}). "
+                 "Business is likely domestic-only in this state. Low entity resolution gap risk.", "green")
+
+        st.markdown("---")
+
+        # ── Sanity check: sos_match_boolean vs state mismatch ────────────────
+        st.markdown("##### 🔍 Entity Resolution Gap Detection — For This Business")
+        checks_dom = [
+            ("sos_match_boolean value", sos_match,
+             sos_match=="true",
+             "true = Middesk found AND matched the SOS record"),
+            ("Formation state known", bool(form_state_up),
+             bool(form_state_up),
+             "Required to check domestic vs foreign"),
+            ("Operating state known", bool(op_state),
+             bool(op_state),
+             "Required to check if states differ"),
+            ("States are the same", not states_differ,
+             not states_differ,
+             "Same state = domestic only, no gap risk"),
+            ("Not a tax-haven state", not is_th,
+             not is_th,
+             "DE/NV/WY = highest probability of gap"),
+            ("Gap risk present", states_differ and sos_match!="true",
+             not (states_differ and sos_match!="true"),
+             "sos_match=false AND states differ = likely false negative"),
         ]
-        for num,title,source,desc,color in FLOW:
-            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
-                border-radius:8px;padding:10px 14px;margin:4px 0">
-              <div style="display:flex;justify-content:space-between;align-items:center">
-                <div>
-                  <span style="color:{color};font-weight:700;font-size:.85rem">Step {num}: {title}</span>
-                  <span style="color:#64748b;font-size:.70rem;margin-left:8px">{source}</span>
-                </div>
-              </div>
-              <div style="color:#94A3B8;font-size:.75rem;margin-top:4px">{desc}</div>
-            </div>""",unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame([{
+            "Check":c,"Result":r,"Status":"✅ OK" if ok else "🔴 Flag","Interpretation":d
+        } for c,r,ok,d in checks_dom]), use_container_width=True, hide_index=True)
 
+        if states_differ and sos_match!="true":
+            flag("🚨 **High confidence this is a false negative:** "
+                 "sos_match_boolean=false AND formation_state ≠ operating_state. "
+                 "Middesk found the foreign qualification record in the operating state, "
+                 "but could NOT match the name — possibly because the domestic legal name "
+                 "in the formation state differs from the submitted DBA name. "
+                 "**Recommended action:** re-run Middesk with formation_state as jurisdiction.", "red")
+
+        st.markdown("---")
+
+        # ── Plotly workflow diagram ────────────────────────────────────────────
+        st.markdown("##### 🔄 Entity Resolution Pipeline — How This Fact Flows")
+        _col_l, _col_r = st.columns([3,2])
+        with _col_l:
+            fig_flow = go.Figure()
+            # Nodes as scatter with text
+            nodes_x  = [0.1, 0.1, 0.5, 0.5, 0.5, 0.9, 0.9]
+            nodes_y  = [0.85, 0.55, 0.85, 0.65, 0.45, 0.75, 0.45]
+            nodes_lbl= [
+                "Merchant\nsubmits address",
+                "Middesk API\n(pid=16, w=2.0)",
+                "OC Fallback\n(pid=23, w=0.9)",
+                "Fact Engine\nfactWithHighestConf",
+                "sos_filings\nrds_warehouse_public.facts",
+                "Admin Portal\nPrimary/Secondary badge",
+                "sos_active\n(derived from filings[].active)",
+            ]
+            nodes_color = ["#f59e0b","#f59e0b","#3B82F6","#8B5CF6","#22c55e","#60A5FA","#94a3b8"]
+            fig_flow.add_trace(go.Scatter(
+                x=nodes_x, y=nodes_y, mode="markers+text",
+                text=nodes_lbl,
+                textposition=["middle right","middle right","middle right",
+                              "middle right","middle right","middle left","middle left"],
+                marker=dict(size=18, color=nodes_color, symbol="circle",
+                            line=dict(color="#1E293B",width=2)),
+                textfont=dict(size=9, color="#E2E8F0"),
+                hoverinfo="text",
+            ))
+            # Arrows as annotations
+            arrows = [
+                (0.1,0.85,0.1,0.60,"submits address"),
+                (0.1,0.55,0.47,0.85,"SOS search by address"),
+                (0.1,0.55,0.47,0.65,"(same request)"),
+                (0.53,0.85,0.53,0.70,"name-based search"),
+                (0.53,0.65,0.87,0.78,"winner stored"),
+                (0.53,0.45,0.87,0.48,"active field"),
+            ]
+            for x0,y0,x1,y1,lbl in arrows:
+                fig_flow.add_annotation(ax=x0,ay=y0,x=x1,y=y1,
+                    xref="x",yref="y",axref="x",ayref="y",
+                    arrowhead=2,arrowwidth=1.5,arrowcolor="#475569",
+                    showarrow=True)
+            fig_flow.update_layout(
+                height=320,
+                xaxis=dict(visible=False,range=[-0.05,1.2]),
+                yaxis=dict(visible=False,range=[0.3,1.0]),
+                margin=dict(t=20,b=10,l=10,r=10),
+                title="Entity Resolution Data Flow",
+            )
+            st.plotly_chart(dark_chart(fig_flow), use_container_width=True)
+
+        with _col_r:
+            st.markdown("**Pipeline stages:**")
+            for step,desc,color in [
+                ("① Merchant submits","Operating address + legal name to onboarding form","#f59e0b"),
+                ("② Middesk (primary)","Live SOS search by address in each state registry","#f59e0b"),
+                ("③ OC (fallback)","Global search by name — may find domestic record Middesk missed","#3B82F6"),
+                ("④ Fact Engine","factWithHighestConfidence selects winner between Middesk & OC","#8B5CF6"),
+                ("⑤ Stored","sos_filings array with foreign_domestic per filing written to Redshift","#22c55e"),
+                ("⑥ Admin Portal","EntityJurisdictionCell.tsx: domestic='Primary', foreign='Secondary'","#60A5FA"),
+                ("⑦ Derived","sos_active = any(filing.active for filing in sos_filings)","#94a3b8"),
+            ]:
+                st.markdown(f"""<div style="background:#1E293B;border-left:3px solid {color};
+                    padding:5px 10px;border-radius:6px;margin:3px 0;font-size:.72rem">
+                  <span style="color:{color};font-weight:600">{step}</span>
+                  <span style="color:#CBD5E1;margin-left:6px">{desc}</span></div>""",
+                    unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # ── Fact lineage for this business ────────────────────────────────────
         render_lineage(facts,["formation_state","formation_date","corporation","year_established"])
 
-        with st.expander("📋 SQL — sos_filings domestic/foreign detail"):
-            st.code(f"""-- PostgreSQL RDS (port 5432) — full SOS filings with domestic/foreign type:
+        st.markdown("---")
+        st.markdown("##### 📖 The Delaware Problem — Why Tax-Haven States Break Entity Resolution")
+        st.markdown("""
+**Why businesses incorporate in DE/NV/WY even if they operate elsewhere:**
+
+| State | Why businesses choose it | Entity resolution problem |
+|---|---|---|
+| **Delaware** | Court of Chancery (predictable corporate law) · no state income tax · flexible equity structures · investor-friendly | DE filing name often differs from submitted DBA; Middesk searches Texas address, finds Texas foreign record, misses DE domestic |
+| **Nevada** | Strong liability protection · no corporate income tax · no disclosure of shareholders | Operating in CA/TX/NY but incorporated NV; address search returns wrong record |
+| **Wyoming** | LLC privacy (no public officer disclosure required) · lowest fees | Particularly common for anonymous holding companies; very hard to resolve by name |
+
+**What this means for this pipeline:**
+
+```
+Business: "Joe's Pizza LLC" operating in Texas, incorporated in Delaware as "JPL Holdings LLC"
+                    ↓
+Middesk searches: Texas SOS registry (by submitted Texas address)
+Finds: "JPL Holdings LLC" (Texas foreign qualification, filed 2022)
+      Name mismatch vs submitted "Joe's Pizza LLC" → sos_match_boolean = FALSE ❌
+                    ↓
+The Delaware DOMESTIC record ("JPL Holdings LLC") is NEVER searched
+The business IS legitimately registered — we searched the wrong state
+```
+
+**Recommended fixes** (from integration-service codebase analysis):
+1. When `sos_match_boolean=false` AND `formation_state ≠ operating_state` → re-run Middesk with `jurisdiction=formation_state`
+2. For all DE/NV/WY incorporations → always run DUAL search (formation state + operating state)
+3. Add a `has_foreign_qualification` boolean fact to the Fact Engine as an explicit flag
+4. Flag these cases for manual underwriter review — they are high-probability false negatives
+        """)
+
+        with st.expander("📋 SQL — Query sos_filings directly (PostgreSQL RDS port 5432 required)"):
+            st.code(f"""-- sos_filings is too large for Redshift federation (VARCHAR 65535 limit).
+-- All queries below must run on PostgreSQL RDS (port 5432) with native JSONB.
+
+-- 1. All SOS filings for this business with domestic/foreign classification:
 SELECT
-    filing->>'foreign_domestic'   AS type,          -- 'domestic' or 'foreign'
+    filing->>'foreign_domestic'   AS type,             -- 'domestic' | 'foreign'
     filing->>'state'              AS state,
-    filing->>'active'             AS active,
-    filing->>'entity_type'        AS entity_type,
-    filing->>'registration_date'  AS registered,
-    filing->>'filing_name'        AS name,
-    filing->>'url'                AS registry_url
+    filing->>'active'             AS is_active,
+    filing->>'entity_type'        AS entity_type,       -- LLC | Corp | etc.
+    filing->>'registration_date'  AS registration_date,
+    filing->>'filing_name'        AS legal_filing_name, -- may differ from submitted name!
+    filing->>'url'                AS registry_url,
+    filing->'officers'            AS officers
 FROM rds_warehouse_public.facts
 CROSS JOIN jsonb_array_elements(value->'value') AS filing
 WHERE name='sos_filings' AND business_id='{bid}'
@@ -1575,15 +1879,46 @@ ORDER BY
     (filing->>'active')::boolean DESC,
     CASE filing->>'foreign_domestic' WHEN 'domestic' THEN 0 ELSE 1 END;
 
--- Quick scalar check (Redshift OK):
-{sql_for(bid,["formation_state","formation_date","sos_active","sos_match_boolean"])}""",language="sql")
+-- 2. Scalar facts (Redshift OK — no size limit):
+{sql_for(bid,["formation_state","formation_date","sos_active","sos_match","sos_match_boolean"])}
 
-        analyst_card("🔬 Domestic vs Foreign — Key Insights",[
-            "A business incorporated in Delaware (domestic) but operating in Texas has TWO SOS records: (1) Domestic = Delaware (primary), (2) Foreign qualification = Texas (secondary). Both are legitimate and valid.",
-            "Entity resolution gap: Middesk's default search is by submitted office address. If the Texas address is submitted, Middesk finds the Texas FOREIGN record. It may miss the Delaware DOMESTIC primary. This causes sos_match_boolean=false as a FALSE NEGATIVE — the entity IS real and registered, just not found via address search.",
-            f"{'⚠️ CURRENT BUSINESS: ' + form_state + ' is a tax-haven state (no state income tax, minimal disclosure). High probability of domestic+foreign split. Always verify both records.' if tax_haven else '✅ ' + (form_state or 'Unknown') + ' — no tax-haven signal detected for this business.'}",
-            "Resolution: when sos_match_boolean=false AND formation_state ≠ operating state, re-run Middesk search using formation_state as the jurisdiction parameter. Also check OpenCorporates alternative in the alternatives[] array.",
-            "Admin Portal shows: domestic filing → 'Primary' green badge, foreign filing → 'Secondary' grey badge. Multiple filings are possible (one per state where registered to operate).",
+-- 3. Cross-check: businesses where sos_match=false but have domestic filing
+--    (entity resolution false negatives) — run on PostgreSQL RDS:
+SELECT f.business_id,
+    sos.value->>'value'       AS sos_match_boolean,
+    filing->>'foreign_domestic' AS filing_type,
+    filing->>'state'            AS filing_state,
+    filing->>'active'           AS is_active
+FROM rds_warehouse_public.facts f
+CROSS JOIN jsonb_array_elements(f.value->'value') AS filing
+JOIN rds_warehouse_public.facts sos
+  ON sos.business_id=f.business_id AND sos.name='sos_match_boolean'
+WHERE f.name='sos_filings'
+  AND sos.value->>'value'='false'
+  AND filing->>'foreign_domestic'='domestic'
+  AND filing->>'active'='true'
+LIMIT 100;""", language="sql")
+
+        analyst_card("🔬 Domestic vs Foreign — Complete Engineering Analysis",[
+            f"CURRENT BUSINESS: formation_state={form_state_up or '(unknown)'}, "
+            f"operating_state={op_state or '(unknown)'}, states_differ={states_differ}, "
+            f"tax_haven={is_th}, sos_match_boolean={sos_match}. "
+            f"{'⚠️ ENTITY RESOLUTION GAP LIKELY — verify both domestic and foreign filings.' if states_differ and sos_match!='true' else '✅ No entity resolution gap detected for this specific business.'}",
+            "sos_filings fact: stores an array of SoSRegistration objects. Each has: id, jurisdiction (us::state), "
+            "filing_date, entity_type, active (bool), foreign_domestic ('domestic'|'foreign'), state, url, "
+            "filing_name, registration_date, officers[]. Source: Middesk (pid=16) wins via factWithHighestConfidence if conf > OC.",
+            "foreign_domestic field is set by Middesk from their API's registrations[].foreignDomestic field. "
+            "OC sets it by comparing home_jurisdiction_code to the filing's jurisdiction. "
+            "If Middesk wins, OC's assessment of domestic/foreign is in the alternatives[].",
+            "sos_active is a DERIVED fact (platformId=-1, ruleApplied=null, source='dependent'). "
+            "It is computed by the Fact Engine as: ANY(filing.active for filing in sos_filings.value). "
+            "It is NOT a direct vendor query. The 'dependencies' field lists ['sos_filings'].",
+            "Admin Portal: KYB → Business Registration → EntityJurisdictionCell.tsx. "
+            "Domestic filing → green 'Primary' badge. Foreign filing → grey 'Secondary' badge. "
+            "Sorted by active=true first, then by domestic before foreign. Multiple badges possible.",
+            "sos_filings exceeds Redshift federation VARCHAR(65535) limit. Must be queried from "
+            "PostgreSQL RDS (port 5432) using JSONB operators (->>, jsonb_array_elements). "
+            "The scalar proxy facts (sos_active, sos_match_boolean, formation_state) are safe in Redshift.",
         ])
 
     with r3:
