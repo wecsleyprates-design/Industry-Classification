@@ -5542,6 +5542,46 @@ elif tab=="📋 All Facts":
       <div style="color:#64748b;font-size:.68rem">{has_val} facts with values · {null_n} null · {large_n} too large for Redshift federation</div>
     </div>""",unsafe_allow_html=True)
 
+    # ── KPI detail panels — sequential full-width (safe outside any expander) ──
+    _all_sql = f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value, JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS winning_pid, received_at FROM rds_warehouse_public.facts WHERE business_id='{bid}' ORDER BY name;"
+    detail_panel("📊 Total Facts", str(total),
+        what_it_means=f"Total distinct fact names stored for this business in rds_warehouse_public.facts. Each fact is a KYB data point (e.g. sos_active, tin_match_boolean, naics_code). Fill rate={fill_pct}%: {has_val} have values, {null_n} are null (vendor did not match), {large_n} are too large for Redshift federation.",
+        source_table="rds_warehouse_public.facts",
+        source_file="facts/kyb/index.ts", source_file_line="All KYB facts defined in integration-service",
+        api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → all data.* keys",
+        json_obj={"total_facts":total,"has_value":has_val,"null":null_n,"too_large":large_n,"has_alts":with_alts,"fill_rate_pct":fill_pct},
+        sql=_all_sql,
+        links=[("facts/kyb/index.ts","KYB fact definitions"),("facts/rules.ts","Fact Engine rules"),("openapi/integration","API Reference")],
+        color="#3B82F6", icon="📊")
+    detail_panel("✅ Has Value", str(has_val),
+        what_it_means=f"{has_val} facts have a non-null value (the winning vendor returned data). Fill rate={fill_pct}%. Low fill rate (<50%) means vendors could not match this entity — common for very new or micro businesses.",
+        source_table="rds_warehouse_public.facts · JSON_EXTRACT_PATH_TEXT(value,'value') IS NOT NULL",
+        source_file="facts/kyb/index.ts", source_file_line="Fact Engine winner selection — factWithHighestConfidence",
+        json_obj={"has_value_count":has_val,"total":total,"fill_rate_pct":fill_pct,"note":"Low fill = vendor entity matching failed"},
+        sql=f"SELECT COUNT(DISTINCT name) AS facts_with_values FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND JSON_EXTRACT_PATH_TEXT(value,'value') IS NOT NULL;",
+        links=[("facts/rules.ts","factWithHighestConfidence rule")], color="#22c55e", icon="✅")
+    detail_panel("⚪ Null Facts", str(null_n),
+        what_it_means=f"{null_n} facts have value=null. Causes: (1) Vendor entity matching failed — ZI/EFX/OC/Middesk could not find this business. (2) Optional field not submitted (email, phone). (3) Dependent fact whose source is also null. (4) Integration not enabled when this business was onboarded.",
+        source_table="rds_warehouse_public.facts · JSON_EXTRACT_PATH_TEXT(value,'value') IS NULL",
+        source_file="facts/kyb/index.ts", source_file_line="Null = no vendor matched OR dependent fact source is null",
+        json_obj={"null_count":null_n,"causes":["entity matching failed","optional field not submitted","dependent on another null fact","integration not enabled"]},
+        sql=f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND JSON_EXTRACT_PATH_TEXT(value,'value') IS NULL ORDER BY name;",
+        links=[("facts/kyb/index.ts","Fact definitions"),("integrations.constant.ts","Vendor IDs")], color="#64748b", icon="⚪")
+    detail_panel("📦 Too Large for Redshift", str(large_n),
+        what_it_means=f"{large_n} facts exceed the Redshift federation VARCHAR(65535) limit. These must be queried from PostgreSQL RDS (port 5432) using native JSONB operators. Affected facts: sos_filings, watchlist, watchlist_raw, bankruptcies, judgements, liens, people, addresses, internal_platform_matches_combined.",
+        source_table="rds_warehouse_public.facts (PostgreSQL RDS port 5432 — NOT queryable from Redshift)",
+        source_file="facts/kyb/index.ts", source_file_line="KNOWN_LARGE set in kyb_hub_app.py load_facts()",
+        json_obj={"too_large_count":large_n,"large_fact_names":["sos_filings","watchlist","watchlist_raw","bankruptcies","judgements","liens","people","addresses"],"solution":"Query from PostgreSQL RDS port 5432 using JSONB operators"},
+        sql="-- PostgreSQL RDS (port 5432) — NOT Redshift:\nSELECT value->'value' FROM rds_warehouse_public.facts WHERE business_id='" + bid + "' AND name='sos_filings';",
+        links=[("facts/kyb/index.ts","KNOWN_LARGE fact names")], color="#f59e0b", icon="📦")
+    detail_panel("🔀 Has Alternatives", str(with_alts),
+        what_it_means=f"{with_alts} facts have alternatives[] — other vendors also returned data but lost the Fact Engine competition. The winner is shown in the table; alternatives are in the JSON value.alternatives[] array. Click any fact expander below to see which vendors lost and their confidence scores.",
+        source_table="rds_warehouse_public.facts · JSON_EXTRACT_PATH_TEXT(value,'alternatives')",
+        source_file="facts/rules.ts", source_file_line="factWithHighestConfidence — losers stored in alternatives[]",
+        json_obj={"facts_with_alts":with_alts,"note":"alternatives[] array stores all losing vendors with their value and confidence"},
+        sql=f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'alternatives') AS alternatives FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND JSON_ARRAY_LENGTH(JSON_EXTRACT_PATH_TEXT(value,'alternatives')) > 0 ORDER BY name;",
+        links=[("facts/rules.ts","factWithHighestConfidence — alternatives")], color="#8B5CF6", icon="🔀")
+
     st.markdown("---")
 
     # ── Column guide (collapsible) ─────────────────────────────────────────────
@@ -5894,11 +5934,10 @@ elif tab=="📋 All Facts":
                     f"<ul style='margin:4px 0 0 16px'>{null_items}</ul></div></details>",
                     unsafe_allow_html=True)
 
-            # ── Group-level detail_panel: SQL + Python for all facts in this group ──
+            # ── Group SQL + Python (inline card — NO expander, we are already inside one) ──
             _grp_fact_names = [r["Fact"].strip("`") for r in rows]
-            _grp_names_str = ",".join(f"'{n}'" for n in _grp_fact_names[:20])  # limit for SQL length
+            _grp_names_str = ",".join(f"'{n}'" for n in _grp_fact_names[:20])
             _grp_sql = (
-                f"-- All facts in group '{grp.split(' ',1)[-1] if ' ' in grp else grp}' for this business:\n"
                 f"SELECT name,\n"
                 f"       JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,\n"
                 f"       JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS winning_pid,\n"
@@ -5910,34 +5949,33 @@ elif tab=="📋 All Facts":
                 f"  AND name IN ({_grp_names_str})\n"
                 f"ORDER BY name;"
             )
-            _grp_json = {
-                "group": grp,
-                "total_facts": len(rows),
-                "with_values": g_val,
-                "null_facts": g_null,
-                "fact_names": _grp_fact_names,
-                "source_table": "rds_warehouse_public.facts",
-                "source_api": f"GET /integration/api/v1/facts/business/{{bid}}/kyb",
-            }
-            detail_panel(
-                f"📋 {grp.split(' ',1)[-1] if ' ' in grp else grp} — all {len(rows)} facts",
-                f"{g_val} with values · {g_null} null",
-                what_it_means=(
-                    f"Group contains: {', '.join(_grp_fact_names[:10])}{'...' if len(_grp_fact_names)>10 else ''}. "
-                    f"{g_val} facts have values, {g_null} are null. "
-                    "Null means the vendor could not match this entity OR the field was not submitted. "
-                    "All facts stored in rds_warehouse_public.facts — the JSON value column contains: "
-                    "value (actual data), source.platformId (winning vendor), source.confidence, ruleApplied.name, alternatives[]."
-                ),
-                source_table="rds_warehouse_public.facts",
-                source_file="facts/kyb/index.ts",
-                source_file_line="All KYB facts defined in integration-service/lib/facts/kyb/index.ts and lib/facts/businessDetails/index.ts",
-                api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.{{fact_name}}",
-                json_obj=_grp_json,
-                sql=_grp_sql,
-                links=[("facts/kyb/index.ts","KYB fact definitions"),("facts/rules.ts","Fact Engine rules"),("openapi/integration","API Reference")],
-                color="#3B82F6", icon="📋"
+            _grp_py = _make_python_from_sql(_grp_sql)
+            # Render as inline card (no expander — nested expanders forbidden)
+            st.markdown(
+                f"<div style='background:#0c1a2e;border-left:3px solid #3B82F6;border-radius:8px;"
+                f"padding:10px 14px;margin:8px 0'>"
+                f"<div style='color:#60A5FA;font-weight:700;font-size:.80rem;margin-bottom:6px'>"
+                f"📋 Group: {grp.split(' ',1)[-1] if ' ' in grp else grp} — "
+                f"{len(rows)} facts · {g_val} with values · {g_null} null</div>"
+                f"<div style='font-size:.75rem;color:#94A3B8;margin-bottom:6px'>"
+                f"Facts: <code style='color:#60A5FA'>{', '.join(_grp_fact_names[:12])}{'…' if len(_grp_fact_names)>12 else ''}</code><br>"
+                f"Source: <code>rds_warehouse_public.facts</code> · "
+                f"API: <code>GET /integration/api/v1/facts/business/{{bid}}/kyb</code></div>"
+                f"<div>" + src_links_html([
+                    ("facts/kyb/index.ts","KYB fact definitions"),
+                    ("facts/rules.ts","Fact Engine rules"),
+                    ("openapi/integration","API Reference"),
+                ]) + "</div></div>",
+                unsafe_allow_html=True
             )
+            # SQL + Python side by side (no expander wrapper)
+            _gc1, _gc2 = st.columns(2)
+            with _gc1:
+                st.markdown("**SQL (Redshift):**")
+                st.code(_grp_sql, language="sql")
+            with _gc2:
+                st.markdown("**Python (paste into 🐍 Runner):**")
+                st.code(_grp_py or "# see SQL", language="python")
 
     st.markdown("---")
     st.markdown("#### 🔍 SQL Reference — Full Business Investigation")
