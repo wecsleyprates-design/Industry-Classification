@@ -4051,52 +4051,48 @@ ORDER BY name, received_at DESC;""",language="sql")
         ra_v=facts.get("address_registered_agent",{}).get("value",{})
 
         ra_status=ra_v.get("status","") if isinstance(ra_v,dict) else ""
-        c1,c2,c3,c4=st.columns(4)
+        ra_msg_v=ra_v.get("message","") if isinstance(ra_v,dict) else ""
         _addr_sql=f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('address_match_boolean','name_match_boolean','addresses_deliverable','address_registered_agent') ORDER BY name;"
-        with c1:
-            kpi("Address Match","✅ Matched" if am_bool=="true" else "❌ No match" if am_bool=="false" else "⚠️ Unknown",
-                     "address_match_boolean","#22c55e" if am_bool=="true" else "#ef4444")
-            detail_panel("Address Match", am_bool or "Unknown",
-                what_it_means="address_match_boolean is a DEPENDENT fact derived from address_verification.value.status==='success'. Middesk (pid=16) searches SOS registry and USPS for the submitted address. true = Middesk found and verified the address. false = address not found or not verified.",
-                source_table="rds_warehouse_public.facts · name='address_match_boolean'",
-                source_file="facts/kyb/index.ts", source_file_line="addressMatchBoolean · dependent · address_verification.status==='success'",
-                json_obj={"name":"address_match_boolean","value":am_bool=="true" if am_bool else None,"source":{"platformId":-1,"name":"dependent"},"dependencies":["address_match"]},
-                sql=_addr_sql, links=[("facts/kyb/index.ts","addressMatchBoolean"),("integrations.constant.ts","MIDDESK=16")],
-                color="#22c55e" if am_bool=="true" else "#ef4444", icon="📍")
-        with c2:
-            kpi("Name Match","✅ Matched" if nm_bool=="true" else "❌ No match" if nm_bool=="false" else "⚠️ Unknown",
-                     "name_match_boolean","#22c55e" if nm_bool=="true" else "#ef4444")
-            detail_panel("Name Match", nm_bool or "Unknown",
-                what_it_means="name_match_boolean is derived from name_match.value.status==='success'. Middesk compares the submitted business name against the SOS registry name. false for DBAs is EXPECTED — the legal name in the SOS differs from the submitted trade name. Does NOT indicate fraud.",
-                source_table="rds_warehouse_public.facts · name='name_match_boolean'",
-                source_file="facts/kyb/index.ts", source_file_line="nameMatchBoolean · dependent · name_match.value.status==='success'",
-                json_obj={"name":"name_match_boolean","value":nm_bool=="true" if nm_bool else None,"source":{"platformId":-1,"name":"dependent"},"dependencies":["name_match"],"note":"false for DBAs is expected — not a fraud signal"},
-                sql=_addr_sql, links=[("facts/kyb/index.ts","nameMatchBoolean")],
-                color="#22c55e" if nm_bool=="true" else "#ef4444", icon="🏢")
-        with c3:
-            kpi("Deliverable Address","✅ Yes" if gv(facts,"addresses_deliverable") else "⚠️ Unknown",
-                     "USPS confirmed deliverable","#22c55e" if gv(facts,"addresses_deliverable") else "#64748b")
-            detail_panel("Deliverable Address", "Yes" if gv(facts,"addresses_deliverable") else "Unknown",
-                what_it_means="addresses_deliverable is a subset of all known addresses that have been confirmed as USPS-deliverable by Middesk. Used for mail-based verification. An empty list means no address was confirmed deliverable — may indicate a PO box, virtual office, or address error.",
-                source_table="rds_warehouse_public.facts · name='addresses_deliverable'",
-                source_file="facts/kyb/index.ts", source_file_line="addressesDeliverable · Middesk pid=16 · USPS CASS verification",
-                json_obj={"name":"addresses_deliverable","source":{"platformId":16,"name":"middesk"},"note":"Subset of addresses confirmed USPS-deliverable"},
-                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS deliverable FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='addresses_deliverable';",
-                links=[("facts/kyb/index.ts","addressesDeliverable"),("integrations.constant.ts","MIDDESK=16")],
-                color="#22c55e" if gv(facts,"addresses_deliverable") else "#64748b", icon="📮")
-        with c4:
-            kpi("Registered Agent Addr","⚠️ WARNING" if ra_status=="warning" else "✅ OK",
-                "address_registered_agent","#f59e0b" if ra_status=="warning" else "#22c55e")
-            ra_msg=ra_v.get("message","") if isinstance(ra_v,dict) else ""
-            detail_panel("Registered Agent Addr", ra_status or "OK",
-                what_it_means=f"address_registered_agent.status='{ra_status or 'ok'}': {ra_msg or 'No warning — address is not a known registered agent address'}. WARNING means the submitted address is associated with a known registered agent (e.g. CT Corporation, The Corporation Trust Company). Common for DE/NV/WY tax-haven incorporations. Indicates entity may NOT physically operate at this address.",
-                source_table="rds_warehouse_public.facts · name='address_registered_agent'",
-                source_file="facts/kyb/index.ts", source_file_line="addressRegisteredAgent · Middesk pid=16",
-                api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.address_registered_agent.value.status",
-                json_obj={"name":"address_registered_agent","value":ra_v if isinstance(ra_v,dict) else {"status":ra_status},"source":{"platformId":16,"name":"middesk"}},
-                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','status') AS ra_status, JSON_EXTRACT_PATH_TEXT(value,'value','message') AS ra_msg FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='address_registered_agent';",
-                links=[("facts/kyb/index.ts","addressRegisteredAgent"),("integrations.constant.ts","MIDDESK=16")],
-                color="#f59e0b" if ra_status=="warning" else "#22c55e", icon="⚠️" if ra_status=="warning" else "✅")
+
+        # KPI cards — card only, no expander inside columns
+        c1,c2,c3,c4=st.columns(4)
+        with c1: kpi("Address Match","✅ Matched" if am_bool=="true" else "❌ No match" if am_bool=="false" else "⚠️ Unknown","address_match_boolean","#22c55e" if am_bool=="true" else "#ef4444")
+        with c2: kpi("Name Match","✅ Matched" if nm_bool=="true" else "❌ No match" if nm_bool=="false" else "⚠️ Unknown","name_match_boolean","#22c55e" if nm_bool=="true" else "#ef4444")
+        with c3: kpi("Deliverable Address","✅ Yes" if gv(facts,"addresses_deliverable") else "⚠️ Unknown","USPS confirmed deliverable","#22c55e" if gv(facts,"addresses_deliverable") else "#64748b")
+        with c4: kpi("Registered Agent Addr","⚠️ WARNING" if ra_status=="warning" else "✅ OK","address_registered_agent","#f59e0b" if ra_status=="warning" else "#22c55e")
+
+        # Detail panels — sequential full-width below columns (no overlap)
+        detail_panel("📍 Address Match", am_bool or "Unknown",
+            what_it_means="address_match_boolean is DEPENDENT — derived from address_verification.value.status==='success'. Middesk (pid=16) searches SOS registry + USPS for the submitted address. true = verified. false = not found or not verified.",
+            source_table="rds_warehouse_public.facts · name='address_match_boolean'",
+            source_file="facts/kyb/index.ts", source_file_line="addressMatchBoolean · dependent · address_verification.status==='success'",
+            json_obj={"name":"address_match_boolean","value":am_bool=="true" if am_bool else None,"source":{"platformId":-1,"name":"dependent"},"dependencies":["address_match"]},
+            sql=_addr_sql, links=[("facts/kyb/index.ts","addressMatchBoolean"),("integrations.constant.ts","MIDDESK=16")],
+            color="#22c55e" if am_bool=="true" else "#ef4444", icon="📍")
+        detail_panel("🏢 Name Match", nm_bool or "Unknown",
+            what_it_means="name_match_boolean derived from name_match.value.status==='success'. Middesk compares submitted name vs SOS registry. false for DBAs is EXPECTED (legal name differs from trade name). Does NOT indicate fraud.",
+            source_table="rds_warehouse_public.facts · name='name_match_boolean'",
+            source_file="facts/kyb/index.ts", source_file_line="nameMatchBoolean · dependent · name_match.value.status==='success'",
+            json_obj={"name":"name_match_boolean","value":nm_bool=="true" if nm_bool else None,"source":{"platformId":-1,"name":"dependent"},"dependencies":["name_match"]},
+            sql=_addr_sql, links=[("facts/kyb/index.ts","nameMatchBoolean")],
+            color="#22c55e" if nm_bool=="true" else "#ef4444", icon="🏢")
+        detail_panel("📮 Deliverable Address", "Yes" if gv(facts,"addresses_deliverable") else "Unknown",
+            what_it_means="addresses_deliverable = subset confirmed USPS-deliverable by Middesk. Empty = no deliverable address confirmed (may be PO box, virtual office, or address error).",
+            source_table="rds_warehouse_public.facts · name='addresses_deliverable'",
+            source_file="facts/kyb/index.ts", source_file_line="addressesDeliverable · Middesk pid=16 · USPS CASS verification",
+            json_obj={"name":"addresses_deliverable","source":{"platformId":16,"name":"middesk"}},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS deliverable FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='addresses_deliverable';",
+            links=[("facts/kyb/index.ts","addressesDeliverable"),("integrations.constant.ts","MIDDESK=16")],
+            color="#22c55e" if gv(facts,"addresses_deliverable") else "#64748b", icon="📮")
+        detail_panel("⚠️ Registered Agent Addr", ra_status or "OK",
+            what_it_means=f"address_registered_agent status='{ra_status or 'ok'}': {ra_msg_v or 'No warning'}. WARNING = submitted address is a known registered agent (e.g. CT Corporation). Common for DE/NV/WY incorporations. Entity may NOT operate at this address.",
+            source_table="rds_warehouse_public.facts · name='address_registered_agent'",
+            source_file="facts/kyb/index.ts", source_file_line="addressRegisteredAgent · Middesk pid=16",
+            api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.address_registered_agent.value.status",
+            json_obj={"name":"address_registered_agent","value":ra_v if isinstance(ra_v,dict) else {"status":ra_status},"source":{"platformId":16,"name":"middesk"}},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','status') AS ra_status, JSON_EXTRACT_PATH_TEXT(value,'value','message') AS ra_msg FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='address_registered_agent';",
+            links=[("facts/kyb/index.ts","addressRegisteredAgent"),("integrations.constant.ts","MIDDESK=16")],
+            color="#f59e0b" if ra_status=="warning" else "#22c55e", icon="⚠️" if ra_status=="warning" else "✅")
 
         if ra_status=="warning":
             ra_msg=ra_v.get("message","") if isinstance(ra_v,dict) else ""
@@ -4901,22 +4897,80 @@ FROM warehouse.latest_score WHERE business_id='{bid}';""",language="sql")
             factors_df,_=load_score_factors(bid)
             if factors_df is not None and not factors_df.empty:
                 st.markdown("##### SHAP Factor Contributions by Category")
-                st.caption("Each row = one model category's contribution to the final score. "
-                           "Positive = adds to score. Negative = reduces score. "
-                           "Source: rds_manual_score_public.business_score_factors")
-                # Add category names
+                st.caption("Each row = one model category's SHAP-equivalent contribution. "
+                           "Positive Impact (pts) = adds to score. Negative = reduces score. "
+                           "Source: `rds_manual_score_public.business_score_factors`")
+
                 CAT_NAMES={
-                    "public_records":"📜 Public Records (BK/Judgments/Liens)",
-                    "company_profile":"🏢 Company Profile (Age/NAICS/State/Structure)",
-                    "financial_trends":"📈 Financial Trends (Economics/Ratios)",
-                    "business_operations":"💼 Business Operations (Revenue/P&L/Balance Sheet)",
-                    "performance_measures":"📊 Performance Measures (Profitability/Risk flags)",
+                    "public_records":"📜 Public Records",
+                    "company_profile":"🏢 Company Profile",
+                    "financial_trends":"📈 Financial Trends",
+                    "business_operations":"💼 Business Operations",
+                    "performance_measures":"📊 Performance Measures",
                 }
-                factors_df["Category"]=factors_df["category_id"].map(lambda c: CAT_NAMES.get(c,c))
-                factors_df["Impact (pts)"]=factors_df["weighted_score_850"].apply(lambda v: f"{v:+.1f}")
+                CAT_FEATURES={
+                    "public_records":"count_bankruptcy, age_bankruptcy, count_judgment, age_judgment, count_lien, age_lien, score_reviews, count_reviews",
+                    "company_profile":"age_business, naics6, primsic, state, bus_struct, count_employees, indicator_government, indicator_education",
+                    "financial_trends":"GDP (gdp_pch), CPI (cpi), interest rates (t10y, t2y), VIX, unemployment, debt ratios, FX rates",
+                    "business_operations":"revenue, is_net_income, cf_cash_at_end_of_period, bs_total_liabilities, bs_total_assets, bs_accounts_payable",
+                    "performance_measures":"ratio_return_on_assets, ratio_gross_margin, ratio_debt_to_equity, flag_equity_negative, flag_total_liabilities_over_assets",
+                }
+                CAT_WHAT={
+                    "public_records":"Public court records including bankruptcies (−40pts each), civil judgments (−20pts), tax/mechanic liens (−10pts). Source: Equifax (pid=17). High negative impact.",
+                    "company_profile":"Business identity: age (older=lower risk), NAICS industry code (561499=penalty), state, entity type, employee count. Source: ZI/EFX/Middesk. NAICS=561499 reduces this category significantly.",
+                    "financial_trends":"Macro-economic indicators (GDP growth, CPI, interest rates, VIX, unemployment) + financial ratios from Plaid banking. Source: Liberty/Fed data + Plaid.",
+                    "business_operations":"Revenue, P&L, cash flow, balance sheet from Plaid banking statements. If Plaid not connected → all null → model uses defaults → lower accuracy.",
+                    "performance_measures":"Profitability ratios, solvency flags. flag_equity_negative / flag_total_liabilities_over_assets = highest negative impact binary features.",
+                }
+
+                factors_df["Category"]=factors_df["category_id"].map(lambda c: CAT_NAMES.get(c, f"Category {c}"))
+                factors_df["Impact (pts)"]=factors_df["weighted_score_850"].apply(lambda v: f"{v:+.1f}" if pd.notna(v) else "n/a")
                 factors_df["Score (0-100)"]=factors_df["score_100"].apply(lambda v: f"{v:.1f}" if pd.notna(v) else "n/a")
-                st.dataframe(factors_df[["Category","Score (0-100)","Impact (pts)"]],
-                             use_container_width=True,hide_index=True)
+                factors_df["Features (model inputs)"] = factors_df["category_id"].map(lambda c: CAT_FEATURES.get(c,"see lookups.py"))
+
+                st.dataframe(
+                    factors_df[["Category","Score (0-100)","Impact (pts)","Features (model inputs)"]],
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        "Category": st.column_config.TextColumn("Category", width="medium"),
+                        "Score (0-100)": st.column_config.TextColumn("Score (0-100)", width="small"),
+                        "Impact (pts)": st.column_config.TextColumn("Impact (pts on 850 scale)", width="small"),
+                        "Features (model inputs)": st.column_config.TextColumn("Model features", width="large"),
+                    }
+                )
+
+                _factors_sql = f"""SELECT category_id, score_100, weighted_score_850
+FROM rds_manual_score_public.business_score_factors
+WHERE score_id = (
+    SELECT score_id FROM rds_manual_score_public.data_current_scores
+    WHERE business_id = '{bid}' LIMIT 1
+)
+ORDER BY ABS(weighted_score_850) DESC;"""
+
+                detail_panel("SHAP Factor Contributions Table", f"{len(factors_df)} categories",
+                    what_it_means=(
+                        "Each row = one model category's SHAP-equivalent contribution to the final Worth Score.\n\n"
+                        "category_id values and their meaning:\n"
+                        "• public_records: BK/judgment/lien counts+ages. Source: Equifax pid=17. −40pts/BK, −20pts/judgment, −10pts/lien.\n"
+                        "• company_profile: age, NAICS, state, entity type, employees. Source: ZI/EFX/Middesk. NAICS=561499 = penalty.\n"
+                        "• financial_trends: macro-economic indicators + financial ratios. Source: Liberty/Fed data + Plaid.\n"
+                        "• business_operations: P&L, cash flow, balance sheet from Plaid banking. NULL if Plaid not connected.\n"
+                        "• performance_measures: profitability ratios, solvency flags. flag_equity_negative = high negative impact.\n\n"
+                        "Score (0-100): category raw score (0=worst, 100=best).\n"
+                        "Impact (pts): SHAP contribution in 850-scale points. Sum of all impacts + 300 ≈ final score.\n"
+                        "Source: rds_manual_score_public.business_score_factors (Redshift federated view)."
+                    ),
+                    source_table="rds_manual_score_public.business_score_factors",
+                    source_file="aiscore.py", source_file_line="SHAP scores × 550 → impact_pts. shap_base_points = base_prediction × 550 + 300",
+                    json_obj={
+                        "table":"rds_manual_score_public.business_score_factors",
+                        "columns":{"category_id":"model category","score_100":"0-100 score","weighted_score_850":"pts impact on 850 scale"},
+                        "categories":{k:v for k,v in CAT_WHAT.items()},
+                        "data":factors_df[["category_id","score_100","weighted_score_850"]].to_dict("records")
+                    },
+                    sql=_factors_sql,
+                    links=[("aiscore.py","SHAP computation"),("worth_score_model.py","model pipeline"),("lookups.py","feature definitions")],
+                    color="#8B5CF6", icon="📊")
             else:
                 flag("business_score_factors not accessible from Redshift federation. "
                      "See waterfall tab for estimated factor breakdown.", "blue")
@@ -5051,7 +5105,7 @@ SELECT range_start, range_end, risk_level, decision FROM score_decision_matrix O
                 ("🏢 Company Profile",f"{profile_est:+.0f}",
                  "naics6, primsic, state, bus_struct, indicator_* flags",
                  "naics_code, formation_state, corporation facts",
-                 f"NAICS={'561499 (fallback⚠️)' if not naics_ok else naics}, state={form_state}"),
+                 f"NAICS={'561499 (fallback⚠️)' if not naics_ok else naics}, state={str(gv(facts,'formation_state') or 'unknown')}"),
                 ("📈 Financial Trends",f"{trends_est:+.0f}",
                  "gdp_pch, cpi, vix, t10y2y, unemployment, ratio_debt_to_equity, ...",
                  "Macro: Liberty/Fed data · Ratios: Plaid balance sheet computation",
@@ -5716,6 +5770,51 @@ elif tab=="📋 All Facts":
                     f"calculated from another null fact · integration not enabled at onboarding time.<br>"
                     f"<ul style='margin:4px 0 0 16px'>{null_items}</ul></div></details>",
                     unsafe_allow_html=True)
+
+            # ── Group-level detail_panel: SQL + Python for all facts in this group ──
+            _grp_fact_names = [r["Fact"].strip("`") for r in rows]
+            _grp_names_str = ",".join(f"'{n}'" for n in _grp_fact_names[:20])  # limit for SQL length
+            _grp_sql = (
+                f"-- All facts in group '{grp.split(' ',1)[-1] if ' ' in grp else grp}' for this business:\n"
+                f"SELECT name,\n"
+                f"       JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,\n"
+                f"       JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS winning_pid,\n"
+                f"       JSON_EXTRACT_PATH_TEXT(value,'source','confidence')  AS confidence,\n"
+                f"       JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name')   AS rule_applied,\n"
+                f"       received_at\n"
+                f"FROM rds_warehouse_public.facts\n"
+                f"WHERE business_id = '{bid}'\n"
+                f"  AND name IN ({_grp_names_str})\n"
+                f"ORDER BY name;"
+            )
+            _grp_json = {
+                "group": grp,
+                "total_facts": len(rows),
+                "with_values": g_val,
+                "null_facts": g_null,
+                "fact_names": _grp_fact_names,
+                "source_table": "rds_warehouse_public.facts",
+                "source_api": f"GET /integration/api/v1/facts/business/{{bid}}/kyb",
+            }
+            detail_panel(
+                f"📋 {grp.split(' ',1)[-1] if ' ' in grp else grp} — all {len(rows)} facts",
+                f"{g_val} with values · {g_null} null",
+                what_it_means=(
+                    f"Group contains: {', '.join(_grp_fact_names[:10])}{'...' if len(_grp_fact_names)>10 else ''}. "
+                    f"{g_val} facts have values, {g_null} are null. "
+                    "Null means the vendor could not match this entity OR the field was not submitted. "
+                    "All facts stored in rds_warehouse_public.facts — the JSON value column contains: "
+                    "value (actual data), source.platformId (winning vendor), source.confidence, ruleApplied.name, alternatives[]."
+                ),
+                source_table="rds_warehouse_public.facts",
+                source_file="facts/kyb/index.ts",
+                source_file_line="All KYB facts defined in integration-service/lib/facts/kyb/index.ts and lib/facts/businessDetails/index.ts",
+                api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.{{fact_name}}",
+                json_obj=_grp_json,
+                sql=_grp_sql,
+                links=[("facts/kyb/index.ts","KYB fact definitions"),("facts/rules.ts","Fact Engine rules"),("openapi/integration","API Reference")],
+                color="#3B82F6", icon="📋"
+            )
 
     st.markdown("---")
     st.markdown("#### 🔍 SQL Reference — Full Business Investigation")
