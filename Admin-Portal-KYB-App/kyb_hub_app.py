@@ -420,9 +420,9 @@ def load_audit():
 @st.cache_data(ttl=600, show_spinner=False)
 def load_customer_names(date_from, date_to):
     """
-    Returns distinct customer names (and IDs) for businesses onboarded in the date range.
-    Linked to rel_business_customer_monitoring so it respects the same date filter.
-    Source: rds_auth_public.data_customers (customer name) joined to rbcm (onboarding date).
+    Returns customers with business counts for the date range.
+    Columns: customer_id, customer_name, business_count
+    Source: rds_auth_public.data_customers + rel_business_customer_monitoring.
     Falls back to customer_id list if data_customers not accessible.
     """
     parts = []
@@ -430,26 +430,32 @@ def load_customer_names(date_from, date_to):
     if date_to:   parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
     dc = (" AND " + " AND ".join(parts)) if parts else ""
 
-    # Try joining to rds_auth_public.data_customers for human-readable names
+    # Primary: with human-readable names + business count
     sql_with_names = f"""
-        SELECT DISTINCT
+        SELECT
             rbcm.customer_id,
-            dc.name AS customer_name
+            dc.name                              AS customer_name,
+            COUNT(DISTINCT rbcm.business_id)     AS business_count
         FROM rds_cases_public.rel_business_customer_monitoring rbcm
         JOIN rds_auth_public.data_customers dc ON dc.id = rbcm.customer_id
         WHERE 1=1{dc}
-        ORDER BY dc.name
+        GROUP BY rbcm.customer_id, dc.name
+        ORDER BY business_count DESC, dc.name
     """
     df, err = run_sql(sql_with_names)
     if df is not None and not df.empty and "customer_name" in df.columns:
         return df, None
 
-    # Fallback: just customer_ids if data_customers not accessible
+    # Fallback: customer_ids with counts
     sql_ids = f"""
-        SELECT DISTINCT customer_id, customer_id AS customer_name
+        SELECT
+            customer_id,
+            customer_id                      AS customer_name,
+            COUNT(DISTINCT business_id)      AS business_count
         FROM rds_cases_public.rel_business_customer_monitoring
         WHERE 1=1{dc}
-        ORDER BY customer_id
+        GROUP BY customer_id
+        ORDER BY business_count DESC
     """
     return run_sql(sql_ids)
 
@@ -1569,21 +1575,69 @@ with st.sidebar:
     st.markdown("**🏢 Customer Filter**")
     st.caption("Filters to businesses of a specific customer within the date range above.")
 
-    # Load customer names for the selected date range (cached per date combo)
+    # Load customer names + business counts for the selected date range
     with st.spinner("Loading customers…"):
         cust_df, cust_err = load_customer_names(hub_date_from, hub_date_to)
 
     if cust_df is not None and not cust_df.empty and "customer_name" in cust_df.columns:
+
+        # ── Business count distribution chart (shown above the dropdown) ──
+        has_count = "business_count" in cust_df.columns
+        if has_count and len(cust_df) > 0:
+            # Horizontal bar chart — sorted by count descending
+            chart_df = cust_df.copy()
+            chart_df["short_name"] = chart_df["customer_name"].apply(
+                lambda n: (n[:22] + "…") if len(str(n)) > 22 else str(n)
+            )
+            chart_df = chart_df.sort_values("business_count", ascending=True)  # ascending for horiz bar
+
+            fig_cust = go.Figure(go.Bar(
+                x=chart_df["business_count"],
+                y=chart_df["short_name"],
+                orientation="h",
+                marker_color="#3B82F6",
+                text=chart_df["business_count"].apply(lambda v: f"{v:,}"),
+                textposition="outside",
+                textfont=dict(size=10, color="#E2E8F0"),
+                hovertemplate="<b>%{y}</b><br>%{x:,} businesses<extra></extra>",
+            ))
+            fig_cust.update_layout(
+                height=max(160, len(chart_df) * 28),
+                margin=dict(t=4, b=4, l=4, r=48),
+                xaxis=dict(showgrid=False, showticklabels=False, title=""),
+                yaxis=dict(tickfont=dict(size=9), title=""),
+                paper_bgcolor="#0A0F1E",
+                plot_bgcolor="#1E293B",
+                font_color="#E2E8F0",
+            )
+            st.plotly_chart(fig_cust, use_container_width=True)
+
+            # Summary stats below chart
+            total_cust = len(cust_df)
+            total_biz_cust = int(chart_df["business_count"].sum())
+            top_cust = chart_df.iloc[-1]["short_name"]  # last = highest (ascending)
+            top_count = int(chart_df.iloc[-1]["business_count"])
+            st.caption(
+                f"{total_cust} customers · {total_biz_cust:,} businesses total · "
+                f"Largest: **{top_cust}** ({top_count:,})"
+            )
+
+        # ── Dropdown — with count shown in label ──────────────────────────
         cust_options = ["All Customers"] + [
-            f"{row['customer_name']} ({row['customer_id'][:8]}…)"
-            for _, row in cust_df.iterrows()
+            f"{row['customer_name']} ({int(row['business_count']):,} biz)" if has_count
+            else f"{row['customer_name']} ({row['customer_id'][:8]}…)"
+            for _, row in cust_df.sort_values("business_count", ascending=False).iterrows()
             if row.get("customer_name")
         ]
         # Map display label → customer_id
         cust_id_map = {"All Customers": None}
         for _, row in cust_df.iterrows():
             if row.get("customer_name"):
-                label = f"{row['customer_name']} ({row['customer_id'][:8]}…)"
+                label = (
+                    f"{row['customer_name']} ({int(row['business_count']):,} biz)"
+                    if has_count
+                    else f"{row['customer_name']} ({row['customer_id'][:8]}…)"
+                )
                 cust_id_map[label] = row["customer_id"]
 
         selected_cust = st.selectbox(
@@ -1591,13 +1645,16 @@ with st.sidebar:
             options=cust_options,
             key="hub_customer",
             label_visibility="collapsed",
-            help="Filter all home dashboard data to businesses of this customer only"
+            help="Select a customer to filter the entire Home dashboard to their businesses only"
         )
         hub_customer_id = cust_id_map.get(selected_cust)
         if hub_customer_id:
-            st.caption(f"🏢 Filtering to: **{selected_cust}**")
+            # Show selected customer's count
+            sel_row = cust_df[cust_df["customer_id"] == hub_customer_id]
+            sel_count = int(sel_row["business_count"].iloc[0]) if (has_count and not sel_row.empty) else "?"
+            st.caption(f"🏢 Filtering to **{selected_cust}** · {sel_count:,} businesses")
         else:
-            st.caption(f"Showing all {len(cust_df)} customer(s) in this period")
+            st.caption(f"Showing all {len(cust_df)} customers in this period")
     else:
         hub_customer_id = None
         if cust_err:
