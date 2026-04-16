@@ -418,28 +418,61 @@ def load_audit():
 # Reference query: uses rbcm.created_at filtered by date range, joins facts for KYB signals.
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_home_recent(date_from, date_to):
+def load_customer_names(date_from, date_to):
     """
-    Load recently onboarded businesses using rel_business_customer_monitoring as the
-    authoritative onboarding date source (rbcm.created_at).
-    No LIMIT — returns all businesses in the date range.
-    Falls back to facts table if rbcm is not accessible.
+    Returns distinct customer names (and IDs) for businesses onboarded in the date range.
+    Linked to rel_business_customer_monitoring so it respects the same date filter.
+    Source: rds_auth_public.data_customers (customer name) joined to rbcm (onboarding date).
+    Falls back to customer_id list if data_customers not accessible.
     """
-    parts=[]
+    parts = []
     if date_from: parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
     if date_to:   parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
+    dc = (" AND " + " AND ".join(parts)) if parts else ""
+
+    # Try joining to rds_auth_public.data_customers for human-readable names
+    sql_with_names = f"""
+        SELECT DISTINCT
+            rbcm.customer_id,
+            dc.name AS customer_name
+        FROM rds_cases_public.rel_business_customer_monitoring rbcm
+        JOIN rds_auth_public.data_customers dc ON dc.id = rbcm.customer_id
+        WHERE 1=1{dc}
+        ORDER BY dc.name
+    """
+    df, err = run_sql(sql_with_names)
+    if df is not None and not df.empty and "customer_name" in df.columns:
+        return df, None
+
+    # Fallback: just customer_ids if data_customers not accessible
+    sql_ids = f"""
+        SELECT DISTINCT customer_id, customer_id AS customer_name
+        FROM rds_cases_public.rel_business_customer_monitoring
+        WHERE 1=1{dc}
+        ORDER BY customer_id
+    """
+    return run_sql(sql_ids)
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_home_recent(date_from, date_to, customer_id=None):
+    """
+    Load recently onboarded businesses.
+    customer_id: if provided, filters to businesses belonging to that customer only.
+    """
+    parts=[]
+    if date_from:    parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
+    if date_to:      parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
+    if customer_id:  parts.append(f"rbcm.customer_id = '{customer_id}'")
     dc=(" AND "+" AND ".join(parts)) if parts else ""
 
-    # Primary: use correct onboarding source (rel_business_customer_monitoring)
     sql = f"""
         SELECT DISTINCT
             rbcm.business_id,
-            MIN(rbcm.created_at)           AS first_seen,
-            MAX(rbcm.created_at)           AS last_updated,
-            COUNT(DISTINCT f.name)         AS fact_count
+            MIN(rbcm.created_at)   AS first_seen,
+            MAX(rbcm.created_at)   AS last_updated,
+            COUNT(DISTINCT f.name) AS fact_count
         FROM rds_cases_public.rel_business_customer_monitoring rbcm
-        LEFT JOIN rds_warehouse_public.facts f
-            ON f.business_id = rbcm.business_id
+        LEFT JOIN rds_warehouse_public.facts f ON f.business_id = rbcm.business_id
         WHERE 1=1{dc}
         GROUP BY rbcm.business_id
         ORDER BY first_seen DESC
@@ -448,7 +481,7 @@ def load_home_recent(date_from, date_to):
     if df is not None and not df.empty:
         return df, None
 
-    # Fallback: facts table if rbcm not accessible
+    # Fallback: facts table (no customer filter available)
     parts2=[]
     if date_from: parts2.append(f"received_at >= '{date_from}'")
     if date_to:   parts2.append(f"received_at <= '{date_to} 23:59:59'")
@@ -458,26 +491,24 @@ def load_home_recent(date_from, date_to):
                COUNT(DISTINCT name) AS fact_count
         FROM rds_warehouse_public.facts
         WHERE 1=1{dc2}
-        GROUP BY business_id
-        ORDER BY first_seen DESC
+        GROUP BY business_id ORDER BY first_seen DESC
     """)
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_home_kyb_stats(date_from, date_to):
+def load_home_kyb_stats(date_from, date_to, customer_id=None):
     """
-    KYB health metrics for all onboarded businesses in the date range.
-    Uses rel_business_customer_monitoring for the business list (correct onboarding date),
-    then joins to facts for KYB signal values.
+    KYB health metrics — respects both date range and optional customer filter.
     """
     parts=[]
-    if date_from: parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
-    if date_to:   parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
+    if date_from:    parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
+    if date_to:      parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
+    if customer_id:  parts.append(f"rbcm.customer_id = '{customer_id}'")
     dc=(" AND "+" AND ".join(parts)) if parts else ""
 
     sql = f"""
         WITH onboarded AS (
-            SELECT DISTINCT business_id
-            FROM rds_cases_public.rel_business_customer_monitoring
+            SELECT DISTINCT rbcm.business_id
+            FROM rds_cases_public.rel_business_customer_monitoring rbcm
             WHERE 1=1{dc}
         )
         SELECT
@@ -539,16 +570,17 @@ def load_home_kyb_stats(date_from, date_to):
     """)
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_home_flags(date_from, date_to):
-    """Flag scoring facts — uses rel_business_customer_monitoring for business list."""
+def load_home_flags(date_from, date_to, customer_id=None):
+    """Flag scoring facts — respects both date range and optional customer filter."""
     parts=[]
-    if date_from: parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
-    if date_to:   parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
+    if date_from:    parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
+    if date_to:      parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
+    if customer_id:  parts.append(f"rbcm.customer_id = '{customer_id}'")
     dc=(" AND "+" AND ".join(parts)) if parts else ""
     sql = f"""
         WITH onboarded AS (
-            SELECT DISTINCT business_id
-            FROM rds_cases_public.rel_business_customer_monitoring
+            SELECT DISTINCT rbcm.business_id
+            FROM rds_cases_public.rel_business_customer_monitoring rbcm
             WHERE 1=1{dc}
         )
         SELECT f.business_id, f.name,
@@ -1532,6 +1564,47 @@ with st.sidebar:
         if hub_date_to:   parts.append(f"{col} <= '{hub_date_to} 23:59:59'")
         return (" AND " + " AND ".join(parts)) if parts else ""
 
+    # ── Customer Filter (linked to date range) ───────────────────────────────
+    st.markdown("---")
+    st.markdown("**🏢 Customer Filter**")
+    st.caption("Filters to businesses of a specific customer within the date range above.")
+
+    # Load customer names for the selected date range (cached per date combo)
+    with st.spinner("Loading customers…"):
+        cust_df, cust_err = load_customer_names(hub_date_from, hub_date_to)
+
+    if cust_df is not None and not cust_df.empty and "customer_name" in cust_df.columns:
+        cust_options = ["All Customers"] + [
+            f"{row['customer_name']} ({row['customer_id'][:8]}…)"
+            for _, row in cust_df.iterrows()
+            if row.get("customer_name")
+        ]
+        # Map display label → customer_id
+        cust_id_map = {"All Customers": None}
+        for _, row in cust_df.iterrows():
+            if row.get("customer_name"):
+                label = f"{row['customer_name']} ({row['customer_id'][:8]}…)"
+                cust_id_map[label] = row["customer_id"]
+
+        selected_cust = st.selectbox(
+            "Customer",
+            options=cust_options,
+            key="hub_customer",
+            label_visibility="collapsed",
+            help="Filter all home dashboard data to businesses of this customer only"
+        )
+        hub_customer_id = cust_id_map.get(selected_cust)
+        if hub_customer_id:
+            st.caption(f"🏢 Filtering to: **{selected_cust}**")
+        else:
+            st.caption(f"Showing all {len(cust_df)} customer(s) in this period")
+    else:
+        hub_customer_id = None
+        if cust_err:
+            st.caption(f"Customer names not available: `{str(cust_err)[:60]}`")
+        else:
+            st.caption("No customers found for this period")
+
     st.markdown("---")
     st.markdown("**Sources**")
     for s in ["rds_warehouse_public.facts","rds_manual_score_public.*",
@@ -1568,12 +1641,12 @@ if tab=="🏠 Home":
         st.caption(f"📅 Period: **{period_label}** · Toggle 'Filter by date' in sidebar to change")
     with ref_c:
         if st.button("🔄 Refresh", key="home_refresh", help="Clear cached data and reload from Redshift"):
-            load_home_recent.clear(); load_home_flags.clear(); load_home_kyb_stats.clear(); st.rerun()
+            load_home_recent.clear(); load_home_flags.clear(); load_home_kyb_stats.clear(); load_customer_names.clear(); st.rerun()
     st.markdown("---")
 
     # ── Load recently onboarded businesses (cached) ───────────────────────────
     with st.spinner("Loading portfolio data…"):
-        recent_df, recent_err = load_home_recent(hub_date_from, hub_date_to)
+        recent_df, recent_err = load_home_recent(hub_date_from, hub_date_to, hub_customer_id)
 
     if recent_df is None or recent_df.empty:
         st.warning(f"No businesses found for this period. {recent_err or ''}")
@@ -1583,7 +1656,7 @@ if tab=="🏠 Home":
 
     # ── Red flag scoring (cached) ──────────────────────────────────────────────
     with st.spinner("Scoring red flags…"):
-        flag_df, flag_err = load_home_flags(hub_date_from, hub_date_to)
+        flag_df, flag_err = load_home_flags(hub_date_from, hub_date_to, hub_customer_id)
 
     # Build per-business red flag summary
     biz_flags = {}  # business_id → {flags:[...], score:int}
@@ -1636,7 +1709,7 @@ if tab=="🏠 Home":
 
     # ── Load enriched KYB stats (single bulk query) ───────────────────────────
     with st.spinner("Loading KYB metrics…"):
-        stats_df, stats_err = load_home_kyb_stats(hub_date_from, hub_date_to)
+        stats_df, stats_err = load_home_kyb_stats(hub_date_from, hub_date_to, hub_customer_id)
 
     # Build per-business flag map from the pivoted stats_df (faster than flag_df loop)
     biz_flags = {}
@@ -1731,13 +1804,15 @@ if tab=="🏠 Home":
     # Source attribution banner
     _src_primary = "rds_cases_public.rel_business_customer_monitoring (created_at = true onboarding date)"
     _src_facts   = "rds_warehouse_public.facts (KYB signal values)"
+    _cust_label = f" · 🏢 Customer: **{selected_cust if hub_customer_id else 'All'}**" if "selected_cust" in dir() else ""
     st.markdown(
         f"<div style='background:#0c1a2e;border-left:3px solid #3B82F6;border-radius:6px;"
         f"padding:8px 14px;margin:4px 0;font-size:.76rem'>"
-        f"📅 <strong style='color:#CBD5E1'>{period_label}</strong> · "
+        f"📅 <strong style='color:#CBD5E1'>{period_label}</strong>"
+        f"{_cust_label} · "
         f"<strong style='color:#60A5FA'>{total_biz:,} businesses</strong> · "
-        f"Onboarding date source: <code style='color:#22c55e'>rds_cases_public.rel_business_customer_monitoring.created_at</code> · "
-        f"KYB signals: <code style='color:#22c55e'>rds_warehouse_public.facts</code>"
+        f"Source: <code style='color:#22c55e'>rel_business_customer_monitoring.created_at</code> · "
+        f"KYB: <code style='color:#22c55e'>rds_warehouse_public.facts</code>"
         f"</div>",
         unsafe_allow_html=True
     )
