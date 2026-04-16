@@ -1935,6 +1935,9 @@ if tab=="🏠 Home":
 
     total_biz = len(recent_df)
 
+    # Build the authoritative business ID list once — used by all three data loaders
+    _authoritative_bids = recent_df["business_id"].tolist()
+
     # ── Red flag scoring — query facts directly for the authoritative business list ──
     @st.cache_data(ttl=600, show_spinner=False)
     def _load_flags_for_bids(bid_tuple):
@@ -2007,14 +2010,7 @@ if tab=="🏠 Home":
             if flags or score > 0:
                 biz_flags[bid_check] = {"flags": flags, "score": score}
 
-    # ── Load enriched KYB stats using recent_df as the authoritative business list ──
-    # Strategy: query facts for EXACTLY the business IDs in recent_df.
-    # This is the most reliable approach because:
-    # (1) recent_df already has the correct filtered businesses (date + customer)
-    # (2) We don't depend on rbcm being accessible a second time
-    # (3) The IN clause guarantees the result matches recent_df exactly
-    _authoritative_bids = recent_df["business_id"].tolist() if recent_df is not None else []
-
+    # ── Load enriched KYB stats using the same authoritative business ID list ──
     @st.cache_data(ttl=600, show_spinner=False)
     def _load_stats_for_bids(bid_tuple):
         """Load KYB stats for a specific list of business IDs."""
