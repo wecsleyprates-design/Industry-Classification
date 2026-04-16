@@ -22,6 +22,11 @@ st.set_page_config(page_title="KYB Intelligence Hub", page_icon="🔬",
                    layout="wide", initial_sidebar_state="expanded")
 BASE = Path(__file__).parent
 
+# ── Theme: default = dark, user can toggle to light ───────────────────────────
+if "theme_mode" not in st.session_state:
+    st.session_state["theme_mode"] = "dark"
+_dark = st.session_state["theme_mode"] == "dark"
+
 # ── GitHub source links ────────────────────────────────────────────────────────
 REPO = "https://github.com/wecsleyprates-design/Industry-Classification/blob/main/Admin-Portal-KYB-App"
 GITHUB_LINKS = {
@@ -72,30 +77,83 @@ def src_links_html(keys_labels):
             parts.append(f'<span style="background:#1e293b;color:#94A3B8;padding:2px 8px;border-radius:12px;font-size:.72rem;margin:1px;display:inline-block">`{txt}`</span>')
     return " ".join(parts)
 
-# ── CSS ───────────────────────────────────────────────────────────────────────
-st.markdown("""<style>
-  .main{background:#0A0F1E}.kpi{background:#1E293B;border-radius:10px;
-  padding:14px 18px;border-left:4px solid #3B82F6;margin-bottom:6px}
-  .kpi .lbl{color:#94A3B8;font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}
-  .kpi .val{color:#F1F5F9;font-size:1.4rem;font-weight:700}
-  .kpi .sub{color:#64748B;font-size:.75rem;margin-top:2px}
-  .analyst{background:#0C1A2E;border:1px solid #1E3A5F;border-radius:10px;
-  padding:14px 16px;margin:8px 0}
-  .analyst .hdr{color:#60A5FA;font-weight:700;font-size:.86rem;margin-bottom:6px}
-  .analyst p{color:#CBD5E1;font-size:.82rem;margin:3px 0;line-height:1.6}
-  .flow-step{background:#1E293B;border-left:3px solid #3B82F6;border-radius:8px;
-  padding:9px 14px;margin:3px 0;font-size:.80rem;color:#CBD5E1}
-  .flag-red{background:#1f0a0a;border-left:4px solid #ef4444;border-radius:8px;
-  padding:10px 14px;margin:5px 0;color:#fca5a5;font-size:.82rem}
-  .flag-amber{background:#1c1917;border-left:4px solid #f59e0b;border-radius:8px;
-  padding:10px 14px;margin:5px 0;color:#fde68a;font-size:.82rem}
-  .flag-green{background:#052e16;border-left:4px solid #22c55e;border-radius:8px;
-  padding:10px 14px;margin:5px 0;color:#86efac;font-size:.82rem}
-  .flag-blue{background:#0c1a2e;border-left:4px solid #60a5fa;border-radius:8px;
-  padding:10px 14px;margin:5px 0;color:#93c5fd;font-size:.82rem}
-  details summary{font-size:.80rem !important}
-  details pre{font-size:.78rem !important}
-  .src-badge a{font-size:.75rem}
+# ── CSS — dark / light themes ─────────────────────────────────────────────────
+if _dark:
+    _bg          = "#0A0F1E"
+    _bg2         = "#1E293B"
+    _bg3         = "#0C1A2E"
+    _border      = "#1E3A5F"
+    _text        = "#F1F5F9"
+    _text_sub    = "#94A3B8"
+    _text_muted  = "#64748B"
+    _text_body   = "#CBD5E1"
+    _accent      = "#60A5FA"
+    _flag_red_bg = "#1f0a0a"; _flag_red_txt   = "#fca5a5"
+    _flag_amb_bg = "#1c1917"; _flag_amb_txt   = "#fde68a"
+    _flag_grn_bg = "#052e16"; _flag_grn_txt   = "#86efac"
+    _flag_blu_bg = "#0c1a2e"; _flag_blu_txt   = "#93c5fd"
+    _card_bg     = "#1E293B"
+    _pre_bg      = "#0f172a"
+    _badge_bg    = "#1e3a5f"; _badge_txt = "#60A5FA"
+    _streamlit_override = ""  # dark = default, no Streamlit-level override needed
+else:
+    _bg          = "#F8FAFC"
+    _bg2         = "#FFFFFF"
+    _bg3         = "#EFF6FF"
+    _border      = "#BFDBFE"
+    _text        = "#0F172A"
+    _text_sub    = "#475569"
+    _text_muted  = "#64748B"
+    _text_body   = "#1E293B"
+    _accent      = "#2563EB"
+    _flag_red_bg = "#FEF2F2"; _flag_red_txt   = "#B91C1C"
+    _flag_amb_bg = "#FFFBEB"; _flag_amb_txt   = "#92400E"
+    _flag_grn_bg = "#F0FDF4"; _flag_grn_txt   = "#166534"
+    _flag_blu_bg = "#EFF6FF"; _flag_blu_txt   = "#1D4ED8"
+    _card_bg     = "#FFFFFF"
+    _pre_bg      = "#F1F5F9"
+    _badge_bg    = "#DBEAFE"; _badge_txt = "#1D4ED8"
+    # Override Streamlit's own dark theme with light colours
+    _streamlit_override = f"""
+    .stApp {{ background-color: {_bg} !important; color: {_text} !important; }}
+    section[data-testid="stSidebar"] {{ background-color: #F1F5F9 !important; }}
+    section[data-testid="stSidebar"] * {{ color: {_text} !important; }}
+    .stTextInput input, .stSelectbox div, .stDateInput input {{
+        background:#FFFFFF !important; color:{_text} !important; border-color:#CBD5E1 !important;
+    }}
+    .stMarkdown, .stMarkdown p, .stMarkdown li {{ color: {_text_body} !important; }}
+    .stDataFrame {{ background: #FFFFFF !important; }}
+    .stExpander {{ background: #FFFFFF !important; border: 1px solid #E2E8F0 !important; }}
+    .stExpander summary {{ color: {_accent} !important; }}
+    .stButton button {{ background: {_accent} !important; color: #FFFFFF !important; }}
+    .stCaption, .stCaption p {{ color: {_text_muted} !important; }}
+    code {{ background: #E2E8F0 !important; color: #1E293B !important; }}
+    pre {{ background: {_pre_bg} !important; color: {_text_body} !important; }}
+    """
+
+st.markdown(f"""<style>
+{_streamlit_override}
+  .main{{background:{_bg}}}
+  .kpi{{background:{_bg2};border-radius:10px;padding:14px 18px;border-left:4px solid #3B82F6;margin-bottom:6px}}
+  .kpi .lbl{{color:{_text_sub};font-size:.75rem;text-transform:uppercase;letter-spacing:.05em}}
+  .kpi .val{{color:{_text};font-size:1.4rem;font-weight:700}}
+  .kpi .sub{{color:{_text_muted};font-size:.75rem;margin-top:2px}}
+  .analyst{{background:{_bg3};border:1px solid {_border};border-radius:10px;padding:14px 16px;margin:8px 0}}
+  .analyst .hdr{{color:{_accent};font-weight:700;font-size:.86rem;margin-bottom:6px}}
+  .analyst p{{color:{_text_body};font-size:.82rem;margin:3px 0;line-height:1.6}}
+  .flow-step{{background:{_bg2};border-left:3px solid #3B82F6;border-radius:8px;
+  padding:9px 14px;margin:3px 0;font-size:.80rem;color:{_text_body}}}
+  .flag-red{{background:{_flag_red_bg};border-left:4px solid #ef4444;border-radius:8px;
+  padding:10px 14px;margin:5px 0;color:{_flag_red_txt};font-size:.82rem}}
+  .flag-amber{{background:{_flag_amb_bg};border-left:4px solid #f59e0b;border-radius:8px;
+  padding:10px 14px;margin:5px 0;color:{_flag_amb_txt};font-size:.82rem}}
+  .flag-green{{background:{_flag_grn_bg};border-left:4px solid #22c55e;border-radius:8px;
+  padding:10px 14px;margin:5px 0;color:{_flag_grn_txt};font-size:.82rem}}
+  .flag-blue{{background:{_flag_blu_bg};border-left:4px solid #60a5fa;border-radius:8px;
+  padding:10px 14px;margin:5px 0;color:{_flag_blu_txt};font-size:.82rem}}
+  details summary{{font-size:.80rem !important}}
+  details pre{{font-size:.78rem !important}}
+  .src-badge a{{font-size:.75rem;background:{_badge_bg};color:{_badge_txt};}}
 </style>""", unsafe_allow_html=True)
 
 # ── Platform ID map — from integration-service/src/constants/integrations.constant.ts ─
@@ -257,8 +315,22 @@ def analyst_card(title, points):
                 unsafe_allow_html=True)
 
 def dark_chart(fig):
-    fig.update_layout(paper_bgcolor="#0A0F1E",plot_bgcolor="#1E293B",font_color="#E2E8F0",
-                      legend=dict(bgcolor="#1E293B"),margin=dict(t=50,b=10,l=10,r=10))
+    """Apply the current theme (dark or light) to a Plotly figure."""
+    is_light = st.session_state.get("theme_mode","dark") == "light"
+    if is_light:
+        fig.update_layout(
+            paper_bgcolor="#FFFFFF", plot_bgcolor="#F8FAFC",
+            font_color="#0F172A",
+            legend=dict(bgcolor="#F1F5F9", bordercolor="#E2E8F0"),
+            margin=dict(t=50,b=10,l=10,r=10)
+        )
+    else:
+        fig.update_layout(
+            paper_bgcolor="#0A0F1E", plot_bgcolor="#1E293B",
+            font_color="#E2E8F0",
+            legend=dict(bgcolor="#1E293B"),
+            margin=dict(t=50,b=10,l=10,r=10)
+        )
     return fig
 
 def parse_fact(v):
@@ -1611,7 +1683,20 @@ def ai_popup(key, context, questions, bid):
 # ════════════════════════════════════════════════════════════════════════════════
 _,is_live,conn_err=get_conn()
 with st.sidebar:
-    st.markdown("# 🔬 KYB Intelligence Hub")
+    # ── Header + theme toggle on same row ────────────────────────────────────
+    _h1, _h2 = st.columns([3, 1])
+    with _h1:
+        st.markdown("# 🔬 KYB Hub")
+    with _h2:
+        # Sunmoon toggle — clicking flips the theme and reruns
+        _toggle_label = "☀️" if _dark else "🌙"
+        _toggle_help  = "Switch to Light Mode" if _dark else "Switch to Dark Mode"
+        if st.button(_toggle_label, help=_toggle_help, key="theme_toggle",
+                     use_container_width=True):
+            st.session_state["theme_mode"] = "light" if _dark else "dark"
+            st.rerun()
+    st.caption(f"{'🌙 Dark' if _dark else '☀️ Light'} Mode — click {_toggle_label} to toggle")
+
     if is_live: st.success("🟢 Redshift connected")
     else:
         st.error("🔴 Not connected"); st.caption(str(conn_err or "")[:60])
