@@ -868,7 +868,8 @@ Dependent (pid=-1): <code>null</code> (not applicable)
         f"🔗 [{src_link('openapi/integration','API Reference')}]({GITHUB_LINKS.get('openapi/integration','')}) — /kyb endpoint"
     )
 
-def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False):
+def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False,
+                   inside_expander=False):
     st.markdown(f"##### {title}")
     if show_rule_explainer:
         render_fact_engine_explainer()
@@ -1184,88 +1185,92 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
                          else (f"{len(v)} keys" if isinstance(v,dict)
                          else dv_disp[:50]))
 
-            # ── Render via expander ────────────────────────────────────────────
-            with st.expander(f"{h_icon} {fname}  ·  {v_summary}  ·  source: {r['Winning Source']}"):
-                # 1) Source reference + storage with clickable links
-                st.markdown(src_ref_html + storage_html, unsafe_allow_html=True)
+            # ── Build SQL + Python for this fact ──────────────────────────────
+            _fact_sql = (
+                f"SELECT\n"
+                f"  name,\n"
+                f"  JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,\n"
+                f"  JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS winning_pid,\n"
+                f"  JSON_EXTRACT_PATH_TEXT(value,'source','confidence')  AS confidence,\n"
+                f"  JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name')   AS rule_applied,\n"
+                f"  received_at\n"
+                f"FROM rds_warehouse_public.facts\n"
+                f"WHERE business_id = '{bid}'\n"
+                f"  AND name = '{fname}'\n"
+                f"ORDER BY received_at DESC LIMIT 5;"
+            )
+            _fact_py = (
+                f"# Paste into 🐍 Python Runner — conn is pre-injected\n"
+                f"df = pd.read_sql(\"\"\"\n"
+                f"SELECT name,\n"
+                f"       JSON_EXTRACT_PATH_TEXT(value,'value')               AS fact_value,\n"
+                f"       JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS winning_pid,\n"
+                f"       JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence,\n"
+                f"       received_at\n"
+                f"FROM rds_warehouse_public.facts\n"
+                f"WHERE business_id = '{bid}' AND name = '{fname}'\n"
+                f"ORDER BY received_at DESC LIMIT 5\n"
+                f"\"\"\", conn)\n"
+                f"print(f'{{len(df)}} rows'); print(df.to_string(index=False))"
+            )
 
-                # 2) Annotations table (larger font)
-                st.markdown("**Field-by-field annotations:**")
-                st.markdown(ann_table_html, unsafe_allow_html=True)
-
-                # 3) Valid JSON rendered as st.code (syntax highlighted, copy button)
-                st.markdown("**Full JSON (as stored in `rds_warehouse_public.facts.value`):**")
-                st.code(json_str, language="json")
-
-                # 4) SQL + Python side by side
-                _fact_sql = (
-                    f"SELECT\n"
-                    f"  name,\n"
-                    f"  JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,\n"
-                    f"  JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS winning_pid,\n"
-                    f"  JSON_EXTRACT_PATH_TEXT(value,'source','confidence')  AS confidence,\n"
-                    f"  JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name')   AS rule_applied,\n"
-                    f"  received_at\n"
-                    f"FROM rds_warehouse_public.facts\n"
-                    f"WHERE business_id = '{bid}'\n"
-                    f"  AND name = '{fname}'\n"
-                    f"ORDER BY received_at DESC\n"
-                    f"LIMIT 5;"
+            # ── Render: st.expander (normal) OR HTML <details> (when nested) ──
+            # st.expander cannot be nested inside another st.expander.
+            # When inside_expander=True (e.g. All Facts group expanders), use
+            # HTML <details> tags instead — they render correctly when nested.
+            if inside_expander:
+                # Escape json_str for HTML embedding
+                _json_escaped = json_str.replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
+                st.markdown(
+                    f"<details style='background:#0A0F1E;border-left:3px solid {h_color};"
+                    f"border-radius:6px;padding:6px 12px;margin:3px 0'>"
+                    f"<summary style='color:{h_color};font-size:.78rem;cursor:pointer;font-weight:600'>"
+                    f"{h_icon} <code style='color:#60A5FA'>{fname}</code> "
+                    f"· {v_summary} · {r['Winning Source']}</summary>"
+                    f"<div style='margin-top:8px'>"
+                    f"{src_ref_html}{storage_html}"
+                    f"<details style='margin:4px 0'><summary style='color:#94A3B8;font-size:.74rem;cursor:pointer'>📋 Field annotations</summary>"
+                    f"{ann_table_html}</details>"
+                    f"<details style='margin:4px 0'><summary style='color:#94A3B8;font-size:.74rem;cursor:pointer'>📄 Full JSON</summary>"
+                    f"<pre style='color:#CBD5E1;background:#0f172a;padding:8px;border-radius:6px;"
+                    f"font-size:.72rem;overflow:auto;max-height:300px'>{_json_escaped}</pre></details>"
+                    f"<details style='margin:4px 0'><summary style='color:#94A3B8;font-size:.74rem;cursor:pointer'>🗄️ SQL &amp; Python</summary>"
+                    f"<pre style='color:#22c55e;background:#052e16;padding:6px;border-radius:4px;font-size:.70rem;overflow:auto'>{_fact_sql}</pre>"
+                    f"<pre style='color:#CBD5E1;background:#0f172a;padding:6px;border-radius:4px;font-size:.70rem;overflow:auto;margin-top:4px'>{_fact_py}</pre>"
+                    + (f"<div style='color:#f59e0b;font-size:.72rem;margin-top:4px'>⚠️ Too large for Redshift — query from PostgreSQL RDS port 5432 using JSONB operators.</div>" if too_large else "")
+                    + f"</details></div></details>",
+                    unsafe_allow_html=True
                 )
-                _fact_py = (
-                    f"# Paste into 🐍 Python Runner — conn is pre-injected\n"
-                    f"df = pd.read_sql(\"\"\"\n"
-                    f"SELECT name,\n"
-                    f"       JSON_EXTRACT_PATH_TEXT(value,'value')               AS fact_value,\n"
-                    f"       JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS winning_pid,\n"
-                    f"       JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence,\n"
-                    f"       JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name')  AS rule_applied,\n"
-                    f"       received_at\n"
-                    f"FROM rds_warehouse_public.facts\n"
-                    f"WHERE business_id = '{bid}'\n"
-                    f"  AND name = '{fname}'\n"
-                    f"ORDER BY received_at DESC LIMIT 5\n"
-                    f"\"\"\", conn)\n"
-                    f"print(f'{{len(df)}} rows for fact: {fname}')\n"
-                    f"print(df.to_string(index=False))"
-                )
-                _sc, _pc = st.columns(2)
-                with _sc:
-                    st.markdown("**SQL (Redshift):**")
-                    st.code(_fact_sql, language="sql")
-                with _pc:
-                    st.markdown("**Python (paste into 🐍 Runner):**")
-                    st.code(_fact_py, language="python")
-
-                if too_large:
-                    st.markdown("**⚠️ Too large for Redshift — query from PostgreSQL RDS (port 5432):**")
-                    _rds_sql = (
-                        f"-- PostgreSQL RDS (native JSONB, no VARCHAR size limit):\n"
-                        f"SELECT value -> 'value'\n"
-                        f"FROM rds_warehouse_public.facts\n"
-                        f"WHERE business_id = '{bid}' AND name = '{fname}';"
-                    )
-                    _rds_py = (
-                        f"# PostgreSQL RDS requires a separate psycopg2 connection on port 5432\n"
-                        f"import psycopg2, json, os\n"
-                        f"rds_conn = psycopg2.connect(\n"
-                        f"    dbname=os.getenv('REDSHIFT_DB','dev'),\n"
-                        f"    user=os.getenv('REDSHIFT_USER','readonly_all_access'),\n"
-                        f"    password=os.getenv('REDSHIFT_PASSWORD',''),\n"
-                        f"    host=os.getenv('REDSHIFT_HOST',''),\n"
-                        f"    port=5432  # PostgreSQL RDS port\n"
-                        f")\n"
-                        f"cur = rds_conn.cursor()\n"
-                        f"cur.execute(\"SELECT value->>'value' FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='{fname}';\")\n"
-                        f"rows = cur.fetchall()\n"
-                        f"print(f'{{len(rows)}} rows'); print(rows[0][0] if rows else 'empty')\n"
-                        f"rds_conn.close()"
-                    )
-                    _rsc, _rpc = st.columns(2)
-                    with _rsc:
-                        st.code(_rds_sql, language="sql")
-                    with _rpc:
-                        st.code(_rds_py, language="python")
+            else:
+                with st.expander(f"{h_icon} {fname}  ·  {v_summary}  ·  source: {r['Winning Source']}"):
+                    st.markdown(src_ref_html + storage_html, unsafe_allow_html=True)
+                    st.markdown("**Field-by-field annotations:**")
+                    st.markdown(ann_table_html, unsafe_allow_html=True)
+                    st.markdown("**Full JSON (as stored in `rds_warehouse_public.facts.value`):**")
+                    st.code(json_str, language="json")
+                    _sc, _pc = st.columns(2)
+                    with _sc:
+                        st.markdown("**SQL (Redshift):**")
+                        st.code(_fact_sql, language="sql")
+                    with _pc:
+                        st.markdown("**Python (paste into 🐍 Runner):**")
+                        st.code(_fact_py, language="python")
+                    if too_large:
+                        st.markdown("**⚠️ Too large for Redshift — query from PostgreSQL RDS (port 5432):**")
+                        _rds_sql = (
+                            f"-- PostgreSQL RDS (native JSONB):\n"
+                            f"SELECT value->'value' FROM rds_warehouse_public.facts\n"
+                            f"WHERE business_id='{bid}' AND name='{fname}';"
+                        )
+                        _rds_py = (
+                            f"# PostgreSQL RDS — port 5432, JSONB native:\n"
+                            f"cur.execute(\"SELECT value->>'value' FROM rds_warehouse_public.facts "
+                            f"WHERE business_id='{bid}' AND name='{fname}';\")\n"
+                            f"print(cur.fetchone()[0])"
+                        )
+                        _rsc, _rpc = st.columns(2)
+                        with _rsc: st.code(_rds_sql, language="sql")
+                        with _rpc: st.code(_rds_py, language="python")
 
         # Rule legend
         used_rules = set(r["Rule"] for r in rows if r["Rule"] not in ("","—","n/a (computed fact)"))
@@ -6071,7 +6076,7 @@ elif tab=="📋 All Facts":
             # ── render_lineage() — identical structure to all other tabs ──────
             # Shows: Source Code Reference + field annotations + JSON + SQL + Python
             # for EVERY fact in this group. No custom renderer — one consistent view.
-            render_lineage(facts, _fact_names_in_grp)
+            render_lineage(facts, _fact_names_in_grp, inside_expander=True)
 
     st.markdown("---")
     st.markdown("#### 🔍 SQL Reference — Full Business Investigation")
