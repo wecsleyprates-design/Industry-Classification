@@ -1492,23 +1492,98 @@ def ask_ai(question, context="", history=None):
     msgs=[{"role":"system","content":SYSTEM}]
     if history: msgs.extend(history[-8:])
     msgs.append({"role":"user","content":f"RAG:\n{rag}\n\nContext:\n{context}\n\nQuestion: {question}"})
+    # ── Source-type → GitHub URL resolver ────────────────────────────────────
+    REPO_BASE = "https://github.com/wecsleyprates-design/Industry-Classification/blob/main/Admin-Portal-KYB-App"
+    def _chunk_github_url(chunk: dict) -> str:
+        """Return a clickable GitHub URL for a RAG chunk based on source_type + path."""
+        stype = chunk.get("source_type","")
+        path  = chunk.get("path","") or ""
+        line_start = chunk.get("line_start")
+        anchor = f"#L{line_start}" if line_start else ""
+
+        # Map source_type to repo folder
+        FOLDER_MAP = {
+            "API_DOCS":           f"{REPO_BASE}/api-docs",
+            "INTEGRATION_SERVICE":f"{REPO_BASE}/integration-service-main/lib/facts",
+            "MICROSITES":         f"{REPO_BASE}/microsites-main/packages/case/src/page/Cases",
+            "WAREHOUSE_SERVICE":  f"{REPO_BASE}/warehouse-service-main",
+            "WORTH_SCORE":        f"{REPO_BASE}/ai-score-service-main",
+            "WATCHLIST":          f"{REPO_BASE}/integration-service-main/lib/facts/kyb",
+            "DOMESTIC_FOREIGN":   f"{REPO_BASE}/integration-service-main/lib/facts/kyb",
+            "FACT_ENGINE":        f"{REPO_BASE}/integration-service-main/lib/facts",
+            "NAICS_MCC":          f"{REPO_BASE}/integration-service-main/lib/facts/businessDetails",
+            "TIN_VERIFICATION":   f"{REPO_BASE}/integration-service-main/lib/facts/kyb",
+        }
+        # Specific file overrides for known paths
+        FILE_MAP = {
+            ("API_DOCS", "kyb.md"):              f"{REPO_BASE}/api-docs/kyb.md",
+            ("API_DOCS", "openapi"):              GITHUB_LINKS.get("openapi/integration",""),
+            ("INTEGRATION_SERVICE","index.ts"):   GITHUB_LINKS.get("facts/kyb/index.ts",""),
+            ("INTEGRATION_SERVICE","rules.ts"):   GITHUB_LINKS.get("facts/rules.ts",""),
+            ("INTEGRATION_SERVICE","sources.ts"): GITHUB_LINKS.get("facts/sources.ts",""),
+            ("WAREHOUSE_SERVICE","customer_table.sql"): GITHUB_LINKS.get("customer_table.sql",""),
+            ("WORTH_SCORE","aiscore.py"):          GITHUB_LINKS.get("aiscore.py",""),
+            ("WORTH_SCORE","worth_score_model.py"):GITHUB_LINKS.get("worth_score_model.py",""),
+            ("FACT_ENGINE","rules.ts"):            GITHUB_LINKS.get("facts/rules.ts",""),
+            ("WATCHLIST","consolidatedWatchlist.ts"): GITHUB_LINKS.get("consolidatedWatchlist.ts",""),
+        }
+        # Try exact file match
+        key = (stype, path)
+        if key in FILE_MAP and FILE_MAP[key]:
+            return FILE_MAP[key] + anchor
+        # Partial path match
+        for (st, fp), url in FILE_MAP.items():
+            if st == stype and fp and fp in path and url:
+                return url + anchor
+        # Fallback to folder
+        folder = FOLDER_MAP.get(stype,"")
+        if folder and path:
+            # Construct direct file URL if we have a filename
+            fname = path.split("/")[-1] if "/" in path else path
+            return f"{folder}/{fname}{anchor}" if fname else folder
+        return folder
+
     try:
         r=get_openai().chat.completions.create(model="gpt-4o-mini",messages=msgs,max_tokens=1200,temperature=0.2)
         answer = r.choices[0].message.content
-        # Append source citations from RAG chunks
+        # Append source citations with clickable GitHub links
         if chunks:
-            cited = []
-            for c in chunks[:4]:
+            # Deduplicate by (source_type, path)
+            seen = set()
+            unique_chunks = []
+            for c in chunks:
+                key = (c.get("source_type",""), c.get("path",""))
+                if key not in seen:
+                    seen.add(key)
+                    unique_chunks.append(c)
+
+            cited_lines = []
+            for c in unique_chunks[:5]:
                 src_type = c.get("source_type","")
-                desc = c.get("description","")[:80]
-                cited.append(f"- `{src_type}`: {desc}")
-            answer += "\n\n---\n**📁 Sources used for this answer:**\n" + "\n".join(cited)
+                path_val = c.get("path","") or ""
+                desc = c.get("description","")[:90]
+                line_start = c.get("line_start")
+                url = _chunk_github_url(c)
+                # Build display label
+                display_file = path_val or src_type.lower().replace("_"," ").title()
+                line_ref = f" L{line_start}" if line_start else ""
+                if url:
+                    cited_lines.append(
+                        f"- [`{src_type}`]({url}) · **{display_file}{line_ref}** — {desc}"
+                    )
+                else:
+                    cited_lines.append(
+                        f"- `{src_type}` · **{display_file}{line_ref}** — {desc}"
+                    )
+
+            answer += "\n\n---\n**📁 Sources used for this answer** *(click to open in GitHub)*:\n"
+            answer += "\n".join(cited_lines)
             answer += (
-                "\n\n**🔗 Key references:**\n"
-                f"- [facts/kyb/index.ts]({GITHUB_LINKS.get('facts/kyb/index.ts','')}) — fact definitions\n"
-                f"- [facts/rules.ts]({GITHUB_LINKS.get('facts/rules.ts','')}) — Fact Engine selection rules\n"
-                f"- [integrations.constant.ts]({GITHUB_LINKS.get('integrations.constant.ts','')}) — vendor IDs\n"
-                f"- [API Reference]({GITHUB_LINKS.get('openapi/integration','')}) — /kyb endpoint schema"
+                "\n\n**🔗 Key reference files:**\n"
+                f"- [facts/kyb/index.ts]({GITHUB_LINKS.get('facts/kyb/index.ts','')}) — all KYB fact definitions\n"
+                f"- [facts/rules.ts]({GITHUB_LINKS.get('facts/rules.ts','')}) — factWithHighestConfidence algorithm\n"
+                f"- [integrations.constant.ts]({GITHUB_LINKS.get('integrations.constant.ts','')}) — vendor platform IDs\n"
+                f"- [API Reference]({GITHUB_LINKS.get('openapi/integration','')}) — /kyb endpoint schema (openapi)"
             )
         return answer
     except Exception as e: return f"⚠️ AI error: {e}"
