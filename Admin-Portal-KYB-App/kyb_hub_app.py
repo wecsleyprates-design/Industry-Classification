@@ -619,33 +619,11 @@ def load_home_kyb_stats(date_from, date_to, customer_id=None):
     if df is not None and not df.empty:
         return df, None
 
-    # Fallback to facts-only if rbcm not accessible
-    parts2=[]
-    if date_from: parts2.append(f"received_at >= '{date_from}'")
-    if date_to:   parts2.append(f"received_at <= '{date_to} 23:59:59'")
-    dc2=(" AND "+" AND ".join(parts2)) if parts2 else ""
-    return run_sql(f"""
-        SELECT business_id,
-            MAX(CASE WHEN name='sos_active'         THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS sos_active,
-            MAX(CASE WHEN name='tin_match_boolean'  THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS tin_match,
-            MAX(CASE WHEN name='idv_passed_boolean' THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS idv_passed,
-            MAX(CASE WHEN name='naics_code'         THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS naics_code,
-            MAX(CASE WHEN name='watchlist_hits'     THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS watchlist_hits,
-            MAX(CASE WHEN name='num_bankruptcies'   THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_bankruptcies,
-            MAX(CASE WHEN name='num_judgements'     THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_judgements,
-            MAX(CASE WHEN name='num_liens'          THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_liens,
-            MAX(CASE WHEN name='adverse_media_hits' THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS adverse_media,
-            MAX(CASE WHEN name='revenue'            THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS revenue,
-            MAX(CASE WHEN name='formation_date'     THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS formation_date,
-            MAX(CASE WHEN name='formation_state'    THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS formation_state,
-            MAX(received_at) AS last_seen, MIN(received_at) AS first_seen,
-            COUNT(DISTINCT name) AS fact_count
-        FROM rds_warehouse_public.facts
-        WHERE name IN ('sos_active','tin_match_boolean','idv_passed_boolean','naics_code',
-            'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
-            'adverse_media_hits','revenue','formation_date','formation_state'){dc2}
-        GROUP BY business_id
-    """)
+    # Fallback: rbcm not accessible — return None so the caller can intersect with recent_df.
+    # We do NOT fall back to facts.received_at because: (a) it's not the onboarding date,
+    # (b) it ignores the customer_id filter, (c) it would return businesses outside the selection.
+    # The stats_df intersection in Home tab (stats_df = stats_df[bids isin recent_df]) handles this.
+    return None, "rbcm not accessible — no fallback to avoid incorrect business counts"
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_home_flags(date_from, date_to, customer_id=None):
@@ -1929,9 +1907,20 @@ if tab=="🏠 Home":
             if flags or score > 0:
                 biz_flags[bid_check] = {"flags": flags, "score": score}
 
-    # ── Load enriched KYB stats (single bulk query) ───────────────────────────
+    # ── Load enriched KYB stats — filtered to EXACTLY the businesses in recent_df ──
+    # recent_df is the authoritative filtered business list (date + customer).
+    # stats_df must be restricted to the same set to ensure all charts are consistent.
     with st.spinner("Loading KYB metrics…"):
         stats_df, stats_err = load_home_kyb_stats(hub_date_from, hub_date_to, hub_customer_id)
+
+    # CRITICAL: intersect stats_df with recent_df to enforce the filter exactly.
+    # stats_df may contain businesses outside the filter if the rbcm fallback fired,
+    # or if facts were written at a different timestamp than the onboarding date.
+    if stats_df is not None and not stats_df.empty and recent_df is not None and not recent_df.empty:
+        _authoritative_bids = set(recent_df["business_id"].tolist())
+        stats_df = stats_df[stats_df["business_id"].isin(_authoritative_bids)].copy()
+        if stats_df.empty:
+            stats_df = None   # treat as no data rather than show misleading numbers
 
     # Build per-business flag map from the pivoted stats_df (faster than flag_df loop)
     biz_flags = {}
@@ -1978,8 +1967,13 @@ if tab=="🏠 Home":
     def rate(num, den): return f"{num/max(den,1)*100:.0f}%"
 
     # ── Pre-compute KYB health rates from stats_df ────────────────────────────
+    # stats_df has already been intersected with recent_df above,
+    # so n == total_biz (or fewer if some businesses have no facts yet).
     if stats_df is not None and not stats_df.empty:
         n = len(stats_df)
+        if n != total_biz:
+            st.caption(f"ℹ️ KYB metrics available for {n:,} of {total_biz:,} businesses "
+                       f"({total_biz-n:,} have no facts yet in Redshift)")
         sos_ok   = (stats_df["sos_active"].str.lower().str.strip()=="true").sum()
         sos_fail = (stats_df["sos_active"].str.lower().str.strip()=="false").sum()
         sos_miss = n - sos_ok - sos_fail
@@ -2315,20 +2309,22 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
     st.caption("From `rds_manual_score_public.business_scores` · score_decision breakdown across portfolio")
 
     @st.cache_data(ttl=600, show_spinner=False)
-    def load_worth_score_dist(date_from, date_to):
-        parts=[]
-        if date_from: parts.append(f"bs.created_at >= '{date_from}'")
-        if date_to:   parts.append(f"bs.created_at <= '{date_to} 23:59:59'")
-        dc=(" AND "+" AND ".join(parts)) if parts else ""
+    # Worth Score distribution — must be for the SAME filtered business IDs only.
+    # Use recent_df as the authoritative list (already filtered by date + customer).
+    def load_worth_score_for_bids(business_ids):
+        if not business_ids:
+            return None, "No business IDs"
+        # Redshift IN clause limit: batch to avoid query-too-long errors
+        bid_list = ",".join(f"'{b}'" for b in list(business_ids)[:2000])
         return run_sql(f"""
-            SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision
+            SELECT cs.business_id, bs.weighted_score_850, bs.risk_level, bs.score_decision
             FROM rds_manual_score_public.data_current_scores cs
             JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
-            WHERE 1=1{dc}
-            LIMIT 5000
+            WHERE cs.business_id IN ({bid_list})
         """)
 
-    ws_df, ws_err = load_worth_score_dist(hub_date_from, hub_date_to)
+    _filtered_bids = set(recent_df["business_id"].tolist()) if recent_df is not None else set()
+    ws_df, ws_err = load_worth_score_for_bids(_filtered_bids)
     if ws_df is not None and not ws_df.empty:
         ws_df["weighted_score_850"] = pd.to_numeric(ws_df["weighted_score_850"], errors="coerce")
         ws_df = ws_df.dropna(subset=["weighted_score_850"])
