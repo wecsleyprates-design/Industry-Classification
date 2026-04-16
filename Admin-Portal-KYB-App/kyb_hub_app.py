@@ -2007,9 +2007,28 @@ if tab=="🏠 Home":
 
     total_biz = len(recent_df)
 
-    # ── Red flag scoring (cached) ──────────────────────────────────────────────
+    # ── Red flag scoring — query facts directly for the authoritative business list ──
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _load_flags_for_bids(bid_tuple):
+        if not bid_tuple:
+            return None, "No business IDs"
+        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
+        return run_sql(f"""
+            SELECT business_id, name,
+                   JSON_EXTRACT_PATH_TEXT(value,'value') AS val,
+                   received_at
+            FROM rds_warehouse_public.facts
+            WHERE business_id IN ({bid_list})
+              AND name IN (
+                  'sos_active','tin_match_boolean','watchlist_hits',
+                  'naics_code','idv_passed_boolean','num_bankruptcies',
+                  'num_judgements','num_liens','sos_match_boolean'
+              )
+            ORDER BY business_id, name, received_at DESC
+        """)
+
     with st.spinner("Scoring red flags…"):
-        flag_df, flag_err = load_home_flags(hub_date_from, hub_date_to, hub_customer_id)
+        flag_df, flag_err = _load_flags_for_bids(tuple(_authoritative_bids))
 
     # Build per-business red flag summary
     biz_flags = {}  # business_id → {flags:[...], score:int}
@@ -2060,20 +2079,51 @@ if tab=="🏠 Home":
             if flags or score > 0:
                 biz_flags[bid_check] = {"flags": flags, "score": score}
 
-    # ── Load enriched KYB stats — filtered to EXACTLY the businesses in recent_df ──
-    # recent_df is the authoritative filtered business list (date + customer).
-    # stats_df must be restricted to the same set to ensure all charts are consistent.
-    with st.spinner("Loading KYB metrics…"):
-        stats_df, stats_err = load_home_kyb_stats(hub_date_from, hub_date_to, hub_customer_id)
+    # ── Load enriched KYB stats using recent_df as the authoritative business list ──
+    # Strategy: query facts for EXACTLY the business IDs in recent_df.
+    # This is the most reliable approach because:
+    # (1) recent_df already has the correct filtered businesses (date + customer)
+    # (2) We don't depend on rbcm being accessible a second time
+    # (3) The IN clause guarantees the result matches recent_df exactly
+    _authoritative_bids = recent_df["business_id"].tolist() if recent_df is not None else []
 
-    # CRITICAL: intersect stats_df with recent_df to enforce the filter exactly.
-    # stats_df may contain businesses outside the filter if the rbcm fallback fired,
-    # or if facts were written at a different timestamp than the onboarding date.
-    if stats_df is not None and not stats_df.empty and recent_df is not None and not recent_df.empty:
-        _authoritative_bids = set(recent_df["business_id"].tolist())
-        stats_df = stats_df[stats_df["business_id"].isin(_authoritative_bids)].copy()
-        if stats_df.empty:
-            stats_df = None   # treat as no data rather than show misleading numbers
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _load_stats_for_bids(bid_tuple):
+        """Load KYB stats for a specific list of business IDs."""
+        if not bid_tuple:
+            return None, "No business IDs"
+        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
+        return run_sql(f"""
+            SELECT
+                f.business_id,
+                MAX(CASE WHEN f.name='sos_active'          THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_active,
+                MAX(CASE WHEN f.name='tin_match_boolean'   THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS tin_match,
+                MAX(CASE WHEN f.name='idv_passed_boolean'  THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS idv_passed,
+                MAX(CASE WHEN f.name='naics_code'          THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS naics_code,
+                MAX(CASE WHEN f.name='watchlist_hits'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS watchlist_hits,
+                MAX(CASE WHEN f.name='num_bankruptcies'    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_bankruptcies,
+                MAX(CASE WHEN f.name='num_judgements'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_judgements,
+                MAX(CASE WHEN f.name='num_liens'           THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_liens,
+                MAX(CASE WHEN f.name='adverse_media_hits'  THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS adverse_media,
+                MAX(CASE WHEN f.name='revenue'             THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS revenue,
+                MAX(CASE WHEN f.name='formation_date'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_date,
+                MAX(CASE WHEN f.name='formation_state'     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_state,
+                MAX(f.received_at) AS last_seen,
+                MIN(f.received_at) AS first_seen,
+                COUNT(DISTINCT f.name) AS fact_count
+            FROM rds_warehouse_public.facts f
+            WHERE f.business_id IN ({bid_list})
+              AND f.name IN (
+                  'sos_active','tin_match_boolean','idv_passed_boolean','naics_code',
+                  'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
+                  'adverse_media_hits','revenue','formation_date','formation_state'
+              )
+            GROUP BY f.business_id
+        """)
+
+    with st.spinner("Loading KYB metrics…"):
+        # Use tuple so it's hashable for st.cache_data
+        stats_df, stats_err = _load_stats_for_bids(tuple(_authoritative_bids))
 
     # Build per-business flag map from the pivoted stats_df (faster than flag_df loop)
     biz_flags = {}
@@ -2462,13 +2512,12 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
     st.caption("From `rds_manual_score_public.business_scores` · score_decision breakdown across portfolio")
 
     @st.cache_data(ttl=600, show_spinner=False)
-    # Worth Score distribution — must be for the SAME filtered business IDs only.
-    # Use recent_df as the authoritative list (already filtered by date + customer).
-    def load_worth_score_for_bids(business_ids):
-        if not business_ids:
+    # Worth Score distribution — same authoritative business list as stats/flags
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _load_worth_score_for_bids(bid_tuple):
+        if not bid_tuple:
             return None, "No business IDs"
-        # Redshift IN clause limit: batch to avoid query-too-long errors
-        bid_list = ",".join(f"'{b}'" for b in list(business_ids)[:2000])
+        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
         return run_sql(f"""
             SELECT cs.business_id, bs.weighted_score_850, bs.risk_level, bs.score_decision
             FROM rds_manual_score_public.data_current_scores cs
@@ -2476,8 +2525,7 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
             WHERE cs.business_id IN ({bid_list})
         """)
 
-    _filtered_bids = set(recent_df["business_id"].tolist()) if recent_df is not None else set()
-    ws_df, ws_err = load_worth_score_for_bids(_filtered_bids)
+    ws_df, ws_err = _load_worth_score_for_bids(tuple(_authoritative_bids))
     if ws_df is not None and not ws_df.empty:
         ws_df["weighted_score_850"] = pd.to_numeric(ws_df["weighted_score_850"], errors="coerce")
         ws_df = ws_df.dropna(subset=["weighted_score_850"])
