@@ -5752,305 +5752,109 @@ elif tab=="📋 All Facts":
 
     st.markdown("---")
 
-    # ── Render each group ─────────────────────────────────────────────────────
+    # ── Render each group using render_lineage() for consistent structure ─────
+    # render_lineage() produces: Source Code Reference + field annotations + JSON + SQL + Python
+    # — exactly the same view as shown in all other tabs (SOS, TIN, IDV, etc.)
     AUTO_EXPAND = {"🏢 Identity / Name","🏛️ Registry / SOS","🔐 TIN / EIN"}
 
-    for grp in list(FACT_GROUPS.keys())+["📦 Other"]:
-        rows     = grouped.get(grp,[])
-        meta     = grouped_meta.get(grp,[])
-        if not rows: continue
+    # GROUP_CARDS: engineer notes shown at the top of each group
+    GROUP_CARDS = {
+        "🏢 Identity / Name":[
+            "legal_name winner: Applicant (pid=0, conf=1.0) or Middesk (pid=16). OC is fallback.",
+            "names_found: combineFacts rule — merges ALL vendor names (not a winner/loser selection).",
+            "dba_found: DBA names from applicant + registry filings. Important for sole props.",
+            "kyb_submitted=true: onboarding form completed. kyb_complete=true: business verified + people screened.",
+            "people: array of officers/directors from Middesk (pid=16). Too large for Redshift → query PostgreSQL RDS.",
+        ],
+        "🏛️ Registry / SOS":[
+            "sos_active: DERIVED (pid=-1, dependent) from sos_filings[].active. Not a vendor query.",
+            "sos_filings: TOO LARGE for Redshift. Contains SoSRegistration[] with id, state, active, foreign_domestic, entity_type, officers[].",
+            "middesk_confidence = 0.15 + 0.20 × tasks passed (max 4 tasks = 0.95 max). Source: Middesk pid=16.",
+            "sos_match winner: Middesk (pid=16, w=2.0) > OC (pid=23, w=0.9). Rule: factWithHighestConfidence.",
+            "Admin Portal: KYB → Business Registration → 'Verified' badge = sos_match_boolean=true AND sos_active=true.",
+        ],
+        "🔐 TIN / EIN":[
+            "tin: raw 9-digit EIN (unmasked in Redshift). Source=Applicant (pid=0), confidence=1.0 by convention.",
+            "tin_submitted: masked version (XXXXX1234). tin_match: IRS verification from Middesk TIN review task.",
+            "tin_match_boolean=true ONLY when tin_match.value.status='success'. Derived (pid=-1, dependent).",
+            "Winning source for tin_match MUST be Middesk (pid=16) for IRS-direct. pid=38 (Trulioo) = fallback, NOT IRS-direct.",
+            "Admin Portal: KYB → Business Registration → Tax ID Number (EIN). 'Verified' badge = tin_match_boolean=true.",
+        ],
+        "📍 Address / Location":[
+            "addresses: combineFacts — merges ALL vendor addresses (Middesk, OC, ZI, EFX) into one array.",
+            "addresses_deliverable: USPS-confirmed subset via Middesk. Used for mail-based verification.",
+            "address_registered_agent WARNING: address matches known registered agent (CT Corp, etc.). Entity may not operate there.",
+            "primary_address: DERIVED (pid=-1, dependent) from addresses[0]. Structured object.",
+        ],
+        "📞 Contact":[
+            "business_phone and email: optional fields — often null (not required on onboarding form).",
+            "phone_found: combineFacts — merges phone numbers from Middesk + SERP + ZI.",
+            "countries: DERIVED from addresses[] — extracts unique country codes.",
+        ],
+        "🌐 Website / Digital":[
+            "website: Applicant (pid=0) or SERP (pid=22). CRITICAL for AI NAICS classification (Gap G2 if missing).",
+            "website_found: verified URLs via combineFacts. Empty [] = no website confirmed online.",
+            "serp_id: Google Business Profile ID. review_rating/count: from Google My Business.",
+        ],
+        "🏭 Industry / Classification":[
+            "naics_code winner: factWithHighestConfidence across EFX(w=0.7) > ZI(w=0.8) > OC(w=0.9) > SERP(w=0.3) > Trulioo(w=0.8) > Applicant(w=0.2) > AI(w=0.1).",
+            "561499 = fallback when ALL vendors fail and AI cannot classify → cascades to MCC 5614.",
+            "mcc_code: DERIVED — mcc_code_found (AI direct) ?? mcc_from_naics (rel_naics_mcc lookup). Not independently verified.",
+        ],
+        "💼 Firmographic":[
+            "ALL 11 NULL = ZI and EFX could NOT match this entity → no commercial firmographic data.",
+            "revenue and num_employees: primary Worth Score inputs (Business Operations + Company Profile). Null → model uses defaults.",
+            "kyb_complete=true: business_verified AND screened_people not empty.",
+        ],
+        "🪪 Identity Verification (KYC)":[
+            "idv_status: object {SUCCESS:N, PENDING:N, FAILED:N, CANCELED:N, EXPIRED:N} — count of ALL sessions ever.",
+            "idv_passed: COUNT of SUCCESS sessions. idv_passed_boolean=true when idv_passed >= 1.",
+            "name_match: Middesk compares submitted name to SOS registry name. false for DBAs is EXPECTED.",
+        ],
+        "📊 Financial Ratios (Worth Score inputs)":[
+            "ALL 15 NULL = Plaid banking NOT connected. Financial PyTorch model uses all default imputations → score less accurate.",
+            "ratio_* and bs_* facts: extracted from Plaid banking statements by Worth Score pipeline (aiscore.py).",
+            "flag_equity_negative / flag_total_liabilities_over_assets: binary risk flags, high Worth Score negative impact.",
+        ],
+        "⚠️ Risk / Watchlist":[
+            "watchlist: PEP+SANCTIONS ONLY. adverse_media deliberately EXCLUDED by filterOutAdverseMedia() in consolidatedWatchlist.ts.",
+            "watchlist, bankruptcies, judgements, liens: TOO LARGE for Redshift. Query PostgreSQL RDS port 5432.",
+            "num_bankruptcies/judgements/liens: scalar counts (Redshift safe). Worth Score: −40/−20/−10 pts each.",
+        ],
+        "🔗 Vendor / Integration":[
+            "internal_platform_matches: XGBoost entity-match model results across ZI/EFX/OC databases.",
+            "internal_platform_matches_combined: TOO LARGE for Redshift. Query from PostgreSQL RDS.",
+            "canadaopen_*: OpenCorporates Canada data (only if business has Canadian presence).",
+        ],
+        "🇨🇦 Canada (if applicable)":[
+            "Only populated for Canadian businesses or those with Canadian registration.",
+            "canada_business_number: BN from CRA (Canada Revenue Agency).",
+            "Source: OpenCorporates Canada API via integration-service.",
+        ],
+        "📦 Other":[
+            "Facts not mapped to any standard group — often dependent/computed facts or newly added facts.",
+            "Many 'Other' facts are null because they compute from another null fact.",
+        ],
+    }
 
-        g_val  = sum(1 for r in rows if r["Value"] not in ("(null)",""))
-        g_null = len(rows) - g_val
-        label  = f"{grp}  ({len(rows)} facts · {g_val} with values · {g_null} null)"
+    for grp in list(FACT_GROUPS.keys())+["📦 Other"]:
+        meta = grouped_meta.get(grp,[])
+        if not meta: continue
+        _fact_names_in_grp = [m["name"] for m in meta]
+        g_val  = sum(1 for m in meta if not m["too_large"] and m["fact"].get("value") is not None)
+        g_null = sum(1 for m in meta if not m["too_large"] and m["fact"].get("value") is None)
+        label  = f"{grp}  ({len(meta)} facts · {g_val} with values · {g_null} null)"
 
         with st.expander(label, expanded=(grp in AUTO_EXPAND)):
 
-            # ── Group analyst card ─────────────────────────────────────────
-            GROUP_CARDS = {
-                "🏢 Identity / Name":[
-                    "Contains: legal_name (winner), names_found (all vendor names), dba_found, people (officers).",
-                    "legal_name winner is typically Applicant (pid=0, conf=1.0) or Middesk (pid=16). OC is fallback.",
-                    "names_found uses combineFacts rule — merges ALL vendor names into one array, not a winner/loser selection.",
-                    "dba_found = DBA names from applicant submission AND registry filings. Important for sole props.",
-                    "kyb_submitted=true means the onboarding form was completed. kyb_complete=true means business verified + people screened.",
-                ],
-                "🏛️ Registry / SOS":[
-                    "sos_active is DERIVED (pid=-1, dependent) from sos_filings[].active — Middesk sets the raw filing, the Fact Engine derives the boolean.",
-                    "sos_filings is TOO LARGE for Redshift federation. Contains array of SoSRegistration objects with: id, state, active, foreign_domestic, entity_type, officers[].",
-                    "middesk_confidence formula: 0.15 base + 0.20 × (tasks passed). Tasks: name verification, TIN, address, SOS (max 4 tasks = 0.95 max).",
-                    "sos_match winning source: Middesk (pid=16, w=2.0) > OC (pid=23, w=0.9). Rule: factWithHighestConfidence.",
-                    "Admin Portal path: KYB → Business Registration → 'Verified' badge = sos_match_boolean=true AND sos_active=true.",
-                ],
-                "🔐 TIN / EIN":[
-                    "tin = raw 9-digit EIN (unmasked in Redshift). Source=Applicant (pid=0), confidence=1.0 by convention.",
-                    "tin_submitted = masked version (XXXXX1234). Source=Applicant. tin_match = IRS verification result from Middesk TIN review task.",
-                    "tin_match_boolean=true ONLY when tin_match.value.status='success'. Derived (pid=-1, dependent).",
-                    "Winning source for tin_match MUST be Middesk (pid=16) for IRS-direct verification. If pid=38 (Trulioo), it is a fallback — NOT IRS-direct.",
-                    "Admin Portal: KYB → Business Registration → Tax ID Number (EIN) row. 'Verified' badge = tin_match_boolean=true.",
-                ],
-                "📍 Address / Location":[
-                    "addresses uses combineFacts rule — merges addresses from ALL vendors (Middesk, OC, ZI, EFX) into one array.",
-                    "addresses_deliverable = subset confirmed deliverable by USPS via Middesk. Used for mail-based verification.",
-                    "address_registered_agent: if true, submitted address is a known registered agent address — entity resolution gap risk.",
-                    "primary_address = DERIVED (pid=-1, dependent) from addresses. Structured object: {line_1, city, state, postal_code, country}.",
-                ],
-                "🏭 Industry / Classification":[
-                    "naics_code winner selected by factWithHighestConfidence across: EFX(w=0.7) > ZI(w=0.8) > OC(w=0.9) > SERP(w=0.3) > Trulioo(w=0.8) > Applicant(w=0.2) > AI(w=0.1).",
-                    "561499 = fallback when ALL vendors fail and AI cannot classify. Cascades to MCC 5614.",
-                    "mcc_code = mcc_code_found (AI direct) ?? mcc_from_naics (rel_naics_mcc lookup table). Not a direct vendor fact.",
-                    "AI (pid=31) is LAST RESORT — only fires when all other vendors have confidence below threshold. Weight=0.1.",
-                ],
-                "⚠️ Risk / Watchlist":[
-                    "watchlist = consolidated PEP+SANCTIONS hits only. adverse_media deliberately EXCLUDED by filterOutAdverseMedia in consolidatedWatchlist.ts.",
-                    "watchlist_hits = COUNT of watchlist.metadata[] items (per-entity hits). Used in Worth Score and Admin Portal badge.",
-                    "adverse_media_hits = tracked SEPARATELY. Different compliance action than sanctions/PEP.",
-                    "sos_filings, watchlist, bankruptcies, judgements, liens = TOO LARGE for Redshift federation. Query PostgreSQL RDS port 5432.",
-                    "num_bankruptcies/judgements/liens = scalar counts extracted from the large arrays. Safe to query from Redshift.",
-                ],
-                "📊 Financial Ratios (Worth Score inputs)":[
-                    "All ratio_* and bs_* facts are extracted from Plaid banking statements by the Worth Score pipeline.",
-                    "These are PRIMARY model features for the financial sub-model (PyTorch neural net component).",
-                    "ALL 15 facts NULL = Plaid banking is NOT connected for this business. Financial model uses default imputations → score accuracy reduced.",
-                    "flag_equity_negative=true / flag_total_liabilities_over_assets=true = binary risk flags with high Worth Score negative impact.",
-                    "Source: ai-score-service reads these facts from rds_warehouse_public.facts → passes to PyTorch model.",
-                ],
-                "📞 Contact":[
-                    "business_phone and email are often null — not required fields on the onboarding form.",
-                    "phone_found = phone numbers found across all vendors via combineFacts rule (merges Middesk + SERP + ZI).",
-                    "countries = DERIVED (pid=-1) from addresses — extracted as unique country codes from addresses array.",
-                    "Admin Portal path: KYB → Contact Information tab.",
-                ],
-                "🌐 Website / Digital":[
-                    "website = submitted by applicant (pid=0) on onboarding form. Critical for AI NAICS classification (Gap G2 if missing).",
-                    "website_found = verified URLs found across vendors via combineFacts. Can be empty array [] if no website confirmed.",
-                    "serp_id = Google Business Profile ID from SERP API. review_rating/review_count = from Google My Business.",
-                    "If website is null AND NAICS=561499 → Gap G1+G2: entity not matched AND AI could not search web.",
-                ],
-                "💼 Firmographic":[
-                    "ALL 11 facts NULL = ZoomInfo and Equifax could NOT match this entity → no commercial firmographic data.",
-                    "revenue and num_employees are the primary firmographic Worth Score inputs. Null → model uses default imputation.",
-                    "kyb_submitted=true means onboarding form was completed. kyb_complete=true means business verified + people screened.",
-                    "business_verified = DERIVED from screened_people status. shareholder_document = uploaded ownership document.",
-                    "minority_owned / woman_owned / veteran_owned = optional self-reported fields from onboarding form.",
-                ],
-                "🪪 Identity Verification (KYC)":[
-                    "idv_status = object {SUCCESS:N, PENDING:N, FAILED:N, CANCELED:N, EXPIRED:N} — count of ALL sessions ever.",
-                    "idv_passed = COUNT of SUCCESS sessions. idv_passed_boolean=true when idv_passed >= 1.",
-                    "name_match and name_match_boolean: Middesk compares submitted business name to SOS registry name.",
-                    "verification_status: overall KYB status from integration-service (pending/verified/failed).",
-                ],
-                "🔗 Vendor / Integration":[
-                    "internal_platform_matches = matches found by the entity-matching XGBoost model across ZI/EFX/OC databases.",
-                    "internal_platform_matches_combined = TOO LARGE for Redshift. Contains full match records — query from PostgreSQL RDS.",
-                    "canadaopen_* = OpenCorporates Canada data (only if business has Canadian presence).",
-                    "internal_platform_matches_count = scalar count of matches (Redshift safe).",
-                ],
-                "🇨🇦 Canada (if applicable)":[
-                    "These facts are only populated for Canadian businesses or businesses with Canadian registration.",
-                    "canada_business_number = BN (Business Number) from CRA (Canada Revenue Agency).",
-                    "canada_corporate_id = provincial incorporation ID (Ontario, BC, Alberta, etc.).",
-                    "Source: OpenCorporates Canada API via integration-service.",
-                ],
-                "📦 Other":[
-                    "Facts not mapped to any standard group. Often: dependent/computed facts, internal metadata, or newly added facts.",
-                    "Check the JSON panel for each fact to understand its source, rule, and dependencies.",
-                    "Many 'Other' facts are null because they are computed from other facts that are also null.",
-                ],
-            }
+            # ── Group engineering notes (analyst card) ──────────────────
             if grp in GROUP_CARDS:
                 analyst_card(f"{grp} — Data Lineage & Engineering Notes", GROUP_CARDS[grp])
 
-            # ── Column guide (inline, compact) ───────────────────────────────
-            st.markdown("""<div style="background:#0f172a;border-radius:6px;padding:8px 12px;margin:4px 0;font-size:.70rem;color:#64748b">
-<strong style="color:#94A3B8">Column guide:</strong>
-<strong style="color:#CBD5E1">Fact</strong> = internal name in rds_warehouse_public.facts ·
-<strong style="color:#CBD5E1">Value</strong> = winning value (click 📄 below to see full JSON) ·
-<strong style="color:#CBD5E1">Winning Source</strong> = vendor whose value the Admin Portal shows ·
-<strong style="color:#CBD5E1">Confidence</strong> = vendor's confidence score (null for dependent/computed facts) ·
-<strong style="color:#CBD5E1">Rule</strong> = Fact Engine selection algorithm ·
-<strong style="color:#CBD5E1">Deps/Alts</strong> = dependencies (computed facts) or alternative vendors (vendor facts)
-</div>""", unsafe_allow_html=True)
-
-            # ── Facts table ───────────────────────────────────────────────
-            display_df = pd.DataFrame([{k:v for k,v in r.items() if k not in ("Override","_raw_fact","_name")}
-                                        for r in rows])
-            st.dataframe(display_df, use_container_width=True, hide_index=True,
-                         column_config={
-                             "Fact": st.column_config.TextColumn("Fact (click 📄 below for JSON)", width="medium"),
-                             "Value": st.column_config.TextColumn("Value", width="medium"),
-                             "Winning Source": st.column_config.TextColumn("Source", width="small"),
-                             "Confidence": st.column_config.TextColumn("Confidence", width="small"),
-                             "Rule": st.column_config.TextColumn("Rule", width="medium"),
-                             "Dependencies / Alternatives": st.column_config.TextColumn("Deps / Alternatives", width="large"),
-                             "Updated": st.column_config.TextColumn("Updated", width="small"),
-                         })
-
-            # ── Per-fact expandable detail ─────────────────────────────────
-            for row_data, m in zip(rows, meta):
-                name      = m["name"]
-                detail    = m["detail"]
-                alts      = m["alts"]
-                explain   = m["explain"]
-                fact_obj  = m["fact"]
-                too_large = m["too_large"]
-                dv        = m["dv"]
-                override  = fact_obj.get("override")
-
-                # Expandable value detail (lists/dicts)
-                if detail is not None:
-                    if isinstance(detail, list):
-                        items_html = "".join(
-                            f"<li style='margin:2px 0'><code style='color:#93c5fd;font-size:.72rem'>"
-                            f"{json.dumps(item,default=str)[:300] if isinstance(item,(dict,list)) else str(item)[:300]}"
-                            f"</code></li>" for item in detail
-                        )
-                        inner = f"<ol style='color:#CBD5E1;font-size:.72rem;margin:4px 0 4px 16px'>{items_html}</ol>"
-                    else:
-                        inner = (f"<pre style='color:#CBD5E1;font-size:.70rem;background:#0F172A;"
-                                 f"padding:8px;border-radius:6px;overflow:auto;max-height:300px'>"
-                                 f"{json.dumps(detail,default=str,indent=2)[:3000]}</pre>")
-
-                    alts_html = ""
-                    if alts:
-                        alt_rows = "".join(
-                            f"<tr><td style='padding:3px 8px;color:#94A3B8;font-size:.70rem'>{_pid_label(a['pid'])}</td>"
-                            f"<td style='padding:3px 8px;color:#CBD5E1;font-size:.70rem'>{str(a.get('value',''))[:60]}</td>"
-                            f"<td style='padding:3px 8px;color:#64748b;font-size:.70rem'>{a['conf']:.4f}</td></tr>"
-                            for a in alts
-                        )
-                        alts_html = (
-                            f"<br><span style='color:#60A5FA;font-size:.70rem;font-weight:600'>"
-                            f"Alternative sources ({len(alts)}) — lost to winner:</span>"
-                            f"<table style='width:100%'><tr>"
-                            f"<th style='color:#60A5FA;text-align:left;padding:2px 8px;font-size:.70rem'>Vendor</th>"
-                            f"<th style='color:#60A5FA;text-align:left;padding:2px 8px;font-size:.70rem'>Value</th>"
-                            f"<th style='color:#60A5FA;text-align:left;padding:2px 8px;font-size:.70rem'>Confidence</th></tr>"
-                            f"{alt_rows}</table>"
-                        )
-
-                    explain_html = ""
-                    if explain:
-                        src_txt, rule_txt, desc_txt = explain
-                        explain_html = (
-                            f"<div style='background:#0c1a2e;border-left:3px solid #3B82F6;padding:6px 10px;"
-                            f"border-radius:6px;margin:6px 0;font-size:.70rem'>"
-                            f"<span style='color:#60A5FA;font-weight:600'>Source:</span> "
-                            f"<span style='color:#CBD5E1'>{src_txt}</span> · "
-                            f"<span style='color:#60A5FA;font-weight:600'>Rule:</span> "
-                            f"<span style='color:#CBD5E1'>{rule_txt}</span><br>"
-                            f"<span style='color:#94A3B8'>{desc_txt}</span></div>"
-                        )
-
-                    st.markdown(
-                        f"<details style='background:#0F172A;border-radius:6px;padding:5px 10px;margin:2px 0'>"
-                        f"<summary style='color:#60A5FA;font-size:.74rem;cursor:pointer'>"
-                        f"🔍 <code>{name}</code> — {dv[:80]}</summary>"
-                        f"{explain_html}{inner}{alts_html}</details>",
-                        unsafe_allow_html=True)
-
-                elif too_large:
-                    st.markdown(
-                        f"<details style='background:#0F172A;border-radius:6px;padding:5px 10px;margin:2px 0'>"
-                        f"<summary style='color:#f59e0b;font-size:.74rem;cursor:pointer'>"
-                        f"📦 <code>{name}</code> — too large for Redshift (click for SQL)</summary>"
-                        f"<div style='color:#94A3B8;font-size:.70rem;margin:4px 0'>This fact exceeds Redshift's VARCHAR(65535) "
-                        f"federation limit. Query directly from PostgreSQL RDS (port 5432) using JSONB operators:</div>"
-                        f"<pre style='color:#22c55e;background:#052e16;padding:8px;border-radius:6px;font-size:.68rem'>"
-                        f"-- PostgreSQL RDS port 5432 (native JSONB — no size limit):\nSELECT value->'value'\nFROM rds_warehouse_public.facts\n"
-                        f"WHERE business_id = '{bid}' AND name = '{name}';</pre>"
-                        + (f"<div style='color:#94A3B8;font-size:.70rem;margin-top:4px'>{FACT_EXPLAIN[name][2]}</div>" if name in FACT_EXPLAIN else "")
-                        + f"</details>", unsafe_allow_html=True)
-
-                elif alts:
-                    alt_rows = "".join(
-                        f"<tr><td style='padding:3px 8px;color:#94A3B8;font-size:.70rem'>{_pid_label(a['pid'])}</td>"
-                        f"<td style='padding:3px 8px;color:#CBD5E1;font-size:.70rem'>{str(a.get('value',''))[:80]}</td>"
-                        f"<td style='padding:3px 8px;color:#64748b;font-size:.70rem'>{a['conf']:.4f}</td></tr>"
-                        for a in alts
-                    )
-                    explain_html2 = ""
-                    if explain:
-                        src_txt,rule_txt,desc_txt = explain
-                        explain_html2 = (f"<div style='color:#94A3B8;font-size:.70rem;margin:4px 0'>"
-                                         f"<b style='color:#60A5FA'>Source:</b> {src_txt} · "
-                                         f"<b style='color:#60A5FA'>Rule:</b> {rule_txt}<br>{desc_txt}</div>")
-                    st.markdown(
-                        f"<details style='background:#0F172A;border-radius:6px;padding:5px 10px;margin:2px 0'>"
-                        f"<summary style='color:#8B5CF6;font-size:.74rem;cursor:pointer'>"
-                        f"🔀 <code>{name}</code> — {len(alts)} alternative source(s)</summary>"
-                        f"{explain_html2}"
-                        f"<table style='width:100%'><tr>"
-                        f"<th style='color:#60A5FA;text-align:left;padding:2px 8px;font-size:.70rem'>Vendor</th>"
-                        f"<th style='color:#60A5FA;text-align:left;padding:2px 8px;font-size:.70rem'>Value</th>"
-                        f"<th style='color:#60A5FA;text-align:left;padding:2px 8px;font-size:.70rem'>Confidence</th></tr>"
-                        f"{alt_rows}</table></details>",
-                        unsafe_allow_html=True)
-
-                if override and str(override) not in ("","None"):
-                    flag(f"Analyst override on `{name}`: **{str(override)[:80]}**", "amber")
-
-            # ── Null facts explanation ─────────────────────────────────────
-            null_facts = [r["Fact"].strip("`") for r in rows if r["Value"]=="(null)"]
-            if null_facts:
-                null_items = "".join(
-                    f"<li style='margin:2px 0'><code style='color:#93c5fd'>{fn}</code>: "
-                    f"<span style='color:#64748b;font-size:.70rem'>"
-                    f"{FACT_EXPLAIN[fn][2] if fn in FACT_EXPLAIN else 'Source not documented — check integration-service lib/facts/'}</span></li>"
-                    for fn in null_facts
-                )
-                st.markdown(
-                    f"<details style='background:#0F172A;border-radius:6px;padding:5px 10px;margin:6px 0'>"
-                    f"<summary style='color:#94A3B8;font-size:.72rem;cursor:pointer'>"
-                    f"❓ Why are {len(null_facts)} fact(s) null in this group?</summary>"
-                    f"<div style='color:#94A3B8;font-size:.71rem;margin-top:4px'>"
-                    f"Possible causes: entity matching failed · optional field not submitted · "
-                    f"calculated from another null fact · integration not enabled at onboarding time.<br>"
-                    f"<ul style='margin:4px 0 0 16px'>{null_items}</ul></div></details>",
-                    unsafe_allow_html=True)
-
-            # ── Group SQL + Python (inline card — NO expander, we are already inside one) ──
-            _grp_fact_names = [r["Fact"].strip("`") for r in rows]
-            _grp_names_str = ",".join(f"'{n}'" for n in _grp_fact_names[:20])
-            _grp_sql = (
-                f"SELECT name,\n"
-                f"       JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,\n"
-                f"       JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS winning_pid,\n"
-                f"       JSON_EXTRACT_PATH_TEXT(value,'source','confidence')  AS confidence,\n"
-                f"       JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name')   AS rule_applied,\n"
-                f"       received_at\n"
-                f"FROM rds_warehouse_public.facts\n"
-                f"WHERE business_id = '{bid}'\n"
-                f"  AND name IN ({_grp_names_str})\n"
-                f"ORDER BY name;"
-            )
-            _grp_py = _make_python_from_sql(_grp_sql)
-            # Render as inline card (no expander — nested expanders forbidden)
-            st.markdown(
-                f"<div style='background:#0c1a2e;border-left:3px solid #3B82F6;border-radius:8px;"
-                f"padding:10px 14px;margin:8px 0'>"
-                f"<div style='color:#60A5FA;font-weight:700;font-size:.80rem;margin-bottom:6px'>"
-                f"📋 Group: {grp.split(' ',1)[-1] if ' ' in grp else grp} — "
-                f"{len(rows)} facts · {g_val} with values · {g_null} null</div>"
-                f"<div style='font-size:.75rem;color:#94A3B8;margin-bottom:6px'>"
-                f"Facts: <code style='color:#60A5FA'>{', '.join(_grp_fact_names[:12])}{'…' if len(_grp_fact_names)>12 else ''}</code><br>"
-                f"Source: <code>rds_warehouse_public.facts</code> · "
-                f"API: <code>GET /integration/api/v1/facts/business/{{bid}}/kyb</code></div>"
-                f"<div>" + src_links_html([
-                    ("facts/kyb/index.ts","KYB fact definitions"),
-                    ("facts/rules.ts","Fact Engine rules"),
-                    ("openapi/integration","API Reference"),
-                ]) + "</div></div>",
-                unsafe_allow_html=True
-            )
-            # SQL + Python side by side (no expander wrapper)
-            _gc1, _gc2 = st.columns(2)
-            with _gc1:
-                st.markdown("**SQL (Redshift):**")
-                st.code(_grp_sql, language="sql")
-            with _gc2:
-                st.markdown("**Python (paste into 🐍 Runner):**")
-                st.code(_grp_py or "# see SQL", language="python")
+            # ── render_lineage() — identical structure to all other tabs ──────
+            # Shows: Source Code Reference + field annotations + JSON + SQL + Python
+            # for EVERY fact in this group. No custom renderer — one consistent view.
+            render_lineage(facts, _fact_names_in_grp)
 
     st.markdown("---")
     st.markdown("#### 🔍 SQL Reference — Full Business Investigation")
