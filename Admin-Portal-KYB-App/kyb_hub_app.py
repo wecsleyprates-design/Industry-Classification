@@ -54,7 +54,74 @@ GITHUB_LINKS = {
     # api-docs
     "api-docs":                 f"{REPO}/api-docs",
     "openapi/integration":      f"{REPO}/api-docs/openapi-specs/integration.json",
+    "openapi/kyb":              f"{REPO}/api-docs/openapi-specs/get-kyb.json",
+    "api-docs/kyb.md":          f"{REPO}/api-docs/api-reference/kyb.md",
 }
+
+# ── External documentation links ──────────────────────────────────────────────
+DOCS_URL    = "https://docs.worthai.com"
+DOCS_KYB    = "https://docs.worthai.com/api-reference/kyb"          # GET /facts/business/{id}/kyb
+DOCS_SCORE  = "https://docs.worthai.com/api-reference/score"
+ADMIN_URL   = "https://admin.joinworth.com"
+OPENAPI_KYB = f"{REPO}/api-docs/openapi-specs/get-kyb.json"         # OpenAPI spec on GitHub
+
+# ── Preloaded OpenAPI fact schemas from get-kyb.json ─────────────────────────
+# Source: Admin-Portal-KYB-App/api-docs/openapi-specs/get-kyb.json
+# This is the authoritative spec for GET /facts/business/{businessId}/kyb
+# Matches what docs.worthai.com shows and what admin.joinworth.com uses.
+@st.cache_resource
+def _load_kyb_fact_schemas():
+    """Load fact schemas from the real OpenAPI spec (get-kyb.json)."""
+    import json as _json
+    spec_path = BASE / "api-docs" / "openapi-specs" / "get-kyb.json"
+    if not spec_path.exists():
+        return {}, {}
+    try:
+        with open(spec_path) as f:
+            spec = _json.load(f)
+        schemas = spec.get("components",{}).get("schemas",{})
+
+        def _resolve(obj, depth=0):
+            if depth > 4 or not isinstance(obj, dict): return None
+            if "$ref" in obj:
+                ref_name = obj["$ref"].split("/")[-1]
+                return _resolve(schemas.get(ref_name,{}), depth+1)
+            t = obj.get("type")
+            props = obj.get("properties",{})
+            example = obj.get("example")
+            if example is not None: return example
+            if t == "object" or props:
+                return {k: _resolve(v, depth+1) for k,v in list(props.items())[:12]}
+            if t == "string":
+                enum = obj.get("enum")
+                return enum[0] if enum else obj.get("description","")[:40] or None
+            if t == "boolean": return None
+            if t in ("integer","number"): return None
+            if t == "array":
+                items = obj.get("items",{})
+                return [_resolve(items, depth+1)]
+            if isinstance(t, list): return None
+            return None
+
+        kyb_data = schemas.get("KYBData",{})
+        fact_props = kyb_data.get("properties",{})
+        fact_examples = {}
+        fact_descriptions = {}
+        for fname, fschema in fact_props.items():
+            try:
+                resolved = fschema
+                if "$ref" in fschema:
+                    ref_name = fschema["$ref"].split("/")[-1]
+                    resolved = schemas.get(ref_name, fschema)
+                fact_examples[fname]     = _resolve(fschema)
+                fact_descriptions[fname] = resolved.get("description","")
+            except Exception:
+                pass
+        return fact_examples, fact_descriptions
+    except Exception:
+        return {}, {}
+
+_KYB_FACT_EXAMPLES, _KYB_FACT_DESCRIPTIONS = _load_kyb_fact_schemas()
 
 def src_link(key, label=None):
     """Return a markdown link for a source file."""
@@ -269,17 +336,61 @@ def kpi_detail(label, value, sub, color, fact_name, fact_value_raw,
                 unsafe_allow_html=True
             )
 
-        # ── JSON as st.code ───────────────────────────────────────────────────
-        st.markdown("**JSON (as stored in Redshift / returned by API):**")
+        # ── JSON — provenance-aware rendering ─────────────────────────────────
+        # Check if fact_name exists in the real OpenAPI spec (get-kyb.json)
+        _dp_spec_example = _KYB_FACT_EXAMPLES.get(fact_name)
+        _dp_spec_desc    = _KYB_FACT_DESCRIPTIONS.get(fact_name,"")
+
         try:
             j_obj = json.loads(json_snippet) if json_snippet and json_snippet.startswith("{") else None
         except Exception:
             j_obj = None
-        if j_obj:
+
+        if _dp_spec_example is not None:
+            # Real schema from official OpenAPI spec
+            st.markdown(
+                f"<div style='background:#052e16;border-left:3px solid #22c55e;"
+                f"border-radius:6px;padding:6px 10px;margin:4px 0;font-size:.74rem'>"
+                f"<strong style='color:#86efac'>✅ Official API Schema</strong> · "
+                f"Source: <a href='{OPENAPI_KYB}' target='_blank' style='color:#22c55e'>"
+                f"api-docs/openapi-specs/get-kyb.json</a> · "
+                f"Docs: <a href='{DOCS_KYB}' target='_blank' style='color:#22c55e'>docs.worthai.com/api-reference/kyb</a>"
+                + (f"<br><span style='color:#94A3B8'>{_dp_spec_desc}</span>" if _dp_spec_desc else "")
+                + "</div>",
+                unsafe_allow_html=True
+            )
+            st.markdown(f"**JSON schema (from `GET /facts/business/{{businessId}}/kyb → data.{fact_name}`):**")
+            st.code(json.dumps(_dp_spec_example, indent=2, default=str, ensure_ascii=False), language="json")
+            if j_obj:
+                st.markdown("**Supplied runtime value:**")
+                st.code(json.dumps(j_obj, indent=2, ensure_ascii=False), language="json")
+        elif j_obj:
+            # Supplied JSON snippet — not from spec, show transparency notice
+            st.markdown(
+                f"<div style='background:#1c1917;border-left:3px solid #f59e0b;"
+                f"border-radius:6px;padding:6px 10px;margin:4px 0;font-size:.74rem'>"
+                f"<strong style='color:#fde68a'>⚠️ Analysis-derived JSON</strong> — "
+                f"<code>{fact_name}</code> is not a direct KYB API fact. "
+                f"This JSON represents computed analysis values, not a raw API response. "
+                f"For the real KYB API schema see "
+                f"<a href='{OPENAPI_KYB}' target='_blank' style='color:#f59e0b'>get-kyb.json</a> or "
+                f"<a href='{DOCS_KYB}' target='_blank' style='color:#f59e0b'>docs.worthai.com</a>."
+                f"</div>",
+                unsafe_allow_html=True
+            )
+            st.markdown("**JSON (analysis-derived values):**")
             st.code(json.dumps(j_obj, indent=2, ensure_ascii=False), language="json")
         else:
-            clean_json = json.dumps({"value": fact_value_raw, "fact": fact_name, "source_table": source_table}, indent=2, default=str)
-            st.code(clean_json, language="json")
+            # Fallback minimal JSON
+            st.markdown(
+                f"<div style='background:#1c1917;border-left:3px solid #f59e0b;"
+                f"border-radius:6px;padding:6px 10px;margin:4px 0;font-size:.74rem'>"
+                f"⚠️ No schema in OpenAPI spec for <code>{fact_name}</code>. "
+                f"See <a href='{OPENAPI_KYB}' target='_blank' style='color:#f59e0b'>get-kyb.json</a> or "
+                f"<a href='{DOCS_KYB}' target='_blank' style='color:#f59e0b'>docs.worthai.com</a>.</div>",
+                unsafe_allow_html=True
+            )
+            st.code(json.dumps({"fact":fact_name,"value":fact_value_raw,"source_table":source_table}, indent=2, default=str), language="json")
 
         # ── SQL + Python side by side ─────────────────────────────────────────
         _py = _make_python_from_sql(source_sql)
@@ -1224,8 +1335,50 @@ def render_lineage(facts, names, title="Fact Lineage", show_rule_explainer=False
                     st.markdown(src_ref_html + storage_html, unsafe_allow_html=True)
                     st.markdown("**Field-by-field annotations:**")
                     st.markdown(ann_table_html, unsafe_allow_html=True)
-                    st.markdown("**Full JSON (as stored in `rds_warehouse_public.facts.value`):**")
-                    st.code(json_str, language="json")
+
+                    # ── JSON provenance banner ────────────────────────────────
+                    # Determine if we have a real OpenAPI spec example or a runtime-constructed object
+                    _spec_example = _KYB_FACT_EXAMPLES.get(fname)
+                    _spec_desc    = _KYB_FACT_DESCRIPTIONS.get(fname,"")
+
+                    if _spec_example is not None:
+                        # REAL JSON from the official OpenAPI spec (get-kyb.json in api-docs folder)
+                        _display_json = json.dumps(_spec_example, indent=2, default=str)
+                        st.markdown(
+                            f"<div style='background:#052e16;border-left:3px solid #22c55e;"
+                            f"border-radius:6px;padding:8px 12px;margin:4px 0;font-size:.76rem'>"
+                            f"<strong style='color:#86efac'>✅ Official API Schema</strong> — "
+                            f"this JSON structure is from the real OpenAPI specification "
+                            f"<a href='{OPENAPI_KYB}' target='_blank' style='color:#22c55e'>"
+                            f"get-kyb.json</a> (same spec that powers "
+                            f"<a href='{DOCS_KYB}' target='_blank' style='color:#22c55e'>docs.worthai.com/api-reference/kyb</a> "
+                            f"and <a href='{ADMIN_URL}' target='_blank' style='color:#22c55e'>admin.joinworth.com</a>).<br>"
+                            + (f"<span style='color:#94A3B8'>API description: {_spec_desc}</span>" if _spec_desc else "")
+                            + f"</div>",
+                            unsafe_allow_html=True
+                        )
+                        st.markdown(f"**JSON schema from [`get-kyb.json`]({OPENAPI_KYB}) — `GET /facts/business/{{businessId}}/kyb → data.{fname}`:**")
+                        st.code(_display_json, language="json")
+
+                        # Also show the LIVE value from Redshift for comparison
+                        if json_str and json_str.strip() != "{}":
+                            st.markdown("**Live value for this business (from `rds_warehouse_public.facts.value`):**")
+                            st.code(json_str, language="json")
+                    else:
+                        # No spec entry — show runtime-constructed object with transparency notice
+                        st.markdown(
+                            f"<div style='background:#1c1917;border-left:3px solid #f59e0b;"
+                            f"border-radius:6px;padding:8px 12px;margin:4px 0;font-size:.76rem'>"
+                            f"<strong style='color:#fde68a'>⚠️ Constructed from runtime data</strong> — "
+                            f"<code>{fname}</code> is not in the public OpenAPI spec "
+                            f"(<a href='{OPENAPI_KYB}' target='_blank' style='color:#f59e0b'>get-kyb.json</a>). "
+                            f"The JSON below is built from the actual value stored in Redshift for this business. "
+                            f"Verify at: <a href='{DOCS_KYB}' target='_blank' style='color:#f59e0b'>docs.worthai.com/api-reference/kyb</a>"
+                            f"</div>",
+                            unsafe_allow_html=True
+                        )
+                        st.markdown("**JSON (constructed from `rds_warehouse_public.facts.value` for this business):**")
+                        st.code(json_str, language="json")
                     _sc, _pc = st.columns(2)
                     with _sc:
                         st.markdown("**SQL (Redshift):**")
