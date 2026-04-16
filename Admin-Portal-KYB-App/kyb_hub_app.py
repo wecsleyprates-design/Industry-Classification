@@ -28,7 +28,10 @@ if "theme_mode" not in st.session_state:
 _dark = st.session_state["theme_mode"] == "dark"
 
 # ── GitHub source links ────────────────────────────────────────────────────────
-REPO = "https://github.com/wecsleyprates-design/Industry-Classification/blob/main/Admin-Portal-KYB-App"
+# Files live on the feature branch, not main
+REPO = "https://github.com/wecsleyprates-design/Industry-Classification/blob/cursor/ai-classification-agent-7910/Admin-Portal-KYB-App"
+REPO_RAW = "https://raw.githubusercontent.com/wecsleyprates-design/Industry-Classification/cursor/ai-classification-agent-7910/Admin-Portal-KYB-App"
+
 GITHUB_LINKS = {
     # integration-service fact definitions
     "facts/kyb/index.ts":       f"{REPO}/integration-service-main/lib/facts/kyb/index.ts",
@@ -51,11 +54,16 @@ GITHUB_LINKS = {
     # microsites (Admin Portal UI)
     "EntityJurisdictionCell":   f"{REPO}/microsites-main/packages/case/src/page/Cases/KYB",
     "KYB UI":                   f"{REPO}/microsites-main/packages/case/src/page/Cases/KYB",
-    # api-docs
+    # api-docs — real paths verified with git ls-files
     "api-docs":                 f"{REPO}/api-docs",
     "openapi/integration":      f"{REPO}/api-docs/openapi-specs/integration.json",
     "openapi/kyb":              f"{REPO}/api-docs/openapi-specs/get-kyb.json",
-    "api-docs/kyb.md":          f"{REPO}/api-docs/api-reference/kyb.md",
+    "api-docs/kyb.md":          f"{REPO}/api-docs/api-reference/integration/facts/kyb.md",
+    "api-docs/kyb-guide":       f"{REPO}/api-docs/getting-started/kyb-kyc.md",
+    "api-docs/bjl":             f"{REPO}/api-docs/api-reference/integration/facts/bankruptcies-judgements-&-liens-bjl.md",
+    "api-docs/reviews":         f"{REPO}/api-docs/api-reference/integration/facts/reviews.md",
+    "api-docs/score":           f"{REPO}/api-docs/api-reference/integration/verification/get-verification-details.md",
+    "api-docs/banking":         f"{REPO}/api-docs/api-reference/integration/banking/banking-information.md",
 }
 
 # ── External documentation links ──────────────────────────────────────────────
@@ -1701,7 +1709,7 @@ def ask_ai(question, context="", history=None):
     if history: msgs.extend(history[-8:])
     msgs.append({"role":"user","content":f"RAG:\n{rag}\n\nContext:\n{context}\n\nQuestion: {question}"})
     # ── Source-type → GitHub URL resolver ────────────────────────────────────
-    REPO_BASE = "https://github.com/wecsleyprates-design/Industry-Classification/blob/main/Admin-Portal-KYB-App"
+    REPO_BASE = REPO  # feature branch URL, already defined above
     def _chunk_github_url(chunk: dict) -> str:
         """Return a clickable GitHub URL for a RAG chunk based on source_type + path."""
         stype = chunk.get("source_type","")
@@ -1724,15 +1732,19 @@ def ask_ai(question, context="", history=None):
         }
         # Specific file overrides for known paths
         FILE_MAP = {
-            ("API_DOCS", "kyb.md"):              f"{REPO_BASE}/api-docs/kyb.md",
+            # Verified paths (git ls-files confirmed these exist on the branch)
+            ("API_DOCS", "kyb.md"):              f"{REPO_BASE}/api-docs/api-reference/integration/facts/kyb.md",
+            ("API_DOCS", "kyb-kyc.md"):          f"{REPO_BASE}/api-docs/getting-started/kyb-kyc.md",
             ("API_DOCS", "openapi"):              GITHUB_LINKS.get("openapi/integration",""),
-            ("INTEGRATION_SERVICE","index.ts"):   GITHUB_LINKS.get("facts/kyb/index.ts",""),
-            ("INTEGRATION_SERVICE","rules.ts"):   GITHUB_LINKS.get("facts/rules.ts",""),
-            ("INTEGRATION_SERVICE","sources.ts"): GITHUB_LINKS.get("facts/sources.ts",""),
+            ("API_DOCS", "get-kyb.json"):        GITHUB_LINKS.get("openapi/kyb",""),
+            ("API_DOCS", "integration.json"):    GITHUB_LINKS.get("openapi/integration",""),
+            ("INTEGRATION_SERVICE","index.ts"):  GITHUB_LINKS.get("facts/kyb/index.ts",""),
+            ("INTEGRATION_SERVICE","rules.ts"):  GITHUB_LINKS.get("facts/rules.ts",""),
+            ("INTEGRATION_SERVICE","sources.ts"):GITHUB_LINKS.get("facts/sources.ts",""),
             ("WAREHOUSE_SERVICE","customer_table.sql"): GITHUB_LINKS.get("customer_table.sql",""),
-            ("WORTH_SCORE","aiscore.py"):          GITHUB_LINKS.get("aiscore.py",""),
+            ("WORTH_SCORE","aiscore.py"):         GITHUB_LINKS.get("aiscore.py",""),
             ("WORTH_SCORE","worth_score_model.py"):GITHUB_LINKS.get("worth_score_model.py",""),
-            ("FACT_ENGINE","rules.ts"):            GITHUB_LINKS.get("facts/rules.ts",""),
+            ("FACT_ENGINE","rules.ts"):           GITHUB_LINKS.get("facts/rules.ts",""),
             ("WATCHLIST","consolidatedWatchlist.ts"): GITHUB_LINKS.get("consolidatedWatchlist.ts",""),
         }
         # Try exact file match
