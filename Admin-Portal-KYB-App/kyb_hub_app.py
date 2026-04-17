@@ -5931,47 +5931,47 @@ ORDER BY name, received_at DESC;""",language="sql")
         kyb_sub=str(gv(facts,"kyb_submitted") or "").lower()
         kyb_comp=str(gv(facts,"kyb_complete") or "").lower()
 
-        c1,c2,c3,c4=st.columns(4)
         _bg_sql=f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val, JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('kyb_submitted','kyb_complete','revenue','num_employees') ORDER BY name;"
-        with c1:
-            kpi("KYB Submitted","✅ Yes" if kyb_sub=="true" else "❌ No","Onboarding form submitted","#22c55e" if kyb_sub=="true" else "#f59e0b")
-            detail_panel("KYB Submitted", kyb_sub or "Unknown",
-                what_it_means="kyb_submitted=true when the onboarding form has been submitted (addresses[] is not empty). This is a DEPENDENT fact (pid=-1) derived from the addresses fact. It means the merchant completed the onboarding form — it does NOT mean KYB verification is complete.",
-                source_table="rds_warehouse_public.facts · name='kyb_submitted'",
-                source_file="facts/kyb/index.ts", source_file_line="kybSubmitted · dependent · addresses[].length > 0",
-                json_obj={"name":"kyb_submitted","value":kyb_sub=="true","source":{"platformId":-1,"name":"dependent"},"dependencies":["addresses"]},
-                sql=_bg_sql, links=[("facts/kyb/index.ts","kybSubmitted definition")],
-                color="#22c55e" if kyb_sub=="true" else "#f59e0b", icon="📋")
-        with c2:
-            kpi("KYB Complete","✅ Yes" if kyb_comp=="true" else "❌ No","Business verified + people screened","#22c55e" if kyb_comp=="true" else "#f59e0b")
-            detail_panel("KYB Complete", kyb_comp or "Unknown",
-                what_it_means="kyb_complete=true when BOTH conditions are met: (1) business_verified=true AND (2) screened_people is not empty (at least one person has been screened). This is a DEPENDENT fact. kyb_complete=false means either the business entity has not been fully verified OR the PSC (Person Screening) has not been completed.",
-                source_table="rds_warehouse_public.facts · name='kyb_complete'",
-                source_file="facts/kyb/index.ts", source_file_line="kybComplete · dependent · business_verified AND screened_people",
-                json_obj={"name":"kyb_complete","value":kyb_comp=="true","source":{"platformId":-1,"name":"dependent"},"dependencies":["business_verified","screened_people"]},
-                sql=_bg_sql, links=[("facts/kyb/index.ts","kybComplete definition"),("trulioo","Trulioo PSC screening")],
-                color="#22c55e" if kyb_comp=="true" else "#f59e0b", icon="✅" if kyb_comp=="true" else "❌")
-        with c3:
-            kpi("Revenue",revenue_v[:18] if revenue_v else "Not available","ZI/EFX bulk data · Worth Score input","#3B82F6" if revenue_v else "#64748b")
-            detail_panel("Revenue", revenue_v or "Not available",
-                what_it_means="Annual revenue in USD. Primary source: ZoomInfo (pid=24, w=0.8) or Equifax (pid=17, w=0.7) bulk firmographic data — matched via internal entity-matching XGBoost model. This is a PRIMARY Worth Score feature (Business Operations category). Null = vendor could not match this entity.",
-                source_table="rds_warehouse_public.facts · name='revenue'",
-                source_file="facts/kyb/index.ts", source_file_line="revenue · factWithHighestConfidence · ZI pid=24 / EFX pid=17",
-                api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.revenue",
-                json_obj={"name":"revenue","value":revenue_v or None,"source":{"platformId":24,"name":"zoominfo","weight":0.8},"worth_score_feature":"revenue","worth_score_category":"Business Operations"},
-                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS revenue FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='revenue';",
-                links=[("worth_score_model.py","Revenue as Worth Score feature"),("integrations.constant.ts","ZOOMINFO=24, EQUIFAX=17")],
-                color="#3B82F6" if revenue_v else "#64748b", icon="💰")
-        with c4:
-            kpi("Employees",emp_v if emp_v else "Not available","num_employees · Worth Score feature: count_employees","#3B82F6" if emp_v else "#64748b")
-            detail_panel("Employees", emp_v or "Not available",
-                what_it_means="Employee count from ZoomInfo (pid=24) or Equifax (pid=17) bulk firmographic data. Worth Score feature: count_employees (Company Profile category). Null = entity not found in vendor databases. Proxy for business scale and stability.",
-                source_table="rds_warehouse_public.facts · name='num_employees'",
-                source_file="facts/kyb/index.ts", source_file_line="numEmployees · factWithHighestConfidence · ZI pid=24 / EFX pid=17",
-                json_obj={"name":"num_employees","value":emp_v or None,"worth_score_feature":"count_employees","worth_score_category":"Company Profile"},
-                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS num_employees FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='num_employees';",
-                links=[("worth_score_model.py","count_employees Worth Score feature"),("integrations.constant.ts","ZOOMINFO=24")],
-                color="#3B82F6" if emp_v else "#64748b", icon="👥")
+
+        # KPI cards only — no expanders inside columns
+        c1,c2,c3,c4=st.columns(4)
+        with c1: kpi("KYB Submitted","✅ Yes" if kyb_sub=="true" else "❌ No","Onboarding form submitted","#22c55e" if kyb_sub=="true" else "#f59e0b")
+        with c2: kpi("KYB Complete","✅ Yes" if kyb_comp=="true" else "❌ No","Business verified + people screened","#22c55e" if kyb_comp=="true" else "#f59e0b")
+        with c3: kpi("Revenue",revenue_v[:18] if revenue_v else "Not available","ZI/EFX bulk data · Worth Score input","#3B82F6" if revenue_v else "#64748b")
+        with c4: kpi("Employees",emp_v if emp_v else "Not available","num_employees · Worth Score feature: count_employees","#3B82F6" if emp_v else "#64748b")
+
+        # Detail panels — sequential full-width (no overlap)
+        detail_panel("📋 KYB Submitted", kyb_sub or "Unknown",
+            what_it_means="kyb_submitted=true when the onboarding form has been submitted (addresses[] is not empty). DEPENDENT fact (pid=-1) derived from the addresses fact. Means the merchant completed the onboarding form — does NOT mean KYB verification is complete.",
+            source_table="rds_warehouse_public.facts · name='kyb_submitted'",
+            source_file="facts/kyb/index.ts", source_file_line="kybSubmitted · dependent · addresses[].length > 0",
+            json_obj={"name":"kyb_submitted","value":kyb_sub=="true","source":{"platformId":-1,"name":"dependent"},"dependencies":["addresses"]},
+            sql=_bg_sql, links=[("facts/kyb/index.ts","kybSubmitted definition")],
+            color="#22c55e" if kyb_sub=="true" else "#f59e0b", icon="📋")
+        detail_panel("✅ KYB Complete", kyb_comp or "Unknown",
+            what_it_means="kyb_complete=true when BOTH: (1) business_verified=true AND (2) screened_people not empty. DEPENDENT fact. kyb_complete=false means entity not fully verified OR PSC (Person Screening) not completed.",
+            source_table="rds_warehouse_public.facts · name='kyb_complete'",
+            source_file="facts/kyb/index.ts", source_file_line="kybComplete · dependent · business_verified AND screened_people",
+            json_obj={"name":"kyb_complete","value":kyb_comp=="true","source":{"platformId":-1,"name":"dependent"},"dependencies":["business_verified","screened_people"]},
+            sql=_bg_sql, links=[("facts/kyb/index.ts","kybComplete definition"),("trulioo","Trulioo PSC screening")],
+            color="#22c55e" if kyb_comp=="true" else "#f59e0b", icon="✅" if kyb_comp=="true" else "❌")
+        detail_panel("💰 Revenue", revenue_v or "Not available",
+            what_it_means="Annual revenue in USD. Primary source: ZoomInfo (pid=24, w=0.8) or Equifax (pid=17, w=0.7) bulk firmographic — matched via internal entity-matching XGBoost model. PRIMARY Worth Score feature (Business Operations). Null = vendor could not match this entity.",
+            source_table="rds_warehouse_public.facts · name='revenue'",
+            source_file="facts/kyb/index.ts", source_file_line="revenue · factWithHighestConfidence · ZI pid=24 / EFX pid=17",
+            api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.revenue",
+            json_obj={"name":"revenue","value":revenue_v or None,"source":{"platformId":24,"name":"zoominfo","weight":0.8},"worth_score_feature":"revenue","worth_score_category":"Business Operations"},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS revenue FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='revenue';",
+            links=[("worth_score_model.py","Revenue as Worth Score feature"),("integrations.constant.ts","ZOOMINFO=24, EQUIFAX=17")],
+            color="#3B82F6" if revenue_v else "#64748b", icon="💰")
+        detail_panel("👥 Employees", emp_v or "Not available",
+            what_it_means="Employee count from ZoomInfo (pid=24) or Equifax (pid=17) bulk firmographic. Worth Score feature: count_employees (Company Profile). Null = entity not found in vendor databases. Proxy for business scale and stability.",
+            source_table="rds_warehouse_public.facts · name='num_employees'",
+            source_file="facts/kyb/index.ts", source_file_line="numEmployees · factWithHighestConfidence · ZI pid=24 / EFX pid=17",
+            json_obj={"name":"num_employees","value":emp_v or None,"worth_score_feature":"count_employees","worth_score_category":"Company Profile"},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS num_employees FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='num_employees';",
+            links=[("worth_score_model.py","count_employees Worth Score feature"),("integrations.constant.ts","ZOOMINFO=24")],
+            color="#3B82F6" if emp_v else "#64748b", icon="👥")
 
         # Name lineage
         st.markdown("##### Name Lineage — business_name vs legal_name")
@@ -6164,46 +6164,45 @@ ORDER BY name, received_at DESC;""",language="sql")
         rating=str(gv(facts,"review_rating") or "")
         rev_count=str(gv(facts,"review_count") or "")
 
-        c1,c2,c3,c4=st.columns(4)
         _web_sql=f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('website','website_found','serp_id','review_rating','review_count') ORDER BY name;"
+
+        # KPI cards only — no expanders inside columns
         c1,c2,c3,c4=st.columns(4)
-        with c1:
-            kpi("Website",website_v[:30] if website_v else "❌ Not submitted","Applicant-submitted URL","#22c55e" if website_v else "#f59e0b")
-            detail_panel("Website", website_v or "Not submitted",
-                what_it_means="Business website URL submitted on the onboarding form (pid=0=Applicant) or found by SERP (pid=22). CRITICAL for NAICS classification: if null, AI enrichment (last resort) cannot use web_search → Gap G2 → likely NAICS=561499 fallback.",
-                source_table="rds_warehouse_public.facts · name='website'",
-                source_file="facts/kyb/index.ts", source_file_line="website · factWithHighestConfidence · pid=0 Applicant or pid=22 SERP",
-                api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.website",
-                json_obj={"name":"website","value":website_v or None,"source":{"platformId":0,"name":"businessDetails"},"naics_impact":"If null AND NAICS=561499 → Gap G2 confirmed"},
-                sql=_web_sql, links=[("facts/kyb/index.ts","website fact"),("aiEnrichment","AI uses website for NAICS")],
-                color="#22c55e" if website_v else "#f59e0b", icon="🌐")
-        with c2:
-            kpi("Website Found","✅ Yes" if web_found_str=="true" else "❌ No","Verified by SERP/Middesk","#22c55e" if web_found_str=="true" else "#64748b")
-            detail_panel("Website Found", web_found_str or "Unknown",
-                what_it_means="website_found = list of verified URLs found by SERP/Middesk. combineFacts rule — merges from all vendors. Empty list means no website was confirmed online. Different from 'website' fact (submitted URL) — website_found is what vendors actually found.",
-                source_table="rds_warehouse_public.facts · name='website_found'",
-                source_file="facts/kyb/index.ts", source_file_line="websiteFound · combineFacts · SERP pid=22 / Middesk pid=16",
-                json_obj={"name":"website_found","value":[],"source":{"platformId":None,"name":None},"ruleApplied":{"name":"combineFacts"}},
-                sql=_web_sql, links=[("facts/kyb/index.ts","websiteFound"),("integrations.constant.ts","SERP_SCRAPE=22")],
-                color="#22c55e" if web_found_str=="true" else "#64748b", icon="🔍")
-        with c3:
-            kpi("SERP/GMB ID","✅ Found" if serp_id else "❌ Not found","Google My Business presence","#22c55e" if serp_id else "#64748b")
-            detail_panel("SERP/GMB ID", serp_id[:30] if serp_id else "Not found",
-                what_it_means="serp_id = Google Business Profile place ID from SERP API (pid=22 or pid=39 SERP_GOOGLE_PROFILE). Presence indicates the business has a Google My Business listing — used for review_rating and review_count. Not found = no verified Google presence.",
-                source_table="rds_warehouse_public.facts · name='serp_id'",
-                source_file="facts/kyb/index.ts", source_file_line="serpId · factWithHighestConfidence · SERP_GOOGLE_PROFILE pid=39",
-                json_obj={"name":"serp_id","value":serp_id or None,"source":{"platformId":39,"name":"serpGoogleProfile"}},
-                sql=_web_sql, links=[("facts/kyb/index.ts","serpId"),("integrations.constant.ts","SERP_GOOGLE_PROFILE=39")],
-                color="#22c55e" if serp_id else "#64748b", icon="📍")
-        with c4:
-            kpi("Review Rating",rating if rating else "N/A",f"{rev_count} reviews" if rev_count else "No reviews","#3B82F6" if rating else "#64748b")
-            detail_panel("Review Rating", rating or "N/A",
-                what_it_means="Google My Business review rating (1-5 stars) from SERP API. Used as social proof signal. Only available when serp_id is found. review_count = number of Google reviews.",
-                source_table="rds_warehouse_public.facts · name='review_rating' + 'review_count'",
-                source_file="facts/kyb/index.ts", source_file_line="reviewRating · SERP pid=22/39",
-                json_obj={"review_rating":rating or None,"review_count":rev_count or None,"source":{"platformId":39,"name":"serpGoogleProfile"}},
-                sql=_web_sql, links=[("facts/kyb/index.ts","reviewRating"),("integrations.constant.ts","SERP_GOOGLE_PROFILE=39")],
-                color="#3B82F6" if rating else "#64748b", icon="⭐")
+        with c1: kpi("Website",website_v[:30] if website_v else "❌ Not submitted","Applicant-submitted URL","#22c55e" if website_v else "#f59e0b")
+        with c2: kpi("Website Found","✅ Yes" if web_found_str=="true" else "❌ No","Verified by SERP/Middesk","#22c55e" if web_found_str=="true" else "#64748b")
+        with c3: kpi("SERP/GMB ID","✅ Found" if serp_id else "❌ Not found","Google My Business presence","#22c55e" if serp_id else "#64748b")
+        with c4: kpi("Review Rating",rating if rating else "N/A",f"{rev_count} reviews" if rev_count else "No reviews","#3B82F6" if rating else "#64748b")
+
+        # Detail panels — sequential full-width (no overlap)
+        detail_panel("🌐 Website", website_v or "Not submitted",
+            what_it_means="Business website URL submitted on the onboarding form (pid=0=Applicant) or found by SERP (pid=22). CRITICAL for NAICS classification: if null, AI enrichment (last resort) cannot use web_search → Gap G2 → likely NAICS=561499 fallback.",
+            source_table="rds_warehouse_public.facts · name='website'",
+            source_file="facts/kyb/index.ts", source_file_line="website · factWithHighestConfidence · pid=0 Applicant or pid=22 SERP",
+            api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.website",
+            json_obj={"name":"website","value":website_v or None,"source":{"platformId":0,"name":"businessDetails"},"naics_impact":"If null AND NAICS=561499 → Gap G2 confirmed"},
+            sql=_web_sql, links=[("facts/kyb/index.ts","website fact"),("aiEnrichment","AI uses website for NAICS")],
+            color="#22c55e" if website_v else "#f59e0b", icon="🌐")
+        detail_panel("🔍 Website Found", web_found_str or "Unknown",
+            what_it_means="website_found = list of verified URLs found by SERP/Middesk. combineFacts rule — merges from all vendors. Empty list means no website was confirmed online. Different from 'website' fact (submitted URL) — website_found is what vendors actually found.",
+            source_table="rds_warehouse_public.facts · name='website_found'",
+            source_file="facts/kyb/index.ts", source_file_line="websiteFound · combineFacts · SERP pid=22 / Middesk pid=16",
+            json_obj={"name":"website_found","value":[],"source":{"platformId":None,"name":None},"ruleApplied":{"name":"combineFacts"}},
+            sql=_web_sql, links=[("facts/kyb/index.ts","websiteFound"),("integrations.constant.ts","SERP_SCRAPE=22")],
+            color="#22c55e" if web_found_str=="true" else "#64748b", icon="🔍")
+        detail_panel("📍 SERP/GMB ID", serp_id[:30] if serp_id else "Not found",
+            what_it_means="serp_id = Google Business Profile place ID from SERP API (pid=22 or pid=39 SERP_GOOGLE_PROFILE). Presence indicates the business has a Google My Business listing — used for review_rating and review_count. Not found = no verified Google presence.",
+            source_table="rds_warehouse_public.facts · name='serp_id'",
+            source_file="facts/kyb/index.ts", source_file_line="serpId · factWithHighestConfidence · SERP_GOOGLE_PROFILE pid=39",
+            json_obj={"name":"serp_id","value":serp_id or None,"source":{"platformId":39,"name":"serpGoogleProfile"}},
+            sql=_web_sql, links=[("facts/kyb/index.ts","serpId"),("integrations.constant.ts","SERP_GOOGLE_PROFILE=39")],
+            color="#22c55e" if serp_id else "#64748b", icon="📍")
+        detail_panel("⭐ Review Rating", rating or "N/A",
+            what_it_means="Google My Business review rating (1-5 stars) from SERP API. Used as social proof signal. Only available when serp_id is found. review_count = number of Google reviews.",
+            source_table="rds_warehouse_public.facts · name='review_rating' + 'review_count'",
+            source_file="facts/kyb/index.ts", source_file_line="reviewRating · SERP pid=22/39",
+            json_obj={"review_rating":rating or None,"review_count":rev_count or None,"source":{"platformId":39,"name":"serpGoogleProfile"}},
+            sql=_web_sql, links=[("facts/kyb/index.ts","reviewRating"),("integrations.constant.ts","SERP_GOOGLE_PROFILE=39")],
+            color="#3B82F6" if rating else "#64748b", icon="⭐")
 
         # NAICS-website link warning
         if website_v and is_fallback:
