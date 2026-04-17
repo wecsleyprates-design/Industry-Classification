@@ -264,6 +264,134 @@ def load_portfolio_businesses(date_from, date_to):
 
 
 @st.cache_data(ttl=600, show_spinner=False)
+def load_customers(date_from=None, date_to=None):
+    """Load distinct customer names from Redshift for the sidebar filter.
+    Uses rel_business_customer_monitoring joined to data_customers."""
+    parts = []
+    if date_from:
+        parts.append(f"DATE(bcm.created_at) >= '{date_from}'")
+    if date_to:
+        parts.append(f"DATE(bcm.created_at) <= '{date_to}'")
+    dc = (" AND " + " AND ".join(parts)) if parts else ""
+    sql = f"""
+        SELECT DISTINCT dc.id AS customer_id, dc.name AS customer_name,
+               COUNT(DISTINCT bcm.business_id) AS business_count
+        FROM rds_cases_public.rel_business_customer_monitoring bcm
+        JOIN rds_auth_public.data_customers dc ON dc.id = bcm.customer_id
+        WHERE dc.name IS NOT NULL AND dc.name != ''{dc}
+        GROUP BY dc.id, dc.name
+        ORDER BY dc.name
+    """
+    return run_query(sql)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_portfolio_businesses_filtered(date_from, date_to, customer_id=None):
+    """Load portfolio businesses optionally filtered by customer_id."""
+    parts = []
+    if date_from:
+        parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
+    if date_to:
+        parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
+    if customer_id:
+        parts.append(f"rbcm.customer_id = '{customer_id}'")
+    dc = (" AND " + " AND ".join(parts)) if parts else ""
+
+    sql = f"""
+        WITH onboarded AS (
+            SELECT DISTINCT business_id
+            FROM rds_cases_public.rel_business_customer_monitoring rbcm
+            WHERE 1=1{dc}
+        )
+        SELECT
+            f.business_id,
+            MAX(CASE WHEN f.name='sos_active'          THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_active,
+            MAX(CASE WHEN f.name='tin_match_boolean'   THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS tin_match,
+            MAX(CASE WHEN f.name='idv_passed_boolean'  THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS idv_passed,
+            MAX(CASE WHEN f.name='naics_code'          THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS naics_code,
+            MAX(CASE WHEN f.name='watchlist_hits'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS watchlist_hits,
+            MAX(CASE WHEN f.name='num_bankruptcies'    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_bankruptcies,
+            MAX(CASE WHEN f.name='num_judgements'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_judgements,
+            MAX(CASE WHEN f.name='num_liens'           THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_liens,
+            MAX(CASE WHEN f.name='adverse_media_hits'  THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS adverse_media,
+            MAX(CASE WHEN f.name='revenue'             THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS revenue,
+            MAX(CASE WHEN f.name='formation_date'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_date,
+            MAX(CASE WHEN f.name='formation_state'     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_state,
+            MAX(CASE WHEN f.name='legal_name'          THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS legal_name,
+            MAX(CASE WHEN f.name='website'             THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS website,
+            MAX(f.received_at) AS last_seen,
+            MIN(f.received_at) AS first_seen,
+            COUNT(DISTINCT f.name) AS fact_count
+        FROM rds_warehouse_public.facts f
+        JOIN onboarded o ON o.business_id = f.business_id
+        WHERE f.name IN (
+            'sos_active','tin_match_boolean','idv_passed_boolean','naics_code',
+            'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
+            'adverse_media_hits','revenue','formation_date','formation_state',
+            'legal_name','website'
+        )
+        GROUP BY f.business_id
+    """
+    df, err = run_query(sql)
+    if df is not None and not df.empty:
+        return df, None
+
+    # Fallback: facts-only if rbcm not accessible
+    parts2 = []
+    if date_from:
+        parts2.append(f"received_at >= '{date_from}'")
+    if date_to:
+        parts2.append(f"received_at <= '{date_to} 23:59:59'")
+    dc2 = (" AND " + " AND ".join(parts2)) if parts2 else ""
+    return run_query(f"""
+        SELECT business_id,
+            MAX(CASE WHEN name='sos_active'         THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS sos_active,
+            MAX(CASE WHEN name='tin_match_boolean'  THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS tin_match,
+            MAX(CASE WHEN name='idv_passed_boolean' THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS idv_passed,
+            MAX(CASE WHEN name='naics_code'         THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS naics_code,
+            MAX(CASE WHEN name='watchlist_hits'     THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS watchlist_hits,
+            MAX(CASE WHEN name='num_bankruptcies'   THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_bankruptcies,
+            MAX(CASE WHEN name='num_judgements'     THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_judgements,
+            MAX(CASE WHEN name='num_liens'          THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_liens,
+            MAX(CASE WHEN name='adverse_media_hits' THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS adverse_media,
+            MAX(CASE WHEN name='revenue'            THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS revenue,
+            MAX(CASE WHEN name='formation_date'     THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS formation_date,
+            MAX(CASE WHEN name='formation_state'    THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS formation_state,
+            MAX(CASE WHEN name='legal_name'         THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS legal_name,
+            MAX(CASE WHEN name='website'            THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS website,
+            MAX(received_at) AS last_seen, MIN(received_at) AS first_seen,
+            COUNT(DISTINCT name) AS fact_count
+        FROM rds_warehouse_public.facts
+        WHERE name IN ('sos_active','tin_match_boolean','idv_passed_boolean','naics_code',
+            'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
+            'adverse_media_hits','revenue','formation_date','formation_state',
+            'legal_name','website'){dc2}
+        GROUP BY business_id
+    """)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_onboarding_counts_filtered(date_from, date_to, customer_id=None):
+    """Load daily onboarding counts, optionally filtered by customer_id."""
+    parts = []
+    if date_from:
+        parts.append(f"DATE(created_at) >= '{date_from}'")
+    if date_to:
+        parts.append(f"DATE(created_at) <= '{date_to}'")
+    if customer_id:
+        parts.append(f"customer_id = '{customer_id}'")
+    dc = (" AND " + " AND ".join(parts)) if parts else ""
+    return run_query(f"""
+        SELECT DATE(created_at) AS onboard_date,
+               COUNT(DISTINCT business_id) AS new_businesses
+        FROM rds_cases_public.rel_business_customer_monitoring
+        WHERE 1=1{dc}
+        GROUP BY DATE(created_at)
+        ORDER BY onboard_date
+    """)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def load_onboarding_counts(date_from, date_to):
     """Load daily onboarding counts for the timeline chart."""
     parts = []

@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from db_connector import (
     run_query, load_all_facts, load_worth_score, load_score_factors,
     load_portfolio_businesses, load_onboarding_counts,
+    load_customers, load_portfolio_businesses_filtered, load_onboarding_counts_filtered,
     get_fact_value, get_fact_confidence, get_fact_platform_id,
     get_fact_alternatives, safe_get, parse_fact_json, REDSHIFT_CONFIG
 )
@@ -62,46 +63,97 @@ with st.sidebar:
     st.markdown("# 🏛️ KYB Hub Pro")
     st.markdown('<div style="color:#64748B;font-size:0.75rem;margin-bottom:16px">Next-Gen KYB Intelligence Platform</div>', unsafe_allow_html=True)
 
-    # Navigation
-    st.markdown("### Navigation")
-    nav = st.radio(
-        "Select View",
-        ["📊 Portfolio Dashboard", "🏢 Business Investigation", "🤖 AI Check-Agent", "🔌 Data Connectors"],
-        label_visibility="collapsed"
-    )
+    # Connection status (compact, at top)
+    try:
+        import psycopg2
+        test_conn = psycopg2.connect(**REDSHIFT_CONFIG, connect_timeout=5)
+        test_conn.close()
+        _rs_connected = True
+        st.success("🟢 Redshift connected")
+    except Exception as e:
+        _rs_connected = False
+        st.error("🔴 Not connected")
+        st.caption(str(e)[:60])
+        if st.button("🔄 Retry"):
+            st.cache_data.clear()
+            st.rerun()
 
     st.markdown("---")
 
+    # Navigation
+    nav = st.radio(
+        "Section",
+        ["📊 Portfolio Dashboard", "🏢 Business Investigation", "🤖 AI Check-Agent", "🔌 Data Connectors"],
+        label_visibility="visible"
+    )
+
     # Business ID input
+    st.markdown("---")
     st.markdown("### 🔍 Business Lookup")
-    bid_input = st.text_input("Business ID (UUID)", value=st.session_state.business_id, placeholder="Enter UUID...")
+    bid_input = st.text_input("Business ID (UUID)", value=st.session_state.business_id, placeholder="Paste UUID here to investigate...", label_visibility="collapsed")
     if bid_input != st.session_state.business_id:
         st.session_state.business_id = bid_input.strip()
         st.session_state.audit_result = None
         st.session_state.chat_messages = []
         st.rerun()
 
-    # Date filters for portfolio
-    st.markdown("### 📅 Date Range")
-    col1, col2 = st.columns(2)
-    with col1:
-        date_from = st.date_input("From", value=date.today() - timedelta(days=90), key="date_from")
-    with col2:
-        date_to = st.date_input("To", value=date.today(), key="date_to")
-
+    # ── Date Range Filter ────────────────────────────────────────────────────
     st.markdown("---")
+    st.markdown("**📅 Date Range**")
+    use_dates = st.toggle("Filter by date", value=True,
+                          help="Filter all queries to a specific onboarding period (created_at from rel_business_customer_monitoring)")
+    if use_dates:
+        today = date.today()
+        date_from = st.date_input("From", value=today - timedelta(days=30),
+                                   max_value=today, key="hub_dfrom", label_visibility="collapsed")
+        date_to   = st.date_input("To",   value=today,
+                                   max_value=today, key="hub_dto",   label_visibility="collapsed")
+        if date_from > date_to:
+            date_from = date_to
+        st.caption(f"📅 {date_from} → {date_to}")
+        hub_date_from, hub_date_to = str(date_from), str(date_to)
+    else:
+        hub_date_from, hub_date_to = None, None
+        date_from, date_to = None, None
+        st.caption("Showing all data (no date filter)")
 
-    # Connection status
-    st.markdown("### ⚡ Connection Status")
-    try:
-        import psycopg2
-        test_conn = psycopg2.connect(**REDSHIFT_CONFIG, connect_timeout=5)
-        test_conn.close()
-        st.markdown('<div class="badge badge-pass">✅ Redshift Connected</div>', unsafe_allow_html=True)
-    except Exception as e:
-        st.markdown(f'<div class="badge badge-fail">❌ Redshift: {str(e)[:40]}</div>', unsafe_allow_html=True)
+    # ── Customer Filter ──────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("**🏢 Customer Filter**")
+    st.caption("Filters to businesses of a specific customer within the date range above.")
 
-    st.markdown(f'<div class="badge badge-pass" style="margin-top:4px">✅ OpenAI Ready</div>', unsafe_allow_html=True)
+    # Load customer list from Redshift
+    _cust_df, _cust_err = load_customers(hub_date_from, hub_date_to)
+    if _cust_df is not None and not _cust_df.empty:
+        _cust_options = ["All Customers"] + _cust_df["customer_name"].tolist()
+        _cust_ids     = [None] + _cust_df["customer_id"].tolist()
+        _cust_counts  = [_cust_df["business_count"].sum()] + _cust_df["business_count"].tolist()
+        selected_cust = st.selectbox(
+            "Customer", _cust_options, index=0, label_visibility="collapsed",
+            key="customer_filter"
+        )
+        _sel_idx = _cust_options.index(selected_cust)
+        selected_customer_id = _cust_ids[_sel_idx]
+        if selected_cust == "All Customers":
+            st.caption(f"Showing all {len(_cust_df)} customers in this period")
+        else:
+            st.caption(f"Showing {_cust_counts[_sel_idx]:,} businesses for {selected_cust}")
+    else:
+        selected_cust = "All Customers"
+        selected_customer_id = None
+        st.selectbox("Customer", ["All Customers"], index=0, label_visibility="collapsed",
+                     disabled=True, key="customer_filter_disabled")
+        if _cust_err:
+            st.caption(f"Could not load customers: {str(_cust_err)[:50]}")
+        else:
+            st.caption("No customers found in this period")
+
+    # ── Sources ──────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("**Sources**")
+    for s in ["rds_warehouse_public.facts", "rds_manual_score_public.*",
+              "rds_integration_data.*", "clients.customer_table", "warehouse.worth_score_input_audit"]:
+        st.caption(f"`{s}`")
 
     st.markdown("---")
     st.markdown('<div style="color:#475569;font-size:0.68rem;text-align:center">KYB Hub Pro v2.0<br>Built by Team B Data Science</div>', unsafe_allow_html=True)
@@ -115,8 +167,11 @@ def render_portfolio_dashboard():
     st.markdown("## 📊 Portfolio Dashboard")
     st.markdown('<div style="color:#94A3B8;font-size:0.85rem;margin-bottom:16px">Real-time KYB portfolio monitoring and analytics</div>', unsafe_allow_html=True)
 
+    # Use customer-filtered loader when a customer is selected
+    _pf_date_from = hub_date_from if use_dates else None
+    _pf_date_to   = hub_date_to   if use_dates else None
     with st.spinner("Loading portfolio data from Redshift..."):
-        df, err = load_portfolio_businesses(str(date_from), str(date_to))
+        df, err = load_portfolio_businesses_filtered(_pf_date_from, _pf_date_to, selected_customer_id)
 
     if err:
         alert_flag(f"Error loading portfolio: {err}", "critical")
@@ -154,7 +209,9 @@ def render_portfolio_dashboard():
     # ── KPI Row ───────────────────────────────────────────────────────────
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1:
-        kpi_card("Total Businesses", f"{total:,}", f"In date range {date_from} → {date_to}", "#3B82F6")
+        _period_label = f"{hub_date_from} → {hub_date_to}" if use_dates else "All time"
+        _cust_label = f" · {selected_cust}" if selected_cust != "All Customers" else ""
+        kpi_card("Total Businesses", f"{total:,}", f"{_period_label}{_cust_label}", "#3B82F6")
     with c2:
         pct = round(sos_pass / max(total, 1) * 100)
         kpi_card("SOS Pass Rate", f"{pct}%", f"{sos_pass:,} of {total:,} verified", "#22c55e" if pct >= 80 else "#f59e0b")
