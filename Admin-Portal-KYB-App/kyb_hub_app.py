@@ -1843,7 +1843,10 @@ def ask_ai(question, context="", history=None, auto_execute=True):
                 df, err, used_sql, fixes = _execute_sql_with_retry(sql)
                 block_label = f"Query {i+1}" if len(sql_blocks) > 1 else "Query"
                 if df is not None and not df.empty:
-                    rows_md = df.head(20).to_markdown(index=False) if hasattr(df,"to_markdown") else df.head(20).to_string(index=False)
+                    try:
+                        rows_md = df.head(20).to_markdown(index=False)
+                    except Exception:
+                        rows_md = df.head(20).to_string(index=False)
                     fix_note = ("\n\n  ⚠️ Auto-corrected: " + " · ".join(fixes)) if fixes else ""
                     executed_results.append(
                         f"\n\n**✅ {block_label} executed against Redshift — {len(df):,} row(s) returned:**{fix_note}\n\n"
