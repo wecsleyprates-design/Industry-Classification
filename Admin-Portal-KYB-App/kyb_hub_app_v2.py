@@ -7952,53 +7952,64 @@ elif tab=="🔍 Check-Agent":
                     grp_color = SEV_COLOR.get(worst, "#64748b")
                     grp_icon  = SEV_ICON.get(worst, "ℹ️")
 
-                    with st.expander(
-                        f"{grp_icon} **{grp_name}** — {len(grp_items)} finding(s)  ·  worst: {worst}",
-                        expanded=(worst in ("CRITICAL","HIGH"))
-                    ):
-                        for r in grp_sorted:
-                            sev   = r["severity"]
-                            color = SEV_COLOR.get(sev, "#64748b")
-                            icon  = SEV_ICON.get(sev, "ℹ️")
+                    # Group header as HTML — NOT st.expander, so detail_panel()
+                    # can open its own st.expander without triggering nested-expander error
+                    st.markdown(
+                        f"""<div style="background:{grp_color}18;border-left:4px solid {grp_color};
+                            border-radius:10px;padding:10px 16px;margin:14px 0 4px 0">
+                          <span style="color:{grp_color};font-weight:700;font-size:.90rem">
+                            {grp_icon} {grp_name}
+                          </span>
+                          <span style="color:#64748b;font-size:.76rem;margin-left:10px">
+                            {len(grp_items)} finding(s) · worst severity: {worst}
+                          </span>
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
 
-                            # Finding card
-                            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
-                                border-radius:10px;padding:14px 18px;margin:8px 0">
-                              <div style="display:flex;justify-content:space-between;align-items:center">
-                                <span style="color:{color};font-weight:700;font-size:.88rem">
-                                  {icon} [{sev}] {r['name']}
-                                </span>
-                                <span style="background:{color}22;color:{color};border-radius:6px;
-                                  padding:2px 10px;font-size:.72rem;font-weight:600">{r['group']}</span>
-                              </div>
-                              <div style="color:#CBD5E1;font-size:.80rem;margin-top:8px">{r['description']}</div>
-                              <div style="margin-top:8px">
-                                <span style="color:#60A5FA;font-size:.75rem">
-                                  ⚡ Action: {r['action']}
-                                </span>
-                              </div>
-                              <div style="margin-top:6px;color:#475569;font-size:.70rem">
-                                Facts: {' · '.join(f'<code style="color:#94A3B8">{fn}</code>' for fn in r['facts'])}
-                              </div>
-                            </div>""", unsafe_allow_html=True)
+                    for r in grp_sorted:
+                        sev   = r["severity"]
+                        color = SEV_COLOR.get(sev, "#64748b")
+                        icon  = SEV_ICON.get(sev, "ℹ️")
 
-                            # detail_panel with SQL + Python
-                            _bid_sql = r["sql"].replace("{bid}", bid) if "{bid}" in r["sql"] else r["sql"]
-                            _involved_json = {fn: {"value": gv(facts, fn), "source_pid": gp(facts, fn),
-                                                   "confidence": gc(facts, fn)}
-                                              for fn in r["facts"] if fn in facts}
-                            detail_panel(
-                                f"{icon} {r['name']}", f"{sev} — {r['group']}",
-                                what_it_means=r["description"],
-                                source_table="rds_warehouse_public.facts · cross-field validation",
-                                source_file="check_agent_v2.py",
-                                source_file_line=f"check id: {r['id']}",
-                                json_obj=_involved_json,
-                                sql=_bid_sql,
-                                links=[("facts/kyb/index.ts","Fact Engine rules"),
-                                       ("facts/rules.ts","factWithHighestConfidence · combineFacts")],
-                                color=color, icon=icon,
-                            )
+                        # Finding card (plain HTML — no st.expander wrapper)
+                        st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
+                            border-radius:10px;padding:14px 18px;margin:6px 0 2px 0">
+                          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
+                            <span style="color:{color};font-weight:700;font-size:.88rem">
+                              {icon} [{sev}] {r['name']}
+                            </span>
+                            <span style="background:{color}22;color:{color};border-radius:6px;
+                              padding:2px 10px;font-size:.72rem;font-weight:600">{r['group']}</span>
+                          </div>
+                          <div style="color:#CBD5E1;font-size:.80rem;margin-top:8px">{r['description']}</div>
+                          <div style="margin-top:8px">
+                            <span style="color:#60A5FA;font-size:.75rem">
+                              ⚡ Action: {r['action']}
+                            </span>
+                          </div>
+                          <div style="margin-top:6px;color:#475569;font-size:.70rem">
+                            Facts: {' · '.join(f'<code style="color:#94A3B8">{fn}</code>' for fn in r['facts'])}
+                          </div>
+                        </div>""", unsafe_allow_html=True)
+
+                        # detail_panel renders its own st.expander at the top level — safe
+                        _bid_sql = r["sql"].replace("{bid}", bid) if "{bid}" in r["sql"] else r["sql"]
+                        _involved_json = {fn: {"value": gv(facts, fn), "source_pid": gp(facts, fn),
+                                               "confidence": gc(facts, fn)}
+                                          for fn in r["facts"] if fn in facts}
+                        detail_panel(
+                            f"{icon} {r['name']}", f"{sev} — {r['group']}",
+                            what_it_means=r["description"],
+                            source_table="rds_warehouse_public.facts · cross-field validation",
+                            source_file="check_agent_v2.py",
+                            source_file_line=f"check id: {r['id']}",
+                            json_obj=_involved_json,
+                            sql=_bid_sql,
+                            links=[("facts/kyb/index.ts","Fact Engine rules"),
+                                   ("facts/rules.ts","factWithHighestConfidence · combineFacts")],
+                            color=color, icon=icon,
+                        )
 
             # ── All-clear summary ────────────────────────────────────────────
             st.markdown("---")
