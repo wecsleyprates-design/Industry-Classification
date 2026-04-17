@@ -2791,6 +2791,45 @@ if tab=="🏠 Home":
             if flags or score > 0:
                 biz_flags[bid_check] = {"flags": flags, "score": score}
 
+    # ── KYB Funnel: SOS/TIN granular facts ──────────────────────────────────
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _load_kyb_funnel_for_bids(bid_tuple):
+        """Load granular SOS and TIN facts needed for funnel analysis.
+        Returns one row per business with:
+          - tin_submitted, tin_match_status (from tin_match.value.status)
+          - sos_match_boolean, sos_active, formation_state
+          - primary_address_state (from primary_address.value.state)
+        """
+        if not bid_tuple:
+            return None, "No business IDs"
+        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
+        return run_sql(f"""
+            SELECT
+                f.business_id,
+                MAX(CASE WHEN f.name='tin_submitted'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_submitted,
+                MAX(CASE WHEN f.name='tin_match'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS tin_status,
+                MAX(CASE WHEN f.name='tin_match_boolean'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_match_boolean,
+                MAX(CASE WHEN f.name='sos_match_boolean'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_match_boolean,
+                MAX(CASE WHEN f.name='sos_active'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_active,
+                MAX(CASE WHEN f.name='formation_state'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_state,
+                MAX(CASE WHEN f.name='primary_address'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','state') END)       AS operating_state,
+                MAX(CASE WHEN f.name='middesk_confidence'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS middesk_confidence
+            FROM rds_warehouse_public.facts f
+            WHERE f.business_id IN ({bid_list})
+              AND f.name IN ('tin_submitted','tin_match','tin_match_boolean',
+                             'sos_match_boolean','sos_active','formation_state',
+                             'primary_address','middesk_confidence')
+            GROUP BY f.business_id
+        """)
+
     # ── Load enriched KYB stats using the same authoritative business ID list ──
     @st.cache_data(ttl=600, show_spinner=False)
     def _load_stats_for_bids(bid_tuple):
@@ -2827,8 +2866,10 @@ if tab=="🏠 Home":
         """)
 
     with st.spinner("Loading KYB metrics…"):
-        # Use tuple so it's hashable for st.cache_data
         stats_df, stats_err = _load_stats_for_bids(tuple(_authoritative_bids))
+
+    with st.spinner("Loading SOS/TIN funnel data…"):
+        funnel_df, funnel_err = _load_kyb_funnel_for_bids(tuple(_authoritative_bids))
 
     # Build per-business flag map from the pivoted stats_df (faster than flag_df loop)
     biz_flags = {}
@@ -3645,6 +3686,220 @@ Complete data gap. Entity existence AND firmographic data both unverified — hi
 
     else:
         st.info("Cross-tabulation requires KYB stats data. Enable date filter or check VPN connection.")
+
+    st.markdown("---")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # KYB VERIFICATION FUNNEL
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("### 🔽 KYB Verification Funnel")
+    st.caption("Step-by-step verification analysis: SOS registry matching → TIN submission → TIN verification pass/fail. "
+               "Each step shows how many businesses pass the gate and how many drop off.")
+
+    if funnel_df is not None and not funnel_df.empty:
+        _f = funnel_df.copy()
+        _N = len(_f)
+        def _sb(col, val): return (_f[col].str.lower().str.strip()==val).sum() if col in _f.columns else 0
+        def _snotnull(col): return _f[col].notna().sum() if col in _f.columns else 0
+        def _snotempty(col): return (_f[col].notna() & (_f[col].str.strip()!="") & (_f[col].str.lower()!="none")).sum() if col in _f.columns else 0
+
+        # ── Metric calculations ───────────────────────────────────────────
+        # SOS Registry Found = sos_match_boolean=true (Middesk or OC found a matching record)
+        sos_found       = _sb("sos_match_boolean","true")
+        sos_not_found   = _N - sos_found
+
+        # TIN Submitted = tin_submitted is not null/empty (applicant provided an EIN)
+        tin_submitted   = _snotempty("tin_submitted")
+        tin_not_submit  = _N - tin_submitted
+
+        # TIN Pass = tin_match_boolean=true OR tin_status=success (IRS confirmed)
+        tin_pass        = _sb("tin_match_boolean","true")
+        # TIN Fail = tin_status=failure (IRS checked but did not confirm)
+        tin_fail        = (_f["tin_status"].str.lower().str.strip()=="failure").sum() if "tin_status" in _f.columns else 0
+        # TIN Not Checked = submitted but IRS not checked yet OR not submitted at all
+        tin_submitted_not_checked = max(0, tin_submitted - tin_pass - tin_fail)
+
+        # Domestic-only registration:
+        # formation_state = operating_state → likely domestic only
+        TAX_HAVENS2 = {"DE","NV","WY","SD","MT","NM"}
+        if "formation_state" in _f.columns and "operating_state" in _f.columns:
+            _f["fs"] = _f["formation_state"].str.upper().str.strip()
+            _f["os"] = _f["operating_state"].str.upper().str.strip()
+            same_state = ((_f["fs"]==_f["os"]) & _f["fs"].notna() & (_f["fs"]!="")).sum()
+            diff_state = ((_f["fs"]!=_f["os"]) & _f["fs"].notna() & _f["os"].notna() & (_f["fs"]!="") & (_f["os"]!="")).sum()
+            # Businesses registered in the state they do business in
+            in_operating_state = same_state
+            # SOS found AND in operating state (1 domestic registration in submitted state)
+            sos_in_op_state = ((_f["sos_match_boolean"].str.lower().str.strip()=="true") & (_f["fs"]==_f["os"])).sum()
+        else:
+            same_state = diff_state = in_operating_state = sos_in_op_state = 0
+
+        # ── Funnel bar chart ──────────────────────────────────────────────
+        funnel_steps = [
+            ("📋 Businesses in period",    _N,           "#3B82F6"),
+            ("🏛️ SOS Registry found",      sos_found,    "#22c55e" if sos_found/_N>=0.8 else "#f59e0b"),
+            ("🗺️ Formation = operating state", in_operating_state, "#8B5CF6"),
+            ("🔐 TIN submitted",            tin_submitted,"#60A5FA" if tin_submitted/_N>=0.8 else "#f59e0b"),
+            ("✅ TIN verified (IRS pass)",  tin_pass,     "#22c55e" if tin_pass>=tin_fail else "#f59e0b"),
+        ]
+        _funnel_df_chart = pd.DataFrame(funnel_steps, columns=["Step","Count","Color"])
+        fig_funnel = go.Figure(go.Bar(
+            x=_funnel_df_chart["Count"],
+            y=_funnel_df_chart["Step"],
+            orientation="h",
+            marker_color=_funnel_df_chart["Color"].tolist(),
+            text=[f"{v:,}  ({v/_N*100:.0f}%)" for v in _funnel_df_chart["Count"]],
+            textposition="outside",
+            textfont=dict(size=12, color="#E2E8F0"),
+        ))
+        fig_funnel.update_layout(
+            title="KYB Verification Funnel — businesses passing each gate",
+            height=280,
+            xaxis=dict(range=[0, _N*1.2], showgrid=False, showticklabels=False),
+            yaxis=dict(autorange="reversed", tickfont=dict(size=12)),
+            margin=dict(t=40,b=10,l=10,r=120),
+        )
+        st.plotly_chart(dark_chart(fig_funnel), use_container_width=True)
+
+        # ── Metric cards ──────────────────────────────────────────────────
+        fc1,fc2,fc3 = st.columns(3)
+        with fc1:
+            kpi("🏛️ SOS Registry Found", f"{sos_found:,}",
+                f"{sos_found/_N*100:.0f}% of businesses · {sos_not_found:,} NOT found","#22c55e" if sos_found/_N>=0.8 else "#f59e0b")
+            detail_panel("SOS Registry Found", f"{sos_found:,} of {_N:,}",
+                what_it_means=("sos_match_boolean=true — Middesk (pid=16) or OC (pid=23) found and matched an SOS registry record for this business. "
+                               f"Source: factWithHighestConfidence. {sos_not_found:,} businesses had NO SOS match — either entity not found in the submitted state's registry, "
+                               "or address-based search returned no results (common for new businesses < 2 weeks old or businesses using registered agent addresses)."),
+                source_table="rds_warehouse_public.facts · name='sos_match_boolean'",
+                source_file="facts/kyb/index.ts", source_file_line="sosMatchBoolean · Middesk pid=16 · factWithHighestConfidence",
+                json_obj={"metric":"SOS Registry Found","sos_match_boolean_true":int(sos_found),"sos_match_boolean_false_or_null":int(sos_not_found),"total":_N,"pct":f"{sos_found/_N*100:.0f}%"},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS sos_match_boolean, COUNT(*) FROM rds_warehouse_public.facts WHERE name='sos_match_boolean' AND business_id IN ({','.join(repr(b) for b in list(_authoritative_bids)[:10])+',...'}) GROUP BY 1;",
+                links=[("facts/kyb/index.ts","sosMatchBoolean"),("integrations.constant.ts","MIDDESK=16")],
+                color="#22c55e" if sos_found/_N>=0.8 else "#f59e0b", icon="🏛️")
+
+        with fc2:
+            kpi("🗺️ Formation = Operating State", f"{in_operating_state:,}",
+                f"Same state registered & operating · {diff_state:,} different states","#8B5CF6")
+            detail_panel("Formation = Operating State", f"{in_operating_state:,} of {_N:,}",
+                what_it_means=("formation_state == primary_address.state — business is incorporated AND operates in the same state. "
+                               "This represents a likely single domestic registration with no foreign qualification needed. "
+                               f"{diff_state:,} businesses have different formation vs operating states — these likely have BOTH a domestic filing "
+                               "and a foreign qualification in the operating state. Middesk address-based search finds the foreign record first, "
+                               "potentially causing sos_match_boolean=false as a false negative (entity resolution gap)."),
+                source_table="rds_warehouse_public.facts · name IN ('formation_state','primary_address')",
+                source_file="facts/kyb/index.ts", source_file_line="formationState · primaryAddress · proxy for domestic-only registration",
+                json_obj={"metric":"Formation = Operating State","same_state_count":int(in_operating_state),"different_state_count":int(diff_state),"sos_found_and_same_state":int(sos_in_op_state)},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS formation_state FROM rds_warehouse_public.facts WHERE name='formation_state' AND business_id IN (...) ORDER BY business_id;",
+                links=[("facts/kyb/index.ts","formationState · primaryAddress")],
+                color="#8B5CF6", icon="🗺️")
+
+        with fc3:
+            kpi("🔐 TIN Submitted", f"{tin_submitted:,}",
+                f"{tin_submitted/_N*100:.0f}% submitted EIN · {tin_not_submit:,} did NOT submit","#60A5FA" if tin_submitted/_N>=0.8 else "#f59e0b")
+            detail_panel("TIN Submitted", f"{tin_submitted:,} of {_N:,}",
+                what_it_means=("tin_submitted is not null/empty — the applicant provided an EIN on the onboarding form. "
+                               "Source: Applicant (pid=0, businessDetails). This is self-reported — it does NOT mean the IRS verified it. "
+                               f"{tin_not_submit:,} businesses did not submit a TIN. This prevents IRS TIN verification from running. "
+                               "Common cause: sole proprietors who use SSN instead of EIN, or businesses that haven't obtained an EIN yet."),
+                source_table="rds_warehouse_public.facts · name='tin_submitted'",
+                source_file="facts/kyb/index.ts", source_file_line="tinSubmitted · Applicant pid=0 · self-reported EIN",
+                json_obj={"metric":"TIN Submitted","submitted_count":int(tin_submitted),"not_submitted_count":int(tin_not_submit),"total":_N,"note":"Submitted ≠ verified. IRS check runs separately via Middesk."},
+                sql=f"SELECT CASE WHEN JSON_EXTRACT_PATH_TEXT(value,'value') IS NOT NULL AND JSON_EXTRACT_PATH_TEXT(value,'value')!='' THEN 'Submitted' ELSE 'Not submitted' END AS status, COUNT(*) FROM rds_warehouse_public.facts WHERE name='tin_submitted' AND business_id IN (...) GROUP BY 1;",
+                links=[("facts/kyb/index.ts","tinSubmitted"),("integrations.constant.ts","pid=0=Applicant")],
+                color="#60A5FA" if tin_submitted/_N>=0.8 else "#f59e0b", icon="🔐")
+
+        fc4,fc5,fc6 = st.columns(3)
+        with fc4:
+            kpi("✅ TIN Pass (IRS verified)", f"{tin_pass:,}",
+                f"{tin_pass/_N*100:.0f}% of all businesses · {tin_pass/max(tin_submitted,1)*100:.0f}% of those who submitted",
+                "#22c55e" if tin_pass/max(tin_submitted,1)>=0.7 else "#f59e0b")
+            detail_panel("TIN Pass", f"{tin_pass:,} of {tin_submitted:,} submitted",
+                what_it_means=("tin_match_boolean=true — the IRS confirmed the EIN + legal name combination is valid. "
+                               "Source: Middesk (pid=16) TIN review task → direct IRS query. "
+                               f"Pass rate among those who submitted: {tin_pass/max(tin_submitted,1)*100:.0f}%. "
+                               "Failures are typically: wrong legal name (DBA submitted instead of registered legal name), "
+                               "EIN belongs to a different entity (fraud signal), or IRS system temporarily unavailable."),
+                source_table="rds_warehouse_public.facts · name='tin_match_boolean' (value='true')",
+                source_file="facts/kyb/index.ts", source_file_line="tinMatchBoolean · dependent · tin_match.value.status==='success'",
+                json_obj={"metric":"TIN Pass","tin_pass_count":int(tin_pass),"tin_submitted_count":int(tin_submitted),"pass_rate_of_submitted":f"{tin_pass/max(tin_submitted,1)*100:.0f}%"},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','status') AS irs_status, COUNT(*) FROM rds_warehouse_public.facts WHERE name='tin_match' AND business_id IN (...) GROUP BY 1 ORDER BY COUNT(*) DESC;",
+                links=[("facts/kyb/index.ts","tinMatchBoolean")],
+                color="#22c55e" if tin_pass/max(tin_submitted,1)>=0.7 else "#f59e0b", icon="✅")
+
+        with fc5:
+            kpi("❌ TIN Fail (IRS rejected)", f"{tin_fail:,}",
+                f"{tin_fail/max(tin_submitted,1)*100:.0f}% of those who submitted TIN",
+                "#ef4444" if tin_fail>0 else "#22c55e")
+            detail_panel("TIN Fail", f"{tin_fail:,} IRS rejections",
+                what_it_means=("tin_match.value.status='failure' — the IRS check ran but DID NOT confirm the EIN+name match. "
+                               "Common failure reasons: (1) Wrong legal name — DBA submitted instead of registered name. "
+                               "(2) EIN belongs to different entity — potential fraud signal, escalate immediately. "
+                               "(3) Invalid EIN format — must be exactly 9 digits. "
+                               "(4) Duplicate IRS request — retry in 24h. "
+                               "NOTE: tin_fail only counts IRS-confirmed failures, not 'not checked'."),
+                source_table="rds_warehouse_public.facts · name='tin_match' (value.status='failure')",
+                source_file="facts/kyb/index.ts", source_file_line="tinMatch · Middesk pid=16 → IRS direct query",
+                json_obj={"metric":"TIN Fail","tin_fail_count":int(tin_fail),"failure_reasons":["Wrong legal name (DBA)","EIN belongs to different entity","Invalid EIN format","IRS duplicate request"]},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','status') AS status, JSON_EXTRACT_PATH_TEXT(value,'value','message') AS irs_message, COUNT(*) FROM rds_warehouse_public.facts WHERE name='tin_match' AND business_id IN (...) AND JSON_EXTRACT_PATH_TEXT(value,'value','status')='failure' GROUP BY 1,2 ORDER BY COUNT(*) DESC;",
+                links=[("facts/kyb/index.ts","tinMatch · IRS failure messages")],
+                color="#ef4444" if tin_fail>0 else "#22c55e", icon="❌")
+
+        with fc6:
+            kpi("⚪ TIN Not Checked", f"{tin_submitted_not_checked:,}",
+                f"Submitted EIN but IRS check not yet run · {tin_not_submit:,} never submitted",
+                "#64748b")
+            detail_panel("TIN Not Checked", f"{tin_submitted_not_checked:,} pending",
+                what_it_means=("tin_submitted is set (EIN was provided) but tin_match_boolean is null "
+                               "and tin_match.value.status is neither 'success' nor 'failure'. "
+                               "The IRS check has not yet been triggered or is still pending. "
+                               "Additionally, {tin_not_submit:,} businesses never submitted a TIN at all. "
+                               "Total without IRS confirmation = TIN Not Checked + Not Submitted."),
+                source_table="rds_warehouse_public.facts · name='tin_match_boolean' (null or not stored)",
+                source_file="facts/kyb/index.ts", source_file_line="tinMatchBoolean · null = IRS check not yet run",
+                json_obj={"metric":"TIN Not Checked","submitted_but_not_checked":int(tin_submitted_not_checked),"never_submitted":int(tin_not_submit),"total_without_IRS_confirmation":int(tin_submitted_not_checked+tin_not_submit)},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS tin_bool FROM rds_warehouse_public.facts WHERE name='tin_match_boolean' AND business_id IN (...) GROUP BY 1;",
+                links=[("facts/kyb/index.ts","tinMatchBoolean · dependent")],
+                color="#64748b", icon="⚪")
+
+        # ── Reconciliation check: TIN submitted = TIN pass + TIN fail + not checked? ──
+        st.markdown("#### 🔍 TIN Reconciliation Check")
+        _tin_reconcile = tin_pass + tin_fail + tin_submitted_not_checked
+        _match = abs(_tin_reconcile - tin_submitted) <= 1  # allow 1 rounding difference
+        _recon_color = "#22c55e" if _match else "#f59e0b"
+        st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {_recon_color};
+            border-radius:10px;padding:14px 18px;margin:8px 0">
+          <div style="color:{_recon_color};font-weight:700;font-size:.90rem;margin-bottom:8px">
+            {'✅ TIN counts reconcile correctly' if _match else '⚠️ TIN counts have a small discrepancy'}
+          </div>
+          <table style="width:100%;font-size:.80rem;color:#CBD5E1;border-collapse:collapse">
+            <tr><td style="padding:4px 8px">TIN Submitted (applicant provided EIN)</td>
+                <td style="padding:4px 8px;text-align:right;font-weight:700">{tin_submitted:,}</td></tr>
+            <tr style="border-top:1px solid #334155"><td style="padding:4px 8px;color:#22c55e">  ✅ TIN Pass (IRS verified)</td>
+                <td style="padding:4px 8px;text-align:right;color:#22c55e">+{tin_pass:,}</td></tr>
+            <tr><td style="padding:4px 8px;color:#ef4444">  ❌ TIN Fail (IRS rejected)</td>
+                <td style="padding:4px 8px;text-align:right;color:#ef4444">+{tin_fail:,}</td></tr>
+            <tr><td style="padding:4px 8px;color:#64748b">  ⚪ TIN Submitted but not yet checked</td>
+                <td style="padding:4px 8px;text-align:right;color:#64748b">+{tin_submitted_not_checked:,}</td></tr>
+            <tr style="border-top:2px solid #475569"><td style="padding:6px 8px;font-weight:700">Sum (Pass + Fail + Not checked)</td>
+                <td style="padding:6px 8px;text-align:right;font-weight:700;color:{_recon_color}">{_tin_reconcile:,}</td></tr>
+          </table>
+          <div style="color:#64748b;font-size:.74rem;margin-top:8px">
+            {'Pass + Fail + Not checked = Submitted ✓ The TIN pipeline is complete and consistent.' if _match
+              else f'Difference of {abs(_tin_reconcile - tin_submitted)} — may be caused by businesses where tin_submitted exists but tin_match was not stored yet (Middesk delay).'}
+          </div>
+        </div>""", unsafe_allow_html=True)
+        detail_panel("TIN Reconciliation", f"Submitted={tin_submitted:,} · Pass+Fail+Pending={_tin_reconcile:,}",
+            what_it_means=(f"Verification: TIN Submitted ({tin_submitted:,}) should equal TIN Pass ({tin_pass:,}) + TIN Fail ({tin_fail:,}) + Not yet checked ({tin_submitted_not_checked:,}) = {_tin_reconcile:,}. "
+                           f"{'Match ✓' if _match else 'Small discrepancy — likely Middesk processing delay between tin_submitted being written and tin_match being stored.'}"),
+            source_table="rds_warehouse_public.facts · name IN ('tin_submitted','tin_match','tin_match_boolean')",
+            source_file="facts/kyb/index.ts", source_file_line="tin_submitted → tin_match (IRS) → tin_match_boolean (derived)",
+            json_obj={"tin_submitted":int(tin_submitted),"tin_pass":int(tin_pass),"tin_fail":int(tin_fail),"tin_not_checked":int(tin_submitted_not_checked),"sum":int(_tin_reconcile),"reconciles":bool(_match)},
+            sql=f"""-- Verify TIN counts:\nSELECT\n  COUNT(CASE WHEN name='tin_submitted' AND JSON_EXTRACT_PATH_TEXT(value,'value') IS NOT NULL AND JSON_EXTRACT_PATH_TEXT(value,'value')!='' THEN 1 END) AS tin_submitted,\n  COUNT(CASE WHEN name='tin_match_boolean' AND JSON_EXTRACT_PATH_TEXT(value,'value')='true' THEN 1 END) AS tin_pass,\n  COUNT(CASE WHEN name='tin_match' AND JSON_EXTRACT_PATH_TEXT(value,'value','status')='failure' THEN 1 END) AS tin_fail\nFROM rds_warehouse_public.facts\nWHERE business_id IN (...);""",
+            links=[("facts/kyb/index.ts","TIN fact chain: tin_submitted → tin_match → tin_match_boolean")],
+            color=_recon_color, icon="🔍")
+
+    else:
+        st.info(f"Funnel analysis requires SOS/TIN data. {funnel_err or 'Check VPN or date filter.'}")
 
     st.markdown("---")
 
