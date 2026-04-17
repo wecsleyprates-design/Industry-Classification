@@ -10,10 +10,7 @@ import streamlit as st
 from openai import OpenAI
 
 # ── OpenAI client ────────────────────────────────────────────────────────────
-OPENAI_API_KEY = os.getenv(
-    "OPENAI_API_KEY",
-    "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"
-)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 
 def get_openai_client():
