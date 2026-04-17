@@ -3914,26 +3914,64 @@ Complete data gap. Entity existence AND firmographic data both unverified — hi
     else:
         # Build portfolio context for the AI
         _portfolio_ctx = (
-            f"Portfolio context for {period_label}:\n"
+            f"PORTFOLIO DATA for {period_label} — USE THESE EXACT NUMBERS TO ANSWER:\n"
             f"Total businesses: {total_biz:,}\n"
-            f"Businesses with flags: {len(flagged_biz):,} ({len(flagged_biz)/max(total_biz,1)*100:.0f}%)\n"
+            f"Businesses with red flags: {len(flagged_biz):,} ({len(flagged_biz)/max(total_biz,1)*100:.0f}%)\n"
         )
         if stats_df is not None and not stats_df.empty:
             _n = len(stats_df)
             _sos_ok = (stats_df["sos_active"].str.lower().str.strip()=="true").sum()
+            _sos_fail = (stats_df["sos_active"].str.lower().str.strip()=="false").sum()
+            _sos_unknown = _n - _sos_ok - _sos_fail
             _tin_ok = (stats_df["tin_match"].str.lower().str.strip()=="true").sum()
             _tin_fail = (stats_df["tin_match"].str.lower().str.strip()=="false").sum()
+            _tin_missing = _n - _tin_ok - _tin_fail
             _idv_ok = (stats_df["idv_passed"].str.lower().str.strip()=="true").sum()
+            _idv_fail = (stats_df["idv_passed"].str.lower().str.strip()=="false").sum()
             _wl_hit = (stats_df["watchlist_hits"].apply(lambda v: _safe_int(v)>0)).sum()
             _naics_561 = (stats_df["naics_code"].str.strip()=="561499").sum()
+            _naics_ok = (~stats_df["naics_code"].isin(["561499","",None]) & stats_df["naics_code"].notna()).sum()
             _th_count = stats_df["formation_state"].str.upper().str.strip().isin(TAX_HAVENS).sum()
+            _rev_known = stats_df["revenue"].notna().sum()
             _portfolio_ctx += (
-                f"SOS Active: {_sos_ok:,} ({_sos_ok/_n*100:.0f}%)\n"
-                f"TIN Verified: {_tin_ok:,} ({_tin_ok/_n*100:.0f}%), TIN Failed: {_tin_fail:,}\n"
-                f"IDV Passed: {_idv_ok:,} ({_idv_ok/_n*100:.0f}%)\n"
-                f"Watchlist hits: {_wl_hit:,} businesses affected\n"
-                f"NAICS=561499 (unclassified): {_naics_561:,}\n"
-                f"Tax-haven incorporated: {_th_count:,}\n"
+                f"\nSOS Registry:\n"
+                f"  Active: {_sos_ok:,} ({_sos_ok/_n*100:.0f}%)\n"
+                f"  Inactive: {_sos_fail:,} ({_sos_fail/_n*100:.0f}%)\n"
+                f"  Unknown/not found: {_sos_unknown:,} ({_sos_unknown/_n*100:.0f}%)\n"
+                f"\nTIN Verification:\n"
+                f"  Verified (IRS pass): {_tin_ok:,} ({_tin_ok/_n*100:.0f}%)\n"
+                f"  Failed (IRS reject): {_tin_fail:,} ({_tin_fail/_n*100:.0f}%)\n"
+                f"  Not checked/submitted: {_tin_missing:,} ({_tin_missing/_n*100:.0f}%)\n"
+                f"\nIDV (Identity Verification):\n"
+                f"  Passed: {_idv_ok:,} ({_idv_ok/_n*100:.0f}%)\n"
+                f"  Failed: {_idv_fail:,} ({_idv_fail/_n*100:.0f}%)\n"
+                f"\nOther signals:\n"
+                f"  Watchlist hits (PEP/Sanctions): {_wl_hit:,} businesses ({_wl_hit/_n*100:.0f}%)\n"
+                f"  NAICS classified: {_naics_ok:,} ({_naics_ok/_n*100:.0f}%)\n"
+                f"  NAICS=561499 (unclassified): {_naics_561:,} ({_naics_561/_n*100:.0f}%)\n"
+                f"  Tax-haven incorporated (DE/NV/WY): {_th_count:,} ({_th_count/_n*100:.0f}%)\n"
+                f"  Revenue data known: {_rev_known:,} ({_rev_known/_n*100:.0f}%)\n"
+            )
+
+        # Add funnel data if available
+        if funnel_df is not None and not funnel_df.empty:
+            _fN = len(funnel_df)
+            _sos_match = (funnel_df["sos_match_boolean"].str.lower().str.strip()=="true").sum() if "sos_match_boolean" in funnel_df.columns else 0
+            _tin_sub = (funnel_df["tin_submitted"].notna() & (funnel_df["tin_submitted"].str.strip()!="") & (funnel_df["tin_submitted"].str.lower()!="none")).sum() if "tin_submitted" in funnel_df.columns else 0
+            _tin_p = (funnel_df["tin_match_boolean"].str.lower().str.strip()=="true").sum() if "tin_match_boolean" in funnel_df.columns else 0
+            _tin_f_irs = (funnel_df["tin_status"].str.lower().str.strip()=="failure").sum() if "tin_status" in funnel_df.columns else 0
+            _same_st = 0
+            if "formation_state" in funnel_df.columns and "operating_state" in funnel_df.columns:
+                _same_st = ((funnel_df["formation_state"].str.upper().str.strip()==funnel_df["operating_state"].str.upper().str.strip()) & funnel_df["formation_state"].notna() & (funnel_df["formation_state"].str.strip()!="")).sum()
+            _portfolio_ctx += (
+                f"\nKYB Verification Funnel:\n"
+                f"  SOS registry record found (sos_match_boolean=true): {_sos_match:,} ({_sos_match/_fN*100:.0f}%)\n"
+                f"  Formation state = operating state (proxy for 1 domestic registration): {_same_st:,} ({_same_st/_fN*100:.0f}%)\n"
+                f"  TIN submitted by applicant: {_tin_sub:,} ({_tin_sub/_fN*100:.0f}%)\n"
+                f"  TIN IRS-verified (pass): {_tin_p:,} ({_tin_p/_fN*100:.0f}%)\n"
+                f"  TIN IRS-rejected (fail): {_tin_f_irs:,} ({_tin_f_irs/_fN*100:.0f}%)\n"
+                f"  TIN submitted but not yet checked: {max(0,_tin_sub-_tin_p-_tin_f_irs):,}\n"
+                f"  TIN reconciliation: {_tin_sub:,} submitted = {_tin_p:,} pass + {_tin_f_irs:,} fail + {max(0,_tin_sub-_tin_p-_tin_f_irs):,} pending\n"
             )
 
         _HOME_QUICK = [
@@ -3961,8 +3999,78 @@ Complete data gap. Entity existence AND firmographic data both unverified — hi
 
         if "home_ai_q" in st.session_state:
             _q = st.session_state.pop("home_ai_q")
-            with st.spinner("Thinking…"):
-                _ans = ask_ai(_q, _portfolio_ctx)
+            with st.spinner("Analysing portfolio data and composing answer…"):
+                # Portfolio AI: uses a direct prompt that forces an answer from the provided data.
+                # Does NOT rely on SQL execution — the data is already in the context.
+                # Two-stage: (1) get any SQL the AI wants to run, (2) generate the actual answer.
+                try:
+                    _client = get_openai()
+                    if _client:
+                        # Stage 1: Direct answer from portfolio context
+                        _direct_prompt = (
+                            f"You are analysing a KYB portfolio. Here is the REAL aggregate data:\n\n"
+                            f"{_portfolio_ctx}\n\n"
+                            f"The user asks: \"{_q}\"\n\n"
+                            f"INSTRUCTIONS:\n"
+                            f"1. Answer the question DIRECTLY using the numbers above.\n"
+                            f"2. Calculate any percentages or cross-references from the data given.\n"
+                            f"3. Provide actionable insight — what does this mean for underwriting?\n"
+                            f"4. If a SQL query would provide MORE detail beyond what's given above, "
+                            f"   write it (using verified fact names: sos_match_boolean, tin_match_boolean, "
+                            f"   tin_submitted, idv_passed_boolean, watchlist_hits, formation_state, naics_code). "
+                            f"   The system will execute it automatically.\n"
+                            f"5. NEVER make up specific business names, addresses, or IDs.\n"
+                            f"6. Format your answer clearly with the direct answer FIRST, then any SQL."
+                        )
+                        _r = _client.chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=[
+                                {"role":"system","content":SYSTEM},
+                                {"role":"user","content":_direct_prompt}
+                            ],
+                            max_tokens=1000, temperature=0.3
+                        )
+                        _raw_ans = _r.choices[0].message.content
+
+                        # Stage 2: if the AI included SQL, execute it and append real results
+                        _sql_blocks = _extract_sql_from_answer(_raw_ans)
+                        _extra_results = []
+                        for _sq in _sql_blocks[:2]:
+                            _df_r, _err_r, _sql_r, _fixes_r = _execute_sql_with_retry(_sq)
+                            if _df_r is not None and not _df_r.empty:
+                                try: _rows_str = _df_r.head(20).to_markdown(index=False)
+                                except: _rows_str = _df_r.head(20).to_string(index=False)
+                                _extra_results.append(
+                                    f"\n\n**✅ Additional data from Redshift ({len(_df_r):,} rows):**\n```\n{_rows_str}\n```"
+                                    f"\n*(Live values — not generated by AI)*"
+                                )
+                            elif _df_r is not None and _df_r.empty:
+                                _extra_results.append(f"\n\n*(SQL executed — 0 rows returned for this query)*")
+                            elif _err_r:
+                                # Try to fix and rerun
+                                _fixed_blocks = _extract_sql_from_answer(
+                                    (get_openai().chat.completions.create(
+                                        model="gpt-4o-mini",
+                                        messages=[{"role":"system","content":SYSTEM},
+                                                  {"role":"user","content":f"Fix this SQL error:\nERROR: {_err_r}\nSQL:\n```sql\n{_sql_r}\n```\nWrite corrected SQL only."}],
+                                        max_tokens=400, temperature=0
+                                    ).choices[0].message.content)
+                                )
+                                if _fixed_blocks:
+                                    _df_r2, _err_r2, _sql_r2, _ = _execute_sql_with_retry(_fixed_blocks[0])
+                                    if _df_r2 is not None and not _df_r2.empty:
+                                        try: _rows_str2 = _df_r2.head(20).to_markdown(index=False)
+                                        except: _rows_str2 = _df_r2.head(20).to_string(index=False)
+                                        _extra_results.append(
+                                            f"\n\n**✅ Additional data from Redshift (auto-fixed SQL):**\n```\n{_rows_str2}\n```"
+                                        )
+
+                        _ans = _raw_ans + "".join(_extra_results)
+                    else:
+                        _ans = "⚠️ Set OPENAI_API_KEY to enable AI responses."
+                except Exception as _e:
+                    _ans = f"⚠️ AI error: {_e}"
+
             st.markdown(f"**Q:** {_q}")
             st.markdown(_ans)
             st.markdown("---")
