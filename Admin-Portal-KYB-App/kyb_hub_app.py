@@ -2402,9 +2402,6 @@ with st.sidebar:
         (["waterfall","shap","factor contribution","category impact","score factor","public records score","company profile score","business_score_factors"],
          "💰 Worth Score","Waterfall & Features tab","📊 Waterfall & Features tab",
          "SHAP factor contributions by category. Source: rds_manual_score_public.business_score_factors. Categories: Public Records, Company Profile, Financial Trends, etc."),
-        (["fill rate","feature fill","model input","null feature","imputation","worth score audit","worth_score_input_audit"],
-         "💰 Worth Score","Feature Fill Rates tab","📊 Feature Fill Rates tab",
-         "Model input fill rates from warehouse.worth_score_input_audit. Low fill (<30%) = imputed defaults → less accurate score."),
         (["plaid banking","banking model","financial model","pytorch","balance sheet","cash flow","ratio","plaid connected"],
          "💰 Worth Score","Waterfall & Features tab","📊 Waterfall & Features tab",
          "Financial sub-model (PyTorch): requires Plaid banking. Null financial features → model uses defaults → score may be 0."),
@@ -6638,7 +6635,7 @@ elif tab=="💰 Worth Score":
     with st.spinner("Loading Worth Score…"):
         score_df,score_err=load_score(bid)
 
-    ws1,ws2,ws3=st.tabs(["💰 Score & Architecture","📊 Waterfall & Features","📊 Feature Fill Rates"])
+    ws1,ws2=st.tabs(["💰 Score & Architecture","📊 Waterfall & Features"])
 
     with ws1:
         # ── Model architecture explainer ──────────────────────────────────────
@@ -7168,85 +7165,6 @@ ORDER BY ABS(weighted_score_850) DESC;""",language="sql")
             "How does the financial model (PyTorch) differ from the firmographic model (XGBoost)?",
             "Why is the waterfall estimated and not the exact model output?"],bid)
 
-    with ws3:
-        st.markdown("#### 📊 Feature Fill Rates — Model Input Data Quality")
-        st.caption("""**Source:** `warehouse.worth_score_input_audit` · 
-        **What it shows:** For each model input feature, what % of scored businesses have a non-null value ·
-        **Why it matters:** Null features are imputed with defaults, reducing model accuracy for that business""")
-
-        audit_df,audit_err=load_audit()
-        if audit_df is not None and not audit_df.empty:
-            fill_cols=[c for c in audit_df.columns if c.startswith("fill_")]
-            lr=audit_df.iloc[0]
-
-            # Safely extract fill rates — only numeric values (skip JSON/string blobs)
-            fd2=[]
-            for c in fill_cols:
-                if c not in audit_df.columns: continue
-                try:
-                    val=float(lr[c])
-                    if val<0 or val>100: continue   # sanity check: must be a percentage
-                except (TypeError,ValueError): continue  # skip non-numeric (JSON strings)
-                cat=("📜 Public Records" if any(x in c for x in ["bankruptcy","judgment","lien","reviews"])
-                     else "🏢 Company Profile" if any(x in c for x in ["age_business","state","naics","primsic","struct","employee","indicator"])
-                     else "📈 Financial Trends" if any(x in c for x in ["gdp","cpi","vix","t10y","unemp","ratio","wag","usd","ppi","brent","wti","csentiment","dolindx","ccdelinq"])
-                     else "💼 Business Ops" if any(x in c for x in ["revenue","net_income","cf_","bs_","is_"])
-                     else "📊 Performance" if any(x in c for x in ["ratio_return","ratio_gross","ratio_net","ratio_equity","ratio_income","flag_"])
-                     else "Other")
-                fd2.append({"Feature":c.replace("fill_",""),"Fill %":round(val,1),"Category":cat})
-
-            if not fd2:
-                flag("audit table columns do not contain numeric fill rates — schema may differ.","amber")
-            else:
-                fdf=pd.DataFrame(fd2).sort_values("Fill %",ascending=True)
-                fdf["Status"]=fdf["Fill %"].apply(lambda v:"🟢 Good" if v>=80 else("🟡 Medium" if v>=30 else"🔴 Low"))
-
-                # Category summary
-                cat_summary=fdf.groupby("Category")["Fill %"].mean().reset_index()
-                cat_summary.columns=["Category","Avg Fill %"]
-                cat_summary["Avg Fill %"]=cat_summary["Avg Fill %"].round(1)
-                cat_summary["Status"]=cat_summary["Avg Fill %"].apply(lambda v:"🟢 Good" if v>=80 else("🟡 Medium" if v>=30 else"🔴 Low"))
-
-                col_cat,col_chart=st.columns([1,2])
-                with col_cat:
-                    st.markdown("**Category averages:**")
-                    st.dataframe(cat_summary,use_container_width=True,hide_index=True)
-                    st.markdown(f"**Score date:** {lr.get('score_date','N/A')}")
-                    st.caption("Low fill rate = feature imputed with default → less accurate prediction")
-                with col_chart:
-                    fig_fill=px.bar(fdf.sort_values("Fill %",ascending=True).tail(40),
-                                    x="Fill %",y="Feature",orientation="h",color="Status",
-                                    color_discrete_map={"🟢 Good":"#22c55e","🟡 Medium":"#f59e0b","🔴 Low":"#ef4444"},
-                                    title=f"Model Feature Fill Rates (top 40 by fill %)")
-                    fig_fill.update_layout(height=700,showlegend=True,
-                                           xaxis=dict(range=[0,110]),
-                                           margin=dict(t=40,b=10,l=10,r=10))
-                    st.plotly_chart(dark_chart(fig_fill),use_container_width=True)
-
-            # Low fill rate features
-            low_fill=fdf[fdf["Fill %"]<30].sort_values("Fill %")
-            if not low_fill.empty:
-                st.markdown("##### ⚠️ Features with Low Fill Rate (<30%) — Imputed with defaults")
-                st.markdown("These features are null for most businesses. When null, the model uses imputed defaults from lookups.py. "
-                            "This reduces model confidence and may cause the Worth Score to be less accurate.")
-                st.dataframe(low_fill[["Feature","Fill %","Category"]],use_container_width=True,hide_index=True)
-        else:
-            flag(f"Audit table not accessible. {audit_err or ''}", "amber")
-            st.code("""-- Try directly:
-SELECT * FROM warehouse.worth_score_input_audit ORDER BY score_date DESC LIMIT 5;""",language="sql")
-
-        st.markdown("**🔗 Source references:**")
-        st.markdown(
-            f"- [{src_link('lookups.py','lookups.py — INPUTS dict (all features + imputation defaults)')}]({GITHUB_LINKS.get('lookups.py','')})\n"
-            f"- [{src_link('worth_score_model.py','worth_score_model.py — _predict() feature pipeline')}]({GITHUB_LINKS.get('worth_score_model.py','')})\n"
-            f"- Redshift table: `warehouse.worth_score_input_audit` — fill rates computed nightly"
-        )
-        ai_popup("FillRates","Worth Score feature fill rates",[
-            "Which features have the lowest fill rate and why?",
-            "How does the model handle null features — what are the imputation defaults?",
-            "What is the impact of having all Financial Ratios null (no Plaid banking)?",
-            "How do I improve the fill rate for firmographic features (revenue, employees)?",
-            "Where are the imputation default values defined in the codebase?"],bid)
 
 # ════════════════════════════════════════════════════════════════════════════════
 # ALL FACTS — grouped, enriched, with lineage
