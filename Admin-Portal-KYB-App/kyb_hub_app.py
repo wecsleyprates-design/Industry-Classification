@@ -2235,124 +2235,216 @@ with st.sidebar:
                                placeholder="e.g. NAICS, TIN, watchlist, Worth Score…",
                                key="global_search", label_visibility="collapsed")
 
-    # Comprehensive index: (keywords, tab, sub-tab, description, emoji)
+    # ── Search index ─────────────────────────────────────────────────────────
+    # Format: (exact_keywords_list, tab, sub_tab, card_path, description)
+    # card_path: the exact expander/card label the user should click once in the tab
+    # Matching: keyword must EXACTLY match or contain the search term as a whole word
     SEARCH_INDEX = [
-        # Home tab
-        (["home","portfolio","overview","dashboard","onboarding","customer","filter","date range","red flag","kpi","total businesses"],
-         "🏠 Home","Portfolio Overview","Main dashboard with KYB health rates, onboarding timeline, red flag distribution, Worth Score distribution, and business count by customer.","🏠"),
-        (["customer filter","customer name","customer dropdown","filter by customer"],
-         "🏠 Home","Customer Filter (sidebar)","Filter the entire Home dashboard to a specific customer. The dropdown shows business count per customer. Located in the sidebar below Date Range.","🏠"),
-        (["date range","date filter","filter by date","onboarding date","period"],
-         "🏠 Home","Date Range Filter (sidebar)","Filter all Home tab data to a specific onboarding period. Uses rel_business_customer_monitoring.created_at as the true onboarding date.","🏠"),
-        (["red flag","risk flag","flag score","flagged business","top 10 attention"],
-         "🏠 Home","Top 10 Businesses Needing Attention","Businesses ranked by red flag score. Score is a custom heuristic (not regulatory). Watchlist=+12, SOS inactive=+10, No SOS=+8, TIN fail=+6.","🏠"),
-        (["recently onboarded","new business","latest business","recent"],
-         "🏠 Home","Recently Onboarded Businesses","Most recently onboarded businesses with their KYB status flags and an Investigate button.","🏠"),
+        # ── 🏠 Home ────────────────────────────────────────────────────────────
+        (["home","dashboard","portfolio","overview","kpi","onboarding timeline"],
+         "🏠 Home","Portfolio Overview",None,
+         "Main dashboard: KYB health rates, onboarding timeline, red flag distribution, Worth Score, business count by customer."),
+        (["customer filter","customer name","filter customer","customer dropdown"],
+         "🏠 Home","Sidebar → Customer Filter",None,
+         "Filter the Home dashboard to one customer's businesses. Dropdown shows business count per customer within the selected date range."),
+        (["date range","date filter","filter date","onboarding date","period filter"],
+         "🏠 Home","Sidebar → Date Range",None,
+         "Filter Home data by onboarding date. Uses rds_cases_public.rel_business_customer_monitoring.created_at (the true onboarding date, not facts.received_at)."),
+        (["red flag","flagged business","top 10","needs attention","flag score"],
+         "🏠 Home","Top 10 Businesses Needing Attention",None,
+         "Businesses ranked by red flag severity score. Watchlist=+12, SOS inactive=+10, TIN fail=+6. Custom heuristic — not a regulatory score."),
+        (["recently onboarded","new business","recent business","latest business"],
+         "🏠 Home","Recently Onboarded Businesses",None,
+         "Most recently onboarded businesses with their KYB status flags."),
 
-        # Registry & Identity
-        (["sos","secretary of state","sos active","sos match","registry","filing","sos filings"],
-         "🏛️ Registry & Identity","SOS tab","SOS registry status, Middesk confidence, sos_active (derived from sos_filings[].active), winning source vs alternatives.","🏛️"),
-        (["domestic","foreign","formation state","tax haven","delaware","nevada","entity resolution gap"],
-         "🏛️ Registry & Identity","Dom/Foreign tab","Domestic vs Foreign registration analysis. Identifies entity resolution gaps for tax-haven states (DE/NV/WY).","🗺️"),
-        (["tin","ein","tax id","tin match","irs","tin verification","tin failed","tin boolean"],
-         "🏛️ Registry & Identity","TIN tab","TIN/EIN verification. Source: Middesk TIN review task → IRS direct. tin_match_boolean derived from tin_match.value.status.","🔐"),
-        (["idv","identity verification","plaid idv","biometric","selfie","id scan","idv passed","idv session"],
-         "🏛️ Registry & Identity","IDV tab","Plaid Identity Verification. idv_status object (SUCCESS/PENDING/FAILED/CANCELED/EXPIRED counts). idv_passed_boolean=true when ≥1 SUCCESS.","🪪"),
-        (["cross analysis","anomaly","consistency check","field check","cross field","data integrity"],
-         "🏛️ Registry & Identity","Cross-Analysis tab","Cross-field consistency checks. Detects: TIN bool/status mismatch, SOS+TIN conflicts, IDV+name_match inconsistencies, entity resolution gaps.","🔗"),
-        (["middesk confidence","middesk conf","0.15","0.20","review task","middesk score"],
-         "🏛️ Registry & Identity","SOS tab","Middesk confidence formula: 0.15 + 0.20 × passing review tasks (max 4 tasks = 0.95 max). Tasks: name, TIN, address, SOS.","🏛️"),
+        # ── 🏛️ Registry & Identity ─────────────────────────────────────────────
+        (["sos","secretary of state","sos active","sos match","sos_match_boolean","sos_active","registry","sos filing"],
+         "🏛️ Registry & Identity","SOS tab → Fact Lineage","🏛️ SOS tab",
+         "SOS registry status. sos_active derived from sos_filings[].active (Middesk pid=16). sos_match: Middesk searches by submitted address."),
+        (["middesk confidence","middesk_confidence","middesk score","0.15","0.20","review task"],
+         "🏛️ Registry & Identity","SOS tab → Fact Lineage","🏛️ SOS tab",
+         "Middesk confidence formula: 0.15 base + 0.20 × passing review tasks (max 4 = 0.95). Fact name: middesk_confidence."),
+        (["domestic","foreign","foreign domestic","formation state","tax haven","delaware","nevada","wyoming","entity resolution"],
+         "🏛️ Registry & Identity","Dom/Foreign tab","🗺️ Dom/Foreign tab",
+         "Domestic vs Foreign registration analysis. Detects entity resolution gaps for tax-haven states (DE/NV/WY)."),
+        (["tin","ein","tax id","tin match","tin_match","tin_match_boolean","tin_submitted","tin verification","irs","irs check"],
+         "🏛️ Registry & Identity","TIN tab → Fact Lineage","🔐 TIN tab",
+         "TIN/EIN verification. Source: Middesk (pid=16) TIN review task → IRS direct. tin_match_boolean derived from tin_match.value.status."),
+        (["idv","identity verification","plaid idv","biometric","selfie","id scan","idv_passed","idv_passed_boolean","idv_status","idv session"],
+         "🏛️ Registry & Identity","IDV tab → Fact Lineage","🪪 IDV tab",
+         "Plaid Identity Verification. idv_status={SUCCESS/PENDING/FAILED/CANCELED/EXPIRED counts}. idv_passed_boolean=true when ≥1 SUCCESS."),
+        (["cross analysis","anomaly detection","consistency check","data integrity","cross field","field inconsistency"],
+         "🏛️ Registry & Identity","Cross-Analysis tab","🔗 Cross-Analysis tab",
+         "Cross-field consistency checks: TIN bool/status mismatch, SOS+TIN conflicts, entity resolution gaps, watchlist+low confidence."),
 
-        # Classification & KYB
-        (["naics","naics code","industry","classification","561499","fallback","mcc","merchant category"],
-         "🏭 Classification & KYB","NAICS/MCC Pipeline tab","NAICS industry classification. Vendor cascade: OC(w=0.9) > ZI(w=0.8) > Trulioo(w=0.8) > EFX(w=0.7) > SERP(w=0.3) > AI(w=0.1). 561499=fallback.","🏭"),
-        (["background","firmographic","revenue","employees","legal name","business name","dba","kyb submitted","kyb complete"],
-         "🏭 Classification & KYB","Background & Firmographic tab","Business background data: legal_name, revenue, num_employees, dba_found, kyb_submitted, kyb_complete. Sources: ZI, EFX, Middesk, Applicant.","🏢"),
-        (["contact","address","address match","name match","deliverable","registered agent","phone","email"],
-         "🏭 Classification & KYB","Contact & Address tab","Address and name verification. address_match_boolean (from Middesk USPS check). address_registered_agent warning for CT Corp etc.","📬"),
-        (["website","website found","serp","google","gmb","google my business","serp id","review rating","gap g2"],
-         "🏭 Classification & KYB","Website & Digital tab","Website and digital presence. Gap G2: website exists but NAICS=561499 (AI enrichment couldn't classify). serp_id from Google Business Profile.","🌐"),
-        (["ai enrichment","gpt","last resort","ai naics","561499 root cause","gap g1","gap g2","gap g3"],
-         "🏭 Classification & KYB","NAICS/MCC Pipeline tab","AI enrichment (GPT-4o-mini) is the LAST RESORT vendor (weight=0.1). Only fires when all other vendors fail. Gap analysis: G1=entity not matched, G2=no website URL, G3=name insufficient.","🤖"),
+        # ── 🏭 Classification & KYB ────────────────────────────────────────────
+        (["naics","naics_code","naics code","industry","industry code","classification","561499","fallback","mcc","mcc_code","merchant category"],
+         "🏭 Classification & KYB","NAICS/MCC Pipeline tab","🏭 NAICS/MCC tab",
+         "NAICS classification. Vendor cascade: OC(w=0.9)>ZI(w=0.8)>Trulioo(w=0.8)>EFX(w=0.7)>SERP(w=0.3)>AI(w=0.1). 561499=fallback."),
+        (["background","firmographic","revenue","num_employees","employees","legal name","legal_name","business name","business_name","dba","kyb_submitted","kyb_complete"],
+         "🏭 Classification & KYB","Background & Firmographic tab","🏢 Background tab",
+         "Business background: legal_name, revenue, num_employees, dba_found, kyb_submitted, kyb_complete. Sources: ZI, EFX, Middesk, Applicant."),
+        (["contact","address","address match","address_match","name match","name_match","deliverable","registered agent","phone","email","address verification"],
+         "🏭 Classification & KYB","Contact & Address tab","📬 Contact tab",
+         "Address and name verification. address_match_boolean from Middesk USPS check. address_registered_agent warning for virtual offices."),
+        (["website","website found","serp","google business","gmb","serp_id","review rating","gap g2","website digital"],
+         "🏭 Classification & KYB","Website & Digital tab","🌐 Website tab",
+         "Website and digital presence. Gap G2: website exists but NAICS=561499 (AI enrichment couldn't use website URL)."),
 
-        # Risk & Watchlist
-        (["watchlist","sanctions","pep","ofac","adverse media","watchlist hits","compliance"],
-         "⚠️ Risk & Watchlist","Watchlist Detail tab","Watchlist architecture: PEP+SANCTIONS only. Adverse media excluded (filterOutAdverseMedia). Trulioo PSC + Middesk merged by consolidatedWatchlist.ts.","⚠️"),
-        (["bankruptcy","judgement","lien","public records","bk","num bankruptcies","equifax public"],
-         "⚠️ Risk & Watchlist","Public Records tab","Bankruptcies (-40pts/each), Judgments (-20pts), Liens (-10pts). Source: Equifax pid=17. Scalar counts in Redshift. Full arrays require PostgreSQL RDS.","📜"),
-        (["risk combination","watchlist bk","risk signal","compliance credit","underwriting action"],
-         "⚠️ Risk & Watchlist","Risk Combinations tab","Cross-signal analysis: Watchlist+BK (CRITICAL), Watchlist+Adverse Media (HIGH), BK+Judgment+Lien (HIGH). Required actions per combination.","🔗"),
-        (["bert","business entity review","review task","rds_integration_data","watchlist review"],
-         "⚠️ Risk & Watchlist","Watchlist Detail tab","BERT (Business Entity Review Task) live query from rds_integration_data.business_entity_review_task. key='watchlist', status, sublabel.","📋"),
+        # ── ⚠️ Risk & Watchlist ─────────────────────────────────────────────────
+        (["watchlist","watchlist_hits","sanctions","pep","ofac","adverse media","adverse_media_hits","watchlist hits","compliance"],
+         "⚠️ Risk & Watchlist","Watchlist Detail tab","🔍 Watchlist Detail tab",
+         "Watchlist: PEP+SANCTIONS only. Adverse media excluded (filterOutAdverseMedia). Trulioo PSC + Middesk merged by consolidatedWatchlist.ts."),
+        (["bankruptcy","bankruptcies","num_bankruptcies","judgement","lien","num_judgements","num_liens","public records","equifax records"],
+         "⚠️ Risk & Watchlist","Public Records tab","📜 Public Records tab",
+         "Bankruptcies (−40pts each), Judgments (−20pts), Liens (−10pts). Source: Equifax pid=17. Scalar counts in Redshift; full arrays in PostgreSQL RDS."),
+        (["risk combination","risk signal","watchlist bankruptcy","watchlist bk","underwriting action","risk combo"],
+         "⚠️ Risk & Watchlist","Risk Combinations tab","🔗 Risk Combinations tab",
+         "Cross-signal analysis: Watchlist+BK (CRITICAL), Watchlist+Adverse Media (HIGH), BK+Judgment+Lien (HIGH)."),
 
-        # Worth Score
-        (["worth score","score","300 850","model","probability","approve","decline","further review","risk level"],
-         "💰 Worth Score","Score & Architecture tab","Worth Score architecture: 3-model ensemble (XGBoost + PyTorch + Economic). Formula: p × 550 + 300. Thresholds: APPROVE≥700, REVIEW 550-699, DECLINE<550.","💰"),
-        (["waterfall","shap","factor contribution","category impact","public records score","company profile score"],
-         "💰 Worth Score","Waterfall & Features tab","SHAP factor contributions by category: Public Records, Company Profile, Financial Trends, Business Operations, Performance Measures. Source: business_score_factors.","📊"),
-        (["fill rate","feature fill","model input","null feature","imputation","audit","worth score audit"],
-         "💰 Worth Score","Feature Fill Rates tab","Model input fill rates from warehouse.worth_score_input_audit. Low fill (<30%) = feature imputed with defaults → less accurate score.","📊"),
-        (["plaid","banking","balance sheet","cash flow","ratio","financial model","pytorch"],
-         "💰 Worth Score","Waterfall & Features tab","Financial sub-model (PyTorch): requires Plaid banking data. If Plaid not connected → all financial features null → model uses defaults → score may be 0.","💼"),
+        # ── 💰 Worth Score ──────────────────────────────────────────────────────
+        (["worth score","score","score_850","weighted_score","300 850","model","probability","approve","decline","further review","risk level","score decision"],
+         "💰 Worth Score","Score & Architecture tab","💰 Score & Architecture tab",
+         "Worth Score: p × 550 + 300. Thresholds: APPROVE≥700, FURTHER_REVIEW 550-699, DECLINE<550. Source: rds_manual_score_public.business_scores."),
+        (["waterfall","shap","factor contribution","category impact","score factor","public records score","company profile score","business_score_factors"],
+         "💰 Worth Score","Waterfall & Features tab","📊 Waterfall & Features tab",
+         "SHAP factor contributions by category. Source: rds_manual_score_public.business_score_factors. Categories: Public Records, Company Profile, Financial Trends, etc."),
+        (["fill rate","feature fill","model input","null feature","imputation","worth score audit","worth_score_input_audit"],
+         "💰 Worth Score","Feature Fill Rates tab","📊 Feature Fill Rates tab",
+         "Model input fill rates from warehouse.worth_score_input_audit. Low fill (<30%) = imputed defaults → less accurate score."),
+        (["plaid banking","banking model","financial model","pytorch","balance sheet","cash flow","ratio","plaid connected"],
+         "💰 Worth Score","Waterfall & Features tab","📊 Waterfall & Features tab",
+         "Financial sub-model (PyTorch): requires Plaid banking. Null financial features → model uses defaults → score may be 0."),
 
-        # All Facts
-        (["all facts","fact list","fact table","all kyb facts","group facts","fact group","fact overview"],
-         "📋 All Facts","All Facts tab","Complete list of all KYB facts stored in rds_warehouse_public.facts, grouped by category. Includes JSON, source, confidence, rule, alternatives for each fact.","📋"),
-        (["identity name group","legal name fact","names found fact","dba found fact","people fact"],
-         "📋 All Facts","Identity/Name group","Facts: legal_name, names_found, dba_found, people, kyb_submitted, kyb_complete. Uses combineFacts rule for names (merges all vendors).","🏢"),
-        (["registry sos group","sos filings group","middesk id","formation state fact","formation date fact"],
-         "📋 All Facts","Registry/SOS group","Facts: sos_active, sos_match, sos_filings (too large), middesk_confidence, formation_state, formation_date. sos_filings must be queried from PostgreSQL RDS.","🏛️"),
-        (["financial ratios group","ratio fact","bs fact","cf fact","plaid ratio","financial fill rate"],
-         "📋 All Facts","Financial Ratios group","15 facts: ratio_*, bs_*, cf_*, flag_equity_negative, etc. All null if Plaid not connected. These are Worth Score model inputs for the financial sub-model.","📊"),
-        (["alternative sources","winning source","confidence score","fact engine","rule applied","all facts table"],
-         "📋 All Facts","Any fact expander","Each fact expander shows: Source Code Reference (GitHub link), field-by-field annotations, full JSON from OpenAPI spec, SQL + Python code to query from Redshift.","📋"),
+        # ── 📋 All Facts ────────────────────────────────────────────────────────
+        (["all facts","fact list","fact table","all kyb facts","fact overview","facts tab","fact fill rate"],
+         "📋 All Facts","All Facts tab → Facts Overview","📋 All Facts → Facts Overview (top)",
+         "All KYB facts grouped by category. Fill rate, null count, too-large count. Click any group to expand facts with JSON, source, SQL, Python."),
+        (["identity name","legal name fact","names found","dba_found fact","people fact","kyb_submitted fact","kyb_complete fact"],
+         "📋 All Facts","All Facts tab → 🏢 Identity / Name group","📋 All Facts → 🏢 Identity / Name (group expander)",
+         "Facts: legal_name, names_found, dba_found, people, kyb_submitted, kyb_complete. combineFacts rule merges all vendor names."),
+        (["sos group","sos facts","registry sos","sos_filings fact","formation_state fact","formation_date fact","middesk_id"],
+         "📋 All Facts","All Facts tab → 🏛️ Registry / SOS group","📋 All Facts → 🏛️ Registry / SOS (group expander)",
+         "Facts: sos_active, sos_match, sos_filings (too large for Redshift), middesk_confidence, formation_state, formation_date."),
+        (["tin ein group","tin facts","tin_match fact","tin_submitted fact","tin group","ein group","is_sole_prop"],
+         "📋 All Facts","All Facts tab → 🔐 TIN / EIN group","📋 All Facts → 🔐 TIN / EIN (group expander)",
+         "Facts: tin, tin_submitted, tin_match, tin_match_boolean, is_sole_prop. tin_match_boolean=true only when IRS status='success'."),
+        (["address facts","location facts","addresses fact","primary_address fact","address_match fact","address_verification fact","addresses group"],
+         "📋 All Facts","All Facts tab → 📍 Address / Location group","📋 All Facts → 📍 Address / Location (group expander)",
+         "Facts: addresses, primary_address, addresses_submitted, addresses_found, addresses_deliverable, address_match, address_verification."),
+        (["contact facts","email fact","phone_found fact","countries fact","contact group"],
+         "📋 All Facts","All Facts tab → 📞 Contact group","📋 All Facts → 📞 Contact (group expander)",
+         "Facts: business_phone, phone_found, email, countries. Often null — optional fields on onboarding form."),
+        (["website facts","website_found fact","serp_id fact","review_rating fact","website group","digital facts"],
+         "📋 All Facts","All Facts tab → 🌐 Website / Digital group","📋 All Facts → 🌐 Website / Digital (group expander)",
+         "Facts: website, website_found, serp_id, review_rating, review_count. Critical for AI NAICS classification."),
+        (["naics facts","mcc_code fact","naics_code fact","industry fact","classification group","naics group"],
+         "📋 All Facts","All Facts tab → 🏭 Industry / Classification group","📋 All Facts → 🏭 Industry / Classification (group expander)",
+         "Facts: naics_code, mcc_code, naics_description, mcc_description, industry. mcc_code is calculated (not a vendor fact)."),
+        (["firmographic facts","revenue fact","num_employees fact","firmographic group","firmographic facts"],
+         "📋 All Facts","All Facts tab → 💼 Firmographic group","📋 All Facts → 💼 Firmographic (group expander)",
+         "Facts: revenue, num_employees, minority_owned, woman_owned, veteran_owned, kyb_complete, business_verified. ZI/EFX sources."),
+        (["idv facts","idv_status fact","idv_passed fact","name_match fact","kyc facts","identity verification facts","idv group","kyc group"],
+         "📋 All Facts","All Facts tab → 🪪 Identity Verification (KYC) group","📋 All Facts → 🪪 Identity Verification / KYC (group expander)",
+         "Facts: idv_status, idv_passed, idv_passed_boolean, name_match, name_match_boolean, verification_status."),
+        (["financial ratios","ratio facts","bs_facts","cf_facts","financial worth score inputs","plaid facts","financial group"],
+         "📋 All Facts","All Facts tab → 📊 Financial Ratios group","📋 All Facts → 📊 Financial Ratios (Worth Score inputs)",
+         "15 facts: ratio_*, bs_*, cf_*, flag_equity_negative. All null if Plaid not connected. Primary Worth Score financial model inputs."),
+        (["watchlist facts","watchlist_hits fact","adverse_media_hits fact","sanctions_hits","watchlist group","risk watchlist facts"],
+         "📋 All Facts","All Facts tab → ⚠️ Risk / Watchlist group","📋 All Facts → ⚠️ Risk / Watchlist (group expander)",
+         "Facts: watchlist, watchlist_hits, watchlist_raw, adverse_media_hits, sanctions_hits, num_bankruptcies, num_judgements, num_liens."),
+        (["vendor integration","internal_platform_matches","entity matching","canadaopen","vendor group"],
+         "📋 All Facts","All Facts tab → 🔗 Vendor / Integration group","📋 All Facts → 🔗 Vendor / Integration (group expander)",
+         "Facts: internal_platform_matches, internal_platform_matches_count, canadaopen_* . Entity-matching XGBoost model results."),
+        (["canada facts","canada_business_number","canada_corporate_id","canadian","canada group"],
+         "📋 All Facts","All Facts tab → 🇨🇦 Canada group","📋 All Facts → 🇨🇦 Canada (if applicable)",
+         "Facts: canada_business_number, canada_corporate_id, canada_id_number_match. Only populated for Canadian businesses."),
 
-        # AI Agent
-        (["ai agent","ask ai","chat","question","ai answer","openai","gpt"],
-         "🤖 AI Agent","AI Agent tab","RAG-powered chat. Ask any question about KYB data. AI auto-executes SQL and returns live Redshift results. Sources cited with clickable GitHub links.","🤖"),
-        (["sql runner","run sql","query redshift","sql query","python runner","execute sql"],
-         "🤖 AI Agent","SQL & Python Runner","Interactive SQL runner with CSV/XLSX download. Python Runner with pre-injected Redshift connection. Quick templates for common queries.","🔬"),
+        # ── 🤖 AI Agent ─────────────────────────────────────────────────────────
+        (["ai agent","ask ai","chat","question answer","openai","gpt","ai question"],
+         "🤖 AI Agent","AI Agent tab → Chat","🤖 AI Agent → Chat section",
+         "RAG-powered chat. Executes SQL automatically and returns live Redshift data. Sources cited with clickable GitHub links."),
+        (["sql runner","run sql","query redshift","sql query","execute query"],
+         "🤖 AI Agent","AI Agent tab → SQL Runner","🤖 AI Agent → 🗄️ SQL Runner tab",
+         "Write and run SQL directly against Redshift. Results show as a table with CSV/XLSX download. No VPN issues — runs server-side."),
+        (["python runner","run python","python query","execute python","psycopg2"],
+         "🤖 AI Agent","AI Agent tab → Python Runner","🤖 AI Agent → 🐍 Python Runner tab",
+         "Run Python code against Redshift. conn is pre-injected. Quick templates for common queries. CSV/XLSX download."),
 
-        # Data sources / tables
-        (["rds_warehouse_public facts","facts table","fact schema","received_at","business_id fact"],
-         "📋 All Facts","Any tab — rds_warehouse_public.facts","Primary KYB data store. Columns: business_id, name, value (JSON), received_at. All KYB facts are in this table. Use JSON_EXTRACT_PATH_TEXT() to read JSON fields.","🗄️"),
-        (["rel_business_customer_monitoring","rbcm","onboarding date","created_at","customer id"],
-         "🏠 Home","Home tab — rds_cases_public.rel_business_customer_monitoring","True onboarding date source. Columns: business_id, customer_id, created_at. NOTE: no updated_at column. Used to filter businesses by onboarding date and customer.","🗄️"),
-        (["worth score table","business_scores","data_current_scores","weighted_score_850","score_id"],
-         "💰 Worth Score","Score & Architecture tab","rds_manual_score_public.business_scores: id, weighted_score_850, weighted_score_100, risk_level, score_decision, created_at. JOIN via data_current_scores.score_id.","🗄️"),
-        (["fact engine","factWithHighestConfidence","weight threshold","platform weight","rule","winner selection"],
-         "📋 All Facts","Any fact expander","Fact Engine: factWithHighestConfidence rule picks vendor with highest confidence. If within 5% (WEIGHT_THRESHOLD=0.05), higher platform weight wins. Weights: Middesk=2.0 > OC=0.9 > ZI=0.8.","⚙️"),
+        # ── Data tables / sources ────────────────────────────────────────────────
+        (["rds_warehouse_public","facts table","fact schema","facts schema","received_at","business_id fact"],
+         "📋 All Facts","All Facts tab → Facts Overview","📋 All Facts (primary source for all KYB facts)",
+         "rds_warehouse_public.facts: columns are business_id, name, value (JSON), received_at. All KYB facts in this table."),
+        (["rel_business_customer_monitoring","rbcm","onboarding date","created_at","customer id link"],
+         "🏠 Home","Sidebar → Date Range / Customer Filter","🏠 Home filters use rel_business_customer_monitoring",
+         "rds_cases_public.rel_business_customer_monitoring: columns are business_id, customer_id, created_at (true onboarding date)."),
+        (["worth score table","business_scores","data_current_scores","score_id","weighted_score_850"],
+         "💰 Worth Score","Score & Architecture tab","💰 Worth Score → Score & Architecture",
+         "rds_manual_score_public.business_scores: id, weighted_score_850, weighted_score_100, risk_level, score_decision, created_at."),
+        (["fact engine","factwithhighestconfidence","weight threshold","rule applied","winner selection","platform weight"],
+         "📋 All Facts","All Facts tab → any fact expander","📋 All Facts → click any fact → Source Code Reference",
+         "factWithHighestConfidence: highest confidence wins. If within 5% (WEIGHT_THRESHOLD=0.05), higher platform weight wins."),
     ]
 
     if _search_q and len(_search_q.strip()) >= 2:
+        import re as _sr
         q_lower = _search_q.strip().lower()
+        # Split query into individual words (for multi-word searches)
+        q_words = [w for w in _sr.split(r'\W+', q_lower) if len(w) >= 2]
+
         results = []
-        for keywords, tab_name, sub_tab, desc, emoji in SEARCH_INDEX:
-            score = sum(1 for kw in keywords if kw in q_lower or q_lower in kw)
-            if score == 0:
-                # Try partial word match
-                score = sum(1 for kw in keywords if any(w in kw for w in q_lower.split()))
+        for entry in SEARCH_INDEX:
+            keywords, tab_name, sub_tab, card_path, desc = entry
+            score = 0
+            for kw in keywords:
+                kw_lower = kw.lower()
+                # Exact match: query == keyword
+                if q_lower == kw_lower:
+                    score += 10
+                # Keyword starts with query (e.g. "tin" matches "tin_match")
+                elif kw_lower.startswith(q_lower) and len(q_lower) >= 3:
+                    score += 5
+                # Query is a whole word inside the keyword (e.g. "tin" in "tin verification")
+                elif _sr.search(rf'(?<![a-z]){_sr.escape(q_lower)}(?![a-z])', kw_lower):
+                    score += 4
+                # All query words found in keyword
+                elif all(w in kw_lower for w in q_words):
+                    score += 3
             if score > 0:
-                results.append((score, tab_name, sub_tab, desc, emoji))
+                results.append((score, tab_name, sub_tab, card_path, desc))
 
         results.sort(key=lambda x: -x[0])
+
+        # Deduplicate by exact (tab + sub_tab + card_path) combination
         unique = []
-        seen_tabs = set()
-        for score, tab_name, sub_tab, desc, emoji in results:
-            key = f"{tab_name}|{sub_tab}"
-            if key not in seen_tabs:
-                seen_tabs.add(key)
-                unique.append((tab_name, sub_tab, desc, emoji))
+        seen = set()
+        for score, tab_name, sub_tab, card_path, desc in results:
+            key = f"{tab_name}||{sub_tab}||{card_path}"
+            if key not in seen:
+                seen.add(key)
+                unique.append((tab_name, sub_tab, card_path, desc))
 
         if unique:
-            st.markdown(f"<div style='font-size:.74rem;color:#94A3B8;margin-bottom:4px'>{len(unique)} result(s) for <strong style='color:#60A5FA'>\"{_search_q}\"</strong>:</div>", unsafe_allow_html=True)
-            for tab_name, sub_tab, desc, emoji in unique[:6]:
+            st.markdown(
+                f"<div style='font-size:.74rem;color:#94A3B8;margin-bottom:4px'>"
+                f"{len(unique)} result(s) for <strong style='color:#60A5FA'>\"{_search_q}\"</strong>:</div>",
+                unsafe_allow_html=True
+            )
+            for tab_name, sub_tab, card_path, desc in unique[:8]:
+                # Determine border colour by tab
+                border = {"🏠":"#3B82F6","🏛️":"#f59e0b","🏭":"#8B5CF6","⚠️":"#ef4444",
+                          "💰":"#22c55e","📋":"#60A5FA","🤖":"#f97316"}.get(tab_name[:2],"#3B82F6")
+                card_html = (
+                    f"<div style='font-size:.72rem;color:#60A5FA;margin-top:3px'>"
+                    f"📌 Card/Table: <strong>{card_path}</strong></div>"
+                ) if card_path else ""
                 st.markdown(
-                    f"<div style='background:#1E293B;border-left:3px solid #3B82F6;border-radius:6px;"
-                    f"padding:8px 12px;margin:3px 0;font-size:.76rem'>"
-                    f"<div style='color:#60A5FA;font-weight:700'>{emoji} {tab_name}</div>"
-                    f"<div style='color:#CBD5E1;margin:2px 0'>→ {sub_tab}</div>"
-                    f"<div style='color:#64748b;font-size:.71rem'>{desc[:120]}{'…' if len(desc)>120 else ''}</div>"
+                    f"<div style='background:#1E293B;border-left:3px solid {border};border-radius:6px;"
+                    f"padding:9px 13px;margin:4px 0'>"
+                    f"<div style='color:{border};font-weight:700;font-size:.80rem'>{tab_name}</div>"
+                    f"<div style='color:#CBD5E1;font-size:.77rem;margin:2px 0'>→ <strong>{sub_tab}</strong></div>"
+                    f"{card_html}"
+                    f"<div style='color:#64748b;font-size:.71rem;margin-top:3px'>{desc[:140]}{'…' if len(desc)>140 else ''}</div>"
                     f"</div>",
                     unsafe_allow_html=True
                 )
