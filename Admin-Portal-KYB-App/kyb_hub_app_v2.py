@@ -1,11 +1,12 @@
 """
-KYB Intelligence Hub — kyb_hub_app.py
-========================================
-Full per-business KYB investigation with complete data lineage,
-winning source + alternatives + confidence, SQL/Python code,
-analyst explanations, per-card AI quick-questions, global AI agent.
+KYB Intelligence Hub v2 — kyb_hub_app_v2.py
+=============================================
+V1 plus the AI Check-Agent tab:
+  • 28 deterministic cross-field checks (instant, no LLM)
+  • GPT-4o-mini deep compliance audit (structured JSON)
+  • Severity radar, grouped findings, underwriting decision guidance
 
-Run:   streamlit run Admin-Portal-KYB-App/kyb_hub_app.py
+Run:   streamlit run Admin-Portal-KYB-App/kyb_hub_app_v2.py
 Keys:  export OPENAI_API_KEY=your-key
        export REDSHIFT_DB=dev REDSHIFT_USER=... REDSHIFT_PASSWORD=...
 """
@@ -18,8 +19,18 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="KYB Intelligence Hub", page_icon="🔬",
+st.set_page_config(page_title="KYB Intelligence Hub v2", page_icon="🔬",
                    layout="wide", initial_sidebar_state="expanded")
+
+# ── Check-Agent import ────────────────────────────────────────────────────────
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).parent))
+from check_agent_v2 import (
+    run_deterministic_checks, get_check_summary, run_llm_audit,
+    build_fact_summary, facts_cache_key,
+    _fv, _fv_lower, _gc, _safe_int, _safe_float,
+    SEV_COLOR, SEV_ICON, DETERMINISTIC_CHECKS,
+)
 BASE = Path(__file__).parent
 
 
@@ -2546,7 +2557,8 @@ with st.sidebar:
     st.markdown("---")
     tab=st.radio("Section",[
         "🏠 Home","🏛️ Registry & Identity","🏭 Classification & KYB",
-        "⚠️ Risk & Watchlist","💰 Worth Score","📋 All Facts","🤖 AI Agent"])
+        "⚠️ Risk & Watchlist","💰 Worth Score","📋 All Facts",
+        "🔍 Check-Agent","🤖 AI Agent"])
 
     # ── Date Range Filter ────────────────────────────────────────────────────
     st.markdown("---")
@@ -7801,6 +7813,376 @@ WHERE name='watchlist' AND business_id='{bid}';
 -- GET https://api.joinworth.com/integration/api/v1/facts/business/{bid}/kyb
 -- Redis cache key: integration-express-cache::{bid}::/api/v1/facts/business/{bid}/kyb""",
             language="sql")
+
+# ════════════════════════════════════════════════════════════════════════════════
+# CHECK-AGENT
+# ════════════════════════════════════════════════════════════════════════════════
+elif tab=="🔍 Check-Agent":
+    bid = st.session_state.get("hub_bid","")
+    st.markdown("## 🔍 KYB Check-Agent")
+    st.markdown(
+        "Automated compliance analysis in two layers: **28 instant deterministic checks** "
+        "(cross-field rule engine, zero latency) + **GPT-4o-mini Deep Audit** "
+        "(structured JSON compliance report with severity-ranked findings and underwriting guidance)."
+    )
+
+    if not bid:
+        st.info("👈 Select a Business ID in the sidebar to run the Check-Agent.")
+    else:
+        st.info(f"📍 Analysing business: `{bid}`")
+
+        # ── Load facts ───────────────────────────────────────────────────────
+        with st.spinner("Loading facts from Redshift…"):
+            facts, facts_err = load_facts_with_ui(bid, "check_agent")
+
+        if facts_err or not facts:
+            flag(f"Cannot load facts: {facts_err or 'No data found for this business ID.'}", "red")
+        else:
+            # ── Load Worth Score (for LLM context) ──────────────────────────
+            @st.cache_data(ttl=600, show_spinner=False)
+            def _load_ws_for_check(bid):
+                q = f"""SELECT score_850, risk_level, score_decision
+                        FROM rds_manual_score_public.data_current_scores cs
+                        JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+                        WHERE bs.business_id='{bid}' LIMIT 1;"""
+                return run_sql(q)
+            ws_df, _ = _load_ws_for_check(bid)
+            score_info = {}
+            if ws_df is not None and not ws_df.empty:
+                r = ws_df.iloc[0]
+                score_info = {
+                    "score_850":   float(r.get("score_850") or 0),
+                    "risk_level":  str(r.get("risk_level")  or ""),
+                    "decision":    str(r.get("score_decision") or ""),
+                }
+
+            # ════════════════════════════════════════════════════════════════
+            # LAYER 1 — DETERMINISTIC CHECKS
+            # ════════════════════════════════════════════════════════════════
+            st.markdown("---")
+            st.markdown("### 🔍 Layer 1 — Deterministic Cross-Field Checks")
+            st.caption("28 rule-based checks across 7 groups. Run instantly on loaded facts — no AI calls required.")
+
+            det_results = run_deterministic_checks(facts)
+            summary     = get_check_summary(det_results)
+
+            # ── Severity KPI row ─────────────────────────────────────────────
+            _sev_kpis = [
+                ("CRITICAL", "#ef4444", "🔴"),
+                ("HIGH",     "#f97316", "🟠"),
+                ("MEDIUM",   "#f59e0b", "🟡"),
+                ("LOW",      "#22c55e", "🟢"),
+                ("NOTICE",   "#3B82F6", "🔵"),
+            ]
+            ck0, ck1, ck2, ck3, ck4, ck5 = st.columns(6)
+            _overall_col = {
+                "CRITICAL": "#ef4444", "HIGH": "#f97316",
+                "MEDIUM":   "#f59e0b", "LOW":  "#22c55e",
+                "NOTICE":   "#3B82F6", "CLEAN": "#22c55e",
+            }.get(summary["overall"], "#64748b")
+            with ck0: kpi("Overall Risk", summary["overall"], f"{summary['total']} flags triggered", _overall_col)
+            for col, (sev, color, icon) in zip([ck1,ck2,ck3,ck4,ck5], _sev_kpis):
+                with col: kpi(f"{icon} {sev}", str(summary["counts"].get(sev,0)),
+                              {"CRITICAL":"Block approval","HIGH":"Manual review",
+                               "MEDIUM":"Investigate","LOW":"Informational","NOTICE":"Advisory"}[sev], color)
+
+            # ── Severity Radar / Bar ─────────────────────────────────────────
+            if summary["total"] > 0:
+                _radar_cats = [s for s,_,_ in _sev_kpis]
+                _radar_vals = [summary["counts"].get(s,0) for s in _radar_cats]
+                _radar_colors = [c for _,c,_ in _sev_kpis]
+
+                ra_col, rb_col = st.columns([1,2])
+                with ra_col:
+                    fig_sev = go.Figure(go.Bar(
+                        x=_radar_cats, y=_radar_vals,
+                        marker_color=_radar_colors,
+                        text=_radar_vals, textposition="outside",
+                        textfont=dict(color="#CBD5E1", size=12),
+                    ))
+                    fig_sev.update_layout(
+                        height=260, title="Findings by Severity",
+                        xaxis=dict(tickfont=dict(color="#CBD5E1")),
+                        yaxis=dict(title="Count", tickfont=dict(color="#64748b")),
+                        margin=dict(t=40,b=10,l=10,r=10),
+                        plot_bgcolor="#0f172a", paper_bgcolor="#0f172a",
+                        font=dict(color="#CBD5E1"),
+                    )
+                    st.plotly_chart(dark_chart(fig_sev), use_container_width=True)
+
+                with rb_col:
+                    # Group breakdown bar
+                    _grp_names = list(summary["by_group"].keys())
+                    _grp_cnts  = [len(v) for v in summary["by_group"].values()]
+                    _grp_sev_max = []
+                    for grp_items in summary["by_group"].values():
+                        maxs = min([{"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"NOTICE":4}.get(i["severity"],5)
+                                    for i in grp_items])
+                        _grp_sev_max.append(
+                            ["#ef4444","#f97316","#f59e0b","#22c55e","#3B82F6"][maxs]
+                        )
+                    fig_grp = go.Figure(go.Bar(
+                        y=_grp_names, x=_grp_cnts, orientation="h",
+                        marker_color=_grp_sev_max,
+                        text=_grp_cnts, textposition="outside",
+                        textfont=dict(color="#CBD5E1", size=11),
+                    ))
+                    fig_grp.update_layout(
+                        height=260, title="Findings by Group",
+                        yaxis=dict(autorange="reversed", tickfont=dict(color="#CBD5E1")),
+                        xaxis=dict(title="Count", tickfont=dict(color="#64748b")),
+                        margin=dict(t=40,b=10,l=10,r=10),
+                        plot_bgcolor="#0f172a", paper_bgcolor="#0f172a",
+                        font=dict(color="#CBD5E1"),
+                    )
+                    st.plotly_chart(dark_chart(fig_grp), use_container_width=True)
+
+            st.markdown("---")
+
+            # ── Findings by group ────────────────────────────────────────────
+            if summary["total"] == 0:
+                st.success("✅ All 28 deterministic checks passed — no cross-field anomalies detected.")
+            else:
+                _sev_order = {"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"NOTICE":4}
+                _all_sorted = sorted(det_results, key=lambda r: _sev_order.get(r["severity"], 5))
+
+                for grp_name, grp_items in summary["by_group"].items():
+                    grp_sorted = sorted(grp_items, key=lambda r: _sev_order.get(r["severity"],5))
+                    worst = grp_sorted[0]["severity"]
+                    grp_color = SEV_COLOR.get(worst, "#64748b")
+                    grp_icon  = SEV_ICON.get(worst, "ℹ️")
+
+                    with st.expander(
+                        f"{grp_icon} **{grp_name}** — {len(grp_items)} finding(s)  ·  worst: {worst}",
+                        expanded=(worst in ("CRITICAL","HIGH"))
+                    ):
+                        for r in grp_sorted:
+                            sev   = r["severity"]
+                            color = SEV_COLOR.get(sev, "#64748b")
+                            icon  = SEV_ICON.get(sev, "ℹ️")
+
+                            # Finding card
+                            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
+                                border-radius:10px;padding:14px 18px;margin:8px 0">
+                              <div style="display:flex;justify-content:space-between;align-items:center">
+                                <span style="color:{color};font-weight:700;font-size:.88rem">
+                                  {icon} [{sev}] {r['name']}
+                                </span>
+                                <span style="background:{color}22;color:{color};border-radius:6px;
+                                  padding:2px 10px;font-size:.72rem;font-weight:600">{r['group']}</span>
+                              </div>
+                              <div style="color:#CBD5E1;font-size:.80rem;margin-top:8px">{r['description']}</div>
+                              <div style="margin-top:8px">
+                                <span style="color:#60A5FA;font-size:.75rem">
+                                  ⚡ Action: {r['action']}
+                                </span>
+                              </div>
+                              <div style="margin-top:6px;color:#475569;font-size:.70rem">
+                                Facts: {' · '.join(f'<code style="color:#94A3B8">{fn}</code>' for fn in r['facts'])}
+                              </div>
+                            </div>""", unsafe_allow_html=True)
+
+                            # detail_panel with SQL + Python
+                            _bid_sql = r["sql"].replace("{bid}", bid) if "{bid}" in r["sql"] else r["sql"]
+                            _involved_json = {fn: {"value": gv(facts, fn), "source_pid": gp(facts, fn),
+                                                   "confidence": gc(facts, fn)}
+                                              for fn in r["facts"] if fn in facts}
+                            detail_panel(
+                                f"{icon} {r['name']}", f"{sev} — {r['group']}",
+                                what_it_means=r["description"],
+                                source_table="rds_warehouse_public.facts · cross-field validation",
+                                source_file="check_agent_v2.py",
+                                source_file_line=f"check id: {r['id']}",
+                                json_obj=_involved_json,
+                                sql=_bid_sql,
+                                links=[("facts/kyb/index.ts","Fact Engine rules"),
+                                       ("facts/rules.ts","factWithHighestConfidence · combineFacts")],
+                                color=color, icon=icon,
+                            )
+
+            # ── All-clear summary ────────────────────────────────────────────
+            st.markdown("---")
+            _pass_count = len(DETERMINISTIC_CHECKS) - summary["total"]
+            st.markdown(
+                f"<div style='color:#64748b;font-size:.78rem'>✅ {_pass_count} / {len(DETERMINISTIC_CHECKS)} checks passed &nbsp;·&nbsp; "
+                f"🚩 {summary['total']} / {len(DETERMINISTIC_CHECKS)} checks triggered</div>",
+                unsafe_allow_html=True,
+            )
+
+            # ════════════════════════════════════════════════════════════════
+            # LAYER 2 — LLM DEEP AUDIT
+            # ════════════════════════════════════════════════════════════════
+            st.markdown("---")
+            st.markdown("### 🧠 Layer 2 — AI Deep Audit (GPT-4o-mini)")
+            st.caption(
+                "Sends the complete fact profile to GPT-4o-mini with a structured compliance audit prompt. "
+                "Returns: overall risk, data quality score, KYB completeness matrix, "
+                "severity-ranked findings with Worth Score impact, and underwriting decision guidance. "
+                "**Results are cached for 30 minutes per business.**"
+            )
+
+            if not get_openai():
+                flag("OpenAI API key not configured — cannot run AI Deep Audit. "
+                     "Set OPENAI_API_KEY in .streamlit/secrets.toml or as an env var.", "amber")
+            else:
+                # Controls
+                audit_col1, audit_col2, audit_col3 = st.columns([2,2,1])
+                with audit_col1:
+                    run_audit_btn = st.button(
+                        "🚀 Run AI Deep Audit",
+                        type="primary",
+                        use_container_width=True,
+                        help="Sends all facts to GPT-4o-mini for comprehensive compliance analysis. ~10-20 seconds."
+                    )
+                with audit_col2:
+                    _cache_key = facts_cache_key(facts)
+                    st.caption(f"Facts hash: `{_cache_key}` · Cache TTL: 30 min")
+                with audit_col3:
+                    clear_audit_btn = st.button("🗑️ Clear", use_container_width=True)
+
+                if clear_audit_btn:
+                    if "check_agent_audit" in st.session_state:
+                        del st.session_state["check_agent_audit"]
+                    st.rerun()
+
+                if run_audit_btn:
+                    with st.spinner("Running AI Deep Audit… analysing all facts, cross-referencing, generating compliance report…"):
+                        _facts_json = json.dumps(facts, default=str)
+                        _score_json = json.dumps(score_info, default=str)
+                        _audit_result, _audit_err = run_llm_audit(_facts_json, bid, _score_json)
+                    if _audit_err:
+                        flag(f"AI audit error: {_audit_err}", "red")
+                    elif _audit_result:
+                        st.session_state["check_agent_audit"] = _audit_result
+
+                # ── Display audit result ─────────────────────────────────────
+                audit_result = st.session_state.get("check_agent_audit")
+                if audit_result:
+                    st.markdown("---")
+
+                    # ── Header banner ────────────────────────────────────────
+                    _oa_risk  = audit_result.get("overall_risk","Unknown")
+                    _dq_score = int(audit_result.get("data_quality_score", 0))
+                    _summary  = audit_result.get("summary","")
+                    _decision = audit_result.get("underwriting_decision_guidance","")
+                    _oa_color = {"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b",
+                                 "LOW":"#22c55e","CLEAN":"#10b981"}.get(_oa_risk,"#64748b")
+                    _dec_color = ("#22c55e" if "APPROVE" in _decision.upper()
+                                  else "#ef4444" if "DECLINE" in _decision.upper()
+                                  else "#f59e0b")
+
+                    st.markdown(f"""<div style="background:linear-gradient(135deg,#1E293B,#0F172A);
+                        border:1px solid {_oa_color};border-radius:14px;padding:20px 24px;margin-bottom:16px">
+                      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px">
+                        <div style="flex:1">
+                          <div style="color:{_oa_color};font-size:1.4rem;font-weight:800">
+                            🔴 Overall Risk: {_oa_risk}
+                          </div>
+                          <div style="color:#CBD5E1;font-size:.82rem;margin-top:8px;max-width:600px">
+                            {_summary}
+                          </div>
+                          <div style="margin-top:10px;color:{_dec_color};font-weight:600;font-size:.84rem">
+                            ⚖️ Guidance: {_decision}
+                          </div>
+                        </div>
+                        <div style="text-align:center;min-width:100px">
+                          <div style="color:{'#22c55e' if _dq_score>=80 else '#f59e0b' if _dq_score>=50 else '#ef4444'};
+                            font-size:2rem;font-weight:900">{_dq_score}</div>
+                          <div style="color:#64748b;font-size:.72rem">Data Quality<br>Score / 100</div>
+                        </div>
+                      </div>
+                    </div>""", unsafe_allow_html=True)
+
+                    # ── KYB Completeness matrix ──────────────────────────────
+                    kyb_comp = audit_result.get("kyb_completeness", {})
+                    if kyb_comp:
+                        st.markdown("#### ✅ KYB Completeness Matrix")
+                        _comp_items = [
+                            ("SOS Verified",       kyb_comp.get("sos_verified"),       "sos_active / sos_match_boolean"),
+                            ("TIN Verified",        kyb_comp.get("tin_verified"),        "tin_match_boolean (Middesk IRS check)"),
+                            ("IDV Completed",       kyb_comp.get("idv_completed"),       "idv_passed_boolean (Plaid biometrics)"),
+                            ("Watchlist Screened",  kyb_comp.get("watchlist_screened"),  "watchlist_hits (Trulioo PSC + Middesk)"),
+                            ("Industry Classified", kyb_comp.get("industry_classified"), "naics_code ≠ 561499"),
+                        ]
+                        mc1,mc2,mc3,mc4,mc5 = st.columns(5)
+                        for col, (lbl, ok, src) in zip([mc1,mc2,mc3,mc4,mc5], _comp_items):
+                            with col:
+                                _ic = "#22c55e" if ok else "#ef4444"
+                                _iv = "✅ Pass" if ok else "❌ Fail"
+                                kpi(lbl, _iv, src, _ic)
+
+                    st.markdown("---")
+
+                    # ── Findings ─────────────────────────────────────────────
+                    findings = audit_result.get("findings", [])
+                    if findings:
+                        st.markdown(f"#### 📋 Findings ({len(findings)} total)")
+                        _f_order = {"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"CLEAN":4}
+                        for f_item in sorted(findings, key=lambda x: _f_order.get(x.get("severity",""), 5)):
+                            f_sev   = f_item.get("severity","MEDIUM")
+                            f_color = {"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b",
+                                       "LOW":"#22c55e","CLEAN":"#10b981"}.get(f_sev,"#64748b")
+                            f_icon  = SEV_ICON.get(f_sev,"ℹ️")
+                            f_facts = ", ".join(f"`{fn}`" for fn in f_item.get("facts_involved",[]))
+                            f_ext   = f_item.get("external_verification","")
+                            f_ws    = f_item.get("worth_score_impact","")
+
+                            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {f_color};
+                                border-radius:10px;padding:14px 18px;margin:8px 0">
+                              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+                                <span style="color:{f_color};font-weight:700;font-size:.88rem">
+                                  {f_icon} [{f_sev}] {f_item.get('title','Finding')}
+                                </span>
+                                <span style="background:{f_color}22;color:{f_color};border-radius:6px;
+                                  padding:2px 10px;font-size:.72rem">{f_item.get('category','')}</span>
+                              </div>
+                              <div style="color:#CBD5E1;font-size:.80rem;margin-top:8px">{f_item.get('description','')}</div>
+                              {f'<div style="color:#94A3B8;font-size:.73rem;margin-top:6px">Facts: {f_facts}</div>' if f_facts else ''}
+                              {f'<div style="color:#60A5FA;font-size:.75rem;margin-top:4px">⚡ Action: {f_item.get("recommended_action","")}</div>' if f_item.get("recommended_action") else ''}
+                              {f'<div style="color:#a78bfa;font-size:.73rem;margin-top:4px">📊 Worth Score Impact: {f_ws}</div>' if f_ws else ''}
+                              {f'<div style="color:#06b6d4;font-size:.73rem;margin-top:4px">🌐 External: {f_ext}</div>' if f_ext else ''}
+                            </div>""", unsafe_allow_html=True)
+
+                    st.markdown("---")
+
+                    # ── Next Steps ───────────────────────────────────────────
+                    steps = audit_result.get("recommended_next_steps",[])
+                    if steps:
+                        st.markdown("#### 🗺️ Recommended Next Steps")
+                        for i, step in enumerate(steps, 1):
+                            _s_color = "#ef4444" if i==1 else "#f59e0b" if i==2 else "#3B82F6"
+                            st.markdown(
+                                f"""<div style="background:#1E293B;border-left:3px solid {_s_color};
+                                    border-radius:8px;padding:10px 14px;margin:4px 0">
+                                  <span style="color:{_s_color};font-weight:700;font-size:.80rem">Step {i}</span>
+                                  <span style="color:#CBD5E1;font-size:.80rem;margin-left:8px">{step}</span>
+                                </div>""",
+                                unsafe_allow_html=True
+                            )
+
+                    # ── detail_panel for the full audit JSON ─────────────────
+                    detail_panel(
+                        "🧠 Full AI Audit Response (JSON)", f"Overall: {_oa_risk} · DQ: {_dq_score}/100",
+                        what_it_means=(
+                            "The complete structured JSON response from the GPT-4o-mini deep audit. "
+                            "Includes overall_risk, data_quality_score, kyb_completeness matrix, "
+                            "all findings with severity/category/facts/worth_score_impact, "
+                            "recommended_next_steps, and underwriting_decision_guidance."
+                        ),
+                        source_table="Generated by GPT-4o-mini via check_agent_v2.run_llm_audit()",
+                        source_file="check_agent_v2.py",
+                        source_file_line="run_llm_audit() → AUDIT_SYSTEM_PROMPT",
+                        json_obj=audit_result,
+                        sql=f"-- Fact profile query for manual inspection:\nSELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val, "
+                            f"JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid\n"
+                            f"FROM rds_warehouse_public.facts\nWHERE business_id='{bid}'\nORDER BY name;",
+                        links=[("facts/kyb/index.ts","Fact Engine"),
+                               ("worth_score_model.py","Worth Score model")],
+                        color=_oa_color, icon="🧠",
+                    )
+
+                else:
+                    st.info("Click **Run AI Deep Audit** to generate the GPT compliance report for this business.")
 
 # ════════════════════════════════════════════════════════════════════════════════
 # AI AGENT
