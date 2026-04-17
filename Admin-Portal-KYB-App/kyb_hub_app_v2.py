@@ -8181,9 +8181,17 @@ elif tab=="🔍 Check-Agent":
                 st.markdown("**⚠️ Vendor Disagreements — analyst review required:**")
                 for dis in _vendor_disagreements:
                     _dc = "#f97316"
-                    _disagree_list = " · ".join(
-                        f"**{d['vendor']}** says `{str(d['value'])[:30]}`"
+                    # Use <strong>/<code> HTML — NOT markdown ** or backticks —
+                    # to avoid Streamlit misinterpreting markdown inside an HTML block
+                    _disagree_list_html = " &nbsp;·&nbsp; ".join(
+                        f"<strong style='color:#f59e0b'>{d['vendor']}</strong>"
+                        f" says <code style='color:#CBD5E1'>{str(d['value'])[:40]}</code>"
                         for d in dis["disagreements"]
+                    )
+                    _agree_html = (
+                        f"<div style='color:#22c55e;font-size:.74rem;margin-top:4px'>"
+                        f"✅ Also agree: {', '.join(dis['agreements'])}</div>"
+                        if dis["agreements"] else ""
                     )
                     st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {_dc};
                         border-radius:10px;padding:14px 18px;margin:6px 0">
@@ -8191,14 +8199,15 @@ elif tab=="🔍 Check-Agent":
                         ⚠️ {dis['fact']} — {len(dis['disagreements'])} vendor(s) disagree
                       </div>
                       <div style="color:#CBD5E1;font-size:.80rem;margin-top:6px">
-                        <strong>Winner:</strong> <code>{str(dis['winner_value'])[:40]}</code>
-                        &nbsp;(source: {dis['winner_vendor']}, pid={dis['winner_pid']},
-                        conf={dis['winner_conf']:.3f})
+                        <strong>Winner:</strong>
+                        <code style="color:#60A5FA">{str(dis['winner_value'])[:40]}</code>
+                        &nbsp;(source: <strong>{dis['winner_vendor']}</strong>,
+                        pid={dis['winner_pid']}, conf={dis['winner_conf']:.3f})
                       </div>
-                      <div style="color:#f59e0b;font-size:.78rem;margin-top:4px">
-                        <strong>Disagree:</strong> {_disagree_list}
+                      <div style="color:#f59e0b;font-size:.78rem;margin-top:6px">
+                        <strong>Disagree:</strong> {_disagree_list_html}
                       </div>
-                      {f'<div style="color:#22c55e;font-size:.74rem;margin-top:4px">✅ Agree: {", ".join(dis["agreements"])}</div>' if dis["agreements"] else ''}
+                      {_agree_html}
                     </div>""", unsafe_allow_html=True)
 
                     _dsql = (f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS winner_value,\n"
