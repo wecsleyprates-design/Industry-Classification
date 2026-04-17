@@ -1432,11 +1432,15 @@ You have direct access to execute SQL against the Redshift database and WILL run
 CRITICAL RULES — NEVER VIOLATE:
 1. ONLY reference tables, schemas, and columns that ACTUALLY EXIST (verified list below).
    NEVER invent, guess, or hallucinate anything. If unsure, say so explicitly.
-2. When asked about a specific business_id: ALWAYS generate and execute SQL to get real results.
-   Include the actual query results in your answer, not just the SQL.
-3. Redshift SQL: use JSON_EXTRACT_PATH_TEXT(col, 'key'). NEVER use ->> or ::json (fails on federation).
-4. Always cite exact source file, table, column name, and API endpoint.
-5. Platform IDs (integrations.constant.ts INTEGRATION_ID enum):
+2. NEVER use placeholder values like "example value", "12345", "2023-01-01", "YOUR-UUID", etc.
+   The system will AUTOMATICALLY EXECUTE your SQL and return REAL data from Redshift.
+   Your job is ONLY to write correct SQL — do NOT fabricate or estimate results.
+   Write the SQL, then say "Running query against Redshift..." — the system handles execution.
+3. When asked about a specific business_id: write SQL using the EXACT UUID provided in context.
+   NEVER replace the UUID with a placeholder. Use it verbatim in the WHERE clause.
+4. Redshift SQL: use JSON_EXTRACT_PATH_TEXT(col, 'key'). NEVER use ->> or ::json (fails on federation).
+5. Always cite exact source file, table, column name, and API endpoint.
+6. Platform IDs (integrations.constant.ts INTEGRATION_ID enum):
    16=Middesk · 23=OpenCorporates · 24=ZoomInfo · 17=Equifax · 38=Trulioo · 31=AI(GPT) ·
    22=SERP · 40=Plaid/KYX · 18=Plaid IDV · 0=Applicant · -1=System/Dependent
 
@@ -1718,7 +1722,25 @@ def ask_ai(question, context="", history=None, auto_execute=True):
     rag="\n\n".join(f"[{c['source_type']}] {c['description']}\n{c['text'][:600]}" for c in chunks)
     msgs=[{"role":"system","content":SYSTEM}]
     if history: msgs.extend(history[-8:])
-    msgs.append({"role":"user","content":f"RAG:\n{rag}\n\nContext:\n{context}\n\nQuestion: {question}"})
+    # Extract business UUID from context if present — inject it explicitly
+    # so the AI uses the exact UUID in SQL, never a placeholder
+    import re as _re
+    _uuid_match = _re.search(
+        r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+        context + " " + question, _re.IGNORECASE
+    )
+    _bid_injection = ""
+    if _uuid_match:
+        _bid_injection = (
+            f"\n\nBUSINESS UUID FOR SQL (use this EXACT value in WHERE business_id = '...' clauses):\n"
+            f"  {_uuid_match.group(0)}\n"
+            f"CRITICAL: Never replace this UUID with a placeholder like '12345' or 'example'."
+        )
+
+    msgs.append({"role":"user","content":
+        f"RAG:\n{rag}\n\nContext:\n{context}{_bid_injection}\n\nQuestion: {question}\n\n"
+        f"IMPORTANT: Write SQL with the real UUID above. The system will execute it and return REAL data. "
+        f"Do NOT write 'example value' or placeholder results — just write the SQL."})
     # ── Source-type → GitHub URL resolver ────────────────────────────────────
     REPO_BASE = REPO  # feature branch URL, already defined above
     def _chunk_github_url(chunk: dict) -> str:
@@ -1835,6 +1857,21 @@ def ask_ai(question, context="", history=None, auto_execute=True):
         r=get_openai().chat.completions.create(model="gpt-4o-mini",messages=msgs,max_tokens=1500,temperature=0.2)
         answer = r.choices[0].message.content
 
+        # ── Strip any placeholder/fake values the AI may have hallucinated ────
+        # These patterns indicate the AI fabricated results instead of letting
+        # the auto-execution return real data.
+        import re as _re2
+        _fake_patterns = [
+            r'\(example value\)',
+            r'example value',
+            r'\bYOUR[-_]UUID\b',
+            r'\bPASTE[-_]UUID[-_]HERE\b',
+            r'\bexample[-_]business[-_]id\b',
+        ]
+        for pat in _fake_patterns:
+            if _re2.search(pat, answer, _re2.IGNORECASE):
+                answer = _re2.sub(pat, '*(real value returned below)*', answer, flags=_re2.IGNORECASE)
+
         # ── Auto-execute SQL blocks and append real results ───────────────────
         if auto_execute:
             sql_blocks = _extract_sql_from_answer(answer)
@@ -1849,9 +1886,10 @@ def ask_ai(question, context="", history=None, auto_execute=True):
                         rows_md = df.head(20).to_string(index=False)
                     fix_note = ("\n\n  ⚠️ Auto-corrected: " + " · ".join(fixes)) if fixes else ""
                     executed_results.append(
-                        f"\n\n**✅ {block_label} executed against Redshift — {len(df):,} row(s) returned:**{fix_note}\n\n"
+                        f"\n\n**✅ {block_label} — REAL DATA from Redshift ({len(df):,} row(s)):**{fix_note}\n\n"
                         f"```\n{rows_md}\n```"
                         + (f"\n\n*(Showing first 20 of {len(df):,} rows)*" if len(df) > 20 else "")
+                        + f"\n\n*(These are live values queried directly from `rds_warehouse_public` / `rds_cases_public`)*"
                     )
                     if used_sql != sql:
                         executed_results.append(
