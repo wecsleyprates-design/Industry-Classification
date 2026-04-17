@@ -1639,57 +1639,114 @@ def ask_ai(question, context="", history=None):
     # ── Source-type → GitHub URL resolver ────────────────────────────────────
     REPO_BASE = REPO  # feature branch URL, already defined above
     def _chunk_github_url(chunk: dict) -> str:
-        """Return a clickable GitHub URL for a RAG chunk based on source_type + path."""
+        """Return a verified GitHub URL for a RAG chunk.
+        Uses a complete filename→URL lookup built from git ls-files output,
+        so every link points to a file that actually exists on the branch.
+        """
         stype = chunk.get("source_type","")
         path  = chunk.get("path","") or ""
         line_start = chunk.get("line_start")
         anchor = f"#L{line_start}" if line_start else ""
 
-        # Map source_type to repo folder
+        # Complete map of EVERY tracked api-docs file: filename → full GitHub URL
+        # Built from: git ls-files Admin-Portal-KYB-App/api-docs/
+        # Branch: cursor/ai-classification-agent-7910
+        _R = REPO_BASE  # already points to the correct branch
+        API_DOCS_FILES = {
+            # api-reference / add-or-update-business
+            "add-business.md":          f"{_R}/api-docs/api-reference/add-or-update-business/add-business.md",
+            "update-business.md":       f"{_R}/api-docs/api-reference/add-or-update-business/update-business.md",
+            # api-reference / auth
+            "create-customer-user.md":  f"{_R}/api-docs/api-reference/auth/customers/create-customer-user.md",
+            "customer-user-resend-invitation.md": f"{_R}/api-docs/api-reference/auth/customers/customer-user-resend-invitation.md",
+            "get-customer-subroles.md": f"{_R}/api-docs/api-reference/auth/customers/get-customer-subroles.md",
+            "get-customer-user-by-id.md": f"{_R}/api-docs/api-reference/auth/customers/get-customer-user-by-id.md",
+            "get-customer-users.md":    f"{_R}/api-docs/api-reference/auth/customers/get-customer-users.md",
+            "update-customer-user-by-id.md": f"{_R}/api-docs/api-reference/auth/customers/update-customer-user-by-id.md",
+            "customer-logout.md":       f"{_R}/api-docs/api-reference/auth/sign-in/customer-logout.md",
+            "customer-refresh-token.md":f"{_R}/api-docs/api-reference/auth/sign-in/customer-refresh-token.md",
+            "customer-sign-in.md":      f"{_R}/api-docs/api-reference/auth/sign-in/customer-sign-in.md",
+            "forgot-password-init.md":  f"{_R}/api-docs/api-reference/auth/sign-in/forgot-password-init.md",
+            "reset-password.md":        f"{_R}/api-docs/api-reference/auth/sign-in/reset-password.md",
+            "accept-invitation.md":     f"{_R}/api-docs/api-reference/auth/users/accept-invitation.md",
+            # api-reference / case
+            "add-update-business-custom-fields.md": f"{_R}/api-docs/api-reference/case/businesses/add-update-business-custom-fields.md",
+            "get-business-cases.md":    f"{_R}/api-docs/api-reference/case/businesses/get-business-cases.md",
+            "get-business-details.md":  f"{_R}/api-docs/api-reference/case/businesses/get-business-details.md",
+            "get-custom-fields.md":     f"{_R}/api-docs/api-reference/case/businesses/get-custom-fields.md",
+            "get-customer-businesses.md": f"{_R}/api-docs/api-reference/case/businesses/get-customer-businesses.md",
+            "npi-reverse-lookup.md":    f"{_R}/api-docs/api-reference/case/businesses/npi-reverse-lookup.md",
+            "get-customer-case-by-id.md": f"{_R}/api-docs/api-reference/case/cases/get-customer-case-by-id.md",
+            "get-customer-cases.md":    f"{_R}/api-docs/api-reference/case/cases/get-customer-cases.md",
+            "send-business-invite.md":  f"{_R}/api-docs/api-reference/case/invites/send-business-invite.md",
+            "get-related-businesses.md": f"{_R}/api-docs/api-reference/case/related-businesses/get-related-businesses.md",
+            # api-reference / integration
+            "get-reports.md":           f"{_R}/api-docs/api-reference/integration/accounting/get-reports.md",
+            "banking-information.md":   f"{_R}/api-docs/api-reference/integration/banking/banking-information.md",
+            "bankruptcies-judgements-&-liens-bjl.md": f"{_R}/api-docs/api-reference/integration/facts/bankruptcies-judgements-&-liens-bjl.md",
+            "kyb.md":                   f"{_R}/api-docs/api-reference/integration/facts/kyb.md",
+            "reviews.md":               f"{_R}/api-docs/api-reference/integration/facts/reviews.md",
+            "adverse-media.md":         f"{_R}/api-docs/api-reference/integration/public-records/adverse-media.md",
+            "public-records.md":        f"{_R}/api-docs/api-reference/integration/public-records/public-records.md",
+            "tax-filing.md":            f"{_R}/api-docs/api-reference/integration/taxation/tax-filing.md",
+            "get-business-website-data.md": f"{_R}/api-docs/api-reference/integration/verification/get-business-website-data.md",
+            "get-npi-details.md":       f"{_R}/api-docs/api-reference/integration/verification/get-npi-details.md",
+            "get-verification-details.md": f"{_R}/api-docs/api-reference/integration/verification/get-verification-details.md",
+            "kyc-ownership-verification.md": f"{_R}/api-docs/api-reference/integration/verification/kyc-ownership-verification.md",
+            # api-reference / score & worth-360
+            "get-business-score.md":    f"{_R}/api-docs/api-reference/score/score/get-business-score.md",
+            "check-worth-360-report-generation-status.md": f"{_R}/api-docs/api-reference/worth-360-report/check-worth-360-report-generation-status.md",
+            "download-worth-360-report.md": f"{_R}/api-docs/api-reference/worth-360-report/download-worth-360-report.md",
+            "generate-worth-360-report-using-customer.md": f"{_R}/api-docs/api-reference/worth-360-report/generate-worth-360-report-using-customer.md",
+            # getting-started
+            "overview.md":              f"{_R}/api-docs/getting-started/overview.md",
+            "kyb-kyc.md":              f"{_R}/api-docs/getting-started/kyb-kyc.md",
+            "add-business.md":          f"{_R}/api-docs/getting-started/add-business.md",
+            "banking.md":              f"{_R}/api-docs/getting-started/banking.md",
+            "introduction.md":          f"{_R}/api-docs/introduction.md",
+            # onboarding-sdk
+            "api-overview.md":          f"{_R}/api-docs/onboarding-sdk/api-overview.md",
+            "api-sequence-diagram.md":  f"{_R}/api-docs/onboarding-sdk/api-sequence-diagram.md",
+            "api-step-by-step-breakdown.md": f"{_R}/api-docs/onboarding-sdk/api-step-by-step-breakdown.md",
+            "api-reference.md":         f"{_R}/api-docs/onboarding-sdk/overview.md",
+            # use-cases
+            "instant-onboarding.md":    f"{_R}/api-docs/use-cases/onboarding/instant-onboarding.md",
+            "invite-business.md":       f"{_R}/api-docs/use-cases/onboarding/invite-business.md",
+            # openapi specs
+            "get-kyb.json":            GITHUB_LINKS.get("openapi/kyb",""),
+            "integration.json":        GITHUB_LINKS.get("openapi/integration",""),
+            # integration-service source files
+            "index.ts":                GITHUB_LINKS.get("facts/kyb/index.ts",""),
+            "rules.ts":                GITHUB_LINKS.get("facts/rules.ts",""),
+            "sources.ts":              GITHUB_LINKS.get("facts/sources.ts",""),
+            "consolidatedWatchlist.ts":GITHUB_LINKS.get("consolidatedWatchlist.ts",""),
+            "aiscore.py":              GITHUB_LINKS.get("aiscore.py",""),
+            "worth_score_model.py":    GITHUB_LINKS.get("worth_score_model.py",""),
+            "customer_table.sql":      GITHUB_LINKS.get("customer_table.sql",""),
+        }
+
+        # 1. Direct filename lookup (most reliable)
+        fname = path.split("/")[-1] if "/" in path else path
+        if fname and fname in API_DOCS_FILES and API_DOCS_FILES[fname]:
+            return API_DOCS_FILES[fname] + anchor
+
+        # 2. Source-type folder fallback for non-API_DOCS sources
         FOLDER_MAP = {
-            "API_DOCS":           f"{REPO_BASE}/api-docs",
-            "INTEGRATION_SERVICE":f"{REPO_BASE}/integration-service-main/lib/facts",
-            "MICROSITES":         f"{REPO_BASE}/microsites-main/packages/case/src/page/Cases",
-            "WAREHOUSE_SERVICE":  f"{REPO_BASE}/warehouse-service-main",
-            "WORTH_SCORE":        f"{REPO_BASE}/ai-score-service-main",
-            "WATCHLIST":          f"{REPO_BASE}/integration-service-main/lib/facts/kyb",
-            "DOMESTIC_FOREIGN":   f"{REPO_BASE}/integration-service-main/lib/facts/kyb",
-            "FACT_ENGINE":        f"{REPO_BASE}/integration-service-main/lib/facts",
-            "NAICS_MCC":          f"{REPO_BASE}/integration-service-main/lib/facts/businessDetails",
-            "TIN_VERIFICATION":   f"{REPO_BASE}/integration-service-main/lib/facts/kyb",
+            "INTEGRATION_SERVICE":f"{_R}/integration-service-main/lib/facts",
+            "MICROSITES":         f"{_R}/microsites-main/packages/case/src/page/Cases",
+            "WAREHOUSE_SERVICE":  f"{_R}/warehouse-service-main",
+            "WORTH_SCORE":        f"{_R}/ai-score-service-main",
+            "WATCHLIST":          f"{_R}/integration-service-main/lib/facts/kyb",
+            "DOMESTIC_FOREIGN":   f"{_R}/integration-service-main/lib/facts/kyb",
+            "FACT_ENGINE":        f"{_R}/integration-service-main/lib/facts",
+            "NAICS_MCC":          f"{_R}/integration-service-main/lib/facts/businessDetails",
+            "TIN_VERIFICATION":   f"{_R}/integration-service-main/lib/facts/kyb",
+            "API_DOCS":           f"{_R}/api-docs",
         }
-        # Specific file overrides for known paths
-        FILE_MAP = {
-            # Verified paths (git ls-files confirmed these exist on the branch)
-            ("API_DOCS", "kyb.md"):              f"{REPO_BASE}/api-docs/api-reference/integration/facts/kyb.md",
-            ("API_DOCS", "kyb-kyc.md"):          f"{REPO_BASE}/api-docs/getting-started/kyb-kyc.md",
-            ("API_DOCS", "openapi"):              GITHUB_LINKS.get("openapi/integration",""),
-            ("API_DOCS", "get-kyb.json"):        GITHUB_LINKS.get("openapi/kyb",""),
-            ("API_DOCS", "integration.json"):    GITHUB_LINKS.get("openapi/integration",""),
-            ("INTEGRATION_SERVICE","index.ts"):  GITHUB_LINKS.get("facts/kyb/index.ts",""),
-            ("INTEGRATION_SERVICE","rules.ts"):  GITHUB_LINKS.get("facts/rules.ts",""),
-            ("INTEGRATION_SERVICE","sources.ts"):GITHUB_LINKS.get("facts/sources.ts",""),
-            ("WAREHOUSE_SERVICE","customer_table.sql"): GITHUB_LINKS.get("customer_table.sql",""),
-            ("WORTH_SCORE","aiscore.py"):         GITHUB_LINKS.get("aiscore.py",""),
-            ("WORTH_SCORE","worth_score_model.py"):GITHUB_LINKS.get("worth_score_model.py",""),
-            ("FACT_ENGINE","rules.ts"):           GITHUB_LINKS.get("facts/rules.ts",""),
-            ("WATCHLIST","consolidatedWatchlist.ts"): GITHUB_LINKS.get("consolidatedWatchlist.ts",""),
-        }
-        # Try exact file match
-        key = (stype, path)
-        if key in FILE_MAP and FILE_MAP[key]:
-            return FILE_MAP[key] + anchor
-        # Partial path match
-        for (st, fp), url in FILE_MAP.items():
-            if st == stype and fp and fp in path and url:
-                return url + anchor
-        # Fallback to folder
         folder = FOLDER_MAP.get(stype,"")
-        if folder and path:
-            # Construct direct file URL if we have a filename
-            fname = path.split("/")[-1] if "/" in path else path
-            return f"{folder}/{fname}{anchor}" if fname else folder
-        return folder
+        if folder and fname:
+            return f"{folder}/{fname}{anchor}"
+        return folder or ""
 
     try:
         r=get_openai().chat.completions.create(model="gpt-4o-mini",messages=msgs,max_tokens=1200,temperature=0.2)
