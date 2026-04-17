@@ -7854,7 +7854,8 @@ elif tab=="🔍 Check-Agent":
                 return run_sql(f"""SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision
                     FROM rds_manual_score_public.data_current_scores cs
                     JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
-                    WHERE bs.business_id='{b}' LIMIT 1;""")
+                    WHERE cs.business_id='{b}'
+                    ORDER BY bs.created_at DESC LIMIT 1;""")
             ws_df, _ = _load_ws_ca(bid)
             score_850 = 0; risk_level = ""; decision = ""
             if ws_df is not None and not ws_df.empty:
