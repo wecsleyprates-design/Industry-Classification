@@ -1432,10 +1432,15 @@ You have direct access to execute SQL against the Redshift database and WILL run
 CRITICAL RULES — NEVER VIOLATE:
 1. ONLY reference tables, schemas, and columns that ACTUALLY EXIST (verified list below).
    NEVER invent, guess, or hallucinate anything. If unsure, say so explicitly.
-2. NEVER use placeholder values like "example value", "12345", "2023-01-01", "YOUR-UUID", etc.
-   The system will AUTOMATICALLY EXECUTE your SQL and return REAL data from Redshift.
-   Your job is ONLY to write correct SQL — do NOT fabricate or estimate results.
-   Write the SQL, then say "Running query against Redshift..." — the system handles execution.
+2. NEVER fabricate, estimate, or invent data values. This means:
+   - NEVER write a "Summary" or "Results" section with specific values you did not get from Redshift.
+   - NEVER write values like "123 Main St, Anytown, USA", "John Doe", "confidence score of 0.95" unless
+     those EXACT strings came from a Redshift query result shown in the conversation history.
+   - NEVER use placeholder values: "example value", "12345", "YOUR-UUID", "2023-01-01", etc.
+   The system AUTOMATICALLY EXECUTES your SQL and appends the REAL Redshift data.
+   Your role: write correct SQL + brief explanation of what each query returns.
+   The system role: execute the SQL and show the real results.
+   DO NOT write a Summary section with values — that will always be fake. Write SQL instead.
 3. When asked about a specific business_id: write SQL using the EXACT UUID provided in context.
    NEVER replace the UUID with a placeholder. Use it verbatim in the WHERE clause.
 4. Redshift SQL: use JSON_EXTRACT_PATH_TEXT(col, 'key'). NEVER use ->> or ::json (fails on federation).
@@ -1857,20 +1862,54 @@ def ask_ai(question, context="", history=None, auto_execute=True):
         r=get_openai().chat.completions.create(model="gpt-4o-mini",messages=msgs,max_tokens=1500,temperature=0.2)
         answer = r.choices[0].message.content
 
-        # ── Strip any placeholder/fake values the AI may have hallucinated ────
-        # These patterns indicate the AI fabricated results instead of letting
-        # the auto-execution return real data.
+        # ── Detect and remove hallucinated narrative result sections ─────────
+        # The AI sometimes writes a "Summary" or "Query Results" section with
+        # fabricated values (e.g. "123 Main St, Anytown, USA", "John Doe", "0.95").
+        # These are NOT from Redshift — they are invented. Strip them entirely
+        # so only the real executed results (appended below) are shown.
         import re as _re2
+
+        # Remove entire "Summary" / "Query Results" / "Results" blocks that
+        # appear to be AI-fabricated narrative text
+        _hallucinated_sections = _re2.split(
+            r'\n+#{1,3}\s*(?:Summary|Query Results?|Results?|Findings?)\s*\n',
+            answer, flags=_re2.IGNORECASE
+        )
+        if len(_hallucinated_sections) > 1:
+            # Keep only the first part (the explanation/SQL) — discard the fake results section
+            # But keep any part that is actually a code block
+            _kept_parts = []
+            for part in _hallucinated_sections:
+                # If the section contains a SQL code block, keep it (it's the SQL explanation)
+                # If it looks like fabricated narrative results, drop it
+                if "```" in part or "SELECT" in part.upper() or len(part.strip()) < 50:
+                    _kept_parts.append(part)
+                elif any(fake in part.lower() for fake in [
+                    "123 main st", "anytown", "john doe", "jane doe",
+                    "example value", "placeholder", "0.95", "0.90",
+                    "address submitted", "confidence score of"
+                ]):
+                    # Drop this fabricated section — real data comes from execution
+                    _kept_parts.append(
+                        "\n> ⚠️ *Narrative summary removed — see **REAL DATA from Redshift** below for actual values.*\n"
+                    )
+                else:
+                    _kept_parts.append(part)
+            answer = "\n\n".join(_kept_parts)
+
+        # Also strip known fake value patterns inline
         _fake_patterns = [
-            r'\(example value\)',
-            r'example value',
-            r'\bYOUR[-_]UUID\b',
-            r'\bPASTE[-_]UUID[-_]HERE\b',
-            r'\bexample[-_]business[-_]id\b',
+            (r'123\s+Main\s+St[,\s]+Anytown[,\s]+USA', '`[see real data below]`'),
+            (r'\bJohn\s+Doe\b', '`[see real data below]`'),
+            (r'\bJane\s+Doe\b', '`[see real data below]`'),
+            (r'\(example value\)', '*(real value in results below)*'),
+            (r'example value', '*(real value in results below)*'),
+            (r'\bYOUR[-_]UUID\b', '`[UUID from context]`'),
+            (r'\bPASTE[-_]UUID[-_]HERE\b', '`[UUID from context]`'),
         ]
-        for pat in _fake_patterns:
+        for pat, replacement in _fake_patterns:
             if _re2.search(pat, answer, _re2.IGNORECASE):
-                answer = _re2.sub(pat, '*(real value returned below)*', answer, flags=_re2.IGNORECASE)
+                answer = _re2.sub(pat, replacement, answer, flags=_re2.IGNORECASE)
 
         # ── Auto-execute SQL blocks and append real results ───────────────────
         if auto_execute:
