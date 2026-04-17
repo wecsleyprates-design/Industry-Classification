@@ -8036,27 +8036,24 @@ elif tab=="🔍 Check-Agent":
                 flag("OpenAI API key not configured — cannot run AI Deep Audit. "
                      "Set OPENAI_API_KEY in .streamlit/secrets.toml or as an env var.", "amber")
             else:
-                # Controls
-                audit_col1, audit_col2, audit_col3 = st.columns([2,2,1])
-                with audit_col1:
-                    run_audit_btn = st.button(
-                        "🚀 Run AI Deep Audit",
-                        type="primary",
-                        use_container_width=True,
-                        help="Sends all facts to GPT-4o-mini for comprehensive compliance analysis. ~10-20 seconds."
-                    )
-                with audit_col2:
-                    _cache_key = facts_cache_key(facts)
-                    st.caption(f"Facts hash: `{_cache_key}` · Cache TTL: 30 min")
-                with audit_col3:
-                    clear_audit_btn = st.button("🗑️ Clear", use_container_width=True)
+                # Auto-run: key is (bid, facts_hash) so results are cached per business
+                # and don't re-call the API on every rerun for the same business.
+                _cache_key = facts_cache_key(facts)
+                _audit_session_key = f"check_agent_audit_{bid}_{_cache_key}"
 
-                if clear_audit_btn:
-                    if "check_agent_audit" in st.session_state:
-                        del st.session_state["check_agent_audit"]
-                    st.rerun()
+                # Show a thin status bar + refresh button
+                _hdr_col, _btn_col = st.columns([5, 1])
+                with _hdr_col:
+                    st.caption(f"Auto-running for `{bid[:20]}…` · Facts hash: `{_cache_key}` · Cache TTL: 30 min")
+                with _btn_col:
+                    if st.button("🔄 Re-run", use_container_width=True,
+                                 help="Clear cached result and re-run the audit"):
+                        if _audit_session_key in st.session_state:
+                            del st.session_state[_audit_session_key]
+                        st.rerun()
 
-                if run_audit_btn:
+                # Run automatically if not already cached in session state
+                if _audit_session_key not in st.session_state:
                     with st.spinner("Running AI Deep Audit… analysing all facts, cross-referencing, generating compliance report…"):
                         _facts_json = json.dumps(facts, default=str)
                         _score_json = json.dumps(score_info, default=str)
@@ -8064,10 +8061,10 @@ elif tab=="🔍 Check-Agent":
                     if _audit_err:
                         flag(f"AI audit error: {_audit_err}", "red")
                     elif _audit_result:
-                        st.session_state["check_agent_audit"] = _audit_result
+                        st.session_state[_audit_session_key] = _audit_result
 
                 # ── Display audit result ─────────────────────────────────────
-                audit_result = st.session_state.get("check_agent_audit")
+                audit_result = st.session_state.get(_audit_session_key)
                 if audit_result:
                     st.markdown("---")
 
@@ -8192,8 +8189,6 @@ elif tab=="🔍 Check-Agent":
                         color=_oa_color, icon="🧠",
                     )
 
-                else:
-                    st.info("Click **Run AI Deep Audit** to generate the GPT compliance report for this business.")
 
 # ════════════════════════════════════════════════════════════════════════════════
 # AI AGENT
