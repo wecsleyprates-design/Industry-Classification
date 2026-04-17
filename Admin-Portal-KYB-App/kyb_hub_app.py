@@ -3586,6 +3586,17 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
                 with st.expander("📊 Full cross-tab table"):
                     _pivot1 = _ct1.pivot_table(index="TIN",columns="Formation",values="Count",aggfunc="sum",fill_value=0)
                     st.dataframe(_pivot1, use_container_width=True)
+                detail_panel("🔐 × 🗺️ TIN × Formation State", f"{len(_ct1)} combinations",
+                    what_it_means="Cross-tabulation of TIN verification outcome vs formation state type. Tax-Haven = DE/NV/WY/SD/MT/NM. "
+                        "TIN Failed in tax-haven states often caused by DBA name submitted instead of the legal name registered in DE/NV/WY. "
+                        "The Middesk TIN check queries the IRS using the submitted business name — if the DE entity has a different name, it fails. "
+                        "Source facts: tin_match_boolean (from tin_match.value.status via Middesk pid=16), formation_state (from Middesk pid=16).",
+                    source_table="rds_warehouse_public.facts · name IN ('tin_match_boolean','formation_state')",
+                    source_file="facts/kyb/index.ts", source_file_line="tinMatchBoolean + formationState · Middesk pid=16",
+                    json_obj={"chart":"TIN x Formation","data":_ct1.to_dict("records"),"tax_havens":["DE","NV","WY","SD","MT","NM"]},
+                    sql=f"SELECT JSON_EXTRACT_PATH_TEXT(a.value,'value') AS tin_match_boolean, JSON_EXTRACT_PATH_TEXT(b.value,'value') AS formation_state, COUNT(*) AS businesses FROM rds_warehouse_public.facts a JOIN rds_warehouse_public.facts b ON a.business_id=b.business_id AND b.name='formation_state' WHERE a.name='tin_match_boolean' AND a.business_id IN ({','.join(repr(x) for x in list(_authoritative_bids)[:5])},...) GROUP BY 1,2 ORDER BY COUNT(*) DESC;",
+                    links=[("facts/kyb/index.ts","tinMatchBoolean · formationState")],
+                    color="#8B5CF6", icon="🔐")
 
         # Cross-tab 2: SOS × TIN
         with xc2:
@@ -3612,6 +3623,19 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
                         else "🔴 Critical" if "Inactive" in r["SOS"] and "Failed" in r["TIN"]
                         else "🟡 Review", axis=1)
                     st.dataframe(_ct2_disp, use_container_width=True, hide_index=True)
+                detail_panel("🏛️ × 🔐 SOS Status × TIN Verification", f"{len(_ct2)} combinations",
+                    what_it_means="Cross-tabulation of SOS registry status vs TIN verification outcome. "
+                        "Expected healthy: SOS Active + TIN Verified. "
+                        "SOS Active + TIN Failed: entity is legally registered but EIN+name IRS check failed — likely DBA submitted instead of legal name on EIN certificate. "
+                        "SOS Inactive + TIN Verified: entity has a valid EIN history but lost SOS good standing (missed annual report, unpaid state fees). "
+                        "Risk Signal: Good=✅ Active+Verified | Critical=🔴 Inactive+Failed | Review=🟡 all others. "
+                        "Source: sos_active (dependent, from sos_filings[].active, Middesk pid=16), tin_match_boolean (dependent, from tin_match.value.status, Middesk pid=16).",
+                    source_table="rds_warehouse_public.facts · name IN ('sos_active','tin_match_boolean')",
+                    source_file="facts/kyb/index.ts", source_file_line="sosActive (dependent) + tinMatchBoolean (dependent) · Middesk pid=16",
+                    json_obj={"chart":"SOS x TIN","data":_ct2.to_dict("records"),"risk_signals":{"Good":"SOS Active + TIN Verified","Critical":"SOS Inactive + TIN Failed","Review":"all other combinations"}},
+                    sql=f"SELECT JSON_EXTRACT_PATH_TEXT(a.value,'value') AS sos_active, JSON_EXTRACT_PATH_TEXT(b.value,'value') AS tin_match_boolean, COUNT(*) FROM rds_warehouse_public.facts a JOIN rds_warehouse_public.facts b ON a.business_id=b.business_id AND b.name='tin_match_boolean' WHERE a.name='sos_active' AND a.business_id IN (...) GROUP BY 1,2 ORDER BY COUNT(*) DESC;",
+                    links=[("facts/kyb/index.ts","sosActive · tinMatchBoolean")],
+                    color="#3B82F6", icon="🏛️")
 
         xc3, xc4 = st.columns(2)
 
@@ -3629,6 +3653,19 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
                 st.plotly_chart(dark_chart(fig_ct3), use_container_width=True)
                 st.caption("💡 IDV Passed + Watchlist Hit = owner identity confirmed but entity has sanctions/PEP hit. "
                            "The person passed biometrics but the business entity itself is flagged. Both must be reviewed.")
+                detail_panel("🪪 × ⚠️ IDV Passed × Watchlist Status", f"{len(_ct3)} combinations",
+                    what_it_means="Cross-tabulation of IDV (Identity Verification) outcome vs Watchlist status. "
+                        "IDV Passed + Watchlist Hit: the beneficial owner's identity is confirmed by Plaid biometrics (government ID + selfie + liveness), "
+                        "but the BUSINESS ENTITY has a PEP or SANCTIONS screening hit. These are independent checks — a clean owner can still run a flagged entity. "
+                        "IDV Failed + Watchlist Hit: double risk — neither owner identity nor entity compliance confirmed. Immediate escalation required. "
+                        "Source: idv_passed_boolean (Plaid IDV pid=18, dependent from idv_passed), watchlist_hits (dependent from watchlist.metadata[].length, "
+                        "Trulioo PSC pid=38 + Middesk pid=16 merged by consolidatedWatchlist.ts).",
+                    source_table="rds_warehouse_public.facts · name IN ('idv_passed_boolean','watchlist_hits')",
+                    source_file="facts/kyb/index.ts", source_file_line="idvPassedBoolean (Plaid pid=18) + watchlistHits (Trulioo pid=38 / Middesk pid=16)",
+                    json_obj={"chart":"IDV x Watchlist","data":_ct3.to_dict("records"),"watchlist_note":"PEP+SANCTIONS only, adverse_media excluded (filterOutAdverseMedia)"},
+                    sql=f"SELECT JSON_EXTRACT_PATH_TEXT(a.value,'value') AS idv_passed, CASE WHEN CAST(JSON_EXTRACT_PATH_TEXT(b.value,'value') AS INT)>0 THEN 'Has hits' ELSE 'Clean' END AS watchlist, COUNT(*) FROM rds_warehouse_public.facts a JOIN rds_warehouse_public.facts b ON a.business_id=b.business_id AND b.name='watchlist_hits' WHERE a.name='idv_passed_boolean' AND a.business_id IN (...) GROUP BY 1,2 ORDER BY COUNT(*) DESC;",
+                    links=[("facts/kyb/index.ts","idvPassedBoolean + watchlistHits"),("consolidatedWatchlist.ts","Watchlist architecture")],
+                    color="#8B5CF6", icon="🪪")
 
         # Cross-tab 4: NAICS × TIN
         with xc4:
@@ -3644,6 +3681,20 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
                 st.plotly_chart(dark_chart(fig_ct4), use_container_width=True)
                 st.caption("💡 NAICS Fallback (561499) + TIN Failed = both industry and tax identity unresolved. "
                            "These businesses likely failed entity matching in all vendor databases — highest data quality risk.")
+                detail_panel("🏭 × 🔐 NAICS Classification × TIN Verification", f"{len(_ct4)} combinations",
+                    what_it_means="Cross-tabulation of NAICS industry classification vs TIN verification outcome. "
+                        "NAICS Fallback (561499) = AI enrichment (last resort, weight=0.1) returned 'All Other Business Support Services' because all commercial vendors "
+                        "(ZI, EFX, OC, Middesk, SERP, Trulioo) failed to match the entity. "
+                        "NAICS Fallback + TIN Failed = both industry and EIN identity are unresolved — the entity could not be matched in ANY vendor database. "
+                        "This is the highest data quality risk in the portfolio. "
+                        "NAICS Classified + TIN Verified = healthy classification with confirmed EIN — most reliable underwriting signal. "
+                        "Source: naics_code (factWithHighestConfidence, vendor cascade), tin_match_boolean (Middesk pid=16 IRS check).",
+                    source_table="rds_warehouse_public.facts · name IN ('naics_code','tin_match_boolean')",
+                    source_file="facts/kyb/index.ts", source_file_line="naicsCode (factWithHighestConfidence) + tinMatchBoolean (Middesk pid=16)",
+                    json_obj={"chart":"NAICS x TIN","data":_ct4.to_dict("records"),"naics_fallback":"561499 = AI last resort, all commercial vendors failed","highest_risk":"NAICS Fallback + TIN Failed"},
+                    sql=f"SELECT JSON_EXTRACT_PATH_TEXT(a.value,'value') AS naics_code, JSON_EXTRACT_PATH_TEXT(b.value,'value') AS tin_match_boolean, COUNT(*) FROM rds_warehouse_public.facts a JOIN rds_warehouse_public.facts b ON a.business_id=b.business_id AND b.name='tin_match_boolean' WHERE a.name='naics_code' AND a.business_id IN (...) GROUP BY 1,2 ORDER BY COUNT(*) DESC;",
+                    links=[("facts/kyb/index.ts","naicsCode + tinMatchBoolean"),("integrations.constant.ts","MIDDESK=16")],
+                    color="#f97316", icon="🏭")
 
         # Cross-tab 5: Revenue × SOS (full row)
         st.markdown("#### 💰 × 🏛️ Revenue Availability × SOS Status — Data Quality Matrix")
@@ -3658,6 +3709,19 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
                                  title="SOS Status × Revenue Data Availability")
                 fig_ct5.update_layout(height=280,margin=dict(t=40,b=10,l=10,r=10))
                 st.plotly_chart(dark_chart(fig_ct5), use_container_width=True)
+                detail_panel("💰 × 🏛️ Revenue Availability × SOS Status", f"{len(_ct5)} combinations",
+                    what_it_means="Cross-tabulation of revenue data availability (from ZI/EFX firmographic bulk data) vs SOS registry status. "
+                        "Revenue Known = ZoomInfo (pid=24, w=0.8) or Equifax (pid=17, w=0.7) matched the entity and have annual revenue data. "
+                        "Revenue Missing = neither ZI nor EFX could match this entity in their database — common for micro-businesses, very new businesses (<2 weeks), or businesses with unusual names. "
+                        "SOS Active + Revenue Missing: entity is legitimately registered but too small/new for commercial firmographic databases. "
+                        "SOS Unknown + Revenue Missing: complete data gap — entity existence AND firmographic data both unverified. Highest underwriting risk. "
+                        "Revenue is a primary Worth Score feature (Business Operations category) — null revenue forces the model to use default imputation.",
+                    source_table="rds_warehouse_public.facts · name IN ('sos_active','revenue')",
+                    source_file="facts/kyb/index.ts", source_file_line="sosActive (Middesk pid=16) + revenue (ZoomInfo pid=24 / Equifax pid=17)",
+                    json_obj={"chart":"Revenue x SOS","data":_ct5.to_dict("records"),"revenue_source":"ZoomInfo pid=24 (w=0.8) and Equifax pid=17 (w=0.7) bulk firmographic","worth_score_impact":"Null revenue → financial sub-model uses default imputation → less accurate score"},
+                    sql=f"SELECT JSON_EXTRACT_PATH_TEXT(a.value,'value') AS sos_active, CASE WHEN JSON_EXTRACT_PATH_TEXT(b.value,'value') IS NOT NULL AND JSON_EXTRACT_PATH_TEXT(b.value,'value')!='' THEN 'Known' ELSE 'Missing' END AS revenue_known, COUNT(*) FROM rds_warehouse_public.facts a JOIN rds_warehouse_public.facts b ON a.business_id=b.business_id AND b.name='revenue' WHERE a.name='sos_active' AND a.business_id IN (...) GROUP BY 1,2 ORDER BY COUNT(*) DESC;",
+                    links=[("facts/kyb/index.ts","sosActive + revenue"),("integrations.constant.ts","ZOOMINFO=24, EQUIFAX=17")],
+                    color="#22c55e", icon="💰")
             with col_note:
                 st.markdown("""<div style="background:#1E293B;border-radius:8px;padding:12px;margin-top:10px;font-size:.78rem">
 <div style="color:#60A5FA;font-weight:700;margin-bottom:8px">What this tells you:</div>
@@ -3676,13 +3740,61 @@ Complete data gap. Entity existence AND firmographic data both unverified — hi
         _tax_tin_fail = len(_ct[_ct["Formation"].str.contains("Tax-Haven",na=False) & (_ct["TIN"]=="❌ Failed")])
 
         st.markdown("#### 📊 Portfolio Cross-Signal Summary")
+        _naics_bad_tin = len(_ct[(_ct["NAICS"]=="⚠️ Fallback (561499)") & (_ct["TIN"]=="❌ Failed")])
         _sm1,_sm2,_sm3,_sm4 = st.columns(4)
         with _sm1: kpi("Fully Clean",str(_clean_all),"SOS Active + TIN Verified + IDV Passed + No Watchlist","#22c55e")
         with _sm2: kpi("Multi-Risk",str(_multi_risk),"SOS Issue + TIN Failed + Watchlist Hit","#ef4444")
         with _sm3: kpi("Tax-Haven + TIN Fail",str(_tax_tin_fail),"Incorporated in DE/NV/WY and TIN failed","#f59e0b")
-        with _sm4:
-            _naics_bad_tin = len(_ct[(_ct["NAICS"]=="⚠️ Fallback (561499)") & (_ct["TIN"]=="❌ Failed")])
-            kpi("No Industry + TIN Fail",str(_naics_bad_tin),"NAICS=561499 AND TIN failed — highest data risk","#ef4444")
+        with _sm4: kpi("No Industry + TIN Fail",str(_naics_bad_tin),"NAICS=561499 AND TIN failed — highest data risk","#ef4444")
+
+        # Detail panels below — sequential to avoid overlap
+        detail_panel("✅ Fully Clean Businesses", str(_clean_all),
+            what_it_means=f"{_clean_all} businesses passed ALL 4 core KYB checks: SOS Active (entity in good standing) + TIN Verified (IRS confirmed EIN) + IDV Passed (Plaid biometric confirmed) + No Watchlist hits (no PEP or SANCTIONS). "
+                "These are the lowest-risk businesses in the portfolio — all identity, entity, and compliance signals are green. "
+                f"Represents {_clean_all/max(len(_ct),1)*100:.0f}% of businesses with fact data.",
+            source_table="rds_warehouse_public.facts · sos_active='true' AND tin_match_boolean='true' AND idv_passed_boolean='true' AND watchlist_hits='0'",
+            source_file="facts/kyb/index.ts", source_file_line="sosActive + tinMatchBoolean + idvPassedBoolean + watchlistHits — all 4 checks",
+            json_obj={"fully_clean_count":int(_clean_all),"criteria":"SOS Active=true AND TIN Verified=true AND IDV Passed=true AND Watchlist=0","pct":f"{_clean_all/max(len(_ct),1)*100:.0f}%"},
+            sql=f"SELECT COUNT(*) AS fully_clean FROM (SELECT a.business_id FROM rds_warehouse_public.facts a WHERE a.name='sos_active' AND JSON_EXTRACT_PATH_TEXT(a.value,'value')='true' AND a.business_id IN (SELECT b.business_id FROM rds_warehouse_public.facts b WHERE b.name='tin_match_boolean' AND JSON_EXTRACT_PATH_TEXT(b.value,'value')='true' AND b.business_id IN (SELECT c.business_id FROM rds_warehouse_public.facts c WHERE c.name='watchlist_hits' AND CAST(JSON_EXTRACT_PATH_TEXT(c.value,'value') AS INT)=0)));",
+            links=[("facts/kyb/index.ts","sosActive + tinMatchBoolean + idvPassedBoolean + watchlistHits")],
+            color="#22c55e", icon="✅")
+
+        detail_panel("🔴 Multi-Risk Businesses", str(_multi_risk),
+            what_it_means=f"{_multi_risk} businesses have THREE simultaneous risk signals: SOS NOT Active (entity not in good standing OR unverified) + TIN NOT Verified (IRS check failed or not run) + Watchlist Hit (PEP or SANCTIONS). "
+                "This combination requires immediate escalation — entity existence, tax identity, and compliance are ALL unresolved simultaneously. "
+                "These businesses should be blocked from approval without manual Compliance review.",
+            source_table="rds_warehouse_public.facts · sos_active≠'true' AND tin_match_boolean≠'true' AND watchlist_hits>0",
+            source_file="consolidatedWatchlist.ts + facts/kyb/index.ts",
+            json_obj={"multi_risk_count":int(_multi_risk),"criteria":"SOS NOT Active AND TIN NOT Verified AND Watchlist>0","action":"Immediate escalation to Compliance"},
+            sql=f"SELECT a.business_id FROM rds_warehouse_public.facts a JOIN rds_warehouse_public.facts b ON a.business_id=b.business_id AND b.name='tin_match_boolean' JOIN rds_warehouse_public.facts c ON a.business_id=c.business_id AND c.name='watchlist_hits' WHERE a.name='sos_active' AND JSON_EXTRACT_PATH_TEXT(a.value,'value')!='true' AND JSON_EXTRACT_PATH_TEXT(b.value,'value')!='true' AND CAST(JSON_EXTRACT_PATH_TEXT(c.value,'value') AS INT)>0 AND a.business_id IN (...);",
+            links=[("consolidatedWatchlist.ts","Watchlist architecture"),("facts/kyb/index.ts","Risk signals")],
+            color="#ef4444", icon="🔴")
+
+        detail_panel("⚠️ Tax-Haven + TIN Fail", str(_tax_tin_fail),
+            what_it_means=f"{_tax_tin_fail} businesses are incorporated in a tax-haven state (DE/NV/WY/SD/MT/NM) AND have a TIN verification failure. "
+                "The most common cause: the entity is incorporated in Delaware under one legal name, but submitted a DBA trade name on the onboarding form. "
+                "The IRS TIN check uses the submitted name — if it doesn't match the EIN certificate exactly, it fails. "
+                "These are often NOT fraudulent — they just need the correct legal name from the EIN certificate (IRS SS-4 form). "
+                "Action: request the IRS EIN confirmation letter and resubmit with the exact legal name.",
+            source_table="rds_warehouse_public.facts · formation_state IN (DE/NV/WY...) AND tin_match_boolean='false'",
+            source_file="facts/kyb/index.ts", source_file_line="formationState (Middesk) + tinMatchBoolean (Middesk IRS check)",
+            json_obj={"tax_haven_tin_fail_count":int(_tax_tin_fail),"tax_haven_states":["DE","NV","WY","SD","MT","NM"],"common_cause":"DBA name submitted instead of legal EIN name","action":"Request IRS EIN confirmation letter (SS-4)"},
+            sql=f"SELECT a.business_id, JSON_EXTRACT_PATH_TEXT(a.value,'value') AS formation_state, JSON_EXTRACT_PATH_TEXT(b.value,'value','status') AS tin_status, JSON_EXTRACT_PATH_TEXT(b.value,'value','message') AS tin_message FROM rds_warehouse_public.facts a JOIN rds_warehouse_public.facts b ON a.business_id=b.business_id AND b.name='tin_match' WHERE a.name='formation_state' AND UPPER(JSON_EXTRACT_PATH_TEXT(a.value,'value')) IN ('DE','NV','WY','SD','MT','NM') AND JSON_EXTRACT_PATH_TEXT(b.value,'value','status')='failure' AND a.business_id IN (...);",
+            links=[("facts/kyb/index.ts","formationState + tinMatch")],
+            color="#f59e0b", icon="⚠️")
+
+        detail_panel("🚨 No Industry + TIN Fail", str(_naics_bad_tin),
+            what_it_means=f"{_naics_bad_tin} businesses have BOTH industry classification failure (NAICS=561499 fallback) AND TIN verification failure. "
+                "NAICS=561499 means all 7 vendors (EFX, ZI, OC, SERP, Trulioo, Applicant, AI) failed to classify the business industry. "
+                "Combined with TIN failure, this means the entity could NOT be matched in ANY commercial database for firmographic data, AND the EIN-name combination was not confirmed by IRS. "
+                "This is the highest data quality risk in the portfolio. Both facts independently suggest entity matching failure. "
+                "These businesses need manual investigation before any underwriting decision.",
+            source_table="rds_warehouse_public.facts · naics_code='561499' AND tin_match_boolean='false'",
+            source_file="facts/kyb/index.ts", source_file_line="naicsCode (factWithHighestConfidence, AI last resort) + tinMatchBoolean (Middesk IRS)",
+            json_obj={"naics_561499_and_tin_fail_count":int(_naics_bad_tin),"meaning":"Both industry classification AND TIN verification failed simultaneously","risk_level":"CRITICAL — manual investigation required"},
+            sql=f"SELECT a.business_id FROM rds_warehouse_public.facts a JOIN rds_warehouse_public.facts b ON a.business_id=b.business_id AND b.name='tin_match_boolean' WHERE a.name='naics_code' AND JSON_EXTRACT_PATH_TEXT(a.value,'value')='561499' AND JSON_EXTRACT_PATH_TEXT(b.value,'value')='false' AND a.business_id IN (...);",
+            links=[("facts/kyb/index.ts","naicsCode + tinMatchBoolean")],
+            color="#ef4444", icon="🚨")
 
     else:
         st.info("Cross-tabulation requires KYB stats data. Enable date filter or check VPN connection.")
