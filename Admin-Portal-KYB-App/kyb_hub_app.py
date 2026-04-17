@@ -1642,81 +1642,136 @@ def detail_panel(
             st.code(_py, language="python")
 
 
-def _extract_sql_from_answer(text: str) -> list:
-    """Extract all SQL code blocks from an AI answer."""
+def _clean_sql(sql: str) -> str:
+    """
+    Clean SQL before execution:
+    1. Remove inline comments that appear on the SAME LINE as the SELECT
+       (e.g. '-- Check if ...\nSELECT ...' — Redshift treats the SELECT as
+       a comment continuation if the -- is on the preceding line without a newline)
+    2. Remove trailing semicolons from multi-statement blocks
+    3. Strip leading/trailing whitespace
+    """
     import re
-    # Match ```sql ... ``` blocks
-    blocks = re.findall(r"```sql\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
-    # Also match bare SELECT/WITH statements if no code block
-    if not blocks:
-        lines = text.split("\n")
-        current = []
-        for line in lines:
-            stripped = line.strip().upper()
-            if stripped.startswith(("SELECT","WITH","INSERT","UPDATE")):
-                current = [line]
-            elif current and (line.strip() or stripped.startswith(("FROM","WHERE","JOIN","GROUP","ORDER","LIMIT","AND","OR","HAVING"))):
-                current.append(line)
-            elif current and line.strip() == "":
-                if len(current) > 1:
-                    blocks.append("\n".join(current))
-                current = []
-        if len(current) > 1:
-            blocks.append("\n".join(current))
-    return [b.strip() for b in blocks if b.strip()]
+    # Remove lines that are ONLY comments (keep SQL lines that have inline --)
+    clean_lines = []
+    for line in sql.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("--"):
+            continue  # skip pure comment lines
+        clean_lines.append(line)
+    sql = "\n".join(clean_lines).strip()
+    # Remove leading/trailing semicolons
+    sql = sql.rstrip(";").strip()
+    return sql
 
-def _execute_sql_with_retry(sql: str, max_attempts: int = 3) -> tuple:
-    """Execute SQL and return (df, error, sql_used).
-    On error, tries to auto-fix common schema mistakes."""
-    SCHEMA_FIXES = [
-        # updated_at doesn't exist in rel_business_customer_monitoring
-        ("rel_business_customer_monitoring", "updated_at", None,
-         "Column updated_at removed — it does not exist in rel_business_customer_monitoring (only: business_id, customer_id, created_at)"),
-        # common hallucinated columns
-        ("facts", "rule_applied", "JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name')",
-         "rule_applied column replaced with JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name')"),
-        ("facts", "source_confidence", "JSON_EXTRACT_PATH_TEXT(value,'source','confidence')",
-         "source_confidence replaced with JSON_EXTRACT_PATH_TEXT(value,'source','confidence')"),
-        ("facts", "fact_value", "JSON_EXTRACT_PATH_TEXT(value,'value')",
-         "fact_value replaced with JSON_EXTRACT_PATH_TEXT(value,'value')"),
-        ("facts", "winning_source", "JSON_EXTRACT_PATH_TEXT(value,'source','platformId')",
-         "winning_source replaced with JSON_EXTRACT_PATH_TEXT(value,'source','platformId')"),
-        ("facts", "is_winning", None,
-         "is_winning column removed — it does not exist (there is no separate is_winning column in facts)"),
+def _extract_sql_from_answer(text: str) -> list:
+    """Extract SQL code blocks from an AI answer, clean them before returning."""
+    import re
+    # Primary: extract ```sql ... ``` fenced blocks
+    blocks = re.findall(r"```sql\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    # Fallback: extract bare ```...``` blocks that look like SQL
+    if not blocks:
+        all_code = re.findall(r"```\s*(.*?)```", text, re.DOTALL)
+        for b in all_code:
+            upper = b.strip().upper()
+            if upper.startswith(("SELECT","WITH","INSERT","UPDATE","CREATE","DROP")):
+                blocks.append(b)
+    # Clean each block before returning
+    cleaned = []
+    for b in blocks:
+        c = _clean_sql(b)
+        if c and len(c) > 10:  # skip tiny fragments
+            cleaned.append(c)
+    return cleaned
+
+def _execute_sql_with_retry(sql: str, max_attempts: int = 4) -> tuple:
+    """
+    Execute SQL against Redshift with self-healing retry logic.
+    Returns: (df, error, final_sql, list_of_fixes_applied)
+
+    On each failure, analyses the error message and applies targeted fixes:
+    - Removes comments that break Redshift parsing
+    - Replaces non-existent columns with their correct equivalents
+    - Removes non-existent columns from SELECT
+    - Tries alternative table/schema names
+    """
+    import re
+
+    # Map of error fragment → (bad_pattern, fix_function, fix_description)
+    # Each fix is a callable that takes current_sql and returns fixed_sql
+    def _fix_comment_parsing(s):
+        """Redshift fails when -- comment is on same line before SQL keywords."""
+        return _clean_sql(s)
+
+    def _fix_remove_col(col):
+        def _f(s):
+            lines = s.split("\n")
+            return "\n".join(l for l in lines if col.lower() not in l.lower())
+        return _f
+
+    def _fix_replace_col(bad, good):
+        def _f(s):
+            return re.sub(rf'\b{re.escape(bad)}\b', good, s, flags=re.IGNORECASE)
+        return _f
+
+    # Ordered list of (error_signature, fix_function, description)
+    FIXES = [
+        # Comment parsing issues
+        ("syntax error", _fix_comment_parsing,
+         "Removed inline SQL comments that were breaking Redshift parsing"),
+        # Non-existent columns in rds_warehouse_public.facts
+        ("address_value", _fix_replace_col("address_value", "JSON_EXTRACT_PATH_TEXT(value,'value')"),
+         "address_value → JSON_EXTRACT_PATH_TEXT(value,'value')"),
+        ("fact_value", _fix_replace_col("fact_value", "JSON_EXTRACT_PATH_TEXT(value,'value')"),
+         "fact_value → JSON_EXTRACT_PATH_TEXT(value,'value')"),
+        ("rule_applied", _fix_replace_col("rule_applied", "JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name')"),
+         "rule_applied → JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name')"),
+        ("source_confidence", _fix_replace_col("source_confidence", "JSON_EXTRACT_PATH_TEXT(value,'source','confidence')"),
+         "source_confidence → JSON_EXTRACT_PATH_TEXT(value,'source','confidence')"),
+        ("winning_source", _fix_replace_col("winning_source", "JSON_EXTRACT_PATH_TEXT(value,'source','platformId')"),
+         "winning_source → JSON_EXTRACT_PATH_TEXT(value,'source','platformId')"),
+        ("winning_pid", _fix_replace_col("winning_pid", "JSON_EXTRACT_PATH_TEXT(value,'source','platformId')"),
+         "winning_pid → JSON_EXTRACT_PATH_TEXT(value,'source','platformId') (already an alias, not a column)"),
+        ("is_winning", _fix_remove_col("is_winning"),
+         "Removed is_winning — not a column in facts table"),
+        # Non-existent columns in rel_business_customer_monitoring
+        ("updated_at", _fix_remove_col("updated_at"),
+         "Removed updated_at — does not exist in rel_business_customer_monitoring"),
+        # Alias used as column name (common when AI reuses aliases in WHERE)
+        ("address_match_status", _fix_replace_col("address_match_status", "JSON_EXTRACT_PATH_TEXT(value,'value')"),
+         "address_match_status → JSON_EXTRACT_PATH_TEXT(value,'value')"),
+        # Schema name issues
+        ("does not exist", _fix_comment_parsing,
+         "Cleaned SQL to remove potential comment interference"),
     ]
-    current_sql = sql
+
+    current_sql = _clean_sql(sql)
     fixes_applied = []
+    last_err = None
+
     for attempt in range(max_attempts):
         df, err = run_sql(current_sql)
         if df is not None:
             return df, None, current_sql, fixes_applied
-        if err is None:
-            return None, "Unknown error", current_sql, fixes_applied
-        # Try to auto-fix based on the error message
+        last_err = err or "Unknown error"
+        if attempt == max_attempts - 1:
+            break
+
+        # Find and apply a fix based on error message
+        err_lower = last_err.lower()
         fixed = False
-        err_lower = err.lower()
-        for _table, bad_col, replacement, fix_note in SCHEMA_FIXES:
-            if bad_col in err_lower or f'"{bad_col}"' in err_lower:
-                if replacement:
-                    import re
-                    # Replace column references
-                    current_sql = re.sub(
-                        rf'\b{re.escape(bad_col)}\b',
-                        replacement, current_sql, flags=re.IGNORECASE
-                    )
-                else:
-                    # Remove the column from SELECT (simple: remove the line containing it)
-                    lines = current_sql.split("\n")
-                    current_sql = "\n".join(
-                        l for l in lines
-                        if bad_col.lower() not in l.lower()
-                    )
-                fixes_applied.append(fix_note)
-                fixed = True
-                break
+        for err_sig, fix_fn, fix_desc in FIXES:
+            if err_sig in err_lower:
+                new_sql = fix_fn(current_sql)
+                if new_sql != current_sql:
+                    current_sql = new_sql
+                    fixes_applied.append(fix_desc)
+                    fixed = True
+                    break
         if not fixed:
-            return None, err, current_sql, fixes_applied
-    return None, err, current_sql, fixes_applied
+            break  # no known fix — stop retrying
+
+    return None, last_err, current_sql, fixes_applied
 
 def ask_ai(question, context="", history=None, auto_execute=True):
     """Ask the AI. If auto_execute=True, automatically runs any SQL in the answer
@@ -1918,30 +1973,93 @@ def ask_ai(question, context="", history=None, auto_execute=True):
             for i, sql in enumerate(sql_blocks[:3]):  # max 3 queries per answer
                 df, err, used_sql, fixes = _execute_sql_with_retry(sql)
                 block_label = f"Query {i+1}" if len(sql_blocks) > 1 else "Query"
+
                 if df is not None and not df.empty:
                     try:
                         rows_md = df.head(20).to_markdown(index=False)
                     except Exception:
                         rows_md = df.head(20).to_string(index=False)
-                    fix_note = ("\n\n  ⚠️ Auto-corrected: " + " · ".join(fixes)) if fixes else ""
+                    fix_note = ("\n\n  ✏️ Auto-corrected schema: " + " · ".join(fixes)) if fixes else ""
                     executed_results.append(
                         f"\n\n**✅ {block_label} — REAL DATA from Redshift ({len(df):,} row(s)):**{fix_note}\n\n"
                         f"```\n{rows_md}\n```"
                         + (f"\n\n*(Showing first 20 of {len(df):,} rows)*" if len(df) > 20 else "")
-                        + f"\n\n*(These are live values queried directly from `rds_warehouse_public` / `rds_cases_public`)*"
+                        + f"\n\n*(Live values from Redshift — not generated by AI)*"
                     )
-                    if used_sql != sql:
+                    if used_sql.strip() != _clean_sql(sql).strip():
                         executed_results.append(
-                            f"\n\n**🔧 Corrected SQL (original had schema errors):**\n```sql\n{used_sql}\n```"
+                            f"\n\n**🔧 SQL actually executed (auto-corrected):**\n```sql\n{used_sql}\n```"
                         )
+
                 elif df is not None and df.empty:
-                    executed_results.append(f"\n\n**ℹ️ {block_label} executed — 0 rows returned** (no data found for this query)")
-                elif err:
-                    fix_note = (" Auto-fix attempted but failed: " + " · ".join(fixes)) if fixes else ""
                     executed_results.append(
-                        f"\n\n**❌ {block_label} failed:** `{err[:200]}`{fix_note}\n"
-                        f"⚠️ This column or table may not exist. Please use the SQL Runner to investigate."
+                        f"\n\n**ℹ️ {block_label} executed — 0 rows returned.**\n"
+                        f"The query ran successfully but found no matching data. "
+                        f"The business ID may not have this fact, or the fact value may be null.\n\n"
+                        f"**SQL used:**\n```sql\n{used_sql}\n```"
                     )
+
+                elif err:
+                    # AI self-heal: ask OpenAI to fix the broken SQL
+                    _fix_prompt = (
+                        f"The following SQL failed on Redshift with error:\n"
+                        f"ERROR: {err}\n\n"
+                        f"BROKEN SQL:\n```sql\n{used_sql}\n```\n\n"
+                        f"VERIFIED COLUMNS:\n"
+                        f"- rds_warehouse_public.facts: business_id, name, value, received_at\n"
+                        f"  (use JSON_EXTRACT_PATH_TEXT(value,'value') — no other columns exist)\n"
+                        f"- rds_cases_public.rel_business_customer_monitoring: business_id, customer_id, created_at\n"
+                        f"  (NO updated_at column)\n\n"
+                        f"Write ONLY the corrected SQL in a ```sql block. No explanation. No comments on the SELECT line."
+                    )
+                    try:
+                        _fix_r = get_openai().chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=[{"role":"system","content":SYSTEM},
+                                      {"role":"user","content":_fix_prompt}],
+                            max_tokens=400, temperature=0
+                        )
+                        _fixed_answer = _fix_r.choices[0].message.content
+                        _fixed_blocks = _extract_sql_from_answer(_fixed_answer)
+                        if _fixed_blocks:
+                            _fixed_sql = _fixed_blocks[0]
+                            df2, err2, used2, fixes2 = _execute_sql_with_retry(_fixed_sql)
+                            if df2 is not None and not df2.empty:
+                                try:
+                                    rows_md2 = df2.head(20).to_markdown(index=False)
+                                except Exception:
+                                    rows_md2 = df2.head(20).to_string(index=False)
+                                executed_results.append(
+                                    f"\n\n**✅ {block_label} — REAL DATA from Redshift "
+                                    f"({len(df2):,} row(s)) — recovered after SQL auto-fix:**\n\n"
+                                    f"```\n{rows_md2}\n```"
+                                    f"\n\n**Corrected SQL:**\n```sql\n{used2}\n```"
+                                    f"\n\n*(Live values from Redshift — not generated by AI)*"
+                                )
+                            elif df2 is not None and df2.empty:
+                                executed_results.append(
+                                    f"\n\n**ℹ️ {block_label} — 0 rows after auto-fix.**\n"
+                                    f"**Corrected SQL:**\n```sql\n{used2}\n```"
+                                )
+                            else:
+                                executed_results.append(
+                                    f"\n\n**❌ {block_label} failed even after auto-fix.**\n"
+                                    f"Original error: `{err[:150]}`\n"
+                                    f"Fix attempt error: `{(err2 or '')[:150]}`\n\n"
+                                    f"**Use the SQL Runner to debug:**\n```sql\n{_fixed_sql}\n```"
+                                )
+                        else:
+                            executed_results.append(
+                                f"\n\n**❌ {block_label} failed** — could not auto-fix.\n"
+                                f"Error: `{err[:200]}`\n\n"
+                                f"**Try this in the SQL Runner:**\n```sql\n{used_sql}\n```"
+                            )
+                    except Exception as _fix_ex:
+                        executed_results.append(
+                            f"\n\n**❌ {block_label} failed:** `{err[:200]}`\n"
+                            f"**Try this corrected version in the SQL Runner:**\n```sql\n{used_sql}\n```"
+                        )
+
             if executed_results:
                 answer += "\n\n---\n**🔬 Live Results from Redshift:**" + "".join(executed_results)
 
