@@ -1773,9 +1773,93 @@ def _execute_sql_with_retry(sql: str, max_attempts: int = 4) -> tuple:
 
     return None, last_err, current_sql, fixes_applied
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _discover_schema(schema_name: str, table_name: str) -> str:
+    """Query information_schema for the REAL column list. Cached 1h."""
+    df, err = run_sql(f"""
+        SELECT column_name, data_type
+        FROM information_schema.columns
+        WHERE table_schema='{schema_name}' AND table_name='{table_name}'
+        ORDER BY ordinal_position
+    """)
+    if df is not None and not df.empty:
+        return "\n".join(f"  {r['column_name']} ({r['data_type']})" for _, r in df.iterrows())
+    return f"  (schema discovery failed for {schema_name}.{table_name}: {err or 'no columns found'})"
+
+def _get_schema_for_sql(sql: str) -> str:
+    """Extract table references from SQL and discover their real columns."""
+    import re
+    refs = re.findall(r'(?:FROM|JOIN)\s+([\w]+)\.([\w]+)', sql, re.IGNORECASE)
+    if not refs:
+        return ""
+    parts = []
+    for schema, table in refs[:4]:
+        parts.append(f"\nReal columns in {schema}.{table} (from information_schema):\n{_discover_schema(schema, table)}")
+    return "\n".join(parts)
+
+def _explain_zero_rows(sql: str, bid: str) -> str:
+    """When a query returns 0 rows, run diagnostic queries to explain why
+    and return a meaningful explanation with alternative suggestions."""
+    import re
+    explanation_parts = ["**Why 0 rows? Diagnostic investigation:**\n"]
+
+    # Check 1: does the business_id exist at all?
+    if bid and len(bid) > 10:
+        df_check, _ = run_sql(f"""
+            SELECT COUNT(DISTINCT name) AS fact_count, MIN(received_at) AS earliest, MAX(received_at) AS latest
+            FROM rds_warehouse_public.facts
+            WHERE business_id = '{bid}'
+        """)
+        if df_check is not None and not df_check.empty:
+            count = int(df_check.iloc[0].get('fact_count', 0) or 0)
+            if count == 0:
+                explanation_parts.append(f"- ❌ Business ID `{bid}` has **NO facts** in `rds_warehouse_public.facts`. "
+                                          "This business may not have been processed yet, or the UUID may be incorrect.")
+            else:
+                earliest = str(df_check.iloc[0].get('earliest',''))[:16]
+                latest   = str(df_check.iloc[0].get('latest',''))[:16]
+                explanation_parts.append(f"- ✅ Business ID exists with **{count} facts** (from {earliest} to {latest})")
+
+    # Check 2: what fact names does it actually have?
+    if bid and len(bid) > 10:
+        df_names, _ = run_sql(f"""
+            SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val
+            FROM rds_warehouse_public.facts
+            WHERE business_id = '{bid}'
+              AND name IN ('addresses_submitted','addresses','primary_address','address_verification',
+                           'address_match','address_match_boolean','kyb_submitted','kyb_complete',
+                           'sos_active','tin_match_boolean','idv_passed_boolean','naics_code',
+                           'watchlist_hits','formation_state')
+            ORDER BY name
+        """)
+        if df_names is not None and not df_names.empty:
+            rows_str = df_names.to_string(index=False)
+            explanation_parts.append(f"\n**Available KYB facts for this business:**\n```\n{rows_str}\n```")
+        else:
+            explanation_parts.append("- ℹ️ Could not retrieve available fact names — business may not exist in facts table")
+
+    # Check 3: extract the fact name being queried and check it specifically
+    fact_names = re.findall(r"name\s*=\s*'([^']+)'", sql, re.IGNORECASE)
+    if fact_names and bid:
+        for fname in fact_names[:3]:
+            df_fact, _ = run_sql(f"""
+                SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,
+                       JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid,
+                       received_at
+                FROM rds_warehouse_public.facts
+                WHERE business_id = '{bid}' AND name = '{fname}'
+                ORDER BY received_at DESC LIMIT 3
+            """)
+            if df_fact is not None and not df_fact.empty:
+                explanation_parts.append(f"\n**Fact `{fname}` found (the original query had a schema issue):**\n```\n{df_fact.to_string(index=False)}\n```")
+            else:
+                explanation_parts.append(f"\n- ℹ️ Fact `{fname}` does not exist for this business — it was never populated")
+
+    return "\n".join(explanation_parts) if len(explanation_parts) > 1 else ""
+
 def ask_ai(question, context="", history=None, auto_execute=True):
-    """Ask the AI. If auto_execute=True, automatically runs any SQL in the answer
-    and appends the real results — validating and self-correcting as needed."""
+    """Ask the AI. Executes SQL, self-heals schema errors, and always returns
+    meaningful results — never just '0 rows returned'."""
     client=get_openai()
     if not client: return "⚠️ Set OPENAI_API_KEY env var to enable AI responses."
     chunks=rag_search(question,top_k=6)
@@ -1992,35 +2076,42 @@ def ask_ai(question, context="", history=None, auto_execute=True):
                         )
 
                 elif df is not None and df.empty:
+                    # 0 rows — run diagnostics to explain why and show what's actually there
+                    _zero_explanation = _explain_zero_rows(used_sql, _uuid_match.group(0) if _uuid_match else "")
                     executed_results.append(
-                        f"\n\n**ℹ️ {block_label} executed — 0 rows returned.**\n"
-                        f"The query ran successfully but found no matching data. "
-                        f"The business ID may not have this fact, or the fact value may be null.\n\n"
-                        f"**SQL used:**\n```sql\n{used_sql}\n```"
+                        f"\n\n**ℹ️ {block_label} returned 0 rows — running diagnostics…**\n\n"
+                        + (_zero_explanation if _zero_explanation else
+                           "No data found and diagnostics were inconclusive. "
+                           "The business may not have this fact populated yet.\n\n"
+                           f"**SQL used:**\n```sql\n{used_sql}\n```")
                     )
 
                 elif err:
-                    # AI self-heal: ask OpenAI to fix the broken SQL
+                    # SQL failed — discover real schema and ask AI to fix it
+                    _real_schema = _get_schema_for_sql(used_sql)
                     _fix_prompt = (
-                        f"The following SQL failed on Redshift with error:\n"
+                        f"The following SQL failed on Redshift:\n"
                         f"ERROR: {err}\n\n"
                         f"BROKEN SQL:\n```sql\n{used_sql}\n```\n\n"
-                        f"VERIFIED COLUMNS:\n"
-                        f"- rds_warehouse_public.facts: business_id, name, value, received_at\n"
-                        f"  (use JSON_EXTRACT_PATH_TEXT(value,'value') — no other columns exist)\n"
-                        f"- rds_cases_public.rel_business_customer_monitoring: business_id, customer_id, created_at\n"
-                        f"  (NO updated_at column)\n\n"
-                        f"Write ONLY the corrected SQL in a ```sql block. No explanation. No comments on the SELECT line."
+                        f"{_real_schema}\n\n"
+                        f"RULES:\n"
+                        f"- rds_warehouse_public.facts has ONLY: business_id, name, value, received_at\n"
+                        f"  All other fields are inside the 'value' JSON column.\n"
+                        f"  Use JSON_EXTRACT_PATH_TEXT(value,'value') to get the fact value.\n"
+                        f"  Use JSON_EXTRACT_PATH_TEXT(value,'source','platformId') for the vendor ID.\n"
+                        f"- rds_cases_public.rel_business_customer_monitoring has ONLY: business_id, customer_id, created_at\n"
+                        f"- Do NOT put -- comments on the same line as SQL keywords.\n"
+                        f"- Do NOT use aliases in WHERE clauses.\n\n"
+                        f"Write ONLY the corrected SQL in a ```sql block. No narrative. No comments."
                     )
                     try:
                         _fix_r = get_openai().chat.completions.create(
                             model="gpt-4o-mini",
                             messages=[{"role":"system","content":SYSTEM},
                                       {"role":"user","content":_fix_prompt}],
-                            max_tokens=400, temperature=0
+                            max_tokens=600, temperature=0
                         )
-                        _fixed_answer = _fix_r.choices[0].message.content
-                        _fixed_blocks = _extract_sql_from_answer(_fixed_answer)
+                        _fixed_blocks = _extract_sql_from_answer(_fix_r.choices[0].message.content)
                         if _fixed_blocks:
                             _fixed_sql = _fixed_blocks[0]
                             df2, err2, used2, fixes2 = _execute_sql_with_retry(_fixed_sql)
@@ -2031,33 +2122,41 @@ def ask_ai(question, context="", history=None, auto_execute=True):
                                     rows_md2 = df2.head(20).to_string(index=False)
                                 executed_results.append(
                                     f"\n\n**✅ {block_label} — REAL DATA from Redshift "
-                                    f"({len(df2):,} row(s)) — recovered after SQL auto-fix:**\n\n"
+                                    f"({len(df2):,} row(s)) — recovered after schema auto-fix:**\n\n"
                                     f"```\n{rows_md2}\n```"
+                                    + (f"\n\n*(Showing first 20 of {len(df2):,} rows)*" if len(df2)>20 else "")
+                                    + f"\n\n*(Live values from Redshift — not generated by AI)*"
                                     f"\n\n**Corrected SQL:**\n```sql\n{used2}\n```"
-                                    f"\n\n*(Live values from Redshift — not generated by AI)*"
                                 )
                             elif df2 is not None and df2.empty:
+                                # Fixed SQL works but still 0 rows — run diagnostics
+                                _bid_for_diag = _uuid_match.group(0) if _uuid_match else ""
+                                _diag = _explain_zero_rows(used2, _bid_for_diag)
                                 executed_results.append(
-                                    f"\n\n**ℹ️ {block_label} — 0 rows after auto-fix.**\n"
-                                    f"**Corrected SQL:**\n```sql\n{used2}\n```"
+                                    f"\n\n**ℹ️ {block_label} — Schema fixed but 0 rows returned. Diagnostics:**\n\n"
+                                    + (_diag or "No data found for this query.")
+                                    + f"\n\n**Working SQL:**\n```sql\n{used2}\n```"
                                 )
                             else:
                                 executed_results.append(
-                                    f"\n\n**❌ {block_label} failed even after auto-fix.**\n"
-                                    f"Original error: `{err[:150]}`\n"
-                                    f"Fix attempt error: `{(err2 or '')[:150]}`\n\n"
-                                    f"**Use the SQL Runner to debug:**\n```sql\n{_fixed_sql}\n```"
+                                    f"\n\n**❌ {block_label} failed even after schema fix.**\n"
+                                    f"Original error: `{err[:120]}`\n"
+                                    f"Fix attempt error: `{(err2 or '')[:120]}`\n\n"
+                                    f"**{_real_schema}**\n\n"
+                                    f"**Try this in the SQL Runner:**\n```sql\n{_fixed_sql}\n```"
                                 )
                         else:
                             executed_results.append(
-                                f"\n\n**❌ {block_label} failed** — could not auto-fix.\n"
+                                f"\n\n**❌ {block_label} failed — auto-fix produced no SQL.**\n"
                                 f"Error: `{err[:200]}`\n\n"
+                                f"{_real_schema}\n\n"
                                 f"**Try this in the SQL Runner:**\n```sql\n{used_sql}\n```"
                             )
                     except Exception as _fix_ex:
                         executed_results.append(
-                            f"\n\n**❌ {block_label} failed:** `{err[:200]}`\n"
-                            f"**Try this corrected version in the SQL Runner:**\n```sql\n{used_sql}\n```"
+                            f"\n\n**❌ {block_label} failed:** `{err[:200]}`\n\n"
+                            f"{_get_schema_for_sql(used_sql)}\n\n"
+                            f"**Try this in the SQL Runner:**\n```sql\n{used_sql}\n```"
                         )
 
             if executed_results:
