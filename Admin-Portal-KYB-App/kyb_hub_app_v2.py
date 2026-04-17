@@ -7222,7 +7222,8 @@ SELECT range_start, range_end, risk_level, decision FROM score_decision_matrix O
             tin_ok=str(gv(facts,"tin_match_boolean") or "").lower()=="true"
             wl_n=int(float(gv(facts,"watchlist_hits") or 0))
             has_rev=gv(facts,"revenue") is not None and str(gv(facts,"revenue") or "") not in ("","None","[too large")
-            naics_ok=str(gv(facts,"naics_code") or "561499")!="561499"
+            naics=str(gv(facts,"naics_code") or "")
+            naics_ok=naics not in ("","561499")
             fd_w=str(gv(facts,"formation_date") or "")
             try: age_w=datetime.now(timezone.utc).year-int(fd_w[:4]) if fd_w and fd_w[:4].isdigit() else None
             except: age_w=None
