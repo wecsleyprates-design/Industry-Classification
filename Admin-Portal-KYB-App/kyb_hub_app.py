@@ -3538,6 +3538,161 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
     st.markdown("---")
 
     # ════════════════════════════════════════════════════════════════════════
+    # DOMESTIC vs FOREIGN × TIN VERIFICATION — BRIDGE ANALYSIS
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("### 🗺️ × 🔐 Domestic/Foreign Registration × TIN Verification")
+    st.caption("How does the business formation state (domestic, tax-haven, or foreign) relate to TIN verification outcomes? This reveals systematic mismatches between registration strategy and IRS identity confirmation.")
+
+    if stats_df is not None and not stats_df.empty:
+        TAX_HAVENS_SET = {"DE","NV","WY","SD","MT","NM"}
+        _br = stats_df.copy()
+
+        def _br_s(v): return str(v or "").lower().strip()
+        def _form_label(v):
+            s = str(v or "").strip().upper()
+            if s in TAX_HAVENS_SET: return f"⚠️ Tax-Haven ({s})"
+            if s: return "✅ Other State"
+            return "⚪ No State Data"
+        def _tin_label2(v):
+            s = _br_s(v)
+            if s == "true":  return "✅ TIN Verified"
+            if s == "false": return "❌ TIN Failed"
+            return "⚪ Not Checked"
+
+        _br["Formation Type"] = _br["formation_state"].apply(_form_label)
+        _br["TIN Status"]     = _br["tin_match"].apply(_tin_label2)
+
+        _bridge_ct = _br.groupby(["Formation Type","TIN Status"]).size().reset_index(name="Count")
+
+        _br_sql = f"""SELECT
+    JSON_EXTRACT_PATH_TEXT(a.value,'value') AS formation_state,
+    JSON_EXTRACT_PATH_TEXT(b.value,'value') AS tin_match_boolean,
+    COUNT(DISTINCT a.business_id) AS businesses
+FROM rds_warehouse_public.facts a
+JOIN rds_warehouse_public.facts b
+  ON a.business_id = b.business_id
+ AND b.name = 'tin_match_boolean'
+WHERE a.name = 'formation_state'
+  AND a.business_id IN (
+      SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring
+      WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}'
+  )
+GROUP BY 1,2
+ORDER BY businesses DESC;"""
+
+        brcol1, brcol2 = st.columns([3, 2])
+
+        with brcol1:
+            st.markdown("##### Stacked Bar — TIN outcome by Formation Type")
+            if not _bridge_ct.empty:
+                fig_br = px.bar(
+                    _bridge_ct, x="Formation Type", y="Count", color="TIN Status",
+                    barmode="stack",
+                    color_discrete_map={
+                        "✅ TIN Verified": "#22c55e",
+                        "❌ TIN Failed":   "#ef4444",
+                        "⚪ Not Checked":  "#334155",
+                    },
+                    title="Formation Type × TIN Verification Outcome",
+                )
+                fig_br.update_layout(height=320, margin=dict(t=40,b=10,l=10,r=10), xaxis_tickangle=-10)
+                st.plotly_chart(dark_chart(fig_br), use_container_width=True)
+                detail_panel("🗺️ × 🔐 Formation Type × TIN Verification (stacked bar)", f"{len(_bridge_ct)} combinations",
+                    what_it_means=(
+                        "Stacked bar showing, for each formation state category, how many businesses Verified, Failed, or skipped TIN checks.\n\n"
+                        "⚠️ Tax-Haven (DE/NV/WY/SD/MT/NM) + ❌ TIN Failed: entity is incorporated in a nominee state but IRS name-check failed — "
+                        "classic DBA/trade name vs. legal name mismatch. The EIN certificate uses the legal name registered in Delaware, "
+                        "but the onboarding form submitted the trade name. Middesk IRS query compares submitted name vs. IRS record → mismatch → TIN Failed.\n\n"
+                        "✅ Other State + ❌ TIN Failed: entity is not in a tax-haven state but still fails — likely incorrect EIN, sole-prop EIN used for LLC, "
+                        "or EIN applied but IRS record not yet updated (<2 weeks).\n\n"
+                        "⚪ No State Data + ⚪ Not Checked: complete data gap — no formation state from Middesk AND no TIN check triggered. "
+                        "Most common for businesses where SOS query failed (no matching entity found) and EIN was not submitted."
+                    ),
+                    source_table="rds_warehouse_public.facts · name IN ('formation_state','tin_match_boolean')",
+                    source_file="facts/kyb/index.ts",
+                    source_file_line="formationState (Middesk pid=16) + tinMatchBoolean (dependent · Middesk IRS check)",
+                    json_obj={"chart":"Formation Type x TIN","data":_bridge_ct.to_dict("records"),
+                              "tax_havens":list(TAX_HAVENS_SET),
+                              "risk_pattern":"Tax-Haven + TIN Failed = DBA vs legal name mismatch"},
+                    sql=_br_sql,
+                    links=[("facts/kyb/index.ts","formationState + tinMatchBoolean"),
+                           ("integrations.constant.ts","MIDDESK=16")],
+                    color="#8B5CF6", icon="🗺️")
+            else:
+                st.info("No data to cross-tabulate.")
+
+        with brcol2:
+            st.markdown("##### Cross-Tab Table & Insight Cards")
+            if not _bridge_ct.empty:
+                # Pivot table
+                _br_pivot = _bridge_ct.pivot_table(
+                    index="Formation Type", columns="TIN Status",
+                    values="Count", aggfunc="sum", fill_value=0
+                ).reset_index()
+                st.dataframe(_br_pivot, use_container_width=True, hide_index=True)
+                detail_panel("🗺️ × 🔐 Formation × TIN Pivot Table", f"{len(_br_pivot)} rows",
+                    what_it_means="Pivot table with Formation Type as rows and TIN Status as columns. Each cell = number of businesses in that combination. Use this to find the single most risky combination for the selected date range and customer.",
+                    source_table="rds_warehouse_public.facts · name IN ('formation_state','tin_match_boolean')",
+                    source_file="facts/kyb/index.ts",
+                    source_file_line="formationState + tinMatchBoolean · Middesk pid=16",
+                    json_obj={"pivot":_br_pivot.to_dict("records")},
+                    sql=_br_sql,
+                    links=[("facts/kyb/index.ts","formationState + tinMatchBoolean")],
+                    color="#3B82F6", icon="📊")
+
+                st.markdown("---")
+                # Key insight cards
+                _th_fail = _bridge_ct[
+                    _bridge_ct["Formation Type"].str.startswith("⚠️") &
+                    (_bridge_ct["TIN Status"]=="❌ TIN Failed")
+                ]["Count"].sum()
+                _th_pass = _bridge_ct[
+                    _bridge_ct["Formation Type"].str.startswith("⚠️") &
+                    (_bridge_ct["TIN Status"]=="✅ TIN Verified")
+                ]["Count"].sum()
+                _other_fail = _bridge_ct[
+                    (_bridge_ct["Formation Type"]=="✅ Other State") &
+                    (_bridge_ct["TIN Status"]=="❌ TIN Failed")
+                ]["Count"].sum()
+                _no_state_no_tin = _bridge_ct[
+                    (_bridge_ct["Formation Type"]=="⚪ No State Data") &
+                    (_bridge_ct["TIN Status"]=="⚪ Not Checked")
+                ]["Count"].sum()
+
+                _cards = [
+                    ("⚠️ Tax-Haven + ❌ TIN Failed", int(_th_fail), "#ef4444",
+                     "DBA vs legal name mismatch — IRS name doesn't match submitted name. Highest name-mismatch risk."),
+                    ("⚠️ Tax-Haven + ✅ TIN Verified", int(_th_pass), "#22c55e",
+                     "Tax-haven but EIN confirmed. Entity uses legal name on onboarding. Lower risk for TIN."),
+                    ("✅ Other State + ❌ TIN Failed", int(_other_fail), "#f59e0b",
+                     "Not tax-haven but TIN still failed. Possible wrong EIN, sole-prop EIN, or new EIN not yet in IRS."),
+                    ("⚪ No State + ⚪ Not Checked", int(_no_state_no_tin), "#64748b",
+                     "Complete data gap — no SOS data AND no TIN check. These businesses have near-zero entity verification."),
+                ]
+                for label, count, color, insight in _cards:
+                    st.markdown(f"""<div style="background:#1E293B;border-left:3px solid {color};
+                        border-radius:8px;padding:8px 12px;margin:4px 0">
+                      <div style="display:flex;justify-content:space-between;align-items:center">
+                        <span style="color:#CBD5E1;font-weight:600;font-size:.75rem">{label}</span>
+                        <span style="color:{color};font-weight:700;font-size:1rem">{count:,}</span>
+                      </div>
+                      <div style="color:#64748b;font-size:.68rem;margin-top:2px">{insight}</div>
+                    </div>""", unsafe_allow_html=True)
+                    detail_panel(label, f"{count:,} businesses",
+                        what_it_means=insight,
+                        source_table="rds_warehouse_public.facts · name IN ('formation_state','tin_match_boolean')",
+                        source_file="facts/kyb/index.ts",
+                        source_file_line="formationState (Middesk pid=16) + tinMatchBoolean (Middesk IRS check)",
+                        json_obj={"segment":label,"count":count,"insight":insight},
+                        sql=_br_sql,
+                        links=[("facts/kyb/index.ts","formationState + tinMatchBoolean")],
+                        color=color, icon="🔍")
+    else:
+        st.info("No data available for Domestic × TIN analysis.")
+
+    st.markdown("---")
+
+    # ════════════════════════════════════════════════════════════════════════
     # CROSS-TABULATION ANALYSIS
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("### 🔀 Cross-Tabulation Analysis")
