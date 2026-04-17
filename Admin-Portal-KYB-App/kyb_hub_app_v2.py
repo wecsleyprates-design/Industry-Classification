@@ -7819,18 +7819,16 @@ WHERE name='watchlist' AND business_id='{bid}';
 # ════════════════════════════════════════════════════════════════════════════════
 elif tab=="🔍 Check-Agent":
     bid = st.session_state.get("hub_bid","")
-    st.markdown("## 🔍 KYB Check-Agent")
-    st.markdown(
-        "Automated compliance analysis in two layers: **28 instant deterministic checks** "
-        "(cross-field rule engine, zero latency) + **GPT-4o-mini Deep Audit** "
-        "(structured JSON compliance report with severity-ranked findings and underwriting guidance)."
+    st.markdown("## 🔍 KYB Check-Agent — Deep Verification Engine")
+    st.caption(
+        "Four independent analytical layers that go far beyond what any other tab shows: "
+        "**Fact Trust Scoring** · **Vendor Consistency Audit** · **Contradiction & Anomaly Scanner** · **AI Analyst Narrative**. "
+        "Each finding includes analyst reasoning, SQL to verify, and `detail_panel()` lineage."
     )
 
     if not bid:
         st.info("👈 Select a Business ID in the sidebar to run the Check-Agent.")
     else:
-        st.info(f"📍 Analysing business: `{bid}`")
-
         # ── Load facts ───────────────────────────────────────────────────────
         with st.spinner("Loading facts from Redshift…"):
             facts, facts_err = load_facts_with_ui(bid, "check_agent")
@@ -7838,237 +7836,541 @@ elif tab=="🔍 Check-Agent":
         if facts_err or not facts:
             flag(f"Cannot load facts: {facts_err or 'No data found for this business ID.'}", "red")
         else:
-            # ── Load Worth Score (for LLM context) ──────────────────────────
+            # helpers scoped to this business
+            def _fval(name): return str(gv(facts, name) or "").strip()
+            def _flo(name):
+                try: return float(_fval(name) or 0)
+                except: return 0.0
+            def _fint(name):
+                try: return int(float(_fval(name) or 0))
+                except: return 0
+            def _conf(name): return gc(facts, name)
+            def _pid(name):  return gp(facts, name)
+
+            # ── Load Worth Score ─────────────────────────────────────────────
             @st.cache_data(ttl=600, show_spinner=False)
-            def _load_ws_for_check(bid):
-                q = f"""SELECT score_850, risk_level, score_decision
-                        FROM rds_manual_score_public.data_current_scores cs
-                        JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
-                        WHERE bs.business_id='{bid}' LIMIT 1;"""
-                return run_sql(q)
-            ws_df, _ = _load_ws_for_check(bid)
-            score_info = {}
+            def _load_ws_ca(b):
+                return run_sql(f"""SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision
+                    FROM rds_manual_score_public.data_current_scores cs
+                    JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+                    WHERE bs.business_id='{b}' LIMIT 1;""")
+            ws_df, _ = _load_ws_ca(bid)
+            score_850 = 0; risk_level = ""; decision = ""
             if ws_df is not None and not ws_df.empty:
-                r = ws_df.iloc[0]
-                score_info = {
-                    "score_850":   float(r.get("score_850") or 0),
-                    "risk_level":  str(r.get("risk_level")  or ""),
-                    "decision":    str(r.get("score_decision") or ""),
-                }
+                _wr = ws_df.iloc[0]
+                score_850  = float(_wr.get("weighted_score_850") or 0)
+                risk_level = str(_wr.get("risk_level") or "")
+                decision   = str(_wr.get("score_decision") or "")
+
+            score_info = {"score_850": score_850, "risk_level": risk_level, "decision": decision}
+
+            # ── Business identity header ─────────────────────────────────────
+            _legal   = _fval("legal_name") or _fval("business_name") or "Unknown Entity"
+            _state   = _fval("formation_state")
+            _naics   = _fval("naics_code")
+            _score_color = "#ef4444" if score_850 < 550 else "#f59e0b" if score_850 < 700 else "#22c55e"
+            st.markdown(f"""<div style="background:linear-gradient(135deg,#1E293B,#0F172A);
+                border-radius:12px;padding:16px 22px;margin-bottom:12px;border:1px solid #334155">
+              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+                <div>
+                  <div style="color:#F1F5F9;font-size:1.2rem;font-weight:800">{_legal}</div>
+                  <div style="color:#64748B;font-size:.78rem;margin-top:4px">
+                    {bid} &nbsp;·&nbsp; NAICS: {_naics or '—'} &nbsp;·&nbsp; Formation: {_state or '—'}
+                  </div>
+                </div>
+                <div style="text-align:center">
+                  <div style="color:{_score_color};font-size:1.8rem;font-weight:900">{score_850:.0f}</div>
+                  <div style="color:#64748b;font-size:.70rem">Worth Score · {risk_level or '—'}</div>
+                </div>
+              </div>
+            </div>""", unsafe_allow_html=True)
 
             # ════════════════════════════════════════════════════════════════
-            # LAYER 1 — DETERMINISTIC CHECKS
+            # LAYER 1 — FACT TRUST MATRIX
+            # Each critical fact gets a trust score: does it have a value?
+            # What vendor provided it? How confident? Any alternatives that disagree?
             # ════════════════════════════════════════════════════════════════
             st.markdown("---")
-            st.markdown("### 🔍 Layer 1 — Deterministic Cross-Field Checks")
-            st.caption("28 rule-based checks across 7 groups. Run instantly on loaded facts — no AI calls required.")
+            st.markdown("### 🧮 Layer 1 — Fact Trust Matrix")
+            st.caption(
+                "For every critical KYB fact, the Check-Agent scores its **trustworthiness (0–100)** based on: "
+                "whether a value exists, the confidence of the winning vendor, how many vendors agreed, "
+                "and whether alternatives contradict the winner. This is NOT shown anywhere else in the app."
+            )
+
+            # Trustworthiness scoring per fact
+            TRUST_FACTS = [
+                ("sos_active",         "SOS Status",           "Registry",    "Is the entity currently in good standing?"),
+                ("sos_match_boolean",  "SOS Match",            "Registry",    "Did Middesk find this entity in the SOS registry?"),
+                ("tin_match_boolean",  "TIN / EIN Verified",   "Tax ID",      "Did the IRS confirm the EIN matches this entity name?"),
+                ("idv_passed_boolean", "IDV — Owner Identity", "Identity",    "Did the beneficial owner pass Plaid biometric verification?"),
+                ("naics_code",         "Industry (NAICS)",     "Industry",    "Was the industry classified by a commercial vendor (not AI fallback)?"),
+                ("formation_state",    "Formation State",      "Registry",    "Which state is the entity legally incorporated in?"),
+                ("legal_name",         "Legal Name",           "Identity",    "The registered legal name per SOS / IRS"),
+                ("revenue",            "Revenue",              "Firmographic","Annual revenue from ZoomInfo / Equifax firmographic database"),
+                ("num_employees",      "Employee Count",       "Firmographic","Employee count from ZoomInfo / Equifax"),
+                ("watchlist_hits",     "Watchlist Screening",  "Compliance",  "Count of PEP / OFAC sanctions hits (excludes adverse media)"),
+                ("middesk_confidence", "Middesk Confidence",   "Registry",    "Middesk entity-match confidence (0.15 base + 0.20 × passing tasks)"),
+                ("website",            "Website URL",          "Digital",     "Business website (applicant-submitted or SERP-found)"),
+            ]
+
+            def _trust_score(facts, name):
+                """
+                0-100 trust score for a single fact.
+                Components:
+                  30 pts — value exists and is non-null
+                  20 pts — confidence >= 0.5 (or fact has no confidence field)
+                  20 pts — at least 1 alternative also agrees (vendor corroboration)
+                  15 pts — no alternative contradicts the winner
+                  15 pts — not a known fallback value (561499, empty, "false" for boolean checks)
+                """
+                f = facts.get(name, {})
+                if f.get("_too_large"): return 0, "too_large"
+                v = f.get("value")
+                score = 0
+                reasons = []
+
+                # Existence
+                has_val = v is not None and str(v).strip() not in ("", "None", "null", "[]", "{}")
+                if has_val:
+                    score += 30
+                else:
+                    reasons.append("No value — vendor did not match or fact not triggered")
+                    return score, reasons
+
+                # Confidence
+                conf = _conf(name)
+                if conf == 0.0:
+                    score += 20  # no confidence field = rule-based, treat as reliable
+                elif conf >= 0.7:
+                    score += 20
+                elif conf >= 0.4:
+                    score += 12
+                    reasons.append(f"Low confidence: {conf:.3f}")
+                else:
+                    score += 5
+                    reasons.append(f"Very low confidence: {conf:.3f} — treat as uncertain")
+
+                # Vendor corroboration
+                alts = f.get("alternatives", []) or []
+                agree = sum(1 for a in alts if str(a.get("value","")).strip() == str(v).strip())
+                if agree >= 2:
+                    score += 20
+                elif agree >= 1:
+                    score += 12
+                elif len(alts) == 0:
+                    score += 15  # single source, no alternatives — can't verify but not penalised
+                else:
+                    score += 5
+                    reasons.append(f"No alternatives agree with the winning value")
+
+                # Contradiction check
+                disagree = sum(1 for a in alts if str(a.get("value","")).strip() not in ("", str(v).strip()))
+                if disagree == 0:
+                    score += 15
+                elif disagree == 1:
+                    score += 8
+                    reasons.append(f"1 alternative vendor disagrees with the winner")
+                else:
+                    reasons.append(f"{disagree} alternative vendors disagree — winner may be wrong")
+
+                # Fallback penalty
+                str_v = str(v).strip()
+                if name == "naics_code" and str_v == "561499":
+                    score = max(0, score - 20)
+                    reasons.append("NAICS=561499 is the fallback code — classification unreliable")
+                if name == "middesk_confidence" and _flo("middesk_confidence") < 0.25:
+                    score = max(0, score - 15)
+                    reasons.append("Middesk confidence <0.25 — entity resolution unreliable")
+
+                return min(100, score), reasons
+
+            trust_rows = []
+            for fname, label, category, meaning in TRUST_FACTS:
+                tscore, treasons = _trust_score(facts, fname)
+                f = facts.get(fname, {})
+                raw_v = f.get("value")
+                disp_v = str(raw_v)[:40] if raw_v is not None else "—"
+                conf   = _conf(fname)
+                pid_v  = _pid(fname)
+                alts   = len(f.get("alternatives",[]) or [])
+                trust_rows.append({
+                    "Fact": label,
+                    "Category": category,
+                    "Value": disp_v,
+                    "Trust Score": tscore,
+                    "Confidence": f"{conf:.3f}" if conf > 0 else "—",
+                    "Vendor pid": pid_v or "—",
+                    "Alternatives": alts,
+                    "_fname": fname,
+                    "_meaning": meaning,
+                    "_reasons": treasons,
+                    "_raw_v": raw_v,
+                })
+
+            trust_df = pd.DataFrame(trust_rows)
+
+            # ── Visual: trust score heatmap bar ─────────────────────────────
+            _tcol1, _tcol2 = st.columns([2, 1])
+            with _tcol1:
+                _tc = trust_df.sort_values("Trust Score", ascending=True)
+                _bar_colors = ["#ef4444" if s < 40 else "#f59e0b" if s < 70 else "#22c55e"
+                               for s in _tc["Trust Score"]]
+                fig_trust = go.Figure(go.Bar(
+                    y=_tc["Fact"], x=_tc["Trust Score"], orientation="h",
+                    marker_color=_bar_colors,
+                    text=[f"{s}/100" for s in _tc["Trust Score"]],
+                    textposition="outside",
+                    textfont=dict(color="#CBD5E1", size=11),
+                ))
+                fig_trust.update_layout(
+                    height=400, title="Fact Trust Scores — 0 (untrusted) to 100 (fully corroborated)",
+                    xaxis=dict(range=[0,120], tickfont=dict(color="#64748b")),
+                    yaxis=dict(tickfont=dict(color="#CBD5E1")),
+                    margin=dict(t=40,b=10,l=10,r=40),
+                    plot_bgcolor="#0f172a", paper_bgcolor="#0f172a",
+                    font=dict(color="#CBD5E1"),
+                )
+                st.plotly_chart(dark_chart(fig_trust), use_container_width=True)
+
+            with _tcol2:
+                _low_trust = [r for r in trust_rows if r["Trust Score"] < 50]
+                _med_trust = [r for r in trust_rows if 50 <= r["Trust Score"] < 75]
+                _hi_trust  = [r for r in trust_rows if r["Trust Score"] >= 75]
+                kpi("🔴 Low Trust (<50)", str(len(_low_trust)), "Needs investigation or manual verification", "#ef4444")
+                kpi("🟡 Medium Trust (50–74)", str(len(_med_trust)), "Single-source or low-confidence data", "#f59e0b")
+                kpi("🟢 High Trust (≥75)", str(len(_hi_trust)), "Multi-vendor corroborated", "#22c55e")
+                _avg_trust = int(trust_df["Trust Score"].mean())
+                kpi("Portfolio Trust Avg", f"{_avg_trust}/100",
+                    "Mean trust across all critical facts",
+                    "#ef4444" if _avg_trust < 50 else "#f59e0b" if _avg_trust < 75 else "#22c55e")
+
+            # ── Trust detail — one detail_panel per fact ─────────────────────
+            st.markdown("**📋 Per-Fact Trust Analysis — click any row to see analyst explanation, SQL, and JSON:**")
+            for r in sorted(trust_rows, key=lambda x: x["Trust Score"]):
+                _ts  = r["Trust Score"]
+                _tc2 = "#ef4444" if _ts < 40 else "#f59e0b" if _ts < 70 else "#22c55e"
+                _reasons_html = "".join(
+                    f"<div style='color:#f59e0b;font-size:.72rem;margin-top:3px'>⚠ {reason}</div>"
+                    for reason in r["_reasons"]
+                ) if r["_reasons"] else "<div style='color:#22c55e;font-size:.72rem;margin-top:3px'>✅ No trust issues detected</div>"
+
+                st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {_tc2};
+                    border-radius:8px;padding:10px 16px;margin:4px 0;
+                    display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+                  <div style="min-width:140px">
+                    <div style="color:#CBD5E1;font-weight:600;font-size:.82rem">{r['Fact']}</div>
+                    <div style="color:#64748b;font-size:.70rem">{r['Category']}</div>
+                  </div>
+                  <div style="background:#0f172a;border-radius:6px;padding:4px 12px;min-width:100px;text-align:center">
+                    <div style="color:{_tc2};font-size:1.1rem;font-weight:800">{_ts}/100</div>
+                    <div style="color:#475569;font-size:.65rem">Trust Score</div>
+                  </div>
+                  <div style="flex:1;min-width:180px">
+                    <div style="color:#94A3B8;font-size:.75rem">Value: <code style="color:#CBD5E1">{r['Value']}</code>
+                      &nbsp;·&nbsp; pid: <code style="color:#60A5FA">{r['Vendor pid']}</code>
+                      &nbsp;·&nbsp; conf: <code style="color:#a78bfa">{r['Confidence']}</code>
+                      &nbsp;·&nbsp; alts: <code>{r['Alternatives']}</code>
+                    </div>
+                    {_reasons_html}
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
+                _fsql = (f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,\n"
+                         f"  JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS winning_pid,\n"
+                         f"  JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence,\n"
+                         f"  JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name') AS rule\n"
+                         f"FROM rds_warehouse_public.facts\n"
+                         f"WHERE business_id='{bid}' AND name='{r['_fname']}';")
+                _fjson = {
+                    "name": r["_fname"], "value": r["_raw_v"],
+                    "trust_score": _ts, "trust_reasons": r["_reasons"],
+                    "source_pid": r["Vendor pid"], "confidence": r["Confidence"],
+                    "alternatives_count": r["Alternatives"],
+                }
+                detail_panel(
+                    f"Trust Analysis: {r['Fact']}", f"{_ts}/100 — {r['Category']}",
+                    what_it_means=(
+                        f"{r['_meaning']}\n\n"
+                        f"**Trust Score breakdown:** Existence (+30), Confidence (+20), "
+                        f"Vendor corroboration (+20), No contradictions (+15), Not a fallback value (+15).\n\n"
+                        f"**Current issues:** {'; '.join(r['_reasons']) if r['_reasons'] else 'None — fully trusted'}"
+                    ),
+                    source_table="rds_warehouse_public.facts",
+                    source_file="facts/kyb/index.ts",
+                    source_file_line=f"{r['_fname']} · factWithHighestConfidence / dependent",
+                    json_obj=_fjson,
+                    sql=_fsql,
+                    links=[("facts/kyb/index.ts","Fact Engine definition"),
+                           ("facts/rules.ts","factWithHighestConfidence · combineFacts")],
+                    color=_tc2, icon="🧮",
+                )
+
+            # ════════════════════════════════════════════════════════════════
+            # LAYER 2 — VENDOR CONSISTENCY AUDIT
+            # Do the same facts from different vendors agree?
+            # ════════════════════════════════════════════════════════════════
+            st.markdown("---")
+            st.markdown("### 🏭 Layer 2 — Vendor Consistency Audit")
+            st.caption(
+                "For each fact where multiple vendors competed, the Check-Agent compares the **winning value** "
+                "against every **alternative** to detect disagreements. A disagreement means two or more vendors "
+                "returned different answers for the same field — a strong signal of data uncertainty."
+            )
+
+            _vendor_disagreements = []
+            _vendor_agreements    = []
+            _no_competition       = []
+
+            VENDOR_NAMES = {
+                "0": "Applicant", "16": "Middesk", "17": "Equifax", "22": "SERP",
+                "23": "OpenCorporates", "24": "ZoomInfo", "31": "AI Enrichment",
+                "38": "Trulioo", "39": "SERP GMB", "-1": "Dependent (derived)",
+                "18": "Plaid IDV",
+            }
+
+            KEY_FACTS_FOR_VENDOR_AUDIT = [
+                "legal_name","formation_state","naics_code","revenue","num_employees",
+                "website","sos_active","tin_match_boolean","formation_date",
+                "corporation","address_match_boolean","name_match_boolean",
+            ]
+
+            for fname in KEY_FACTS_FOR_VENDOR_AUDIT:
+                f = facts.get(fname, {})
+                if f.get("_too_large") or not f: continue
+                winner_v = f.get("value")
+                if winner_v is None: continue
+                alts = f.get("alternatives", []) or []
+                if not alts:
+                    _no_competition.append(fname)
+                    continue
+                winner_str = str(winner_v).strip().lower()
+                pid_w = _pid(fname)
+                vendor_w = VENDOR_NAMES.get(pid_w, f"pid={pid_w}")
+                disagreements = []
+                agreements    = []
+                for a in alts:
+                    alt_v   = str(a.get("value","")).strip().lower()
+                    alt_pid = str(a.get("source",{}).get("platformId","") if isinstance(a.get("source"),dict) else a.get("source",""))
+                    alt_vendor = VENDOR_NAMES.get(alt_pid, f"pid={alt_pid}")
+                    if alt_v and alt_v != winner_str:
+                        disagreements.append({"vendor": alt_vendor, "value": a.get("value"), "pid": alt_pid})
+                    elif alt_v == winner_str:
+                        agreements.append(alt_vendor)
+                if disagreements:
+                    _vendor_disagreements.append({
+                        "fact": fname, "winner_value": winner_v, "winner_vendor": vendor_w,
+                        "winner_pid": pid_w, "winner_conf": _conf(fname),
+                        "disagreements": disagreements, "agreements": agreements,
+                    })
+                else:
+                    _vendor_agreements.append(fname)
+
+            # Summary KPIs
+            _va1, _va2, _va3 = st.columns(3)
+            with _va1: kpi("🔴 Vendor Disagreements", str(len(_vendor_disagreements)),
+                           "Facts where vendors returned different values", "#ef4444" if _vendor_disagreements else "#22c55e")
+            with _va2: kpi("✅ Full Agreement", str(len(_vendor_agreements)),
+                           "Facts where all vendors agree", "#22c55e")
+            with _va3: kpi("⚪ Single Source", str(len(_no_competition)),
+                           "Facts with no alternative vendors to compare", "#64748b")
+
+            if _vendor_disagreements:
+                st.markdown("**⚠️ Vendor Disagreements — analyst review required:**")
+                for dis in _vendor_disagreements:
+                    _dc = "#f97316"
+                    _disagree_list = " · ".join(
+                        f"**{d['vendor']}** says `{str(d['value'])[:30]}`"
+                        for d in dis["disagreements"]
+                    )
+                    st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {_dc};
+                        border-radius:10px;padding:14px 18px;margin:6px 0">
+                      <div style="color:#f97316;font-weight:700;font-size:.88rem">
+                        ⚠️ {dis['fact']} — {len(dis['disagreements'])} vendor(s) disagree
+                      </div>
+                      <div style="color:#CBD5E1;font-size:.80rem;margin-top:6px">
+                        <strong>Winner:</strong> <code>{str(dis['winner_value'])[:40]}</code>
+                        &nbsp;(source: {dis['winner_vendor']}, pid={dis['winner_pid']},
+                        conf={dis['winner_conf']:.3f})
+                      </div>
+                      <div style="color:#f59e0b;font-size:.78rem;margin-top:4px">
+                        <strong>Disagree:</strong> {_disagree_list}
+                      </div>
+                      {f'<div style="color:#22c55e;font-size:.74rem;margin-top:4px">✅ Agree: {", ".join(dis["agreements"])}</div>' if dis["agreements"] else ''}
+                    </div>""", unsafe_allow_html=True)
+
+                    _dsql = (f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS winner_value,\n"
+                             f"  JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS winning_pid,\n"
+                             f"  JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence\n"
+                             f"FROM rds_warehouse_public.facts\n"
+                             f"WHERE business_id='{bid}' AND name='{dis['fact']}';")
+                    detail_panel(
+                        f"⚠️ Vendor Disagreement: {dis['fact']}",
+                        f"Winner: {dis['winner_vendor']} · {len(dis['disagreements'])} disagree",
+                        what_it_means=(
+                            f"The `factWithHighestConfidence` rule selected **{dis['winner_vendor']}** as the "
+                            f"winning source for `{dis['fact']}` (value: `{dis['winner_value']}`, conf={dis['winner_conf']:.3f}). "
+                            f"However, {len(dis['disagreements'])} other vendor(s) returned a different value. "
+                            f"Disagreements: {'; '.join(str(d['vendor'])+'→'+str(d['value']) for d in dis['disagreements'])}.\n\n"
+                            f"**Why it matters:** The winning vendor may have matched a different entity than intended "
+                            f"(entity resolution error), or a vendor's data may be stale. The fact with the most "
+                            f"disagreements is the most uncertain — treat it as unverified until independently confirmed."
+                        ),
+                        source_table="rds_warehouse_public.facts · alternatives[] array",
+                        source_file="facts/rules.ts",
+                        source_file_line="factWithHighestConfidence — selects winner by weight × confidence",
+                        json_obj={"fact": dis["fact"], "winner": {"value": dis["winner_value"],
+                                  "vendor": dis["winner_vendor"], "pid": dis["winner_pid"],
+                                  "confidence": dis["winner_conf"]},
+                                  "disagreements": dis["disagreements"], "agreements": dis["agreements"]},
+                        sql=_dsql,
+                        links=[("facts/rules.ts","factWithHighestConfidence rule"),
+                               ("facts/kyb/index.ts","Fact definitions")],
+                        color="#f97316", icon="⚠️",
+                    )
+            else:
+                st.success("✅ No vendor disagreements detected across all audited facts.")
+
+            # ════════════════════════════════════════════════════════════════
+            # LAYER 3 — CONTRADICTION & ANOMALY SCANNER
+            # Cross-field logic checks with detailed analyst narrative
+            # ════════════════════════════════════════════════════════════════
+            st.markdown("---")
+            st.markdown("### 🔬 Layer 3 — Contradiction & Anomaly Scanner")
+            st.caption(
+                "The scanner tests **logical relationships between facts** — not individual facts in isolation. "
+                "Every finding includes an analyst-grade explanation of *why* the combination is suspicious "
+                "and *exactly* what an underwriter should do next."
+            )
 
             det_results = run_deterministic_checks(facts)
             summary     = get_check_summary(det_results)
 
-            # ── Severity KPI row ─────────────────────────────────────────────
-            _sev_kpis = [
-                ("CRITICAL", "#ef4444", "🔴"),
-                ("HIGH",     "#f97316", "🟠"),
-                ("MEDIUM",   "#f59e0b", "🟡"),
-                ("LOW",      "#22c55e", "🟢"),
-                ("NOTICE",   "#3B82F6", "🔵"),
-            ]
-            ck0, ck1, ck2, ck3, ck4, ck5 = st.columns(6)
-            _overall_col = {
-                "CRITICAL": "#ef4444", "HIGH": "#f97316",
-                "MEDIUM":   "#f59e0b", "LOW":  "#22c55e",
-                "NOTICE":   "#3B82F6", "CLEAN": "#22c55e",
-            }.get(summary["overall"], "#64748b")
-            with ck0: kpi("Overall Risk", summary["overall"], f"{summary['total']} flags triggered", _overall_col)
-            for col, (sev, color, icon) in zip([ck1,ck2,ck3,ck4,ck5], _sev_kpis):
-                with col: kpi(f"{icon} {sev}", str(summary["counts"].get(sev,0)),
-                              {"CRITICAL":"Block approval","HIGH":"Manual review",
-                               "MEDIUM":"Investigate","LOW":"Informational","NOTICE":"Advisory"}[sev], color)
+            _sev_order = {"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"NOTICE":4}
 
-            # ── Severity Radar / Bar ─────────────────────────────────────────
-            if summary["total"] > 0:
-                _radar_cats = [s for s,_,_ in _sev_kpis]
-                _radar_vals = [summary["counts"].get(s,0) for s in _radar_cats]
-                _radar_colors = [c for _,c,_ in _sev_kpis]
-
-                ra_col, rb_col = st.columns([1,2])
-                with ra_col:
-                    fig_sev = go.Figure(go.Bar(
-                        x=_radar_cats, y=_radar_vals,
-                        marker_color=_radar_colors,
-                        text=_radar_vals, textposition="outside",
-                        textfont=dict(color="#CBD5E1", size=12),
-                    ))
-                    fig_sev.update_layout(
-                        height=260, title="Findings by Severity",
-                        xaxis=dict(tickfont=dict(color="#CBD5E1")),
-                        yaxis=dict(title="Count", tickfont=dict(color="#64748b")),
-                        margin=dict(t=40,b=10,l=10,r=10),
-                        plot_bgcolor="#0f172a", paper_bgcolor="#0f172a",
-                        font=dict(color="#CBD5E1"),
-                    )
-                    st.plotly_chart(dark_chart(fig_sev), use_container_width=True)
-
-                with rb_col:
-                    # Group breakdown bar
-                    _grp_names = list(summary["by_group"].keys())
-                    _grp_cnts  = [len(v) for v in summary["by_group"].values()]
-                    _grp_sev_max = []
-                    for grp_items in summary["by_group"].values():
-                        maxs = min([{"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"NOTICE":4}.get(i["severity"],5)
-                                    for i in grp_items])
-                        _grp_sev_max.append(
-                            ["#ef4444","#f97316","#f59e0b","#22c55e","#3B82F6"][maxs]
-                        )
-                    fig_grp = go.Figure(go.Bar(
-                        y=_grp_names, x=_grp_cnts, orientation="h",
-                        marker_color=_grp_sev_max,
-                        text=_grp_cnts, textposition="outside",
-                        textfont=dict(color="#CBD5E1", size=11),
-                    ))
-                    fig_grp.update_layout(
-                        height=260, title="Findings by Group",
-                        yaxis=dict(autorange="reversed", tickfont=dict(color="#CBD5E1")),
-                        xaxis=dict(title="Count", tickfont=dict(color="#64748b")),
-                        margin=dict(t=40,b=10,l=10,r=10),
-                        plot_bgcolor="#0f172a", paper_bgcolor="#0f172a",
-                        font=dict(color="#CBD5E1"),
-                    )
-                    st.plotly_chart(dark_chart(fig_grp), use_container_width=True)
-
-            st.markdown("---")
-
-            # ── Findings by group ────────────────────────────────────────────
             if summary["total"] == 0:
-                st.success("✅ All 28 deterministic checks passed — no cross-field anomalies detected.")
+                st.success("✅ All 28 cross-field logic checks passed — no contradictions or anomalies detected for this business.")
+                _pass_total = len(DETERMINISTIC_CHECKS)
+                st.caption(f"{_pass_total} checks evaluated · 0 triggered · Business profile is internally consistent.")
             else:
-                _sev_order = {"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"NOTICE":4}
-                _all_sorted = sorted(det_results, key=lambda r: _sev_order.get(r["severity"], 5))
+                # Compact severity summary strip
+                _sev_strip_html = ""
+                for sev, color, icon in [("CRITICAL","#ef4444","🔴"),("HIGH","#f97316","🟠"),
+                                          ("MEDIUM","#f59e0b","🟡"),("LOW","#22c55e","🟢"),("NOTICE","#3B82F6","🔵")]:
+                    cnt = summary["counts"].get(sev, 0)
+                    if cnt:
+                        _sev_strip_html += (f'<span style="background:{color}22;color:{color};border-radius:6px;'
+                                            f'padding:3px 10px;font-size:.76rem;font-weight:700;margin-right:6px">'
+                                            f'{icon} {sev}: {cnt}</span>')
+                st.markdown(f'<div style="margin:8px 0">{_sev_strip_html}</div>', unsafe_allow_html=True)
 
-                for grp_name, grp_items in summary["by_group"].items():
-                    grp_sorted = sorted(grp_items, key=lambda r: _sev_order.get(r["severity"],5))
-                    worst = grp_sorted[0]["severity"]
-                    grp_color = SEV_COLOR.get(worst, "#64748b")
-                    grp_icon  = SEV_ICON.get(worst, "ℹ️")
+                # All findings sorted by severity, each with full analyst narrative
+                for r in sorted(det_results, key=lambda x: _sev_order.get(x["severity"], 5)):
+                    sev   = r["severity"]
+                    color = SEV_COLOR.get(sev, "#64748b")
+                    icon  = SEV_ICON.get(sev, "ℹ️")
 
-                    # Group header as HTML — NOT st.expander, so detail_panel()
-                    # can open its own st.expander without triggering nested-expander error
-                    st.markdown(
-                        f"""<div style="background:{grp_color}18;border-left:4px solid {grp_color};
-                            border-radius:10px;padding:10px 16px;margin:14px 0 4px 0">
-                          <span style="color:{grp_color};font-weight:700;font-size:.90rem">
-                            {grp_icon} {grp_name}
-                          </span>
-                          <span style="color:#64748b;font-size:.76rem;margin-left:10px">
-                            {len(grp_items)} finding(s) · worst severity: {worst}
-                          </span>
-                        </div>""",
-                        unsafe_allow_html=True,
+                    # Actual current values of the involved facts
+                    _fact_vals = {fn: _fval(fn) for fn in r["facts"]}
+                    _fact_vals_html = " &nbsp;·&nbsp; ".join(
+                        f'<code style="color:#94A3B8">{fn}</code>=<code style="color:#60A5FA">{v or "null"}</code>'
+                        for fn, v in _fact_vals.items()
                     )
 
-                    for r in grp_sorted:
-                        sev   = r["severity"]
-                        color = SEV_COLOR.get(sev, "#64748b")
-                        icon  = SEV_ICON.get(sev, "ℹ️")
+                    # Full analyst card with actual values embedded
+                    st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
+                        border-radius:10px;padding:16px 20px;margin:8px 0">
+                      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px">
+                        <div>
+                          <span style="color:{color};font-weight:800;font-size:.92rem">{icon} [{sev}] {r['name']}</span>
+                          <span style="background:{color}18;color:{color};border-radius:6px;
+                            padding:1px 8px;font-size:.70rem;margin-left:8px">{r['group']}</span>
+                        </div>
+                      </div>
+                      <div style="color:#CBD5E1;font-size:.80rem;margin-top:10px;line-height:1.5">
+                        {r['description']}
+                      </div>
+                      <div style="background:#0f172a;border-radius:6px;padding:8px 12px;margin-top:10px;font-size:.74rem">
+                        <span style="color:#64748b">Current values for this business: &nbsp;</span>{_fact_vals_html}
+                      </div>
+                      <div style="margin-top:10px;background:#052e16;border-radius:6px;padding:8px 12px">
+                        <span style="color:#86efac;font-weight:600;font-size:.76rem">⚡ Underwriter Action: </span>
+                        <span style="color:#CBD5E1;font-size:.76rem">{r['action']}</span>
+                      </div>
+                    </div>""", unsafe_allow_html=True)
 
-                        # Finding card (plain HTML — no st.expander wrapper)
-                        st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {color};
-                            border-radius:10px;padding:14px 18px;margin:6px 0 2px 0">
-                          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px">
-                            <span style="color:{color};font-weight:700;font-size:.88rem">
-                              {icon} [{sev}] {r['name']}
-                            </span>
-                            <span style="background:{color}22;color:{color};border-radius:6px;
-                              padding:2px 10px;font-size:.72rem;font-weight:600">{r['group']}</span>
-                          </div>
-                          <div style="color:#CBD5E1;font-size:.80rem;margin-top:8px">{r['description']}</div>
-                          <div style="margin-top:8px">
-                            <span style="color:#60A5FA;font-size:.75rem">
-                              ⚡ Action: {r['action']}
-                            </span>
-                          </div>
-                          <div style="margin-top:6px;color:#475569;font-size:.70rem">
-                            Facts: {' · '.join(f'<code style="color:#94A3B8">{fn}</code>' for fn in r['facts'])}
-                          </div>
-                        </div>""", unsafe_allow_html=True)
+                    _bid_sql = r["sql"].replace("{bid}", bid) if "{bid}" in r["sql"] else r["sql"]
+                    _involved_json = {fn: {"current_value": _fval(fn), "source_pid": _pid(fn),
+                                           "confidence": _conf(fn), "trust_score": next(
+                                               (x["Trust Score"] for x in trust_rows if x["_fname"]==fn), "n/a")}
+                                      for fn in r["facts"] if fn in facts}
+                    detail_panel(
+                        f"{icon} {r['name']}", f"{sev} · {r['group']}",
+                        what_it_means=(
+                            f"**Root cause:** {r['description']}\n\n"
+                            f"**Current values:** {'; '.join(fn+'='+(_fval(fn) or 'null') for fn in r['facts'])}\n\n"
+                            f"**Underwriter action:** {r['action']}"
+                        ),
+                        source_table="rds_warehouse_public.facts · cross-field logic check",
+                        source_file="check_agent_v2.py",
+                        source_file_line=f"DETERMINISTIC_CHECKS · id={r['id']}",
+                        json_obj=_involved_json,
+                        sql=_bid_sql,
+                        links=[("facts/kyb/index.ts","Fact Engine definitions"),
+                               ("facts/rules.ts","Fact Engine rules")],
+                        color=color, icon=icon,
+                    )
 
-                        # detail_panel renders its own st.expander at the top level — safe
-                        _bid_sql = r["sql"].replace("{bid}", bid) if "{bid}" in r["sql"] else r["sql"]
-                        _involved_json = {fn: {"value": gv(facts, fn), "source_pid": gp(facts, fn),
-                                               "confidence": gc(facts, fn)}
-                                          for fn in r["facts"] if fn in facts}
-                        detail_panel(
-                            f"{icon} {r['name']}", f"{sev} — {r['group']}",
-                            what_it_means=r["description"],
-                            source_table="rds_warehouse_public.facts · cross-field validation",
-                            source_file="check_agent_v2.py",
-                            source_file_line=f"check id: {r['id']}",
-                            json_obj=_involved_json,
-                            sql=_bid_sql,
-                            links=[("facts/kyb/index.ts","Fact Engine rules"),
-                                   ("facts/rules.ts","factWithHighestConfidence · combineFacts")],
-                            color=color, icon=icon,
-                        )
-
-            # ── All-clear summary ────────────────────────────────────────────
-            st.markdown("---")
-            _pass_count = len(DETERMINISTIC_CHECKS) - summary["total"]
-            st.markdown(
-                f"<div style='color:#64748b;font-size:.78rem'>✅ {_pass_count} / {len(DETERMINISTIC_CHECKS)} checks passed &nbsp;·&nbsp; "
-                f"🚩 {summary['total']} / {len(DETERMINISTIC_CHECKS)} checks triggered</div>",
-                unsafe_allow_html=True,
-            )
+                _pass_count = len(DETERMINISTIC_CHECKS) - summary["total"]
+                st.markdown(
+                    f"<div style='color:#64748b;font-size:.75rem;margin-top:8px'>"
+                    f"✅ {_pass_count}/{len(DETERMINISTIC_CHECKS)} checks passed &nbsp;·&nbsp; "
+                    f"🚩 {summary['total']}/{len(DETERMINISTIC_CHECKS)} triggered</div>",
+                    unsafe_allow_html=True,
+                )
 
             # ════════════════════════════════════════════════════════════════
-            # LAYER 2 — LLM DEEP AUDIT
+            # LAYER 4 — AI ANALYST NARRATIVE (GPT-4o-mini)
+            # Full narrative audit — not just JSON, but paragraphs an analyst
+            # would actually write, with specific values from this business
             # ════════════════════════════════════════════════════════════════
             st.markdown("---")
-            st.markdown("### 🧠 Layer 2 — AI Deep Audit (GPT-4o-mini)")
+            st.markdown("### 🧠 Layer 4 — AI Analyst Narrative")
             st.caption(
-                "Sends the complete fact profile to GPT-4o-mini with a structured compliance audit prompt. "
-                "Returns: overall risk, data quality score, KYB completeness matrix, "
-                "severity-ranked findings with Worth Score impact, and underwriting decision guidance. "
-                "**Results are cached for 30 minutes per business.**"
+                "GPT-4o-mini acts as a senior KYB analyst writing a **case memo** — not a JSON summary, "
+                "but paragraph-form analysis referencing the actual fact values for this specific business. "
+                "Covers: entity verification chain, financial plausibility, compliance posture, "
+                "Worth Score drivers, and an underwriting recommendation with rationale. "
+                "Auto-runs and caches for 30 min per business."
             )
 
             if not get_openai():
-                flag("OpenAI API key not configured — cannot run AI Deep Audit. "
-                     "Set OPENAI_API_KEY in .streamlit/secrets.toml or as an env var.", "amber")
+                flag("OpenAI API key not configured. Set OPENAI_API_KEY in .streamlit/secrets.toml.", "amber")
             else:
-                # Auto-run: key is (bid, facts_hash) so results are cached per business
-                # and don't re-call the API on every rerun for the same business.
-                _cache_key = facts_cache_key(facts)
-                _audit_session_key = f"check_agent_audit_{bid}_{_cache_key}"
+                _cache_key       = facts_cache_key(facts)
+                _audit_skey      = f"ca_audit_{bid}_{_cache_key}"
 
-                # Show a thin status bar + refresh button
-                _hdr_col, _btn_col = st.columns([5, 1])
-                with _hdr_col:
-                    st.caption(f"Auto-running for `{bid[:20]}…` · Facts hash: `{_cache_key}` · Cache TTL: 30 min")
-                with _btn_col:
-                    if st.button("🔄 Re-run", use_container_width=True,
-                                 help="Clear cached result and re-run the audit"):
-                        if _audit_session_key in st.session_state:
-                            del st.session_state[_audit_session_key]
+                _hdr_c, _btn_c = st.columns([5,1])
+                with _hdr_c:
+                    st.caption(f"Business: `{bid[:24]}…` · Facts hash: `{_cache_key}` · Cache: 30 min")
+                with _btn_c:
+                    if st.button("🔄 Re-run", use_container_width=True, key="ca_rerun"):
+                        if _audit_skey in st.session_state:
+                            del st.session_state[_audit_skey]
                         st.rerun()
 
-                # Run automatically if not already cached in session state
-                if _audit_session_key not in st.session_state:
-                    with st.spinner("Running AI Deep Audit… analysing all facts, cross-referencing, generating compliance report…"):
+                if _audit_skey not in st.session_state:
+                    with st.spinner("AI analyst writing case memo… (~15 seconds)"):
                         _facts_json = json.dumps(facts, default=str)
                         _score_json = json.dumps(score_info, default=str)
                         _audit_result, _audit_err = run_llm_audit(_facts_json, bid, _score_json)
                     if _audit_err:
                         flag(f"AI audit error: {_audit_err}", "red")
                     elif _audit_result:
-                        st.session_state[_audit_session_key] = _audit_result
+                        st.session_state[_audit_skey] = _audit_result
 
-                # ── Display audit result ─────────────────────────────────────
-                audit_result = st.session_state.get(_audit_session_key)
+                audit_result = st.session_state.get(_audit_skey)
                 if audit_result:
-                    st.markdown("---")
-
-                    # ── Header banner ────────────────────────────────────────
                     _oa_risk  = audit_result.get("overall_risk","Unknown")
                     _dq_score = int(audit_result.get("data_quality_score", 0))
                     _summary  = audit_result.get("summary","")
@@ -8079,113 +8381,154 @@ elif tab=="🔍 Check-Agent":
                                   else "#ef4444" if "DECLINE" in _decision.upper()
                                   else "#f59e0b")
 
+                    # ── Verdict banner ───────────────────────────────────────
                     st.markdown(f"""<div style="background:linear-gradient(135deg,#1E293B,#0F172A);
-                        border:1px solid {_oa_color};border-radius:14px;padding:20px 24px;margin-bottom:16px">
-                      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px">
+                        border:2px solid {_oa_color};border-radius:14px;padding:20px 24px;margin-bottom:16px">
+                      <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:16px">
                         <div style="flex:1">
-                          <div style="color:{_oa_color};font-size:1.4rem;font-weight:800">
-                            🔴 Overall Risk: {_oa_risk}
+                          <div style="color:{_oa_color};font-size:1.3rem;font-weight:800">
+                            {SEV_ICON.get(_oa_risk,'⚠️')} Analyst Verdict: {_oa_risk} RISK
                           </div>
-                          <div style="color:#CBD5E1;font-size:.82rem;margin-top:8px;max-width:600px">
+                          <div style="color:#CBD5E1;font-size:.84rem;margin-top:10px;line-height:1.6;max-width:680px">
                             {_summary}
                           </div>
-                          <div style="margin-top:10px;color:{_dec_color};font-weight:600;font-size:.84rem">
-                            ⚖️ Guidance: {_decision}
+                          <div style="margin-top:12px;color:{_dec_color};font-weight:700;font-size:.86rem">
+                            ⚖️ Underwriting Guidance: {_decision}
                           </div>
                         </div>
-                        <div style="text-align:center;min-width:100px">
+                        <div style="text-align:center;min-width:120px">
                           <div style="color:{'#22c55e' if _dq_score>=80 else '#f59e0b' if _dq_score>=50 else '#ef4444'};
-                            font-size:2rem;font-weight:900">{_dq_score}</div>
-                          <div style="color:#64748b;font-size:.72rem">Data Quality<br>Score / 100</div>
+                            font-size:2.4rem;font-weight:900;line-height:1">{_dq_score}</div>
+                          <div style="color:#64748b;font-size:.72rem;margin-top:4px">Data Quality<br>Score / 100</div>
                         </div>
                       </div>
                     </div>""", unsafe_allow_html=True)
 
-                    # ── KYB Completeness matrix ──────────────────────────────
+                    # ── KYB completeness matrix ──────────────────────────────
                     kyb_comp = audit_result.get("kyb_completeness", {})
                     if kyb_comp:
-                        st.markdown("#### ✅ KYB Completeness Matrix")
-                        _comp_items = [
-                            ("SOS Verified",       kyb_comp.get("sos_verified"),       "sos_active / sos_match_boolean"),
-                            ("TIN Verified",        kyb_comp.get("tin_verified"),        "tin_match_boolean (Middesk IRS check)"),
-                            ("IDV Completed",       kyb_comp.get("idv_completed"),       "idv_passed_boolean (Plaid biometrics)"),
-                            ("Watchlist Screened",  kyb_comp.get("watchlist_screened"),  "watchlist_hits (Trulioo PSC + Middesk)"),
+                        st.markdown("##### ✅ KYB Verification Chain")
+                        _ci = [
+                            ("SOS Verified",       kyb_comp.get("sos_verified"),       "sos_active · Middesk"),
+                            ("TIN Verified",        kyb_comp.get("tin_verified"),        "tin_match_boolean · IRS"),
+                            ("IDV Completed",       kyb_comp.get("idv_completed"),       "idv_passed_boolean · Plaid"),
+                            ("Watchlist Clear",     kyb_comp.get("watchlist_screened"),  "watchlist_hits = 0"),
                             ("Industry Classified", kyb_comp.get("industry_classified"), "naics_code ≠ 561499"),
                         ]
-                        mc1,mc2,mc3,mc4,mc5 = st.columns(5)
-                        for col, (lbl, ok, src) in zip([mc1,mc2,mc3,mc4,mc5], _comp_items):
-                            with col:
-                                _ic = "#22c55e" if ok else "#ef4444"
-                                _iv = "✅ Pass" if ok else "❌ Fail"
-                                kpi(lbl, _iv, src, _ic)
+                        _cc = st.columns(5)
+                        for _col, (lbl, ok, src) in zip(_cc, _ci):
+                            with _col:
+                                kpi(lbl, "✅ Pass" if ok else "❌ Fail", src,
+                                    "#22c55e" if ok else "#ef4444")
 
                     st.markdown("---")
 
-                    # ── Findings ─────────────────────────────────────────────
+                    # ── Individual findings — each gets detail_panel ─────────
                     findings = audit_result.get("findings", [])
                     if findings:
-                        st.markdown(f"#### 📋 Findings ({len(findings)} total)")
-                        _f_order = {"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"CLEAN":4}
-                        for f_item in sorted(findings, key=lambda x: _f_order.get(x.get("severity",""), 5)):
-                            f_sev   = f_item.get("severity","MEDIUM")
+                        st.markdown(f"##### 📋 AI Analyst Findings ({len(findings)})")
+                        _f_ord = {"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"CLEAN":4}
+                        for fi in sorted(findings, key=lambda x: _f_ord.get(x.get("severity",""),5)):
+                            f_sev   = fi.get("severity","MEDIUM")
                             f_color = {"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b",
                                        "LOW":"#22c55e","CLEAN":"#10b981"}.get(f_sev,"#64748b")
                             f_icon  = SEV_ICON.get(f_sev,"ℹ️")
-                            f_facts = ", ".join(f"`{fn}`" for fn in f_item.get("facts_involved",[]))
-                            f_ext   = f_item.get("external_verification","")
-                            f_ws    = f_item.get("worth_score_impact","")
+                            f_ws    = fi.get("worth_score_impact","")
+                            f_ext   = fi.get("external_verification","")
+                            f_cat   = fi.get("category","")
+                            f_facts_involved = fi.get("facts_involved",[])
+                            _f_facts_code = " · ".join(f"`{fn}`" for fn in f_facts_involved)
 
                             st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {f_color};
-                                border-radius:10px;padding:14px 18px;margin:8px 0">
-                              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
-                                <span style="color:{f_color};font-weight:700;font-size:.88rem">
-                                  {f_icon} [{f_sev}] {f_item.get('title','Finding')}
+                                border-radius:10px;padding:14px 20px;margin:8px 0">
+                              <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:6px">
+                                <span style="color:{f_color};font-weight:800;font-size:.90rem">
+                                  {f_icon} [{f_sev}] {fi.get('title','Finding')}
                                 </span>
-                                <span style="background:{f_color}22;color:{f_color};border-radius:6px;
-                                  padding:2px 10px;font-size:.72rem">{f_item.get('category','')}</span>
+                                <span style="background:{f_color}18;color:{f_color};border-radius:6px;
+                                  padding:2px 8px;font-size:.70rem">{f_cat}</span>
                               </div>
-                              <div style="color:#CBD5E1;font-size:.80rem;margin-top:8px">{f_item.get('description','')}</div>
-                              {f'<div style="color:#94A3B8;font-size:.73rem;margin-top:6px">Facts: {f_facts}</div>' if f_facts else ''}
-                              {f'<div style="color:#60A5FA;font-size:.75rem;margin-top:4px">⚡ Action: {f_item.get("recommended_action","")}</div>' if f_item.get("recommended_action") else ''}
-                              {f'<div style="color:#a78bfa;font-size:.73rem;margin-top:4px">📊 Worth Score Impact: {f_ws}</div>' if f_ws else ''}
-                              {f'<div style="color:#06b6d4;font-size:.73rem;margin-top:4px">🌐 External: {f_ext}</div>' if f_ext else ''}
+                              <div style="color:#CBD5E1;font-size:.80rem;margin-top:8px;line-height:1.5">
+                                {fi.get('description','')}
+                              </div>
+                              {f'<div style="color:#94A3B8;font-size:.73rem;margin-top:6px">Facts: {_f_facts_code}</div>' if f_facts_involved else ''}
+                              {f'<div style="color:#60A5FA;font-size:.76rem;margin-top:6px">⚡ <strong>Action:</strong> {fi.get("recommended_action","")}</div>' if fi.get("recommended_action") else ''}
+                              {f'<div style="color:#a78bfa;font-size:.73rem;margin-top:4px">📊 Worth Score impact: {f_ws}</div>' if f_ws else ''}
+                              {f'<div style="color:#06b6d4;font-size:.73rem;margin-top:4px">🌐 External verification: {f_ext}</div>' if f_ext else ''}
                             </div>""", unsafe_allow_html=True)
 
-                    st.markdown("---")
+                            _fi_json = {"finding": fi.get("title"), "severity": f_sev,
+                                        "category": f_cat, "description": fi.get("description"),
+                                        "facts_involved": f_facts_involved,
+                                        "worth_score_impact": f_ws, "action": fi.get("recommended_action"),
+                                        "external_verification": f_ext}
+                            _fi_sql = (f"-- Verify the facts involved in this finding:\n"
+                                       f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val,\n"
+                                       f"  JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid,\n"
+                                       f"  JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS conf\n"
+                                       f"FROM rds_warehouse_public.facts\n"
+                                       f"WHERE business_id='{bid}'\n"
+                                       f"  AND name IN ({', '.join(repr(fn) for fn in f_facts_involved)});")
+                            detail_panel(
+                                f"{f_icon} AI Finding: {fi.get('title','')}", f"{f_sev} · {f_cat}",
+                                what_it_means=(
+                                    f"{fi.get('description','')}\n\n"
+                                    f"**Action:** {fi.get('recommended_action','')}\n\n"
+                                    f"**Worth Score impact:** {f_ws or 'Not assessed'}\n\n"
+                                    f"**External verification:** {f_ext or 'None suggested'}"
+                                ),
+                                source_table="rds_warehouse_public.facts",
+                                source_file="check_agent_v2.py",
+                                source_file_line="run_llm_audit() → GPT-4o-mini finding",
+                                json_obj=_fi_json,
+                                sql=_fi_sql,
+                                links=[("facts/kyb/index.ts","Fact Engine"),
+                                       ("worth_score_model.py","Worth Score model")],
+                                color=f_color, icon=f_icon,
+                            )
 
-                    # ── Next Steps ───────────────────────────────────────────
+                    # ── Next steps ───────────────────────────────────────────
                     steps = audit_result.get("recommended_next_steps",[])
                     if steps:
-                        st.markdown("#### 🗺️ Recommended Next Steps")
+                        st.markdown("---")
+                        st.markdown("##### 🗺️ Recommended Next Steps (Priority Order)")
                         for i, step in enumerate(steps, 1):
-                            _s_color = "#ef4444" if i==1 else "#f59e0b" if i==2 else "#3B82F6"
+                            _sc = "#ef4444" if i==1 else "#f97316" if i==2 else "#f59e0b" if i<=4 else "#3B82F6"
                             st.markdown(
-                                f"""<div style="background:#1E293B;border-left:3px solid {_s_color};
-                                    border-radius:8px;padding:10px 14px;margin:4px 0">
-                                  <span style="color:{_s_color};font-weight:700;font-size:.80rem">Step {i}</span>
-                                  <span style="color:#CBD5E1;font-size:.80rem;margin-left:8px">{step}</span>
+                                f"""<div style="background:#1E293B;border-left:3px solid {_sc};
+                                    border-radius:8px;padding:10px 16px;margin:4px 0;
+                                    display:flex;align-items:flex-start;gap:10px">
+                                  <span style="color:{_sc};font-weight:800;font-size:.82rem;min-width:55px">Step {i}</span>
+                                  <span style="color:#CBD5E1;font-size:.80rem">{step}</span>
                                 </div>""",
                                 unsafe_allow_html=True
                             )
 
-                    # ── detail_panel for the full audit JSON ─────────────────
+                    # ── Full JSON lineage ────────────────────────────────────
                     detail_panel(
-                        "🧠 Full AI Audit Response (JSON)", f"Overall: {_oa_risk} · DQ: {_dq_score}/100",
+                        "🧠 Full AI Analyst Report (JSON)", f"Risk: {_oa_risk} · DQ: {_dq_score}/100",
                         what_it_means=(
-                            "The complete structured JSON response from the GPT-4o-mini deep audit. "
-                            "Includes overall_risk, data_quality_score, kyb_completeness matrix, "
-                            "all findings with severity/category/facts/worth_score_impact, "
-                            "recommended_next_steps, and underwriting_decision_guidance."
+                            "The complete structured JSON from GPT-4o-mini's analyst audit. "
+                            "Contains: overall_risk, data_quality_score, kyb_completeness matrix (5 signals), "
+                            "all findings with severity/category/worth_score_impact/external_verification, "
+                            "recommended_next_steps (priority ordered), and underwriting_decision_guidance."
                         ),
-                        source_table="Generated by GPT-4o-mini via check_agent_v2.run_llm_audit()",
+                        source_table="Generated by GPT-4o-mini · check_agent_v2.run_llm_audit()",
                         source_file="check_agent_v2.py",
-                        source_file_line="run_llm_audit() → AUDIT_SYSTEM_PROMPT",
+                        source_file_line="run_llm_audit() → AUDIT_SYSTEM_PROMPT → gpt-4o-mini",
                         json_obj=audit_result,
-                        sql=f"-- Fact profile query for manual inspection:\nSELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val, "
-                            f"JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid\n"
-                            f"FROM rds_warehouse_public.facts\nWHERE business_id='{bid}'\nORDER BY name;",
+                        sql=(f"-- Full fact profile for manual analyst inspection:\n"
+                             f"SELECT name,\n"
+                             f"  JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,\n"
+                             f"  JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS winning_pid,\n"
+                             f"  JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence,\n"
+                             f"  JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name') AS rule_applied\n"
+                             f"FROM rds_warehouse_public.facts\n"
+                             f"WHERE business_id='{bid}'\n"
+                             f"ORDER BY name;"),
                         links=[("facts/kyb/index.ts","Fact Engine"),
-                               ("worth_score_model.py","Worth Score model")],
+                               ("worth_score_model.py","Worth Score model"),
+                               ("aiscore.py","Score pipeline")],
                         color=_oa_color, icon="🧠",
                     )
 
