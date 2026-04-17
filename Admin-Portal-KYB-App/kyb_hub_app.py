@@ -1494,10 +1494,57 @@ TABLES THAT DO NOT EXIST — NEVER USE:
   Any column named: updated_at (in rel_business_customer_monitoring), fact_name,
   winning_value, winning_source, winning_confidence, rule_applied, is_winning, alternatives
 
+VERIFIED KYB FACT NAMES (use ONLY these exact strings in name = '...' clauses):
+ADDRESS facts: addresses, addresses_submitted, addresses_found, addresses_deliverable,
+  primary_address, address_match, address_match_boolean, address_verification,
+  address_verification_boolean, address_registered_agent
+  IMPORTANT: There is NO fact named 'business_address', 'business_address_city',
+  'business_address_state', 'business_address_postal_code', 'business_address_country'.
+  Address data is stored in the 'addresses' and 'primary_address' facts as JSON objects.
+
+NAME facts: business_name, legal_name, names_found, names_submitted, dba_found
+IDENTITY facts: sos_active, sos_match, sos_match_boolean, sos_filings, formation_state,
+  formation_date, middesk_confidence, middesk_id, tin, tin_submitted, tin_match,
+  tin_match_boolean, is_sole_prop
+IDV facts: idv_status, idv_passed, idv_passed_boolean
+CLASSIFICATION facts: naics_code, mcc_code, naics_description, mcc_description, industry,
+  revenue, num_employees
+RISK facts: watchlist, watchlist_hits, watchlist_raw, adverse_media_hits, sanctions_hits,
+  pep_hits, num_bankruptcies, num_judgements, num_liens
+CONTACT facts: business_phone, phone_found, email, website, website_found, serp_id
+OTHER facts: kyb_submitted, kyb_complete, compliance_status, risk_score, screened_people,
+  people, countries, corporation, year_established
+
+ANSWERING QUESTIONS — CRITICAL BEHAVIOR:
+When a user asks a question, you MUST:
+1. Write SQL using the VERIFIED fact names above (NOT invented names like business_address_city)
+2. The system executes your SQL automatically and returns REAL data
+3. After the data arrives, INTERPRET the results and DIRECTLY ANSWER the question
+4. Explain WHAT the data means for the user's question, not just show the SQL
+
+EXAMPLE: For "why is the OpenCorporates address different?"
+→ Write SQL for 'addresses' fact (not 'business_address')
+→ Then explain: OC (pid=23) vs Middesk (pid=16) may have matched different registry records,
+  alternative sources[] array shows all vendor values with their confidence scores,
+  the winning address may have lower match rank than what OC shows on their website.
+
 EXAMPLE CORRECT SQL PATTERNS:
 
+-- Get address data for a business (CORRECT fact names):
+SELECT name,
+       JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,
+       JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS winning_pid,
+       JSON_EXTRACT_PATH_TEXT(value,'source','confidence')  AS confidence,
+       JSON_EXTRACT_PATH_TEXT(value,'alternatives')         AS alternatives,
+       received_at
+FROM rds_warehouse_public.facts
+WHERE business_id = '{business_id}'
+  AND name IN ('addresses','addresses_submitted','addresses_found','primary_address',
+               'address_verification','address_match_boolean')
+ORDER BY name;
+
 -- Check if a business was submitted by a user (kyb_submitted fact):
-SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS kyb_submitted, received_at
+SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS kyb_submitted, received_at
 FROM rds_warehouse_public.facts
 WHERE business_id = '{business_id}' AND name = 'kyb_submitted';
 
@@ -1518,6 +1565,15 @@ SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, bs.created_at
 FROM rds_manual_score_public.data_current_scores cs
 JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
 WHERE cs.business_id = '{business_id}' ORDER BY bs.created_at DESC LIMIT 1;
+
+-- Get SOS/registry data:
+SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,
+       JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid,
+       JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence
+FROM rds_warehouse_public.facts
+WHERE business_id = '{business_id}'
+  AND name IN ('sos_active','sos_match','sos_match_boolean','formation_state','middesk_confidence')
+ORDER BY name;
 """
 
 # ── Universal detail panel ────────────────────────────────────────────────────
@@ -2161,6 +2217,43 @@ def ask_ai(question, context="", history=None, auto_execute=True):
 
             if executed_results:
                 answer += "\n\n---\n**🔬 Live Results from Redshift:**" + "".join(executed_results)
+
+                # ── Ask AI to interpret the results and answer the original question ──
+                # Collect actual data rows from successful queries
+                _data_for_interpretation = []
+                for i, sql in enumerate(sql_blocks[:3]):
+                    df_check, _, _, _ = _execute_sql_with_retry(sql)
+                    if df_check is not None and not df_check.empty:
+                        _data_for_interpretation.append(
+                            f"Query {i+1} results ({len(df_check)} rows):\n"
+                            + df_check.head(15).to_string(index=False)
+                        )
+
+                if _data_for_interpretation:
+                    try:
+                        _interp_prompt = (
+                            f"The user asked: \"{question}\"\n\n"
+                            f"You queried Redshift and got these REAL results:\n\n"
+                            + "\n\n".join(_data_for_interpretation)
+                            + "\n\nNow DIRECTLY ANSWER the user's question based on this data. "
+                            f"Be specific — reference actual values from the results. "
+                            f"Explain what the data means for their question. "
+                            f"If they asked about discrepancies, explain WHY (e.g. Middesk vs OC different search methods, "
+                            f"confidence scores, when data was last updated, alternatives[] showing other vendor values). "
+                            f"Do NOT just describe the SQL — answer the question."
+                        )
+                        _interp_r = get_openai().chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=[
+                                {"role":"system","content":SYSTEM},
+                                {"role":"user","content":_interp_prompt}
+                            ],
+                            max_tokens=800, temperature=0.3
+                        )
+                        _interpretation = _interp_r.choices[0].message.content
+                        answer += f"\n\n---\n**💡 Answer to your question:**\n\n{_interpretation}"
+                    except Exception:
+                        pass  # interpretation is best-effort — don't fail if it errors
 
         # ── Source citations ──────────────────────────────────────────────────
         if chunks:
