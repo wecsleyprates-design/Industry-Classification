@@ -1427,83 +1427,88 @@ def get_openai():
         return None
 
 SYSTEM="""You are the KYB Intelligence Hub AI — expert on Worth AI's KYB data pipeline.
+You have direct access to execute SQL against the Redshift database and WILL run queries to verify your answers.
 
 CRITICAL RULES — NEVER VIOLATE:
-1. ONLY reference tables and schemas that ACTUALLY EXIST in the database (listed below).
-   NEVER invent, guess, or hallucinate table names, schema names, column names, or fact names.
-   If a table does not appear in the verified list below, say "I don't have verified schema info for that — use the SQL Runner to explore."
-2. Always provide working SQL using ONLY the verified schemas below.
-3. Redshift SQL: use JSON_EXTRACT_PATH_TEXT(col, 'key'), NEVER use ->> or ::json (fails on federation).
-4. Always cite the exact source file, table, fact name, and API endpoint.
-5. Platform IDs (INTEGRATION_ID enum from integrations.constant.ts):
+1. ONLY reference tables, schemas, and columns that ACTUALLY EXIST (verified list below).
+   NEVER invent, guess, or hallucinate anything. If unsure, say so explicitly.
+2. When asked about a specific business_id: ALWAYS generate and execute SQL to get real results.
+   Include the actual query results in your answer, not just the SQL.
+3. Redshift SQL: use JSON_EXTRACT_PATH_TEXT(col, 'key'). NEVER use ->> or ::json (fails on federation).
+4. Always cite exact source file, table, column name, and API endpoint.
+5. Platform IDs (integrations.constant.ts INTEGRATION_ID enum):
    16=Middesk · 23=OpenCorporates · 24=ZoomInfo · 17=Equifax · 38=Trulioo · 31=AI(GPT) ·
    22=SERP · 40=Plaid/KYX · 18=Plaid IDV · 0=Applicant · -1=System/Dependent
 
-VERIFIED REDSHIFT SCHEMAS AND TABLES (these ACTUALLY EXIST — use ONLY these):
+VERIFIED REDSHIFT SCHEMAS, TABLES, AND COLUMNS (use ONLY these — column names are exact):
 
--- PRIMARY KYB DATA SOURCE:
-rds_warehouse_public.facts
-  Columns: business_id (VARCHAR), name (VARCHAR), value (VARCHAR/JSON), received_at (TIMESTAMP)
-  Note: value contains the full JSON fact object. Use JSON_EXTRACT_PATH_TEXT to extract fields.
-  Key fields inside value JSON:
-    JSON_EXTRACT_PATH_TEXT(value, 'value')                  → the actual fact value
-    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId')   → winning vendor ID
-    JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence')   → confidence score
-    JSON_EXTRACT_PATH_TEXT(value, 'ruleApplied', 'name')    → Fact Engine rule
-    JSON_EXTRACT_PATH_TEXT(value, 'alternatives')           → JSON array of losing vendors
-  CRITICAL: There is NO separate columns for source, confidence, rule_applied, alternatives, is_winning.
-  Everything is inside the 'value' JSON column. DO NOT reference non-existent columns.
-
--- ONBOARDING DATE SOURCE (use for date filtering — NOT facts.received_at):
 rds_cases_public.rel_business_customer_monitoring
-  Columns: business_id, customer_id, created_at (true onboarding date), updated_at
+  COLUMNS (exact): business_id, customer_id, created_at
+  NOTE: There is NO 'updated_at' column. Only these 3 columns exist.
+  USE FOR: onboarding date (created_at), linking business → customer
 
--- WORTH SCORE:
+rds_warehouse_public.facts
+  COLUMNS (exact): business_id, name, value, received_at
+  NOTE: value is a JSON string. Use JSON_EXTRACT_PATH_TEXT() — NEVER ->> or ::json.
+  JSON structure inside value:
+    JSON_EXTRACT_PATH_TEXT(value, 'value')                → actual fact value
+    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') → winning vendor ID
+    JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') → confidence score
+    JSON_EXTRACT_PATH_TEXT(value, 'source', 'name')       → vendor name string
+    JSON_EXTRACT_PATH_TEXT(value, 'ruleApplied', 'name')  → Fact Engine rule
+  NO separate columns for: source, confidence, rule_applied, alternatives, is_winning.
+
 rds_manual_score_public.data_current_scores
-  Columns: business_id, score_id
+  COLUMNS (exact): business_id, score_id
+
 rds_manual_score_public.business_scores
-  Columns: id (= score_id), weighted_score_850, weighted_score_100, risk_level, score_decision, created_at
+  COLUMNS (exact): id, weighted_score_850, weighted_score_100, risk_level, score_decision, created_at
+  JOIN: JOIN business_scores bs ON bs.id = cs.score_id
+
 rds_manual_score_public.business_score_factors
-  Columns: score_id, category_id, score_100, weighted_score_850
+  COLUMNS (exact): score_id, category_id, score_100, weighted_score_850
 
--- WATCHLIST / BERT:
 rds_integration_data.business_entity_review_task
-  Columns: id, business_entity_verification_id, key, status, sublabel, created_at, metadata (JSONB)
+  COLUMNS (exact): id, business_entity_verification_id, key, status, sublabel, created_at, metadata
+
 rds_integration_data.business_entity_verification
-  Columns: id, business_id, created_at, updated_at
+  COLUMNS (exact): id, business_id, created_at
 
--- CUSTOMER TABLE (aggregated):
 clients.customer_table
-  Columns: business_id, customer_id, worth_score, watchlist_count, watchlist_verification, etc.
+  COLUMNS (partial, confirmed): business_id, customer_id, worth_score, watchlist_count, watchlist_verification
 
--- WORTH SCORE AUDIT:
 warehouse.worth_score_input_audit
-  Columns: score_date, fill_* columns (fill rate per feature)
+  COLUMNS: score_date, plus fill_{feature_name} columns
 
--- LARGE FACTS (too large for Redshift federation — query PostgreSQL RDS port 5432 instead):
-  Fact names: sos_filings, watchlist, watchlist_raw, bankruptcies, judgements, liens, people, addresses
-  Use: SELECT value->'value' FROM rds_warehouse_public.facts WHERE business_id='...' AND name='sos_filings';
-  (JSONB operators work on PostgreSQL RDS, not on Redshift federation)
+TABLES THAT DO NOT EXIST — NEVER USE:
+  integration_data.kyb_facts · rds_warehouse_public.kyb_facts
+  Any column named: updated_at (in rel_business_customer_monitoring), fact_name,
+  winning_value, winning_source, winning_confidence, rule_applied, is_winning, alternatives
 
-TABLES THAT DO NOT EXIST (never reference these):
-  - integration_data.kyb_facts  (DOES NOT EXIST — hallucinated schema)
-  - rds_warehouse_public.kyb_facts  (DOES NOT EXIST)
-  - Any table with columns: fact_name, winning_value, winning_source, winning_confidence, rule_applied, is_winning, alternatives (as separate columns — they do not exist, everything is in value JSON)
+EXAMPLE CORRECT SQL PATTERNS:
 
-CORRECT SQL PATTERN for all KYB facts with source lineage:
-SELECT
-    name                                                          AS fact_name,
-    JSON_EXTRACT_PATH_TEXT(value, 'value')                        AS fact_value,
-    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId')         AS winning_pid,
-    JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence')         AS confidence,
-    JSON_EXTRACT_PATH_TEXT(value, 'source', 'name')               AS vendor_name,
-    JSON_EXTRACT_PATH_TEXT(value, 'ruleApplied', 'name')          AS rule_applied,
-    received_at
+-- Check if a business was submitted by a user (kyb_submitted fact):
+SELECT JSON_EXTRACT_PATH_TEXT(value, 'value') AS kyb_submitted, received_at
 FROM rds_warehouse_public.facts
-WHERE business_id = '{{business_id}}'
-ORDER BY name;
--- Note: alternatives[] are nested inside value JSON, not a separate column.
--- To see alternatives: JSON_EXTRACT_PATH_TEXT(value, 'alternatives')
+WHERE business_id = '{business_id}' AND name = 'kyb_submitted';
+
+-- Get business onboarding info:
+SELECT business_id, customer_id, created_at AS onboarded_at
+FROM rds_cases_public.rel_business_customer_monitoring
+WHERE business_id = '{business_id}';
+
+-- Get all KYB facts for a business:
+SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,
+       JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS winning_pid,
+       JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence,
+       received_at
+FROM rds_warehouse_public.facts WHERE business_id = '{business_id}' ORDER BY name;
+
+-- Get Worth Score:
+SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, bs.created_at
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+WHERE cs.business_id = '{business_id}' ORDER BY bs.created_at DESC LIMIT 1;
 """
 
 # ── Universal detail panel ────────────────────────────────────────────────────
@@ -1628,7 +1633,85 @@ def detail_panel(
             st.code(_py, language="python")
 
 
-def ask_ai(question, context="", history=None):
+def _extract_sql_from_answer(text: str) -> list:
+    """Extract all SQL code blocks from an AI answer."""
+    import re
+    # Match ```sql ... ``` blocks
+    blocks = re.findall(r"```sql\s*(.*?)```", text, re.DOTALL | re.IGNORECASE)
+    # Also match bare SELECT/WITH statements if no code block
+    if not blocks:
+        lines = text.split("\n")
+        current = []
+        for line in lines:
+            stripped = line.strip().upper()
+            if stripped.startswith(("SELECT","WITH","INSERT","UPDATE")):
+                current = [line]
+            elif current and (line.strip() or stripped.startswith(("FROM","WHERE","JOIN","GROUP","ORDER","LIMIT","AND","OR","HAVING"))):
+                current.append(line)
+            elif current and line.strip() == "":
+                if len(current) > 1:
+                    blocks.append("\n".join(current))
+                current = []
+        if len(current) > 1:
+            blocks.append("\n".join(current))
+    return [b.strip() for b in blocks if b.strip()]
+
+def _execute_sql_with_retry(sql: str, max_attempts: int = 3) -> tuple:
+    """Execute SQL and return (df, error, sql_used).
+    On error, tries to auto-fix common schema mistakes."""
+    SCHEMA_FIXES = [
+        # updated_at doesn't exist in rel_business_customer_monitoring
+        ("rel_business_customer_monitoring", "updated_at", None,
+         "Column updated_at removed — it does not exist in rel_business_customer_monitoring (only: business_id, customer_id, created_at)"),
+        # common hallucinated columns
+        ("facts", "rule_applied", "JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name')",
+         "rule_applied column replaced with JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name')"),
+        ("facts", "source_confidence", "JSON_EXTRACT_PATH_TEXT(value,'source','confidence')",
+         "source_confidence replaced with JSON_EXTRACT_PATH_TEXT(value,'source','confidence')"),
+        ("facts", "fact_value", "JSON_EXTRACT_PATH_TEXT(value,'value')",
+         "fact_value replaced with JSON_EXTRACT_PATH_TEXT(value,'value')"),
+        ("facts", "winning_source", "JSON_EXTRACT_PATH_TEXT(value,'source','platformId')",
+         "winning_source replaced with JSON_EXTRACT_PATH_TEXT(value,'source','platformId')"),
+        ("facts", "is_winning", None,
+         "is_winning column removed — it does not exist (there is no separate is_winning column in facts)"),
+    ]
+    current_sql = sql
+    fixes_applied = []
+    for attempt in range(max_attempts):
+        df, err = run_sql(current_sql)
+        if df is not None:
+            return df, None, current_sql, fixes_applied
+        if err is None:
+            return None, "Unknown error", current_sql, fixes_applied
+        # Try to auto-fix based on the error message
+        fixed = False
+        err_lower = err.lower()
+        for _table, bad_col, replacement, fix_note in SCHEMA_FIXES:
+            if bad_col in err_lower or f'"{bad_col}"' in err_lower:
+                if replacement:
+                    import re
+                    # Replace column references
+                    current_sql = re.sub(
+                        rf'\b{re.escape(bad_col)}\b',
+                        replacement, current_sql, flags=re.IGNORECASE
+                    )
+                else:
+                    # Remove the column from SELECT (simple: remove the line containing it)
+                    lines = current_sql.split("\n")
+                    current_sql = "\n".join(
+                        l for l in lines
+                        if bad_col.lower() not in l.lower()
+                    )
+                fixes_applied.append(fix_note)
+                fixed = True
+                break
+        if not fixed:
+            return None, err, current_sql, fixes_applied
+    return None, err, current_sql, fixes_applied
+
+def ask_ai(question, context="", history=None, auto_execute=True):
+    """Ask the AI. If auto_execute=True, automatically runs any SQL in the answer
+    and appends the real results — validating and self-correcting as needed."""
     client=get_openai()
     if not client: return "⚠️ Set OPENAI_API_KEY env var to enable AI responses."
     chunks=rag_search(question,top_k=6)
@@ -1749,11 +1832,41 @@ def ask_ai(question, context="", history=None):
         return folder or ""
 
     try:
-        r=get_openai().chat.completions.create(model="gpt-4o-mini",messages=msgs,max_tokens=1200,temperature=0.2)
+        r=get_openai().chat.completions.create(model="gpt-4o-mini",messages=msgs,max_tokens=1500,temperature=0.2)
         answer = r.choices[0].message.content
-        # Append source citations with clickable GitHub links
+
+        # ── Auto-execute SQL blocks and append real results ───────────────────
+        if auto_execute:
+            sql_blocks = _extract_sql_from_answer(answer)
+            executed_results = []
+            for i, sql in enumerate(sql_blocks[:3]):  # max 3 queries per answer
+                df, err, used_sql, fixes = _execute_sql_with_retry(sql)
+                block_label = f"Query {i+1}" if len(sql_blocks) > 1 else "Query"
+                if df is not None and not df.empty:
+                    rows_md = df.head(20).to_markdown(index=False) if hasattr(df,"to_markdown") else df.head(20).to_string(index=False)
+                    fix_note = ("\n\n  ⚠️ Auto-corrected: " + " · ".join(fixes)) if fixes else ""
+                    executed_results.append(
+                        f"\n\n**✅ {block_label} executed against Redshift — {len(df):,} row(s) returned:**{fix_note}\n\n"
+                        f"```\n{rows_md}\n```"
+                        + (f"\n\n*(Showing first 20 of {len(df):,} rows)*" if len(df) > 20 else "")
+                    )
+                    if used_sql != sql:
+                        executed_results.append(
+                            f"\n\n**🔧 Corrected SQL (original had schema errors):**\n```sql\n{used_sql}\n```"
+                        )
+                elif df is not None and df.empty:
+                    executed_results.append(f"\n\n**ℹ️ {block_label} executed — 0 rows returned** (no data found for this query)")
+                elif err:
+                    fix_note = (" Auto-fix attempted but failed: " + " · ".join(fixes)) if fixes else ""
+                    executed_results.append(
+                        f"\n\n**❌ {block_label} failed:** `{err[:200]}`{fix_note}\n"
+                        f"⚠️ This column or table may not exist. Please use the SQL Runner to investigate."
+                    )
+            if executed_results:
+                answer += "\n\n---\n**🔬 Live Results from Redshift:**" + "".join(executed_results)
+
+        # ── Source citations ──────────────────────────────────────────────────
         if chunks:
-            # Deduplicate by (source_type, path)
             seen = set()
             unique_chunks = []
             for c in chunks:
@@ -1769,17 +1882,12 @@ def ask_ai(question, context="", history=None):
                 desc = c.get("description","")[:90]
                 line_start = c.get("line_start")
                 url = _chunk_github_url(c)
-                # Build display label
                 display_file = path_val or src_type.lower().replace("_"," ").title()
                 line_ref = f" L{line_start}" if line_start else ""
                 if url:
-                    cited_lines.append(
-                        f"- [`{src_type}`]({url}) · **{display_file}{line_ref}** — {desc}"
-                    )
+                    cited_lines.append(f"- [`{src_type}`]({url}) · **{display_file}{line_ref}** — {desc}")
                 else:
-                    cited_lines.append(
-                        f"- `{src_type}` · **{display_file}{line_ref}** — {desc}"
-                    )
+                    cited_lines.append(f"- `{src_type}` · **{display_file}{line_ref}** — {desc}")
 
             answer += "\n\n---\n**📁 Sources used for this answer** *(click to open in GitHub)*:\n"
             answer += "\n".join(cited_lines)
