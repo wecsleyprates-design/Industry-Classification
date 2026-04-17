@@ -4682,60 +4682,54 @@ Authorization: Bearer <token>
         # KPI row with detail panels
         _dom_sql = f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS formation_state FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='formation_state';"
         _op_sql  = f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','state') AS operating_state FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='primary_address';"
+        _match_color = "#f59e0b" if states_differ else ("#22c55e" if form_state_up else "#64748b")
+        _th_val = "YES — " + form_state_up if is_th else "No"
+
+        # KPI cards only — no expanders inside columns
         c1,c2,c3,c4 = st.columns(4)
-        with c1:
-            kpi("Formation State (domestic)",form_state or "⚠️ Unknown","Where entity was incorporated","#3B82F6")
-            detail_panel("Formation State",form_state or "Unknown",
-                what_it_means="The US state where this entity was legally incorporated (domestic state). Middesk (pid=16) is the primary source. If different from operating state, entity likely has BOTH domestic and foreign filings.",
-                source_table="rds_warehouse_public.facts · name='formation_state'",
-                source_file="facts/kyb/index.ts", source_file_line="formationState · factWithHighestConfidence rule",
-                api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.formation_state",
-                json_obj={"name":"formation_state","value":form_state or None,"source":{"platformId":16,"name":"middesk","confidence":mdsk_conf},"ruleApplied":{"name":"factWithHighestConfidence"}},
-                sql=_dom_sql,
-                links=[("facts/kyb/index.ts","formation_state fact"),("integrations.constant.ts","INTEGRATION_ID.MIDDESK=16")],
-                color="#3B82F6",icon="🗺️")
-        with c2:
-            kpi("Operating State",op_state or "⚠️ Unknown","primary_address.state","#3B82F6")
-            detail_panel("Operating State",op_state or "Unknown",
-                what_it_means="The state where the business operates, derived from primary_address.state. This is the state Middesk searches by default, which may find the FOREIGN filing instead of the DOMESTIC one.",
-                source_table="rds_warehouse_public.facts · name='primary_address' → value.state",
-                source_file="facts/kyb/index.ts", source_file_line="primaryAddress · dependent from addresses[]",
-                api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.primary_address.value.state",
-                json_obj={"name":"primary_address","value":{"state":op_state or None},"source":{"platformId":-1,"name":"dependent"},"dependencies":["addresses"]},
-                sql=_op_sql,
-                links=[("facts/kyb/index.ts","primary_address fact"),("middesk","Middesk SOS search uses this address")],
-                color="#3B82F6",icon="📍")
+        with c1: kpi("Formation State (domestic)",form_state or "⚠️ Unknown","Where entity was incorporated","#3B82F6")
+        with c2: kpi("Operating State",op_state or "⚠️ Unknown","primary_address.state","#3B82F6")
         with c3:
-            if states_differ:
-                kpi("State Match","❌ Different",f"{form_state_up} ≠ {op_state} — foreign qual. likely","#f59e0b")
-                _match_color="#f59e0b"
-            elif form_state_up:
-                kpi("State Match","✅ Same state","No foreign qualification needed","#22c55e")
-                _match_color="#22c55e"
-            else:
-                kpi("State Match","⚠️ Unknown","formation_state missing","#64748b")
-                _match_color="#64748b"
-            detail_panel("State Match","Different" if states_differ else ("Same" if form_state_up else "Unknown"),
-                what_it_means=("formation_state ≠ operating_state. Business almost certainly has: (1) Domestic filing in " + form_state_up + ", (2) Foreign qualification in " + op_state + ". Middesk address search finds the FOREIGN record, potentially missing the DOMESTIC primary." if states_differ else ("Same state = entity incorporated and operating in the same state. Middesk address search will find the correct domestic record." if form_state_up else "Formation state unknown — cannot assess domestic vs foreign risk.")),
-                source_table="Computed from formation_state vs primary_address.state (both from rds_warehouse_public.facts)",
-                source_file="facts/businessDetails/index.ts", source_file_line="Proxy analysis — not a stored fact",
-                json_obj={"formation_state":form_state_up or None,"operating_state":op_state or None,"states_match":not states_differ,"entity_resolution_gap_risk":states_differ},
-                sql=f"-- Compare both states:\nSELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS formation_state FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='formation_state';\n-- vs:\n{_op_sql}",
-                links=[("facts/kyb/index.ts","sos_match_boolean — affected by entity resolution gap")],
-                color=_match_color,icon="🔍")
+            if states_differ: kpi("State Match","❌ Different",f"{form_state_up} ≠ {op_state} — foreign qual. likely","#f59e0b")
+            elif form_state_up: kpi("State Match","✅ Same state","No foreign qualification needed","#22c55e")
+            else: kpi("State Match","⚠️ Unknown","formation_state missing","#64748b")
         with c4:
-            _th_val = "YES — " + form_state_up if is_th else "No"
-            kpi("Tax Haven?","⚠️ " + _th_val if is_th else "✅ " + _th_val,
+            kpi("Tax Haven?","⚠️ "+_th_val if is_th else "✅ "+_th_val,
                 "DE/NV/WY/SD/MT/NM = entity resolution gap risk" if is_th else "Low entity resolution risk",
                 "#f59e0b" if is_th else "#22c55e")
-            detail_panel("Tax Haven State","YES" if is_th else "No",
-                what_it_means=("DE/NV/WY/SD/MT/NM are preferred for incorporation due to: no state income tax (DE,NV,WY), flexible corporate law (DE Court of Chancery), LLC privacy (WY). Businesses incorporate here but operate elsewhere, creating the entity resolution gap. Middesk searches by operating address → finds foreign qualification → misses domestic filing." if is_th else "Formation state " + (form_state_up or "?") + " is not a tax-haven state. Lower probability of entity resolution gap from state mismatch."),
-                source_table="Derived from formation_state value — no separate fact stored",
-                source_file="facts/kyb/index.ts", source_file_line="formation_state fact · Middesk pid=16",
-                json_obj={"formation_state":form_state_up or None,"is_tax_haven_state":is_th,"tax_haven_states":["DE","NV","WY","SD","MT","NM"]},
-                sql=_dom_sql,
-                links=[("facts/kyb/index.ts","formation_state"),("middesk","Middesk SOS search implementation")],
-                color="#f59e0b" if is_th else "#22c55e",icon="⚠️" if is_th else "✅")
+
+        # Detail panels — sequential full-width (no overlap)
+        detail_panel("🗺️ Formation State",form_state or "Unknown",
+            what_it_means="The US state where this entity was legally incorporated (domestic state). Middesk (pid=16) is the primary source. If different from operating state, entity likely has BOTH domestic and foreign filings.",
+            source_table="rds_warehouse_public.facts · name='formation_state'",
+            source_file="facts/kyb/index.ts", source_file_line="formationState · factWithHighestConfidence rule",
+            api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.formation_state",
+            json_obj={"name":"formation_state","value":form_state or None,"source":{"platformId":16,"name":"middesk","confidence":mdsk_conf},"ruleApplied":{"name":"factWithHighestConfidence"}},
+            sql=_dom_sql, links=[("facts/kyb/index.ts","formation_state fact"),("integrations.constant.ts","INTEGRATION_ID.MIDDESK=16")],
+            color="#3B82F6", icon="🗺️")
+        detail_panel("📍 Operating State",op_state or "Unknown",
+            what_it_means="The state where the business operates, derived from primary_address.state. This is the state Middesk searches by default, which may find the FOREIGN filing instead of the DOMESTIC one.",
+            source_table="rds_warehouse_public.facts · name='primary_address' → value.state",
+            source_file="facts/kyb/index.ts", source_file_line="primaryAddress · dependent from addresses[]",
+            api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.primary_address.value.state",
+            json_obj={"name":"primary_address","value":{"state":op_state or None},"source":{"platformId":-1,"name":"dependent"},"dependencies":["addresses"]},
+            sql=_op_sql, links=[("facts/kyb/index.ts","primary_address fact"),("middesk","Middesk SOS search uses this address")],
+            color="#3B82F6", icon="📍")
+        detail_panel("🔍 State Match","Different" if states_differ else ("Same" if form_state_up else "Unknown"),
+            what_it_means=("formation_state ≠ operating_state. Business almost certainly has: (1) Domestic filing in " + form_state_up + ", (2) Foreign qualification in " + op_state + ". Middesk address search finds the FOREIGN record, potentially missing the DOMESTIC primary." if states_differ else ("Same state = entity incorporated and operating in the same state. Middesk address search will find the correct domestic record." if form_state_up else "Formation state unknown — cannot assess domestic vs foreign risk.")),
+            source_table="Computed from formation_state vs primary_address.state (both from rds_warehouse_public.facts)",
+            source_file="facts/businessDetails/index.ts", source_file_line="Proxy analysis — not a stored fact",
+            json_obj={"formation_state":form_state_up or None,"operating_state":op_state or None,"states_match":not states_differ,"entity_resolution_gap_risk":states_differ},
+            sql=f"-- Compare both states:\nSELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS formation_state FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='formation_state';\n-- vs:\n{_op_sql}",
+            links=[("facts/kyb/index.ts","sos_match_boolean — affected by entity resolution gap")],
+            color=_match_color, icon="🔍")
+        detail_panel("⚠️ Tax Haven State","YES" if is_th else "No",
+            what_it_means=("DE/NV/WY/SD/MT/NM are preferred for incorporation due to: no state income tax (DE,NV,WY), flexible corporate law (DE Court of Chancery), LLC privacy (WY). Businesses incorporate here but operate elsewhere, creating the entity resolution gap. Middesk searches by operating address → finds foreign qualification → misses domestic filing." if is_th else "Formation state " + (form_state_up or "?") + " is not a tax-haven state. Lower probability of entity resolution gap from state mismatch."),
+            source_table="Derived from formation_state value — no separate fact stored",
+            source_file="facts/kyb/index.ts", source_file_line="formation_state fact · Middesk pid=16",
+            json_obj={"formation_state":form_state_up or None,"is_tax_haven_state":is_th,"tax_haven_states":["DE","NV","WY","SD","MT","NM"]},
+            sql=_dom_sql, links=[("facts/kyb/index.ts","formation_state"),("middesk","Middesk SOS search implementation")],
+            color="#f59e0b" if is_th else "#22c55e", icon="⚠️" if is_th else "✅")
 
         if is_th:
             flag(f"🚨 **ENTITY RESOLUTION GAP RISK:** This business is incorporated in **{form_state_up}** "
@@ -5002,57 +4996,50 @@ LIMIT 100;""", language="sql")
 
         render_lineage(facts,["tin","tin_submitted","tin_match","tin_match_boolean"])
 
-        # KPI row with detail panels
+        # KPI cards only — detail panels below (sequential, no overlap)
         tin_submitted_val=str(gv(facts,"tin_submitted") or "")
         _tin_sql_base = f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val, JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name IN ('tin','tin_submitted','tin_match','tin_match_boolean') ORDER BY name;"
         c1,c2,c3,c4=st.columns(4)
-        with c1:
-            kpi("EIN Submitted","✅ Yes" if tin_submitted_val else "❌ No",
-                f"Masked: {tin_submitted_val[:9]}" if tin_submitted_val else "tin_submitted fact","#22c55e" if tin_submitted_val else "#ef4444")
-            detail_panel("EIN Submitted", tin_submitted_val or "Not submitted",
-                what_it_means="tin_submitted stores the masked EIN (XXXXX1234) for display. The unmasked version is in the 'tin' fact. Both are sourced from the Applicant (pid=0, confidence=1.0 by convention). The IRS TIN check CANNOT run until an EIN is submitted.",
-                source_table="rds_warehouse_public.facts · name='tin_submitted'",
-                source_file="facts/kyb/index.ts", source_file_line="tinSubmitted · factWithHighestConfidence · Applicant pid=0",
-                api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.tin_submitted",
-                json_obj={"name":"tin_submitted","value":tin_submitted_val or None,"source":{"platformId":0,"name":"businessDetails","confidence":1.0},"ruleApplied":{"name":"factWithHighestConfidence"},"note":"Masked EIN. Unmasked in 'tin' fact."},
-                sql=_tin_sql_base,
-                links=[("facts/kyb/index.ts","tinSubmitted fact"),("integrations.constant.ts","pid=0=Applicant/businessDetails")],
-                color="#22c55e" if tin_submitted_val else "#ef4444", icon="🔐")
-        with c2:
-            kpi("IRS Status",tin_status.capitalize() or "⚠️ Unknown","tin_match.value.status",
-                "#22c55e" if tin_status=="success" else "#ef4444" if tin_status=="failure" else "#f59e0b")
-            detail_panel("IRS Status", tin_status or "Unknown",
-                what_it_means="tin_match.value.status = the IRS response status for the EIN+name combination check. 'success' = IRS confirmed match. 'failure' = IRS mismatch or no record. 'pending' = check in progress. This field drives tin_match_boolean (dependent fact).",
-                source_table="rds_warehouse_public.facts · name='tin_match' → value.status",
-                source_file="facts/kyb/index.ts", source_file_line="tinMatch · factWithHighestConfidence · Middesk pid=16",
-                api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.tin_match.value.status",
-                json_obj={"name":"tin_match","value":{"status":tin_status or None,"message":tin_msg or None,"sublabel":"Found" if tin_status=="success" else "Failed"},"source":{"platformId":16,"name":"middesk","confidence":gc(facts,"tin_match")}},
-                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','status') AS irs_status, JSON_EXTRACT_PATH_TEXT(value,'value','message') AS irs_message FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match';",
-                links=[("facts/kyb/index.ts","tinMatch fact"),("integrations.constant.ts","INTEGRATION_ID.MIDDESK=16")],
-                color="#22c55e" if tin_status=="success" else "#ef4444" if tin_status=="failure" else "#f59e0b", icon="🏛️")
-        with c3:
-            kpi("IRS Message",tin_msg[:30]+"…" if len(tin_msg)>30 else (tin_msg or "(none)"),
-                "tin_match.value.message","#22c55e" if tin_status=="success" else "#ef4444")
-            detail_panel("IRS Message", tin_msg or "(none)",
-                what_it_means="The exact message returned by the IRS TIN verification system via Middesk. Common messages: 'The IRS has a record for the submitted TIN and Business Name combination' (success). 'The IRS does not have a record' (wrong EIN/name). 'associated with a different Business Name' (FRAUD SIGNAL). 'Duplicate request' (retry in 24h).",
-                source_table="rds_warehouse_public.facts · name='tin_match' → value.message",
-                source_file="facts/kyb/index.ts", source_file_line="tinMatch.value.message · IRS response via Middesk TIN review task",
-                json_obj={"tin_match_message":tin_msg or None,"tin_match_status":tin_status or None,"interpretation":{"does not have a record":"Wrong EIN or name — request SS-4 document","associated with a different":"FRAUD SIGNAL — escalate to Compliance","Duplicate request":"Retry in 24h","unavailable":"IRS outage — auto-retry"}},
-                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','message') AS irs_msg FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match';",
-                links=[("facts/kyb/index.ts","tinMatch message field")],
-                color="#22c55e" if tin_status=="success" else "#ef4444", icon="💬")
-        with c4:
-            kpi("Boolean Result",tin_bool or "⚠️ Unknown","Admin Portal shows this value",
-                "#22c55e" if tin_bool=="true" else "#ef4444")
-            detail_panel("Boolean Result", tin_bool or "Unknown",
-                what_it_means="tin_match_boolean is a DEPENDENT fact (platformId=-1) derived from tin_match.value.status === 'success'. This is the value shown in the Admin Portal's 'Tax ID Number (EIN)' verified badge. CRITICAL: tin_match_boolean=true MUST only happen when status='success'. Any divergence = data integrity bug.",
-                source_table="rds_warehouse_public.facts · name='tin_match_boolean'",
-                source_file="facts/kyb/index.ts", source_file_line="tinMatchBoolean · dependent · tin_match.value.status==='success'",
-                api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.tin_match_boolean.value",
-                json_obj={"name":"tin_match_boolean","value":tin_bool=="true" if tin_bool else None,"source":{"platformId":-1,"name":"dependent"},"dependencies":["tin_match"],"note":"Admin Portal EIN Verified badge. true ONLY when tin_match.value.status='success'"},
-                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS tin_match_boolean FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match_boolean';",
-                links=[("facts/kyb/index.ts","tinMatchBoolean dependent fact"),("facts/rules.ts","dependentFact rule")],
-                color="#22c55e" if tin_bool=="true" else "#ef4444", icon="✅" if tin_bool=="true" else "❌")
+        with c1: kpi("EIN Submitted","✅ Yes" if tin_submitted_val else "❌ No",f"Masked: {tin_submitted_val[:9]}" if tin_submitted_val else "tin_submitted fact","#22c55e" if tin_submitted_val else "#ef4444")
+        with c2: kpi("IRS Status",tin_status.capitalize() or "⚠️ Unknown","tin_match.value.status","#22c55e" if tin_status=="success" else "#ef4444" if tin_status=="failure" else "#f59e0b")
+        with c3: kpi("IRS Message",tin_msg[:30]+"…" if len(tin_msg)>30 else (tin_msg or "(none)"),"tin_match.value.message","#22c55e" if tin_status=="success" else "#ef4444")
+        with c4: kpi("Boolean Result",tin_bool or "⚠️ Unknown","Admin Portal shows this value","#22c55e" if tin_bool=="true" else "#ef4444")
+
+        # Detail panels — sequential full-width
+        detail_panel("🔐 EIN Submitted", tin_submitted_val or "Not submitted",
+            what_it_means="tin_submitted stores the masked EIN (XXXXX1234) for display. The unmasked version is in the 'tin' fact. Both are sourced from the Applicant (pid=0, confidence=1.0 by convention). The IRS TIN check CANNOT run until an EIN is submitted.",
+            source_table="rds_warehouse_public.facts · name='tin_submitted'",
+            source_file="facts/kyb/index.ts", source_file_line="tinSubmitted · factWithHighestConfidence · Applicant pid=0",
+            api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.tin_submitted",
+            json_obj={"name":"tin_submitted","value":tin_submitted_val or None,"source":{"platformId":0,"name":"businessDetails","confidence":1.0},"note":"Masked EIN. Unmasked in 'tin' fact."},
+            sql=_tin_sql_base, links=[("facts/kyb/index.ts","tinSubmitted fact"),("integrations.constant.ts","pid=0=Applicant/businessDetails")],
+            color="#22c55e" if tin_submitted_val else "#ef4444", icon="🔐")
+        detail_panel("🏛️ IRS Status", tin_status or "Unknown",
+            what_it_means="tin_match.value.status = the IRS response status for the EIN+name combination check. 'success' = IRS confirmed match. 'failure' = IRS mismatch or no record. 'pending' = check in progress. This field drives tin_match_boolean (dependent fact).",
+            source_table="rds_warehouse_public.facts · name='tin_match' → value.status",
+            source_file="facts/kyb/index.ts", source_file_line="tinMatch · factWithHighestConfidence · Middesk pid=16",
+            api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.tin_match.value.status",
+            json_obj={"name":"tin_match","value":{"status":tin_status or None,"message":tin_msg or None},"source":{"platformId":16,"name":"middesk","confidence":gc(facts,"tin_match")}},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','status') AS irs_status, JSON_EXTRACT_PATH_TEXT(value,'value','message') AS irs_message FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match';",
+            links=[("facts/kyb/index.ts","tinMatch fact"),("integrations.constant.ts","INTEGRATION_ID.MIDDESK=16")],
+            color="#22c55e" if tin_status=="success" else "#ef4444" if tin_status=="failure" else "#f59e0b", icon="🏛️")
+        detail_panel("💬 IRS Message", tin_msg or "(none)",
+            what_it_means="The exact message returned by the IRS TIN verification system via Middesk. Common messages: 'The IRS has a record for the submitted TIN and Business Name combination' (success). 'The IRS does not have a record' (wrong EIN/name). 'associated with a different Business Name' (FRAUD SIGNAL). 'Duplicate request' (retry in 24h).",
+            source_table="rds_warehouse_public.facts · name='tin_match' → value.message",
+            source_file="facts/kyb/index.ts", source_file_line="tinMatch.value.message · IRS response via Middesk TIN review task",
+            json_obj={"tin_match_message":tin_msg or None,"tin_match_status":tin_status or None,"interpretation":{"does not have a record":"Wrong EIN or name — request SS-4 document","associated with a different":"FRAUD SIGNAL — escalate to Compliance","Duplicate request":"Retry in 24h","unavailable":"IRS outage — auto-retry"}},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','message') AS irs_msg FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match';",
+            links=[("facts/kyb/index.ts","tinMatch message field")],
+            color="#22c55e" if tin_status=="success" else "#ef4444", icon="💬")
+        detail_panel("✅ Boolean Result", tin_bool or "Unknown",
+            what_it_means="tin_match_boolean is a DEPENDENT fact (platformId=-1) derived from tin_match.value.status === 'success'. This is the value shown in the Admin Portal's 'Tax ID Number (EIN)' verified badge. CRITICAL: tin_match_boolean=true MUST only happen when status='success'. Any divergence = data integrity bug.",
+            source_table="rds_warehouse_public.facts · name='tin_match_boolean'",
+            source_file="facts/kyb/index.ts", source_file_line="tinMatchBoolean · dependent · tin_match.value.status==='success'",
+            api_endpoint="GET /integration/api/v1/facts/business/{bid}/kyb → data.tin_match_boolean.value",
+            json_obj={"name":"tin_match_boolean","value":tin_bool=="true" if tin_bool else None,"source":{"platformId":-1,"name":"dependent"},"dependencies":["tin_match"],"note":"Admin Portal EIN Verified badge. true ONLY when tin_match.value.status='success'"},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS tin_match_boolean FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='tin_match_boolean';",
+            links=[("facts/kyb/index.ts","tinMatchBoolean dependent fact"),("facts/rules.ts","dependentFact rule")],
+            color="#22c55e" if tin_bool=="true" else "#ef4444", icon="✅" if tin_bool=="true" else "❌")
 
         if tin_msg: flag(f"Middesk TIN message: **\"{tin_msg}\"**","green" if tin_status=="success" else "amber")
 
@@ -5264,7 +5251,7 @@ ORDER BY received_at DESC LIMIT 5;""",language="sql")
 
         st.markdown("---")
 
-        # ── KPI cards ────────────────────────────────────────────────────────
+        # ── KPI cards only — detail panels below sequentially ──────────────
         sole_prop=str(gv(facts,"is_sole_prop") or "").lower()
         idv_raw=facts.get("idv_status",{}).get("value",{})
         total_sessions=sum(idv_raw.values()) if isinstance(idv_raw,dict) else 0
@@ -5306,14 +5293,41 @@ ORDER BY received_at DESC LIMIT 5;""",language="sql")
         with c4:
             kpi("Sole Prop","✅ Yes" if sole_prop=="true" else "❌ No" if sole_prop=="false" else "⚠️ Unknown",
                      "is_sole_prop — skips IDV if true","#f59e0b" if sole_prop=="true" else "#3B82F6")
-            detail_panel("Sole Prop",sole_prop or "Unknown",
-                what_it_means="is_sole_prop=true when tin_submitted=null AND idv_passed_boolean=true. Indicates the owner is a sole proprietor — no EIN submitted. Some IDV configurations skip the flow for sole props, which is why idv_passed_boolean may be null even with no error.",
-                source_table="rds_warehouse_public.facts · name='is_sole_prop'",
-                source_file="facts/kyb/index.ts",source_file_line="isSoleProp · dependent from tin_submitted + idv_passed_boolean",
-                json_obj={"name":"is_sole_prop","value":sole_prop=="true" if sole_prop else None,"source":{"platformId":-1,"name":"dependent"},"dependencies":["tin_submitted","idv_passed_boolean"]},
-                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='is_sole_prop';",
-                links=[("facts/kyb/index.ts","isSoleProp definition")],
-                color="#f59e0b" if sole_prop=="true" else "#3B82F6",icon="👤")
+            pass  # detail panels below
+
+        # Detail panels — sequential full-width (no column overlap)
+        detail_panel("🪪 IDV Passed",idv_val or "Unknown",
+            what_it_means="idv_passed_boolean=true when at least 1 IDV session completed with SUCCESS status (idv_passed >= 1). DEPENDENT fact — platformId=-1, computed from idv_passed which counts SUCCESS sessions in idv_status.",
+            source_table="rds_warehouse_public.facts · name='idv_passed_boolean'",
+            source_file="facts/kyb/index.ts", source_file_line="idvPassedBoolean · dependent from idv_passed",
+            api_endpoint=f"GET /integration/api/v1/facts/business/{{bid}}/kyb → data.idv_passed_boolean",
+            json_obj={"name":"idv_passed_boolean","value":idv_val=="true" if idv_val else None,"source":{"platformId":-1,"name":"dependent"},"dependencies":["idv_passed"]},
+            sql=_idv_sql, links=[("facts/kyb/index.ts","idv_passed_boolean"),("plaid/plaidIdv.ts","Plaid IDV"),("integrations.constant.ts","PLAID_IDV=18")],
+            color="#22c55e" if idv_val=="true" else "#ef4444" if idv_val=="false" else "#64748b", icon="🪪")
+        detail_panel("📊 Total IDV Sessions",str(total_sessions),
+            what_it_means="Sum of all sessions in idv_status: {SUCCESS:N, PENDING:N, FAILED:N, CANCELED:N, EXPIRED:N}. ALL sessions ever created — not just the most recent.",
+            source_table="rds_warehouse_public.facts · name='idv_status'",
+            source_file="facts/kyb/index.ts", source_file_line="idvStatus · Plaid IDV pid=18",
+            json_obj={"name":"idv_status","value":idv_raw if isinstance(idv_raw,dict) else None,"source":{"platformId":18,"name":"plaidIdv"}},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS idv_status_obj FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='idv_status';",
+            links=[("plaid/plaidIdv.ts","Plaid IDV"),("integrations.constant.ts","PLAID_IDV=18")],
+            color="#3B82F6", icon="📊")
+        detail_panel("✅ Successful IDV Sessions",str(success_n),
+            what_it_means="Sessions where owner completed: government ID scan + selfie + liveness check. idv_passed_boolean=true requires SUCCESS >= 1.",
+            source_table="rds_warehouse_public.facts · name='idv_status' → value.SUCCESS",
+            source_file="facts/kyb/index.ts", source_file_line="idvPassed · dependent · COUNT of SUCCESS sessions",
+            json_obj={"idv_status_SUCCESS":success_n,"idv_passed_boolean":success_n>=1},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value','SUCCESS') AS success_count FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='idv_status';",
+            links=[("facts/kyb/index.ts","idvPassed computation")],
+            color="#22c55e" if success_n>0 else "#64748b", icon="✅")
+        detail_panel("👤 Sole Proprietor",sole_prop or "Unknown",
+            what_it_means="is_sole_prop=true when tin_submitted=null AND idv_passed_boolean=true. No EIN submitted — some IDV configs skip the flow for sole props, so idv_passed_boolean may be null. This is expected behavior.",
+            source_table="rds_warehouse_public.facts · name='is_sole_prop'",
+            source_file="facts/kyb/index.ts", source_file_line="isSoleProp · dependent from tin_submitted + idv_passed_boolean",
+            json_obj={"name":"is_sole_prop","value":sole_prop=="true" if sole_prop else None,"source":{"platformId":-1,"name":"dependent"},"dependencies":["tin_submitted","idv_passed_boolean"]},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') FROM rds_warehouse_public.facts WHERE business_id='{bid}' AND name='is_sole_prop';",
+            links=[("facts/kyb/index.ts","isSoleProp definition")],
+            color="#f59e0b" if sole_prop=="true" else "#3B82F6", icon="👤")
 
         if sole_prop=="true":
             flag("is_sole_prop=true: business has no EIN or EIN was not submitted. IDV is skipped for sole proprietors in some configurations. idv_passed_boolean may be null or false — this is expected.", "amber")
