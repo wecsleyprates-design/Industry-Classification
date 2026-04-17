@@ -3499,6 +3499,221 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
 
     st.markdown("---")
 
+    # ════════════════════════════════════════════════════════════════════════
+    # CROSS-TABULATION ANALYSIS
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("### 🔀 Cross-Tabulation Analysis")
+    st.caption("Slice-and-dice views showing how KYB signals relate to each other across the portfolio.")
+
+    if stats_df is not None and not stats_df.empty:
+        def _s(v): return str(v or "").lower().strip()
+        def _si(v):
+            try: return int(float(v or 0))
+            except: return 0
+
+        _ct = stats_df.copy()
+
+        # Derived labels
+        _ct["SOS"]       = _ct["sos_active"].apply(lambda v: "✅ Active" if _s(v)=="true" else ("❌ Inactive" if _s(v)=="false" else "⚪ Unknown"))
+        _ct["TIN"]       = _ct["tin_match"].apply(lambda v: "✅ Verified" if _s(v)=="true" else ("❌ Failed" if _s(v)=="false" else "⚪ Not checked"))
+        _ct["IDV"]       = _ct["idv_passed"].apply(lambda v: "✅ Passed" if _s(v)=="true" else ("❌ Failed" if _s(v)=="false" else "⚪ Unknown"))
+        _ct["Watchlist"] = _ct["watchlist_hits"].apply(lambda v: "🔴 Has hits" if _si(v)>0 else "✅ Clean")
+        _ct["NAICS"]     = _ct["naics_code"].apply(lambda v: "⚠️ Fallback (561499)" if _s(v)=="561499" else ("✅ Classified" if _s(v) else "⚪ Missing"))
+        TAX_HAVENS = {"DE","NV","WY","SD","MT","NM"}
+        _ct["Formation"] = _ct["formation_state"].apply(lambda v:
+            f"⚠️ Tax-Haven ({_s(v).upper()})" if _s(v).upper() in TAX_HAVENS
+            else ("✅ Other State" if _s(v) else "⚪ Unknown"))
+        _ct["Revenue"]   = _ct["revenue"].apply(lambda v: "✅ Known" if v and str(v).strip() not in ("","None","nan") else "❌ Missing")
+
+        xc1, xc2 = st.columns(2)
+
+        # Cross-tab 1: TIN × Formation (Domestic/Tax-Haven)
+        with xc1:
+            st.markdown("#### 🔐 × 🗺️ TIN Verification × Formation State")
+            st.caption("For each TIN outcome — how many businesses are from tax-haven states vs other states?")
+            _ct1 = _ct.groupby(["TIN","Formation"]).size().reset_index(name="Count")
+            if not _ct1.empty:
+                fig_ct1 = px.bar(_ct1, x="TIN", y="Count", color="Formation",
+                                 barmode="stack",
+                                 color_discrete_map={"⚠️ Tax-Haven (DE)":"#f59e0b","⚠️ Tax-Haven (NV)":"#f59e0b",
+                                                     "⚠️ Tax-Haven (WY)":"#f59e0b","✅ Other State":"#3B82F6","⚪ Unknown":"#334155"},
+                                 title="TIN Verification outcome by Formation State type")
+                fig_ct1.update_layout(height=300,margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_ct1), use_container_width=True)
+                st.caption("💡 Tax-haven businesses with TIN Failed may have name mismatches due to DBA vs legal name differences. "
+                           "The entity is incorporated in DE/NV/WY but operates under a different trade name.")
+                with st.expander("📊 Full cross-tab table"):
+                    _pivot1 = _ct1.pivot_table(index="TIN",columns="Formation",values="Count",aggfunc="sum",fill_value=0)
+                    st.dataframe(_pivot1, use_container_width=True)
+
+        # Cross-tab 2: SOS × TIN
+        with xc2:
+            st.markdown("#### 🏛️ × 🔐 SOS Status × TIN Verification")
+            st.caption("SOS registry status vs TIN outcome — expected: SOS Active + TIN Verified = healthy entity.")
+            _ct2 = _ct.groupby(["SOS","TIN"]).size().reset_index(name="Count")
+            if not _ct2.empty:
+                def _sos_color(s):
+                    if "Active" in s: return "#22c55e"
+                    if "Inactive" in s: return "#ef4444"
+                    return "#64748b"
+                fig_ct2 = px.bar(_ct2, x="SOS", y="Count", color="TIN",
+                                 barmode="stack",
+                                 color_discrete_map={"✅ Verified":"#22c55e","❌ Failed":"#ef4444","⚪ Not checked":"#334155"},
+                                 title="SOS Status × TIN Verification")
+                fig_ct2.update_layout(height=300,margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_ct2), use_container_width=True)
+                st.caption("💡 SOS Active + TIN Failed = entity is registered but EIN doesn't match IRS (possible DBA submission). "
+                           "SOS Inactive + TIN Verified = entity has IRS record but lost good standing (missed annual report, unpaid fees).")
+                with st.expander("📊 Full cross-tab table + signal"):
+                    _ct2_disp = _ct2.copy()
+                    _ct2_disp["Risk Signal"] = _ct2_disp.apply(lambda r:
+                        "✅ Good" if "Active" in r["SOS"] and "Verified" in r["TIN"]
+                        else "🔴 Critical" if "Inactive" in r["SOS"] and "Failed" in r["TIN"]
+                        else "🟡 Review", axis=1)
+                    st.dataframe(_ct2_disp, use_container_width=True, hide_index=True)
+
+        xc3, xc4 = st.columns(2)
+
+        # Cross-tab 3: IDV × Watchlist
+        with xc3:
+            st.markdown("#### 🪪 × ⚠️ IDV Passed × Watchlist Status")
+            st.caption("Did businesses that passed identity verification also have watchlist hits?")
+            _ct3 = _ct.groupby(["IDV","Watchlist"]).size().reset_index(name="Count")
+            if not _ct3.empty:
+                fig_ct3 = px.bar(_ct3, x="IDV", y="Count", color="Watchlist",
+                                 barmode="stack",
+                                 color_discrete_map={"🔴 Has hits":"#ef4444","✅ Clean":"#22c55e"},
+                                 title="IDV Outcome × Watchlist Status")
+                fig_ct3.update_layout(height=300,margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_ct3), use_container_width=True)
+                st.caption("💡 IDV Passed + Watchlist Hit = owner identity confirmed but entity has sanctions/PEP hit. "
+                           "The person passed biometrics but the business entity itself is flagged. Both must be reviewed.")
+
+        # Cross-tab 4: NAICS × TIN
+        with xc4:
+            st.markdown("#### 🏭 × 🔐 Industry Classification × TIN Verification")
+            st.caption("Businesses with unclassified industry (561499) — are they also failing TIN verification?")
+            _ct4 = _ct.groupby(["NAICS","TIN"]).size().reset_index(name="Count")
+            if not _ct4.empty:
+                fig_ct4 = px.bar(_ct4, x="NAICS", y="Count", color="TIN",
+                                 barmode="stack",
+                                 color_discrete_map={"✅ Verified":"#22c55e","❌ Failed":"#ef4444","⚪ Not checked":"#334155"},
+                                 title="NAICS Classification × TIN Verification")
+                fig_ct4.update_layout(height=300,margin=dict(t=40,b=10,l=10,r=10),xaxis_tickangle=-15)
+                st.plotly_chart(dark_chart(fig_ct4), use_container_width=True)
+                st.caption("💡 NAICS Fallback (561499) + TIN Failed = both industry and tax identity unresolved. "
+                           "These businesses likely failed entity matching in all vendor databases — highest data quality risk.")
+
+        # Cross-tab 5: Revenue × SOS (full row)
+        st.markdown("#### 💰 × 🏛️ Revenue Availability × SOS Status — Data Quality Matrix")
+        st.caption("Firmographic data coverage vs SOS registry status. Revenue missing = ZI/EFX could not match entity.")
+        _ct5 = _ct.groupby(["SOS","Revenue"]).size().reset_index(name="Count")
+        if not _ct5.empty:
+            col_heat, col_note = st.columns([2,1])
+            with col_heat:
+                fig_ct5 = px.bar(_ct5, x="SOS", y="Count", color="Revenue",
+                                 barmode="group",
+                                 color_discrete_map={"✅ Known":"#22c55e","❌ Missing":"#ef4444"},
+                                 title="SOS Status × Revenue Data Availability")
+                fig_ct5.update_layout(height=280,margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_ct5), use_container_width=True)
+            with col_note:
+                st.markdown("""<div style="background:#1E293B;border-radius:8px;padding:12px;margin-top:10px;font-size:.78rem">
+<div style="color:#60A5FA;font-weight:700;margin-bottom:8px">What this tells you:</div>
+<div style="color:#CBD5E1">
+<strong>SOS Active + Revenue Missing</strong><br>
+Entity is registered but no firmographic data — ZI/EFX could not match. Common for very new or very small businesses.<br><br>
+<strong>SOS Inactive + Revenue Known</strong><br>
+Firmographic data exists but entity lost good standing. Typically: missed annual report or unpaid state fees.<br><br>
+<strong>SOS Unknown + Revenue Missing</strong><br>
+Complete data gap. Entity existence AND firmographic data both unverified — highest underwriting risk.
+</div></div>""", unsafe_allow_html=True)
+
+        # Summary insight row
+        _clean_all = len(_ct[(_ct["SOS"]=="✅ Active") & (_ct["TIN"]=="✅ Verified") & (_ct["IDV"]=="✅ Passed") & (_ct["Watchlist"]=="✅ Clean")])
+        _multi_risk = len(_ct[(_ct["SOS"]!="✅ Active") & (_ct["TIN"]!="✅ Verified") & (_ct["Watchlist"]=="🔴 Has hits")])
+        _tax_tin_fail = len(_ct[_ct["Formation"].str.contains("Tax-Haven",na=False) & (_ct["TIN"]=="❌ Failed")])
+
+        st.markdown("#### 📊 Portfolio Cross-Signal Summary")
+        _sm1,_sm2,_sm3,_sm4 = st.columns(4)
+        with _sm1: kpi("Fully Clean",str(_clean_all),"SOS Active + TIN Verified + IDV Passed + No Watchlist","#22c55e")
+        with _sm2: kpi("Multi-Risk",str(_multi_risk),"SOS Issue + TIN Failed + Watchlist Hit","#ef4444")
+        with _sm3: kpi("Tax-Haven + TIN Fail",str(_tax_tin_fail),"Incorporated in DE/NV/WY and TIN failed","#f59e0b")
+        with _sm4:
+            _naics_bad_tin = len(_ct[(_ct["NAICS"]=="⚠️ Fallback (561499)") & (_ct["TIN"]=="❌ Failed")])
+            kpi("No Industry + TIN Fail",str(_naics_bad_tin),"NAICS=561499 AND TIN failed — highest data risk","#ef4444")
+
+    else:
+        st.info("Cross-tabulation requires KYB stats data. Enable date filter or check VPN connection.")
+
+    st.markdown("---")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # ASK AI — Home tab portfolio questions
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("### 🤖 Ask AI About This Portfolio")
+    st.caption(f"Ask questions about the {total_biz:,} businesses in this period. The AI has access to the aggregate data shown above.")
+
+    if not get_openai():
+        st.warning("⚠️ Set OPENAI_API_KEY to enable AI. See AI Agent tab for setup instructions.")
+    else:
+        # Build portfolio context for the AI
+        _portfolio_ctx = (
+            f"Portfolio context for {period_label}:\n"
+            f"Total businesses: {total_biz:,}\n"
+            f"Businesses with flags: {len(flagged_biz):,} ({len(flagged_biz)/max(total_biz,1)*100:.0f}%)\n"
+        )
+        if stats_df is not None and not stats_df.empty:
+            _n = len(stats_df)
+            _sos_ok = (stats_df["sos_active"].str.lower().str.strip()=="true").sum()
+            _tin_ok = (stats_df["tin_match"].str.lower().str.strip()=="true").sum()
+            _tin_fail = (stats_df["tin_match"].str.lower().str.strip()=="false").sum()
+            _idv_ok = (stats_df["idv_passed"].str.lower().str.strip()=="true").sum()
+            _wl_hit = (stats_df["watchlist_hits"].apply(lambda v: _safe_int(v)>0)).sum()
+            _naics_561 = (stats_df["naics_code"].str.strip()=="561499").sum()
+            _th_count = stats_df["formation_state"].str.upper().str.strip().isin(TAX_HAVENS).sum()
+            _portfolio_ctx += (
+                f"SOS Active: {_sos_ok:,} ({_sos_ok/_n*100:.0f}%)\n"
+                f"TIN Verified: {_tin_ok:,} ({_tin_ok/_n*100:.0f}%), TIN Failed: {_tin_fail:,}\n"
+                f"IDV Passed: {_idv_ok:,} ({_idv_ok/_n*100:.0f}%)\n"
+                f"Watchlist hits: {_wl_hit:,} businesses affected\n"
+                f"NAICS=561499 (unclassified): {_naics_561:,}\n"
+                f"Tax-haven incorporated: {_th_count:,}\n"
+            )
+
+        _HOME_QUICK = [
+            "What are the top 3 data quality risks in this portfolio?",
+            "Which combination of KYB failures is most common?",
+            "Why might businesses have TIN failed AND SOS inactive simultaneously?",
+            "What percentage of tax-haven businesses also have TIN issues?",
+            "What SQL would help me investigate the watchlist hits in this period?",
+        ]
+
+        import hashlib as _hh
+        _home_q_cols = st.columns(len(_HOME_QUICK))
+        for _qi, _qtext in enumerate(_HOME_QUICK):
+            with _home_q_cols[_qi % len(_HOME_QUICK)]:
+                _qhash = _hh.md5(f"home|{_qtext}".encode()).hexdigest()[:8]
+                if st.button(_qtext, key=f"home_ai_{_qhash}", use_container_width=True):
+                    st.session_state["home_ai_q"] = _qtext
+
+        _home_custom = st.text_input("Or ask your own question about this portfolio:",
+                                      placeholder="e.g. How many businesses passed all 3 checks (SOS + TIN + IDV)?",
+                                      key="home_ai_input")
+        _home_send = st.button("Ask ▶", type="primary", key="home_ai_send")
+        if _home_send and _home_custom:
+            st.session_state["home_ai_q"] = _home_custom
+
+        if "home_ai_q" in st.session_state:
+            _q = st.session_state.pop("home_ai_q")
+            with st.spinner("Thinking…"):
+                _ans = ask_ai(_q, _portfolio_ctx)
+            st.markdown(f"**Q:** {_q}")
+            st.markdown(_ans)
+            st.markdown("---")
+
+    st.markdown("---")
+
     # ── Recently Onboarded (most recent 10) ──────────────────────────────────
     st.markdown("### 🕐 Recently Onboarded Businesses")
     st.markdown("*Most recently seen in the facts table — ordered by first_seen DESC.*")
