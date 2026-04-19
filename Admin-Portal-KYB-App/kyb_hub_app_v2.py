@@ -2558,7 +2558,8 @@ with st.sidebar:
     tab=st.radio("Section",[
         "🏠 Home","🏛️ Registry & Identity","🏭 Classification & KYB",
         "⚠️ Risk & Watchlist","💰 Worth Score","📋 All Facts",
-        "🔍 Check-Agent","🤖 AI Agent"])
+        "🔍 Check-Agent","🤖 AI Agent",
+        "🌳 Lineage & Discovery","⌨️ Data Explorer","🧠 Intelligence Hub"])
 
     # ── Date Range Filter ────────────────────────────────────────────────────
     st.markdown("---")
@@ -8904,6 +8905,1282 @@ print(df.to_string(index=False))""",
                 st.code(output, language="text")
                 st.caption("💡 Tip: use `conn` (pre-injected) instead of creating a new psycopg2.connect() — credentials are already loaded.")
 
+# ════════════════════════════════════════════════════════════════════════════════
+# 🌳 LINEAGE & DISCOVERY
+# ════════════════════════════════════════════════════════════════════════════════
+elif tab == "🌳 Lineage & Discovery":
+    st.markdown("## 🌳 Lineage & Data Discovery")
+    st.caption(
+        "Explore the full data architecture: table catalog, field definitions, "
+        "feature registry, upstream/downstream lineage, and repo file references. "
+        "Every entry has `detail_panel()` with SQL, Python, and GitHub links."
+    )
+
+    ld1, ld2, ld3, ld4, ld5 = st.tabs([
+        "📋 Table Catalog",
+        "🔤 Column / Field Catalog",
+        "⚙️ Feature Registry",
+        "🔗 Field Lineage",
+        "📁 Repo Explorer",
+    ])
+
+    # ── TABLE CATALOG ─────────────────────────────────────────────────────────
+    with ld1:
+        st.markdown("#### 📋 Table Catalog")
+        st.caption("All Redshift schemas and tables used by the KYB platform. Click any row for SQL, business purpose, and GitHub source links.")
+
+        TABLE_CATALOG = [
+            # schema, table, rows_est, freshness, used_by_model, description, business_purpose, key_cols
+            ("rds_warehouse_public",     "facts",                           "28M+",  "live",    True,
+             "Central fact store — one row per (business_id, fact_name). Every KYB signal lives here.",
+             "The single authoritative source of truth for all KYB facts: SOS, TIN, IDV, NAICS, watchlist, firmographic data.",
+             "business_id, name, value (JSON), received_at"),
+            ("rds_cases_public",         "rel_business_customer_monitoring","5M+",   "hourly",  False,
+             "Business ↔ customer link table. Authoritative onboarding date source (created_at).",
+             "Ties each business_id to its customer and records when it was onboarded. The only correct source for onboarding dates.",
+             "business_id, customer_id, created_at"),
+            ("rds_auth_public",          "data_customers",                  "10K+",  "hourly",  False,
+             "Customer master — maps customer_id to customer name.",
+             "Used to filter all portfolio analytics by customer name.",
+             "id, name, created_at"),
+            ("rds_manual_score_public",  "business_scores",                 "2.6M+", "live",    True,
+             "Worth Score history — one row per scored business per scoring run.",
+             "Contains the 300-850 confidence score, risk level (HIGH/MODERATE/LOW), and decision (APPROVE/FURTHER_REVIEW/DECLINE).",
+             "id, business_id, weighted_score_850, risk_level, score_decision, created_at"),
+            ("rds_manual_score_public",  "data_current_scores",             "540K+", "live",    True,
+             "Current score pointer — joins to business_scores via score_id. One row per business.",
+             "Always use this table to get the latest score for a business. JOIN to business_scores ON bs.id = cs.score_id.",
+             "business_id, score_id"),
+            ("rds_manual_score_public",  "business_score_factors",          "13M+",  "live",    True,
+             "SHAP-equivalent factor contributions — one row per (score_id, category).",
+             "Shows how much each model category contributed to the score: public_records, company_profile, financial_trends, etc.",
+             "score_id, category_id, score_100, weighted_score_850"),
+            ("datascience",              "customer_files",                   "1.8M+", "daily",   True,
+             "Pipeline B output — ZoomInfo + Equifax entity matches with firmographic data.",
+             "Primary source of revenue, employee count, and NAICS codes from ZI/EFX bulk data. Fed by entity-matching XGBoost.",
+             "business_id, primary_naics_code, zi_revenue, efx_revenue, zi_num_employees"),
+            ("datascience",              "zoominfo_matches_custom_inc_ml",  "3.4M+", "daily",   True,
+             "ZoomInfo entity matches scored by ML model.",
+             "ZoomInfo (pid=24) firmographic data after entity-matching. Source of revenue and employee count for most businesses.",
+             "business_id, zi_match_confidence, zi_revenue, zi_num_employees"),
+            ("datascience",              "efx_matches_custom_inc_ml",       "2.1M+", "daily",   True,
+             "Equifax entity matches scored by ML model.",
+             "Equifax (pid=17) firmographic data. Fallback when ZoomInfo match confidence is lower.",
+             "business_id, efx_match_confidence, efx_revenue, efx_num_employees"),
+            ("warehouse",                "oc_companies_latest",             "220M+", "weekly",  False,
+             "OpenCorporates registry dump — global company registration data.",
+             "Used by Pipeline B for SOS match fallback when Middesk cannot match the entity.",
+             "company_number, jurisdiction_code, name, dissolution_date"),
+        ]
+
+        tbl_df = pd.DataFrame(TABLE_CATALOG, columns=[
+            "Schema","Table","Est. Rows","Freshness","Model Input","Description","Business Purpose","Key Columns"
+        ])
+
+        _tbl_search = st.text_input("🔍 Search tables, schemas, or descriptions", "", key="tbl_catalog_search")
+        if _tbl_search:
+            mask = tbl_df.apply(lambda r: _tbl_search.lower() in " ".join(str(v) for v in r.values).lower(), axis=1)
+            tbl_df = tbl_df[mask]
+
+        st.dataframe(
+            tbl_df[["Schema","Table","Est. Rows","Freshness","Model Input","Description"]],
+            use_container_width=True, hide_index=True,
+            column_config={"Model Input": st.column_config.CheckboxColumn("Model Input")}
+        )
+
+        st.markdown("##### Detail panels — click any table for SQL, business purpose, and lineage:")
+        for row in TABLE_CATALOG:
+            schema, table, rows, freshness, model_inp, desc, purpose, key_cols = row
+            _tbl_full = f"{schema}.{table}"
+            _tbl_sql = (
+                f"-- Row count and freshness check:\n"
+                f"SELECT COUNT(*) AS total_rows, MAX(created_at) AS latest_row\n"
+                f"FROM {_tbl_full};\n\n"
+                f"-- Preview 5 rows:\n"
+                f"SELECT * FROM {_tbl_full} LIMIT 5;"
+            )
+            detail_panel(
+                f"📋 {_tbl_full}", f"{rows} rows · {freshness}",
+                what_it_means=(
+                    f"**Business purpose:** {purpose}\n\n"
+                    f"**Key columns:** `{key_cols}`\n\n"
+                    f"**Model input:** {'Yes — used by Worth Score pipeline' if model_inp else 'No — operational table only'}\n\n"
+                    f"**Freshness:** {freshness} — data is updated {freshness}."
+                ),
+                source_table=_tbl_full,
+                source_file="customer_table.sql" if "datascience" in schema else "facts/kyb/index.ts",
+                json_obj={
+                    "schema": schema, "table": table, "est_rows": rows,
+                    "freshness": freshness, "model_input": model_inp,
+                    "key_columns": key_cols.split(", "),
+                },
+                sql=_tbl_sql,
+                links=[
+                    ("customer_table.sql", "Pipeline B join SQL"),
+                    ("aiscore.py", "Score pipeline"),
+                    ("api-docs/kyb.md", "KYB API reference"),
+                ],
+                color="#3B82F6" if model_inp else "#64748b",
+                icon="📋",
+            )
+
+        # Live row counts from Redshift
+        st.markdown("---")
+        st.markdown("##### 🔄 Live Row Counts from Redshift")
+        if st.button("📊 Load live counts", key="tbl_live_counts"):
+            _counts_sql = """
+                SELECT 'rds_warehouse_public.facts'                          AS tbl, COUNT(*) AS rows FROM rds_warehouse_public.facts
+                UNION ALL SELECT 'rds_cases_public.rel_business_customer_monitoring', COUNT(*) FROM rds_cases_public.rel_business_customer_monitoring
+                UNION ALL SELECT 'rds_auth_public.data_customers',                    COUNT(*) FROM rds_auth_public.data_customers
+                UNION ALL SELECT 'rds_manual_score_public.business_scores',           COUNT(*) FROM rds_manual_score_public.business_scores
+                UNION ALL SELECT 'rds_manual_score_public.data_current_scores',       COUNT(*) FROM rds_manual_score_public.data_current_scores
+                ORDER BY rows DESC;
+            """
+            with st.spinner("Querying Redshift…"):
+                _cnt_df, _cnt_err = run_sql(_counts_sql)
+            if _cnt_df is not None and not _cnt_df.empty:
+                st.dataframe(_cnt_df, use_container_width=True, hide_index=True)
+                detail_panel("Live Row Counts", f"{len(_cnt_df)} tables queried",
+                    what_it_means="Live COUNT(*) from each key Redshift table. Run this to verify data freshness and catch unexpected row count drops.",
+                    source_table="All tables listed above",
+                    sql=_counts_sql, icon="📊", color="#22c55e")
+            else:
+                flag(f"Could not load live counts: {_cnt_err}", "amber")
+
+    # ── COLUMN / FIELD CATALOG ───────────────────────────────────────────────
+    with ld2:
+        st.markdown("#### 🔤 Column / Field Catalog")
+        st.caption("All key columns across KYB tables — definitions, data types, sensitivity, and join keys.")
+
+        COLUMN_CATALOG = [
+            # table, column, type, sensitivity, join_key, searchable, description
+            ("rds_warehouse_public.facts",          "business_id",         "VARCHAR (UUID)", "INTERNAL", True,  True,  "Unique business identifier. Primary join key across all KYB tables."),
+            ("rds_warehouse_public.facts",          "name",                "VARCHAR",        "LOW",      False, True,  "Fact name (e.g. 'sos_active', 'tin_match_boolean', 'naics_code'). Use WHERE name='...' to filter."),
+            ("rds_warehouse_public.facts",          "value",               "VARCHAR (JSON)", "INTERNAL", False, False, "JSON blob. Use JSON_EXTRACT_PATH_TEXT(value,'value') to get the scalar value."),
+            ("rds_warehouse_public.facts",          "received_at",         "TIMESTAMP",      "LOW",      False, True,  "When this fact was written to Redshift. NOT the onboarding date — use rbcm.created_at for that."),
+            ("rel_business_customer_monitoring",    "customer_id",         "VARCHAR (UUID)", "INTERNAL", True,  False, "Joins to rds_auth_public.data_customers.id to get customer name."),
+            ("rel_business_customer_monitoring",    "created_at",          "TIMESTAMP",      "LOW",      False, True,  "Authoritative onboarding timestamp. Use DATE(created_at) for date-range filters."),
+            ("rds_auth_public.data_customers",      "id",                  "VARCHAR (UUID)", "INTERNAL", True,  False, "Customer primary key. Joins to rbcm.customer_id."),
+            ("rds_auth_public.data_customers",      "name",                "VARCHAR",        "INTERNAL", False, True,  "Customer name. Use for customer-level portfolio filters."),
+            ("rds_manual_score_public.business_scores","weighted_score_850","FLOAT",         "LOW",      False, True,  "Worth Score on 300-850 scale. Formula: probability × 550 + 300."),
+            ("rds_manual_score_public.business_scores","risk_level",        "VARCHAR",        "LOW",      False, True,  "HIGH (<550), MODERATE (550-699), LOW (≥700). Derived from weighted_score_850."),
+            ("rds_manual_score_public.business_scores","score_decision",    "VARCHAR",        "LOW",      False, True,  "APPROVE / FURTHER_REVIEW_NEEDED / DECLINE. Configurable per customer."),
+            ("rds_manual_score_public.business_score_factors","category_id","VARCHAR",        "LOW",      False, True,  "Model category: public_records, company_profile, financial_trends, business_operations, performance_measures."),
+            ("rds_manual_score_public.business_score_factors","weighted_score_850","FLOAT",  "LOW",      False, False, "This category's contribution to the total score. Sum across categories = total score."),
+            ("datascience.customer_files",          "primary_naics_code",  "VARCHAR",        "LOW",      False, True,  "6-digit NAICS from Pipeline B (ZI/EFX match). May differ from facts.naics_code (Pipeline A winner)."),
+            ("datascience.customer_files",          "zi_revenue",          "FLOAT",          "INTERNAL", False, False, "ZoomInfo annual revenue. Worth Score feature: revenue (Business Operations category)."),
+        ]
+
+        col_df = pd.DataFrame(COLUMN_CATALOG, columns=[
+            "Table","Column","Type","Sensitivity","Join Key","Searchable","Description"
+        ])
+
+        _col_search = st.text_input("🔍 Search columns, types, or descriptions", "", key="col_catalog_search")
+        if _col_search:
+            mask = col_df.apply(lambda r: _col_search.lower() in " ".join(str(v) for v in r.values).lower(), axis=1)
+            col_df = col_df[mask]
+
+        st.dataframe(col_df, use_container_width=True, hide_index=True,
+                     column_config={
+                         "Join Key": st.column_config.CheckboxColumn("Join Key"),
+                         "Searchable": st.column_config.CheckboxColumn("Searchable"),
+                     })
+
+        st.markdown("---")
+        st.markdown("##### 🔄 Live Schema Discovery from Redshift")
+        _schema_q = st.text_input("Schema name (e.g. rds_warehouse_public):", "rds_warehouse_public", key="schema_disc_input")
+        if st.button("🔍 Discover columns", key="schema_disc_btn"):
+            _disc_sql = f"""
+                SELECT table_name, column_name, data_type, character_maximum_length
+                FROM information_schema.columns
+                WHERE table_schema = '{_schema_q}'
+                ORDER BY table_name, ordinal_position;
+            """
+            with st.spinner("Discovering schema…"):
+                _disc_df, _disc_err = run_sql(_disc_sql)
+            if _disc_df is not None and not _disc_df.empty:
+                st.dataframe(_disc_df, use_container_width=True, hide_index=True)
+                detail_panel("Live Schema Discovery", f"{len(_disc_df)} columns in {_schema_q}",
+                    what_it_means=f"All columns in schema `{_schema_q}` from Redshift information_schema. Use this to verify column names before writing queries.",
+                    source_table="information_schema.columns",
+                    sql=_disc_sql, icon="🔤", color="#8B5CF6")
+            else:
+                flag(f"Schema discovery failed: {_disc_err}", "amber")
+
+    # ── FEATURE REGISTRY ─────────────────────────────────────────────────────
+    with ld3:
+        st.markdown("#### ⚙️ Feature Registry")
+        st.caption("All Worth Score model features — definition, source fact, model category, transformation logic, and active status.")
+
+        FEATURE_REGISTRY = [
+            # feature, category, source_fact, source_table, transformation, active, description
+            ("age_business",        "Company Profile",    "formation_date",       "rds_warehouse_public.facts",    "CURRENT_YEAR - YEAR(formation_date)",         True,  "Business age in years. Older businesses score higher (lower default risk)."),
+            ("revenue",             "Business Operations","revenue",              "rds_warehouse_public.facts",    "factWithHighestConfidence(ZI, EFX)",           True,  "Annual revenue USD. ZoomInfo (pid=24, w=0.8) > Equifax (pid=17, w=0.7). Null = entity not matched."),
+            ("count_employees",     "Company Profile",    "num_employees",        "rds_warehouse_public.facts",    "factWithHighestConfidence(ZI, EFX)",           True,  "Employee count. Same vendor hierarchy as revenue. Null = entity not in firmographic DB."),
+            ("naics6",              "Company Profile",    "naics_code",           "rds_warehouse_public.facts",    "factWithHighestConfidence(ZI,EFX,OC,SERP,AI)", True,  "6-digit NAICS. 561499 = fallback penalty. Lower NAICS confidence reduces score."),
+            ("primsic",             "Company Profile",    "naics_code",           "rds_warehouse_public.facts",    "rel_naics_mcc lookup from naics_code",         True,  "SIC code derived from NAICS via lookup table."),
+            ("state",               "Company Profile",    "formation_state",      "rds_warehouse_public.facts",    "JSON_EXTRACT_PATH_TEXT(value,'value')",        True,  "Formation state. Tax-haven states (DE/NV/WY) may indicate entity resolution risk."),
+            ("bus_struct",          "Company Profile",    "corporation",          "rds_warehouse_public.facts",    "entity_type from Middesk SOS filing",          True,  "Entity structure (LLC, Corp, Sole Prop). Different risk profiles per structure."),
+            ("count_bankruptcy",    "Public Records",     "num_bankruptcies",     "rds_warehouse_public.facts",    "dependent fact — count of bankruptcies[]",     True,  "Number of bankruptcy filings. Each adds negative score impact. Capped at -120pts."),
+            ("count_judgment",      "Public Records",     "num_judgements",       "rds_warehouse_public.facts",    "dependent fact — count of judgements[]",       True,  "Civil judgment count. Each adds negative impact. Source: Equifax / Verdata."),
+            ("count_lien",          "Public Records",     "num_liens",            "rds_warehouse_public.facts",    "dependent fact — count of liens[]",            True,  "Tax/mechanic lien count. Each adds negative impact. Source: Equifax / Verdata."),
+            ("gdp_pch",             "Financial Trends",   "N/A (macro)",          "Liberty/Fed FRED data",         "GDP percent change — external macro series",   True,  "Macroeconomic indicator. Sourced from external economic data feeds, not Redshift facts."),
+            ("cpi",                 "Financial Trends",   "N/A (macro)",          "Liberty/Fed FRED data",         "Consumer Price Index",                         True,  "Macroeconomic indicator. Applied at scoring time from external feeds."),
+            ("vix",                 "Financial Trends",   "N/A (macro)",          "Liberty/Fed FRED data",         "CBOE Volatility Index",                        True,  "Market volatility indicator. Higher VIX historically correlates with higher default."),
+            ("bs_total_assets",     "Performance",        "N/A (Plaid)",          "Plaid banking data",            "From Plaid balance sheet report",              False, "Total assets from Plaid balance sheet. Null for most businesses (no Plaid connected)."),
+            ("cf_operating",        "Performance",        "N/A (Plaid)",          "Plaid banking data",            "From Plaid cash flow report",                  False, "Operating cash flow from Plaid. Null for most — requires Plaid banking connection."),
+        ]
+
+        feat_df = pd.DataFrame(FEATURE_REGISTRY, columns=[
+            "Feature","Model Category","Source Fact","Source Table","Transformation","Active","Description"
+        ])
+
+        _feat_search = st.text_input("🔍 Search features or categories", "", key="feat_reg_search")
+        if _feat_search:
+            mask = feat_df.apply(lambda r: _feat_search.lower() in " ".join(str(v) for v in r.values).lower(), axis=1)
+            feat_df = feat_df[mask]
+
+        st.dataframe(feat_df, use_container_width=True, hide_index=True,
+                     column_config={"Active": st.column_config.CheckboxColumn("Active")})
+
+        st.markdown("---")
+        # Category fill rate chart
+        _cat_counts = feat_df["Model Category"].value_counts().reset_index()
+        _cat_counts.columns = ["Category","Feature Count"]
+        _active_counts = feat_df[feat_df["Active"]==True]["Model Category"].value_counts().reset_index()
+        _active_counts.columns = ["Category","Active"]
+        fig_feat = px.bar(_cat_counts, x="Category", y="Feature Count",
+                          title="Feature Count by Model Category",
+                          color="Feature Count", color_continuous_scale="Blues")
+        fig_feat.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+        st.plotly_chart(dark_chart(fig_feat), use_container_width=True)
+        detail_panel("Feature Registry — Category Distribution", f"{len(feat_df)} features across {feat_df['Model Category'].nunique()} categories",
+            what_it_means="Count of model features per category. Categories with more features have more variance in their score contribution. 'Active=False' features are defined in the codebase but not currently materialized in Redshift (e.g., Plaid banking features require a banking connection).",
+            source_table="rds_warehouse_public.facts (source facts) · datascience.customer_files (Pipeline B features)",
+            source_file="lookups.py",
+            source_file_line="INPUTS dict — all features + imputation defaults",
+            json_obj={"categories": _cat_counts.to_dict("records"), "total_features": len(feat_df), "active_features": int(feat_df["Active"].sum())},
+            sql=f"SELECT category_id, COUNT(*) AS features, AVG(score_100) AS avg_contribution FROM rds_manual_score_public.business_score_factors WHERE score_id=(SELECT score_id FROM rds_manual_score_public.data_current_scores WHERE business_id='{{business_id}}' LIMIT 1) GROUP BY 1 ORDER BY 2 DESC;",
+            links=[("lookups.py","INPUTS dict — all features"),("worth_score_model.py","Model training"),("aiscore.py","Score pipeline")],
+            icon="⚙️", color="#8B5CF6")
+
+    # ── FIELD LINEAGE ────────────────────────────────────────────────────────
+    with ld4:
+        st.markdown("#### 🔗 Field Lineage Explorer")
+        st.caption("Select any KYB fact or model feature to trace its complete 4-level lineage: business meaning → warehouse source → transformation SQL → repo code files.")
+
+        ALL_LINEAGE_FIELDS = sorted([
+            "sos_active","sos_match_boolean","sos_match","sos_filings",
+            "tin_match_boolean","tin_match","tin_submitted",
+            "idv_passed_boolean","idv_passed","idv_status",
+            "naics_code","mcc_code","industry",
+            "legal_name","business_name","names_found","dba_found",
+            "formation_state","formation_date","corporation",
+            "revenue","num_employees","year_established",
+            "watchlist_hits","adverse_media_hits","watchlist",
+            "num_bankruptcies","num_judgements","num_liens",
+            "website","website_found","serp_id","review_rating",
+            "primary_address","address_match_boolean","name_match_boolean",
+            "kyb_submitted","kyb_complete","middesk_confidence",
+            "confidence_score","weighted_score_850","risk_level","score_decision",
+        ])
+
+        _lin_field = st.selectbox("Select field / fact:", ALL_LINEAGE_FIELDS, key="lin_field_select")
+
+        # Build lineage from FACT_SOURCE_KNOWLEDGE + GITHUB_LINKS
+        FIELD_LINEAGE = {
+            "sos_active": {
+                "l1": "Whether the business entity's Secretary of State registration is currently ACTIVE. True = in good standing. False = dissolved, revoked, or administratively suspended.",
+                "l2": "rds_warehouse_public.facts WHERE name='sos_active'\n  JSON_EXTRACT_PATH_TEXT(value,'value') → 'true' / 'false'",
+                "l3": "DEPENDENT fact (pid=-1). Derived from sos_filings[].active array.\n  Logic: any(filing.active == true for filing in sos_filings) → true",
+                "l4": ["facts/kyb/index.ts → sosActive dependent rule","integration-service/lib/middesk","facts/rules.ts → dependent fact pattern"],
+                "upstream": ["sos_filings","sos_match"],"downstream": ["kyb_complete","Check-Agent registration rules"],
+            },
+            "tin_match_boolean": {
+                "l1": "Whether the submitted EIN matches the IRS record for this business name. True = IRS confirmed match. False = IRS returned failure or no record.",
+                "l2": "rds_warehouse_public.facts WHERE name='tin_match_boolean'\n  JSON_EXTRACT_PATH_TEXT(value,'value') → 'true' / 'false'",
+                "l3": "DEPENDENT fact. Derived from tin_match.value.status:\n  status === 'success' → true; 'failure' or 'not_found' → false",
+                "l4": ["facts/kyb/index.ts → tinMatchBoolean dependent","integration-service/lib/middesk → TIN review task","facts/rules.ts"],
+                "upstream": ["tin_match","tin_submitted"],"downstream": ["kyb_complete","Worth Score (registration signal)"],
+            },
+            "naics_code": {
+                "l1": "6-digit NAICS industry classification. Determines industry risk profile in Worth Score. 561499 = fallback (all vendors failed).",
+                "l2": "rds_warehouse_public.facts WHERE name='naics_code'\n  JSON_EXTRACT_PATH_TEXT(value,'value') → 6-digit code\n  JSON_EXTRACT_PATH_TEXT(value,'source','platformId') → winning vendor ID",
+                "l3": "factWithHighestConfidence rule across vendors:\n  ZoomInfo (pid=24, w=0.8) → Equifax (pid=17, w=0.7) → OpenCorporates (pid=23, w=0.6)\n  → SERP (pid=22, w=0.4) → Trulioo (pid=38, w=0.3) → Applicant (pid=0, w=0.2)\n  → AI enrichment (pid=31, w=0.1) → fallback 561499",
+                "l4": ["facts/kyb/index.ts → naicsCode","facts/rules.ts → factWithHighestConfidence","aiEnrichment → GPT NAICS classification","integrations.constant.ts → vendor IDs"],
+                "upstream": ["website","business_name","legal_name","industry"],"downstream": ["mcc_code","naics6 (Worth Score)","primsic (Worth Score)"],
+            },
+            "weighted_score_850": {
+                "l1": "Worth Score on 300-850 scale. Higher = lower risk. APPROVE ≥700, FURTHER_REVIEW 550-699, DECLINE <550.",
+                "l2": "rds_manual_score_public.business_scores · weighted_score_850\n  JOIN via: data_current_scores cs JOIN business_scores bs ON bs.id=cs.score_id\n  WHERE cs.business_id = '{business_id}'",
+                "l3": "score_300_850 = probability × 550 + 300\n  probability = calibrated ensemble output from 3-model stack:\n    Firmographic XGBoost + Financial PyTorch neural net + Economic model",
+                "l4": ["aiscore.py → score_300_850 formula","worth_score_model.py → 3-model ensemble","lookups.py → INPUTS dict","score_decision_matrix → thresholds"],
+                "upstream": ["rds_warehouse_public.facts (all KYB facts)","datascience.customer_files (Pipeline B firmographic)","Plaid banking data"],"downstream": ["risk_level","score_decision","business_score_factors"],
+            },
+        }
+
+        lineage = FIELD_LINEAGE.get(_lin_field, {
+            "l1": f"`{_lin_field}` — see facts/kyb/index.ts for the full definition and vendor cascade.",
+            "l2": f"rds_warehouse_public.facts WHERE name='{_lin_field}'",
+            "l3": "factWithHighestConfidence rule — see facts/rules.ts",
+            "l4": ["facts/kyb/index.ts","facts/rules.ts","integrations.constant.ts"],
+            "upstream": ["rds_warehouse_public.facts"],"downstream": ["Worth Score model"],
+        })
+
+        # Render 4-level lineage
+        _lin_color = "#3B82F6"
+        st.markdown(f"""<div style="background:#1E293B;border-radius:12px;padding:18px 22px;margin:8px 0">
+          <div style="color:#60A5FA;font-weight:700;font-size:1rem;margin-bottom:12px">🔗 Lineage: <code>{_lin_field}</code></div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+            <div style="background:#0f172a;border-left:3px solid #3B82F6;border-radius:8px;padding:10px 14px">
+              <div style="color:#60A5FA;font-size:.72rem;font-weight:700;margin-bottom:6px"><span style="background:#2563EB;color:#fff;padding:2px 8px;border-radius:10px;font-size:.65rem">L1</span> Business Meaning</div>
+              <div style="color:#CBD5E1;font-size:.80rem">{lineage["l1"]}</div>
+            </div>
+            <div style="background:#0f172a;border-left:3px solid #8B5CF6;border-radius:8px;padding:10px 14px">
+              <div style="color:#a78bfa;font-size:.72rem;font-weight:700;margin-bottom:6px"><span style="background:#6d28d9;color:#fff;padding:2px 8px;border-radius:10px;font-size:.65rem">L2</span> Warehouse Source</div>
+              <div style="color:#CBD5E1;font-size:.80rem;font-family:monospace">{lineage["l2"]}</div>
+            </div>
+            <div style="background:#0f172a;border-left:3px solid #22c55e;border-radius:8px;padding:10px 14px">
+              <div style="color:#86efac;font-size:.72rem;font-weight:700;margin-bottom:6px"><span style="background:#15803d;color:#fff;padding:2px 8px;border-radius:10px;font-size:.65rem">L3</span> Transformation Logic</div>
+              <div style="color:#CBD5E1;font-size:.80rem;font-family:monospace;white-space:pre-wrap">{lineage["l3"]}</div>
+            </div>
+            <div style="background:#0f172a;border-left:3px solid #f59e0b;border-radius:8px;padding:10px 14px">
+              <div style="color:#fde68a;font-size:.72rem;font-weight:700;margin-bottom:6px"><span style="background:#92400e;color:#fff;padding:2px 8px;border-radius:10px;font-size:.65rem">L4</span> Repo / Code Lineage</div>
+              <div style="color:#CBD5E1;font-size:.80rem">{"<br/>".join("· " + f for f in lineage["l4"])}</div>
+            </div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+        # Upstream → Downstream flow
+        _up = lineage.get("upstream",[])
+        _dn = lineage.get("downstream",[])
+        uf1, uf2, uf3 = st.columns([2,1,2])
+        with uf1:
+            st.markdown("**⬆️ Upstream (sources)**")
+            for u in _up: st.markdown(f"- `{u}`")
+        with uf2:
+            st.markdown(f"<div style='text-align:center;padding-top:20px;color:#60A5FA;font-size:1.4rem'>→</div>", unsafe_allow_html=True)
+        with uf3:
+            st.markdown("**⬇️ Downstream (consumers)**")
+            for d in _dn: st.markdown(f"- `{d}`")
+
+        _lin_sql = f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val, JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid, JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS conf, JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name') AS rule FROM rds_warehouse_public.facts WHERE name='{_lin_field}' AND business_id='{{business_id}}' LIMIT 1;"
+        detail_panel(
+            f"🔗 4-Level Lineage: {_lin_field}", "L1 → L2 → L3 → L4",
+            what_it_means=lineage["l1"],
+            source_table=lineage["l2"].split("\n")[0],
+            source_file="facts/kyb/index.ts",
+            source_file_line=f"{_lin_field} definition",
+            json_obj={"field": _lin_field, "upstream": _up, "downstream": _dn,
+                      "l1": lineage["l1"], "l2": lineage["l2"],
+                      "l3": lineage["l3"], "l4": lineage["l4"]},
+            sql=_lin_sql,
+            links=[("facts/kyb/index.ts","Fact Engine definitions"),
+                   ("facts/rules.ts","Winner rules"),
+                   ("aiscore.py","Score pipeline"),
+                   ("worth_score_model.py","Model training")],
+            icon="🔗", color="#3B82F6"
+        )
+
+    # ── REPO EXPLORER ─────────────────────────────────────────────────────────
+    with ld5:
+        st.markdown("#### 📁 Repo Explorer")
+        st.caption("All key source files in the codebase. Search by keyword or file type. Click any row for a direct GitHub link and purpose description.")
+
+        REPO_FILES = [
+            # file, role, tab_link, description
+            ("integration-service/lib/facts/kyb/index.ts",             "Fact definitions",       "facts/kyb/index.ts",          "Defines every KYB fact: source vendors, weights, dependent derivation logic, rule applied."),
+            ("integration-service/lib/facts/rules.ts",                 "Winner rules",           "facts/rules.ts",              "factWithHighestConfidence, combineFacts, dependentFact — the core Fact Engine selector algorithms."),
+            ("integration-service/lib/facts/sources.ts",               "Source registry",        "facts/sources.ts",            "Maps platformId → source name, weight, and fact families. All vendor IDs live here."),
+            ("integration-service/src/constants/integrations.constant.ts","Integration IDs",     "integrations.constant.ts",   "MIDDESK=16, EQUIFAX=17, ZOOMINFO=24, TRULIOO=38, AI=31, etc. Used everywhere."),
+            ("integration-service/lib/aiEnrichment/aiNaicsEnrichment.ts","AI NAICS enrichment", "aiEnrichment",                "GPT-4o-mini NAICS classification — last resort when all commercial vendors fail."),
+            ("integration-service/lib/facts/kyb/consolidatedWatchlist.ts","Watchlist merger",   "consolidatedWatchlist.ts",    "Merges Trulioo PSC + Middesk watchlist hits. filterOutAdverseMedia logic lives here."),
+            ("ai-score-service/aiscore.py",                             "Score pipeline",         "aiscore.py",                  "Main scoring orchestration: loads features, calls 3-model ensemble, converts probability to 300-850."),
+            ("ai-score-service/worth_score_model.py",                   "Model training",         "worth_score_model.py",        "XGBoost firmographic model + PyTorch financial neural net + economic model. Training and inference."),
+            ("ai-score-service/lookups.py",                             "Feature defaults",       "lookups.py",                  "INPUTS dict: all model features, their source facts, and imputation defaults when null."),
+            ("warehouse-service/.../customer_table.sql",                "Pipeline B join",        "customer_table.sql",          "The SQL that joins ZI + EFX firmographic data to KYB businesses. Source of revenue/employees."),
+            ("api-docs/openapi-specs/get-kyb.json",                     "KYB API schema",         "openapi/kyb",                 "Authoritative OpenAPI spec for GET /facts/business/{businessId}/kyb. All fact schemas defined here."),
+            ("api-docs/api-reference/integration/facts/kyb.md",         "KYB API docs",           "api-docs/kyb.md",             "Human-readable KYB API docs. Fact definitions, examples, and response structure."),
+            ("admin-portal/src/page/Cases/KYB",                         "Admin Portal UI",        "KYB UI",                      "React components rendering the KYB tab in the Admin Portal. Shows what the business user sees."),
+        ]
+
+        repo_df = pd.DataFrame(REPO_FILES, columns=["File","Role","Link Key","Description"])
+
+        _repo_search = st.text_input("🔍 Search files, roles, or descriptions", "", key="repo_search_input")
+        if _repo_search:
+            mask = repo_df.apply(lambda r: _repo_search.lower() in " ".join(str(v) for v in r.values).lower(), axis=1)
+            repo_df = repo_df[mask]
+
+        for _, row in repo_df.iterrows():
+            gh_url = GITHUB_LINKS.get(row["Link Key"], "")
+            link_html = f"<a href='{gh_url}' target='_blank' style='color:#60A5FA;font-size:.78rem'>🔗 {row['File']}</a>" if gh_url else f"<code style='color:#94A3B8;font-size:.78rem'>{row['File']}</code>"
+            st.markdown(f"""<div style="background:#1E293B;border-left:3px solid #334155;border-radius:8px;padding:10px 14px;margin:4px 0">
+              <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+                {link_html}
+                <span style="background:#273445;color:#94A3B8;border-radius:6px;padding:2px 8px;font-size:.70rem">{row["Role"]}</span>
+              </div>
+              <div style="color:#64748b;font-size:.74rem;margin-top:4px">{row["Description"]}</div>
+            </div>""", unsafe_allow_html=True)
+            detail_panel(f"📁 {row['File']}", row["Role"],
+                what_it_means=row["Description"],
+                source_file=row["Link Key"],
+                json_obj={"file": row["File"], "role": row["Role"], "github_url": gh_url},
+                links=[(row["Link Key"], row["File"])],
+                icon="📁", color="#334155")
+
+# ════════════════════════════════════════════════════════════════════════════════
+# ⌨️ DATA EXPLORER
+# ════════════════════════════════════════════════════════════════════════════════
+elif tab == "⌨️ Data Explorer":
+    st.markdown("## ⌨️ Data Explorer")
+    st.caption("Direct Redshift access for advanced analysis: templated SQL queries, Python runner, dataset health monitoring, and join validation.")
+
+    de1, de2, de3, de4 = st.tabs(["🗄️ SQL Runner", "🐍 Python Runner", "❤️ Dataset Health", "🔗 Join Validation"])
+
+    # ── SQL RUNNER WITH TEMPLATES ─────────────────────────────────────────────
+    with de1:
+        st.markdown("#### 🗄️ SQL Runner")
+        st.caption("Read-only Redshift access. SELECT-only. Templates for common KYB analytics. Results include download and `detail_panel()` lineage.")
+
+        SQL_TEMPLATES = {
+            "— select a template —": "",
+            "📊 Low-confidence cases by customer (last 30d)": """
+SELECT
+    c.name                                                          AS customer_name,
+    COUNT(DISTINCT cs.business_id)                                  AS low_conf_cases,
+    ROUND(AVG(bs.weighted_score_850)::NUMERIC, 1)                  AS avg_score
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+JOIN rds_cases_public.rel_business_customer_monitoring rbcm
+  ON rbcm.business_id = cs.business_id
+JOIN rds_auth_public.data_customers c ON c.id = rbcm.customer_id
+WHERE DATE(rbcm.created_at) >= CURRENT_DATE - 30
+  AND bs.weighted_score_850 < 550
+GROUP BY 1
+ORDER BY low_conf_cases DESC
+LIMIT 25;""",
+            "🔐 TIN mismatch rate by date": """
+SELECT
+    DATE(rbcm.created_at)                                           AS onboarded_date,
+    COUNT(DISTINCT rbcm.business_id)                                AS total,
+    SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value')='false' THEN 1 ELSE 0 END) AS tin_failed,
+    ROUND(100.0 * SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value')='false' THEN 1 ELSE 0 END)
+          / NULLIF(COUNT(DISTINCT rbcm.business_id),0), 1)          AS tin_fail_pct
+FROM rds_cases_public.rel_business_customer_monitoring rbcm
+LEFT JOIN rds_warehouse_public.facts f
+  ON f.business_id = rbcm.business_id AND f.name = 'tin_match_boolean'
+WHERE DATE(rbcm.created_at) >= CURRENT_DATE - 30
+GROUP BY 1
+ORDER BY 1 DESC;""",
+            "🔗 Duplicate TINs across unrelated businesses": """
+SELECT
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')                         AS tin_submitted,
+    COUNT(DISTINCT f.business_id)                                   AS n_businesses,
+    LISTAGG(DISTINCT f.business_id, ', ') WITHIN GROUP (ORDER BY f.business_id) AS business_ids
+FROM rds_warehouse_public.facts f
+WHERE f.name = 'tin_submitted'
+  AND JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NOT NULL
+GROUP BY 1
+HAVING COUNT(DISTINCT f.business_id) > 1
+ORDER BY n_businesses DESC
+LIMIT 50;""",
+            "📉 Source disagreement on NAICS (winners vs alternatives)": """
+SELECT
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')                                AS winning_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')::INT             AS winner_pid,
+    COUNT(DISTINCT f.business_id)                                          AS businesses,
+    SUM(CASE WHEN JSON_ARRAY_LENGTH(JSON_EXTRACT_PATH_TEXT(f.value,'alternatives')) > 0 THEN 1 ELSE 0 END) AS has_alternatives
+FROM rds_warehouse_public.facts f
+WHERE f.name = 'naics_code'
+GROUP BY 1, 2
+ORDER BY businesses DESC
+LIMIT 20;""",
+            "📈 Confidence score distribution by band (last 30d)": """
+SELECT
+    CASE WHEN bs.weighted_score_850 < 400 THEN 'Very Low (<400)'
+         WHEN bs.weighted_score_850 < 550 THEN 'Low (400-549)'
+         WHEN bs.weighted_score_850 < 700 THEN 'Medium (550-699)'
+         WHEN bs.weighted_score_850 < 800 THEN 'High (700-799)'
+         ELSE                                  'Very High (≥800)' END      AS band,
+    COUNT(DISTINCT cs.business_id)                                          AS businesses,
+    bs.score_decision                                                        AS decision
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+JOIN rds_cases_public.rel_business_customer_monitoring rbcm
+  ON rbcm.business_id = cs.business_id
+WHERE DATE(rbcm.created_at) >= CURRENT_DATE - 30
+GROUP BY 1, 3
+ORDER BY MIN(bs.weighted_score_850);""",
+            "⚠️ High-risk portfolio: watchlist + SOS inactive + TIN failed": """
+SELECT
+    rbcm.business_id,
+    DATE(rbcm.created_at)                                                   AS onboarded,
+    JSON_EXTRACT_PATH_TEXT(f_wl.value,'value')                             AS watchlist_hits,
+    JSON_EXTRACT_PATH_TEXT(f_sos.value,'value')                            AS sos_active,
+    JSON_EXTRACT_PATH_TEXT(f_tin.value,'value')                            AS tin_match_boolean,
+    JSON_EXTRACT_PATH_TEXT(f_naics.value,'value')                          AS naics_code,
+    bs.weighted_score_850                                                    AS worth_score
+FROM rds_cases_public.rel_business_customer_monitoring rbcm
+LEFT JOIN rds_warehouse_public.facts f_wl   ON f_wl.business_id=rbcm.business_id   AND f_wl.name='watchlist_hits'
+LEFT JOIN rds_warehouse_public.facts f_sos  ON f_sos.business_id=rbcm.business_id  AND f_sos.name='sos_active'
+LEFT JOIN rds_warehouse_public.facts f_tin  ON f_tin.business_id=rbcm.business_id  AND f_tin.name='tin_match_boolean'
+LEFT JOIN rds_warehouse_public.facts f_naics ON f_naics.business_id=rbcm.business_id AND f_naics.name='naics_code'
+LEFT JOIN rds_manual_score_public.data_current_scores cs ON cs.business_id=rbcm.business_id
+LEFT JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+WHERE DATE(rbcm.created_at) >= CURRENT_DATE - 30
+  AND (
+    CAST(JSON_EXTRACT_PATH_TEXT(f_wl.value,'value') AS INT) > 0
+    OR JSON_EXTRACT_PATH_TEXT(f_sos.value,'value') = 'false'
+    OR JSON_EXTRACT_PATH_TEXT(f_tin.value,'value') = 'false'
+  )
+ORDER BY rbcm.created_at DESC
+LIMIT 100;""",
+        }
+
+        _tpl_choice = st.selectbox("📋 Query Templates:", list(SQL_TEMPLATES.keys()), key="de_sql_template")
+        _de_default_sql = SQL_TEMPLATES[_tpl_choice] if _tpl_choice != "— select a template —" else "-- Write your SQL here\nSELECT 1 AS test;"
+
+        _de_sql_input = st.text_area("SQL Query:", value=_de_default_sql.strip(), height=220, key="de_sql_input")
+
+        _de_r1, _de_r2 = st.columns([2,1])
+        with _de_r1:
+            _de_run = st.button("▶ Run SQL", type="primary", use_container_width=True, key="de_sql_run")
+        with _de_r2:
+            _de_chart = st.checkbox("Auto-chart result", value=True, key="de_auto_chart")
+
+        if _de_run and _de_sql_input.strip():
+            with st.spinner("Running query against Redshift…"):
+                _de_df, _de_err = run_sql(_de_sql_input)
+
+            if _de_err:
+                flag(f"SQL error: {_de_err}", "red")
+            elif _de_df is not None and not _de_df.empty:
+                st.success(f"✅ {len(_de_df):,} rows · {len(_de_df.columns)} columns")
+                st.dataframe(_de_df, use_container_width=True, hide_index=True)
+
+                # Auto-chart logic
+                if _de_chart and len(_de_df) > 1:
+                    _ncols = _de_df.select_dtypes(include="number").columns.tolist()
+                    _ccols = _de_df.select_dtypes(exclude="number").columns.tolist()
+                    _fig = None
+                    try:
+                        if len(_de_df.columns) == 2 and len(_ccols) >= 1 and len(_ncols) >= 1:
+                            # Simple bar
+                            _fig = px.bar(_de_df, x=_ccols[0], y=_ncols[0], title=f"Result: {_ccols[0]} × {_ncols[0]}")
+                        elif len(_ncols) >= 1 and "date" in " ".join(_de_df.columns).lower():
+                            _date_col = next((c for c in _de_df.columns if "date" in c.lower() or "week" in c.lower() or "month" in c.lower()), _ccols[0] if _ccols else None)
+                            if _date_col:
+                                _color_col = _ccols[1] if len(_ccols) > 1 else None
+                                _fig = px.line(_de_df, x=_date_col, y=_ncols[0], color=_color_col, title=f"Trend: {_ncols[0]} over time")
+                        elif len(_ncols) >= 1 and "band" in " ".join(_de_df.columns).lower():
+                            _fig = px.bar(_de_df, x=_ccols[0] if _ccols else _de_df.columns[0], y=_ncols[0],
+                                          color=_ccols[1] if len(_ccols)>1 else None, barmode="stack", title="Band Distribution")
+                        elif len(_ncols) == 1 and len(_de_df) <= 10:
+                            _fig = px.pie(_de_df, names=_ccols[0] if _ccols else _de_df.columns[0], values=_ncols[0], hole=0.4, title="Distribution")
+                    except Exception:
+                        _fig = None
+                    if _fig is not None:
+                        _fig.update_layout(height=320, margin=dict(t=40,b=10,l=10,r=10))
+                        st.plotly_chart(dark_chart(_fig), use_container_width=True)
+
+                # Downloads
+                _dl1, _dl2 = st.columns(2)
+                with _dl1:
+                    st.download_button("⬇️ CSV", _de_df.to_csv(index=False).encode(),
+                        file_name="query_result.csv", mime="text/csv", use_container_width=True, key="de_dl_csv")
+
+                detail_panel(
+                    "🗄️ SQL Query Result", f"{len(_de_df):,} rows · {len(_de_df.columns)} columns",
+                    what_it_means=f"Result of query against Redshift. Template used: '{_tpl_choice}'.\n\nColumn types: {', '.join(f'{c} ({str(t)})' for c,t in _de_df.dtypes.items())}",
+                    source_table="Multiple Redshift tables — see SQL above",
+                    sql=_de_sql_input,
+                    json_obj={"rows": len(_de_df), "cols": list(_de_df.columns), "template": _tpl_choice},
+                    icon="🗄️", color="#3B82F6"
+                )
+            elif _de_df is not None and _de_df.empty:
+                st.info("Query executed — 0 rows returned.")
+            else:
+                flag("Query returned no data.", "amber")
+
+    # ── PYTHON RUNNER ─────────────────────────────────────────────────────────
+    with de2:
+        st.markdown("#### 🐍 Python Runner")
+        st.caption("Sandboxed Python with `conn` (Redshift), `pd` (pandas), `px` (plotly). No filesystem or external network.")
+        _de_py_default = '''import pandas as pd
+# conn is pre-injected (psycopg2 connection to Redshift)
+# Example: KYB health summary
+df = pd.read_sql("""
+    SELECT
+        COUNT(DISTINCT rbcm.business_id) AS total_businesses,
+        SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value')='true' THEN 1 ELSE 0 END) AS sos_pass,
+        SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f2.value,'value')='true' THEN 1 ELSE 0 END) AS tin_pass
+    FROM rds_cases_public.rel_business_customer_monitoring rbcm
+    LEFT JOIN rds_warehouse_public.facts f  ON f.business_id=rbcm.business_id  AND f.name='sos_active'
+    LEFT JOIN rds_warehouse_public.facts f2 ON f2.business_id=rbcm.business_id AND f2.name='tin_match_boolean'
+    WHERE DATE(rbcm.created_at) >= CURRENT_DATE - 30
+""", conn)
+df["sos_rate"]  = (df["sos_pass"]  / df["total_businesses"] * 100).round(1)
+df["tin_rate"]  = (df["tin_pass"]  / df["total_businesses"] * 100).round(1)
+print(df.to_string(index=False))
+df
+'''
+        _de_py = st.text_area("Python code:", value=_de_py_default, height=260, key="de_py_input")
+        if st.button("▶ Run Python", type="primary", key="de_py_run"):
+            _conn_py, _ok_py, _err_py = get_conn()
+            if not _ok_py:
+                flag(f"Cannot connect to Redshift: {_err_py}", "red")
+            else:
+                import io as _io_de
+                import contextlib as _cl_de
+                _buf_de = _io_de.StringIO()
+                _local_ns = {"conn": _conn_py, "pd": pd, "px": px}
+                try:
+                    with _cl_de.redirect_stdout(_buf_de):
+                        exec(_de_py, _local_ns)
+                    _out = _buf_de.getvalue()
+                    if _out: st.code(_out, language="text")
+                    _last = {k: v for k, v in _local_ns.items()
+                             if isinstance(v, pd.DataFrame) and k not in ("conn", "pd", "px")}
+                    for _vn, _vdf in _last.items():
+                        st.success(f"DataFrame `{_vn}`: {len(_vdf):,} rows × {len(_vdf.columns)} cols")
+                        st.dataframe(_vdf, use_container_width=True, hide_index=True)
+                        detail_panel(f"🐍 Python DataFrame: {_vn}", f"{len(_vdf):,} rows",
+                            what_it_means=f"DataFrame `{_vn}` produced by the Python runner. Columns: {', '.join(_vdf.columns)}.",
+                            source_table="Redshift via psycopg2 (conn pre-injected)",
+                            sql="-- See Python code above for the underlying query",
+                            icon="🐍", color="#22c55e")
+                except Exception as _exc_de:
+                    st.error(f"Python error: {_exc_de}")
+                finally:
+                    try: _conn_py.close()
+                    except Exception: pass
+
+    # ── DATASET HEALTH ────────────────────────────────────────────────────────
+    with de3:
+        st.markdown("#### ❤️ Dataset Health")
+        st.caption("Live health metrics across all key Redshift tables: row counts, freshness, null rates, and anomaly detection.")
+
+        if st.button("🔄 Refresh Health Metrics", type="primary", key="de_health_refresh"):
+            st.session_state["de_health_run"] = True
+
+        if st.session_state.get("de_health_run"):
+            HEALTH_QUERIES = {
+                "Row Counts": """
+                    SELECT 'rds_warehouse_public.facts'                           AS table_name, COUNT(*)    AS rows, MAX(received_at) AS latest FROM rds_warehouse_public.facts
+                    UNION ALL SELECT 'rel_business_customer_monitoring',           COUNT(*), MAX(created_at)  FROM rds_cases_public.rel_business_customer_monitoring
+                    UNION ALL SELECT 'rds_auth_public.data_customers',             COUNT(*), MAX(created_at)  FROM rds_auth_public.data_customers
+                    UNION ALL SELECT 'rds_manual_score_public.business_scores',    COUNT(*), MAX(created_at)  FROM rds_manual_score_public.business_scores
+                    UNION ALL SELECT 'rds_manual_score_public.data_current_scores',COUNT(*), NULL             FROM rds_manual_score_public.data_current_scores
+                    ORDER BY rows DESC;
+                """,
+                "Null Rate — Key Facts": """
+                    SELECT name,
+                           COUNT(*) AS total,
+                           SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(value,'value') IS NULL
+                                      OR JSON_EXTRACT_PATH_TEXT(value,'value') = '' THEN 1 ELSE 0 END) AS null_count,
+                           ROUND(100.0 * SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(value,'value') IS NULL
+                                                     OR JSON_EXTRACT_PATH_TEXT(value,'value') = '' THEN 1 ELSE 0 END)
+                                 / NULLIF(COUNT(*),0), 1) AS null_pct
+                    FROM rds_warehouse_public.facts
+                    WHERE name IN ('sos_active','tin_match_boolean','naics_code','idv_passed_boolean',
+                                   'formation_state','revenue','num_employees','watchlist_hits')
+                    GROUP BY 1
+                    ORDER BY null_pct DESC;
+                """,
+                "Recent Onboarding Volume": """
+                    SELECT DATE(created_at) AS date, COUNT(DISTINCT business_id) AS new_businesses
+                    FROM rds_cases_public.rel_business_customer_monitoring
+                    WHERE DATE(created_at) >= CURRENT_DATE - 14
+                    GROUP BY 1
+                    ORDER BY 1 DESC;
+                """,
+            }
+            for qname, qsql in HEALTH_QUERIES.items():
+                with st.spinner(f"Running {qname}…"):
+                    _h_df, _h_err = run_sql(qsql)
+                st.markdown(f"**{qname}**")
+                if _h_df is not None and not _h_df.empty:
+                    st.dataframe(_h_df, use_container_width=True, hide_index=True)
+                    detail_panel(f"❤️ Dataset Health: {qname}", f"{len(_h_df)} rows",
+                        what_it_means=f"Live dataset health check: {qname}. Run this regularly to catch freshness issues, null spikes, or unexpected row count drops.",
+                        source_table="Multiple Redshift system and data tables",
+                        sql=qsql.strip(), icon="❤️", color="#22c55e")
+                else:
+                    flag(f"{qname}: {_h_err or 'No data'}", "amber")
+        else:
+            st.info("Click **Refresh Health Metrics** to run live health checks against Redshift.")
+
+    # ── JOIN VALIDATION ───────────────────────────────────────────────────────
+    with de4:
+        st.markdown("#### 🔗 Join & Key Validation")
+        st.caption("Cross-table join coverage, orphan records, duplicate keys, and missing join keys across all KYB tables.")
+
+        if st.button("🔄 Run Join Validation", type="primary", key="de_join_run"):
+            JOIN_QUERIES = {
+                "Facts ↔ Business Customer Monitoring (join coverage)": """
+                    SELECT
+                        COUNT(DISTINCT f.business_id) AS fact_businesses,
+                        COUNT(DISTINCT rbcm.business_id) AS rbcm_businesses,
+                        COUNT(DISTINCT CASE WHEN rbcm.business_id IS NOT NULL THEN f.business_id END) AS matched,
+                        COUNT(DISTINCT CASE WHEN rbcm.business_id IS NULL THEN f.business_id END) AS orphan_in_facts
+                    FROM (SELECT DISTINCT business_id FROM rds_warehouse_public.facts) f
+                    LEFT JOIN (SELECT DISTINCT business_id FROM rds_cases_public.rel_business_customer_monitoring) rbcm
+                      ON f.business_id = rbcm.business_id;
+                """,
+                "Scored Businesses ↔ Facts (score with no facts)": """
+                    SELECT
+                        COUNT(DISTINCT cs.business_id) AS scored_businesses,
+                        COUNT(DISTINCT f.business_id) AS scored_with_facts,
+                        COUNT(DISTINCT CASE WHEN f.business_id IS NULL THEN cs.business_id END) AS scored_no_facts
+                    FROM rds_manual_score_public.data_current_scores cs
+                    LEFT JOIN (SELECT DISTINCT business_id FROM rds_warehouse_public.facts) f
+                      ON f.business_id = cs.business_id;
+                """,
+                "Duplicate business_id in data_current_scores (should be 0)": """
+                    SELECT business_id, COUNT(*) AS score_count
+                    FROM rds_manual_score_public.data_current_scores
+                    GROUP BY business_id
+                    HAVING COUNT(*) > 1
+                    ORDER BY score_count DESC
+                    LIMIT 20;
+                """,
+                "Customers with no onboarded businesses": """
+                    SELECT c.id AS customer_id, c.name AS customer_name, c.created_at
+                    FROM rds_auth_public.data_customers c
+                    LEFT JOIN rds_cases_public.rel_business_customer_monitoring rbcm
+                      ON rbcm.customer_id = c.id
+                    WHERE rbcm.business_id IS NULL
+                    ORDER BY c.created_at DESC
+                    LIMIT 25;
+                """,
+            }
+            for jname, jsql in JOIN_QUERIES.items():
+                with st.spinner(f"{jname}…"):
+                    _j_df, _j_err = run_sql(jsql)
+                st.markdown(f"**{jname}**")
+                if _j_df is not None and not _j_df.empty:
+                    st.dataframe(_j_df, use_container_width=True, hide_index=True)
+                    detail_panel(f"🔗 Join Check: {jname}", f"{len(_j_df)} rows",
+                        what_it_means=f"Join validation: {jname}. Orphan records or coverage gaps indicate data pipeline issues (missing facts, unlinked businesses, duplicate score records).",
+                        source_table="Cross-table join between key KYB tables",
+                        sql=jsql.strip(), icon="🔗", color="#f59e0b")
+                else:
+                    flag(f"{jname}: {_j_err or 'No data / 0 rows (good!)'}", "amber" if _j_err else "green")
+
+# ════════════════════════════════════════════════════════════════════════════════
+# 🧠 INTELLIGENCE HUB
+# ════════════════════════════════════════════════════════════════════════════════
+elif tab == "🧠 Intelligence Hub":
+    st.markdown("## 🧠 Intelligence Hub")
+    st.caption(
+        "Natural language analysis, portfolio scans, investigation war room, and glossary. "
+        "The AI View Generator interprets intent → writes SQL → executes → renders the right chart automatically."
+    )
+
+    ih1, ih2, ih3, ih4 = st.tabs([
+        "🎨 AI View Generator",
+        "🛡 Check-Agent Console",
+        "🏢 Investigation Workspace",
+        "📖 Glossary & Definitions",
+    ])
+
+    # ── AI VIEW GENERATOR ─────────────────────────────────────────────────────
+    with ih1:
+        st.markdown("#### 🎨 AI View Generator")
+        st.caption(
+            "Describe what you want to analyze in plain English. The AI interprets the intent, "
+            "writes Redshift SQL, executes it live, and automatically renders the most appropriate chart or table. "
+            "Each result includes SQL, Python, and `detail_panel()` lineage."
+        )
+
+        if not get_openai():
+            flag("OpenAI API key not configured — add OPENAI_API_KEY to .streamlit/secrets.toml.", "amber")
+        else:
+            # Preset chips
+            VIEW_PRESETS = [
+                ("📉 Low-conf trend this month",       "Show the weekly trend of low-confidence businesses (score < 550) for the last 30 days, broken down by week."),
+                ("👤 Manual review rate by customer",  "Which customers have the highest manual review rate? Show top 10 customers by percentage of businesses requiring manual review."),
+                ("🔐 TIN fail + SOS inactive overlap", "How many businesses have both TIN failed AND SOS inactive? Show the count and percentage of the total portfolio."),
+                ("🏭 NAICS fallback rate trend",       "Show the weekly trend of businesses receiving NAICS code 561499 (fallback) over the last 30 days."),
+                ("⚠️ Watchlist hits by state",         "Which formation states have the most businesses with watchlist hits? Show top 10 states."),
+                ("💰 Score distribution this week",    "Show the distribution of Worth Scores for businesses onboarded this week, grouped into bands."),
+            ]
+
+            st.markdown("**Quick prompts:**")
+            _preset_cols = st.columns(3)
+            for i, (chip_label, chip_prompt) in enumerate(VIEW_PRESETS):
+                with _preset_cols[i % 3]:
+                    if st.button(chip_label, key=f"view_preset_{i}", use_container_width=True):
+                        st.session_state["view_gen_prompt"] = chip_prompt
+
+            _vg_prompt = st.text_input(
+                "Your analysis prompt:",
+                value=st.session_state.get("view_gen_prompt",""),
+                placeholder="e.g. Show weekly trend of low-confidence cases by customer for the last 30 days",
+                key="view_gen_input",
+            )
+
+            if st.button("⚡ Generate View", type="primary", key="view_gen_run"):
+                if not _vg_prompt.strip():
+                    st.warning("Enter a prompt.")
+                else:
+                    # Build the structured prompt asking for intent + SQL + chart_type
+                    _vg_system = """You are a KYB data analyst AI with expert knowledge of the Worth AI Redshift schema.
+
+VERIFIED REDSHIFT TABLES (only use these):
+- rds_warehouse_public.facts (business_id, name, value JSON, received_at)
+  - JSON_EXTRACT_PATH_TEXT(value,'value') to get scalar value
+  - names include: sos_active, tin_match_boolean, naics_code, idv_passed_boolean, formation_state, watchlist_hits, num_bankruptcies, revenue, num_employees, website
+- rds_cases_public.rel_business_customer_monitoring (business_id, customer_id, created_at) — authoritative onboarding date
+- rds_auth_public.data_customers (id, name) — customer names
+- rds_manual_score_public.data_current_scores (business_id, score_id) — current score pointer
+- rds_manual_score_public.business_scores (id, business_id, weighted_score_850, risk_level, score_decision, created_at)
+- rds_manual_score_public.business_score_factors (score_id, category_id, score_100, weighted_score_850)
+
+CRITICAL RULES:
+1. Always use DATE(rbcm.created_at) for date filters, never facts.received_at
+2. Always join to rel_business_customer_monitoring for onboarding-date filters
+3. Never use tables not in the list above
+4. Use JSON_EXTRACT_PATH_TEXT(value,'value') to extract fact values
+5. CAST(...value... AS FLOAT) or AS INT when doing arithmetic
+
+OUTPUT FORMAT — return ONLY valid JSON, no extra text:
+{
+  "mode": "descriptive|diagnostic|investigative|technical",
+  "intent_summary": "One sentence describing what this query measures",
+  "sql": "SELECT ...",
+  "chart_type": "line|bar|stacked_bar|donut|histogram|table|kpi",
+  "x_col": "column name for x-axis (or null)",
+  "y_col": "column name for y-axis (or null)",
+  "color_col": "column for color grouping (or null)",
+  "title": "Chart title",
+  "insight": "One sentence interpretation of what the result will likely show",
+  "suggested_followups": ["Follow-up question 1", "Follow-up question 2", "Follow-up question 3"]
+}"""
+
+                    _bid_ctx = st.session_state.get("hub_bid","")
+                    _vg_user = f"""Analyze this request and produce a JSON response:
+
+USER REQUEST: {_vg_prompt}
+
+Active business ID (if relevant): {_bid_ctx or 'none selected'}
+
+Generate a Redshift SQL query that answers this request, and specify the best chart type to visualize the result."""
+
+                    with st.spinner("🤖 AI interpreting intent and writing SQL…"):
+                        try:
+                            import json as _json
+                            _client = get_openai()
+                            _resp = _client.chat.completions.create(
+                                model="gpt-4o-mini",
+                                messages=[
+                                    {"role":"system","content":_vg_system},
+                                    {"role":"user","content":_vg_user},
+                                ],
+                                temperature=0.1,
+                                max_tokens=1500,
+                                response_format={"type":"json_object"},
+                            )
+                            _vg_envelope = _json.loads(_resp.choices[0].message.content)
+                        except Exception as _vg_err:
+                            flag(f"AI error: {_vg_err}","red")
+                            _vg_envelope = None
+
+                    if _vg_envelope:
+                        _vg_sql    = _vg_envelope.get("sql","")
+                        _vg_mode   = _vg_envelope.get("mode","descriptive")
+                        _vg_intent = _vg_envelope.get("intent_summary","")
+                        _vg_chart  = _vg_envelope.get("chart_type","table")
+                        _vg_xcol   = _vg_envelope.get("x_col")
+                        _vg_ycol   = _vg_envelope.get("y_col")
+                        _vg_ccol   = _vg_envelope.get("color_col")
+                        _vg_title  = _vg_envelope.get("title","Result")
+                        _vg_insight= _vg_envelope.get("insight","")
+                        _vg_followups = _vg_envelope.get("suggested_followups",[])
+
+                        # Show intent
+                        _mode_color = {"descriptive":"#3B82F6","diagnostic":"#f59e0b","investigative":"#ef4444","technical":"#8B5CF6"}.get(_vg_mode,"#64748b")
+                        st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {_mode_color};border-radius:8px;padding:10px 14px;margin:8px 0">
+                          <span style="color:{_mode_color};font-weight:700;font-size:.78rem">{_vg_mode.upper()} MODE</span>
+                          <div style="color:#CBD5E1;font-size:.85rem;margin-top:4px"><strong>Interpreted intent:</strong> {_vg_intent}</div>
+                          {"<div style='color:#94A3B8;font-size:.78rem;margin-top:4px'><em>" + _vg_insight + "</em></div>" if _vg_insight else ""}
+                        </div>""", unsafe_allow_html=True)
+
+                        # Show SQL
+                        st.code(_vg_sql, language="sql")
+
+                        # Execute SQL
+                        with st.spinner("⚡ Executing against Redshift…"):
+                            _vg_df, _vg_df_err = run_sql(_vg_sql)
+
+                        if _vg_df_err:
+                            flag(f"SQL error: {_vg_df_err}", "red")
+                            st.caption("The AI will attempt to self-correct. Try rephrasing or check the SQL above.")
+                        elif _vg_df is not None and not _vg_df.empty:
+                            st.success(f"✅ {len(_vg_df):,} rows · {len(_vg_df.columns)} columns")
+
+                            # Auto-render the right chart
+                            _rendered_chart = False
+                            try:
+                                _fig_vg = None
+                                # Override chart_type based on actual data shape
+                                _num_cols = _vg_df.select_dtypes(include="number").columns.tolist()
+                                _cat_cols = _vg_df.select_dtypes(exclude="number").columns.tolist()
+
+                                if _vg_chart == "kpi" or (len(_vg_df)==1 and len(_num_cols)>=1):
+                                    # KPI cards
+                                    _kpi_cols = st.columns(min(len(_num_cols),4))
+                                    for _ki, _kn in enumerate(_num_cols[:4]):
+                                        with _kpi_cols[_ki]:
+                                            _kv = _vg_df[_kn].iloc[0]
+                                            kpi(_kn, f"{_kv:,.1f}" if isinstance(_kv,float) else str(_kv))
+                                    _rendered_chart = True
+
+                                elif _vg_chart in ("line",) and _vg_xcol and _vg_ycol and _vg_xcol in _vg_df.columns and _vg_ycol in _vg_df.columns:
+                                    _fig_vg = px.line(_vg_df, x=_vg_xcol, y=_vg_ycol,
+                                                      color=_vg_ccol if _vg_ccol and _vg_ccol in _vg_df.columns else None,
+                                                      title=_vg_title, markers=True)
+
+                                elif _vg_chart in ("bar","stacked_bar") and _vg_xcol and _vg_ycol and _vg_xcol in _vg_df.columns:
+                                    _fig_vg = px.bar(_vg_df, x=_vg_xcol, y=_vg_ycol,
+                                                     color=_vg_ccol if _vg_ccol and _vg_ccol in _vg_df.columns else None,
+                                                     barmode="stack" if _vg_chart=="stacked_bar" else "group",
+                                                     title=_vg_title)
+
+                                elif _vg_chart == "donut" and _vg_xcol and _vg_ycol:
+                                    _fig_vg = px.pie(_vg_df, names=_vg_xcol, values=_vg_ycol, hole=0.45, title=_vg_title)
+
+                                elif _vg_chart == "histogram" and _vg_xcol and _vg_xcol in _vg_df.columns:
+                                    _fig_vg = px.histogram(_vg_df, x=_vg_xcol, title=_vg_title, nbins=30)
+
+                                else:
+                                    # Smart fallback: inspect data shape
+                                    if len(_num_cols)>=1 and len(_cat_cols)>=1 and len(_vg_df)<=20:
+                                        _fig_vg = px.bar(_vg_df, x=_cat_cols[0], y=_num_cols[0],
+                                                         color=_cat_cols[1] if len(_cat_cols)>1 else None,
+                                                         title=_vg_title)
+                                    elif len(_num_cols)>=1 and len(_vg_df)>20:
+                                        _fig_vg = px.histogram(_vg_df, x=_num_cols[0], title=_vg_title, nbins=30)
+
+                                if _fig_vg is not None:
+                                    _fig_vg.update_layout(height=360, margin=dict(t=50,b=20,l=20,r=20))
+                                    st.plotly_chart(dark_chart(_fig_vg), use_container_width=True)
+                                    _rendered_chart = True
+
+                            except Exception as _chart_err:
+                                st.caption(f"Auto-chart skipped: {_chart_err}")
+
+                            # Always show the dataframe too
+                            if not _rendered_chart:
+                                st.dataframe(_vg_df, use_container_width=True, hide_index=True)
+                            else:
+                                with st.expander("📊 Raw data table"):
+                                    st.dataframe(_vg_df, use_container_width=True, hide_index=True)
+
+                            # detail_panel with full lineage
+                            _vg_py = _make_python_from_sql(_vg_sql)
+                            detail_panel(
+                                f"🎨 AI View: {_vg_title}", f"Mode: {_vg_mode} · {len(_vg_df):,} rows",
+                                what_it_means=(
+                                    f"**Intent:** {_vg_intent}\n\n"
+                                    f"**Mode:** {_vg_mode.upper()} — "
+                                    f"{'What happened?' if _vg_mode=='descriptive' else 'Why did it happen?' if _vg_mode=='diagnostic' else 'What is happening with this specific entity?' if _vg_mode=='investigative' else 'Where did this field/metric come from?'}\n\n"
+                                    f"**Insight:** {_vg_insight}\n\n"
+                                    f"**Chart type selected:** {_vg_chart}"
+                                ),
+                                source_table="Multiple Redshift tables — see SQL above",
+                                json_obj=_vg_envelope,
+                                sql=_vg_sql,
+                                python_code=_vg_py,
+                                links=[("facts/kyb/index.ts","KYB Fact Engine"),
+                                       ("aiscore.py","Worth Score pipeline"),
+                                       ("worth_score_model.py","Model definition")],
+                                icon="🎨", color=_mode_color
+                            )
+
+                            # Suggested follow-ups
+                            if _vg_followups:
+                                st.markdown("**💡 Suggested follow-ups:**")
+                                _fu_cols = st.columns(min(len(_vg_followups),3))
+                                for _fi, _fu in enumerate(_vg_followups[:3]):
+                                    with _fu_cols[_fi]:
+                                        if st.button(f"→ {_fu[:50]}…" if len(_fu)>50 else f"→ {_fu}",
+                                                     key=f"fu_{_fi}_{hash(_fu)%9999}",
+                                                     use_container_width=True):
+                                            st.session_state["view_gen_prompt"] = _fu
+                                            st.rerun()
+
+                        elif _vg_df is not None and _vg_df.empty:
+                            st.info("Query returned 0 rows. Try adjusting the date range or prompt.")
+
+    # ── CHECK-AGENT CONSOLE ───────────────────────────────────────────────────
+    with ih2:
+        st.markdown("#### 🛡 Check-Agent Console — Portfolio Scan")
+        st.caption("Run the Check-Agent across the portfolio (date window) or on a specific entity. All findings include severity, evidence, and recommended action.")
+
+        from check_agent_v2 import (
+            run_deterministic_checks, get_check_summary,
+            run_llm_audit, build_fact_summary, facts_cache_key,
+            SEV_COLOR, SEV_ICON, DETERMINISTIC_CHECKS,
+        )
+
+        _ca_scope = st.radio("Scope:", ["🏢 Specific Entity", "📊 Portfolio Sample"],
+                              horizontal=True, key="ih_ca_scope")
+
+        if _ca_scope == "🏢 Specific Entity":
+            _ca_bid = st.text_input("Business ID:", value=st.session_state.get("hub_bid",""),
+                                    placeholder="Paste UUID…", key="ih_ca_bid")
+            if st.button("🔍 Scan Entity", type="primary", key="ih_ca_scan"):
+                if not _ca_bid.strip():
+                    st.warning("Enter a Business ID.")
+                else:
+                    with st.spinner("Loading facts…"):
+                        _ca_facts, _ca_err = load_facts_with_ui(_ca_bid, "ih_check")
+                    if _ca_err or not _ca_facts:
+                        flag(f"Cannot load facts: {_ca_err}", "red")
+                    else:
+                        _ca_results = run_deterministic_checks(_ca_facts)
+                        _ca_summary = get_check_summary(_ca_results)
+                        _sev_order = {"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"NOTICE":4}
+
+                        # Summary KPI row
+                        _sc0,_sc1,_sc2,_sc3,_sc4,_sc5 = st.columns(6)
+                        _oa_color = {"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b","LOW":"#22c55e","NOTICE":"#3B82F6","CLEAN":"#22c55e"}.get(_ca_summary["overall"],"#64748b")
+                        with _sc0: kpi("Overall", _ca_summary["overall"], f"{_ca_summary['total']} flags", _oa_color)
+                        for _col, (_sev, _color, _icon) in zip([_sc1,_sc2,_sc3,_sc4,_sc5],[("CRITICAL","#ef4444","🔴"),("HIGH","#f97316","🟠"),("MEDIUM","#f59e0b","🟡"),("LOW","#22c55e","🟢"),("NOTICE","#3B82F6","🔵")]):
+                            with _col: kpi(f"{_icon} {_sev}", str(_ca_summary["counts"].get(_sev,0)), "", _color)
+
+                        if _ca_summary["total"] == 0:
+                            st.success("✅ All 28 checks passed — no cross-field anomalies detected.")
+                        else:
+                            for _r in sorted(_ca_results, key=lambda x: _sev_order.get(x["severity"],5)):
+                                _sev = _r["severity"]
+                                _color = SEV_COLOR.get(_sev,"#64748b")
+                                _icon = SEV_ICON.get(_sev,"ℹ️")
+                                st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {_color};border-radius:10px;padding:14px 18px;margin:6px 0">
+                                  <div style="color:{_color};font-weight:700;font-size:.88rem">{_icon} [{_sev}] {_r['name']}</div>
+                                  <div style="color:#CBD5E1;font-size:.80rem;margin-top:6px">{_r['description']}</div>
+                                  <div style="color:#60A5FA;font-size:.75rem;margin-top:6px">⚡ Action: {_r['action']}</div>
+                                </div>""", unsafe_allow_html=True)
+                                _bid_sql = _r["sql"].replace("{bid}", _ca_bid) if "{bid}" in _r["sql"] else _r["sql"]
+                                detail_panel(f"{_icon} {_r['name']}", f"{_sev} · {_r['group']}",
+                                    what_it_means=_r["description"],
+                                    source_table="rds_warehouse_public.facts · cross-field validation",
+                                    source_file="check_agent_v2.py",
+                                    json_obj={fn: {"value": gv(_ca_facts,fn)} for fn in _r.get("facts",[]) if fn in _ca_facts},
+                                    sql=_bid_sql, icon=_icon, color=_color)
+
+        else:  # Portfolio Sample
+            _ca_days = st.slider("Last N days:", 7, 90, 30, key="ih_ca_days")
+            _ca_limit = st.slider("Sample size (businesses):", 10, 200, 50, key="ih_ca_limit")
+            if st.button("📊 Run Portfolio Scan", type="primary", key="ih_ca_port_scan"):
+                _port_sql = f"""
+                    SELECT DISTINCT rbcm.business_id
+                    FROM rds_cases_public.rel_business_customer_monitoring rbcm
+                    WHERE DATE(rbcm.created_at) >= CURRENT_DATE - {_ca_days}
+                    ORDER BY rbcm.created_at DESC
+                    LIMIT {_ca_limit};
+                """
+                with st.spinner("Loading business sample…"):
+                    _port_df, _port_err = run_sql(_port_sql)
+                if _port_df is None or _port_df.empty:
+                    flag(f"Could not load businesses: {_port_err}", "red")
+                else:
+                    _port_bids = _port_df["business_id"].tolist()
+                    _portfolio_findings = {"CRITICAL":[],"HIGH":[],"MEDIUM":[],"LOW":[],"NOTICE":[]}
+                    _prog = st.progress(0)
+                    for _pi, _pbid in enumerate(_port_bids):
+                        _prog.progress((_pi+1)/len(_port_bids))
+                        _pf, _pe = load_facts_with_ui(_pbid, f"port_{_pi}")
+                        if _pf:
+                            for _pr in run_deterministic_checks(_pf):
+                                _portfolio_findings[_pr["severity"]].append({**_pr, "business_id": _pbid})
+                    _prog.empty()
+
+                    st.markdown(f"**Portfolio Check-Agent results — {len(_port_bids)} businesses scanned:**")
+                    _total_findings = sum(len(v) for v in _portfolio_findings.values())
+                    _pc1,_pc2,_pc3,_pc4,_pc5 = st.columns(5)
+                    for _col, _sev, _color in zip([_pc1,_pc2,_pc3,_pc4,_pc5],
+                                                   ["CRITICAL","HIGH","MEDIUM","LOW","NOTICE"],
+                                                   ["#ef4444","#f97316","#f59e0b","#22c55e","#3B82F6"]):
+                        with _col: kpi(_sev, str(len(_portfolio_findings[_sev])), "findings", _color)
+
+                    for _sev in ["CRITICAL","HIGH","MEDIUM"]:
+                        if _portfolio_findings[_sev]:
+                            st.markdown(f"**{SEV_ICON[_sev]} {_sev} findings:**")
+                            _fdf = pd.DataFrame(_portfolio_findings[_sev])[["business_id","name","group","description"]].head(20)
+                            st.dataframe(_fdf, use_container_width=True, hide_index=True)
+                            detail_panel(f"📊 Portfolio: {_sev} Findings", f"{len(_portfolio_findings[_sev])} across {len(_port_bids)} businesses",
+                                what_it_means=f"{_sev} Check-Agent findings from {len(_port_bids)} randomly sampled businesses in the last {_ca_days} days.",
+                                source_table="rds_warehouse_public.facts · rds_cases_public.rel_business_customer_monitoring",
+                                sql=_port_sql,
+                                json_obj={"severity": _sev, "count": len(_portfolio_findings[_sev]), "sample_businesses": len(_port_bids)},
+                                icon=SEV_ICON[_sev], color=SEV_COLOR[_sev])
+
+    # ── INVESTIGATION WORKSPACE ────────────────────────────────────────────────
+    with ih3:
+        st.markdown("#### 🏢 Investigation Workspace (War Room)")
+        st.caption("Select a Business ID to assemble the complete investigation view: profile, score, facts, Check-Agent findings, AI explanation, and lineage — all in one place.")
+
+        _iw_bid = st.text_input("Business ID to investigate:",
+                                 value=st.session_state.get("hub_bid",""),
+                                 placeholder="Paste UUID…", key="iw_bid")
+
+        if _iw_bid.strip():
+            with st.spinner("Assembling war room…"):
+                _iw_facts, _iw_err = load_facts_with_ui(_iw_bid, "war_room")
+
+            if _iw_err or not _iw_facts:
+                flag(f"Cannot load entity: {_iw_err}", "red")
+            else:
+                # Load score
+                @st.cache_data(ttl=600, show_spinner=False)
+                def _load_iw_score(b):
+                    return run_sql(f"""SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision
+                        FROM rds_manual_score_public.data_current_scores cs
+                        JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+                        WHERE cs.business_id='{b}' ORDER BY bs.created_at DESC LIMIT 1;""")
+                _iw_ws, _ = _load_iw_score(_iw_bid)
+                _iw_score = float(_iw_ws.iloc[0]["weighted_score_850"]) if _iw_ws is not None and not _iw_ws.empty else 0
+                _iw_risk = str(_iw_ws.iloc[0]["risk_level"]) if _iw_ws is not None and not _iw_ws.empty else "—"
+                _iw_dec = str(_iw_ws.iloc[0]["score_decision"]) if _iw_ws is not None and not _iw_ws.empty else "—"
+
+                def _gv_iw(n): return str(gv(_iw_facts, n) or "")
+
+                # Entity header
+                _iw_legal = _gv_iw("legal_name") or _gv_iw("business_name") or "Unknown Entity"
+                _iw_sc = "#ef4444" if _iw_score < 550 else "#f59e0b" if _iw_score < 700 else "#22c55e"
+                st.markdown(f"""<div style="background:linear-gradient(135deg,#1E293B,#0F172A);border-radius:14px;padding:20px 24px;margin-bottom:14px;border:1px solid #334155">
+                  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px">
+                    <div>
+                      <div style="color:#F1F5F9;font-size:1.3rem;font-weight:800">{_iw_legal}</div>
+                      <div style="color:#64748B;font-size:.78rem;margin-top:4px">{_iw_bid}</div>
+                      <div style="color:#94A3B8;font-size:.78rem;margin-top:2px">
+                        NAICS: {_gv_iw('naics_code') or '—'} · State: {_gv_iw('formation_state') or '—'} · Entity: {_gv_iw('corporation') or '—'}
+                      </div>
+                    </div>
+                    <div style="text-align:center">
+                      <div style="color:{_iw_sc};font-size:2rem;font-weight:900">{_iw_score:.0f}</div>
+                      <div style="color:#64748b;font-size:.70rem">Worth Score · {_iw_risk}</div>
+                      <div style="color:{_iw_sc};font-size:.74rem;font-weight:600">{_iw_dec.replace('_',' ')}</div>
+                    </div>
+                  </div>
+                </div>""", unsafe_allow_html=True)
+
+                # 6 core KPI cards
+                _wc1,_wc2,_wc3,_wc4,_wc5,_wc6 = st.columns(6)
+                with _wc1: kpi("SOS Active",    "✅" if _gv_iw("sos_active")=="true" else "❌", _gv_iw("sos_active") or "—", "#22c55e" if _gv_iw("sos_active")=="true" else "#ef4444", object_key=f"iw_sos_{_iw_bid}")
+                with _wc2: kpi("TIN Match",     "✅" if _gv_iw("tin_match_boolean")=="true" else "❌", "", "#22c55e" if _gv_iw("tin_match_boolean")=="true" else "#ef4444", object_key=f"iw_tin_{_iw_bid}")
+                with _wc3: kpi("IDV Passed",    "✅" if _gv_iw("idv_passed_boolean")=="true" else "❌", "", "#22c55e" if _gv_iw("idv_passed_boolean")=="true" else "#ef4444", object_key=f"iw_idv_{_iw_bid}")
+                with _wc4: kpi("Watchlist",     _gv_iw("watchlist_hits") or "0", "hits", "#ef4444" if int(_gv_iw("watchlist_hits") or 0)>0 else "#22c55e", object_key=f"iw_wl_{_iw_bid}")
+                with _wc5: kpi("NAICS",         _gv_iw("naics_code") or "—", "⚠️ fallback" if _gv_iw("naics_code")=="561499" else "", "#f59e0b" if _gv_iw("naics_code")=="561499" else "#3B82F6", object_key=f"iw_naics_{_iw_bid}")
+                with _wc6: kpi("Worth Score",   f"{_iw_score:.0f}", _iw_risk, _iw_sc, object_key=f"iw_ws_{_iw_bid}")
+
+                # Check-Agent findings
+                st.markdown("---")
+                st.markdown("##### 🛡 Check-Agent Findings")
+                _iw_findings = run_deterministic_checks(_iw_facts)
+                _iw_summary = get_check_summary(_iw_findings)
+                if _iw_summary["total"] == 0:
+                    st.success("✅ All 28 cross-field checks passed — no anomalies detected.")
+                else:
+                    _sev_order = {"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"NOTICE":4}
+                    for _r in sorted(_iw_findings, key=lambda x: _sev_order.get(x["severity"],5)):
+                        _color = SEV_COLOR.get(_r["severity"],"#64748b")
+                        _icon = SEV_ICON.get(_r["severity"],"ℹ️")
+                        st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {_color};border-radius:8px;padding:10px 14px;margin:4px 0">
+                          <span style="color:{_color};font-weight:700">{_icon} [{_r['severity']}]</span>
+                          <span style="color:#CBD5E1;font-size:.83rem"> {_r['name']}</span>
+                          <div style="color:#64748b;font-size:.74rem;margin-top:4px">{_r['description'][:120]}…</div>
+                        </div>""", unsafe_allow_html=True)
+
+                # AI Explanation
+                st.markdown("---")
+                st.markdown("##### 🤖 AI Explanation")
+                if get_openai():
+                    _iw_cache_key = f"iw_ai_{_iw_bid}_{facts_cache_key(_iw_facts)}"
+                    if _iw_cache_key not in st.session_state:
+                        with st.spinner("AI analyst generating explanation…"):
+                            _iw_fj = json.dumps(_iw_facts, default=str)
+                            _iw_sj = json.dumps({"score":_iw_score,"risk":_iw_risk,"decision":_iw_dec}, default=str)
+                            _iw_audit, _ = run_llm_audit(_iw_fj, _iw_bid, _iw_sj)
+                            st.session_state[_iw_cache_key] = _iw_audit
+                    _iw_audit = st.session_state.get(_iw_cache_key)
+                    if _iw_audit:
+                        st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid #3B82F6;border-radius:8px;padding:12px 16px">
+                          <div style="color:#60A5FA;font-weight:700;margin-bottom:6px">🤖 Analyst Summary — {_iw_audit.get('overall_risk','?')} Risk</div>
+                          <div style="color:#CBD5E1;font-size:.84rem;line-height:1.5">{_iw_audit.get('summary','')}</div>
+                          <div style="color:#f59e0b;font-size:.78rem;margin-top:8px">⚖️ {_iw_audit.get('underwriting_decision_guidance','')}</div>
+                        </div>""", unsafe_allow_html=True)
+
+                        detail_panel("🤖 Full AI Audit (War Room)", f"Risk: {_iw_audit.get('overall_risk','?')}",
+                            what_it_means=_iw_audit.get("summary",""),
+                            source_table="Generated by GPT-4o-mini · check_agent_v2.run_llm_audit()",
+                            json_obj=_iw_audit,
+                            sql=f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val, JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid FROM rds_warehouse_public.facts WHERE business_id='{_iw_bid}' ORDER BY name;",
+                            icon="🤖", color="#3B82F6")
+                else:
+                    flag("Add OPENAI_API_KEY to enable AI explanations.", "amber")
+        else:
+            st.info("👈 Enter a Business ID above to open the investigation workspace.")
+
+    # ── GLOSSARY ──────────────────────────────────────────────────────────────
+    with ih4:
+        st.markdown("#### 📖 Glossary & Definitions")
+        st.caption("Definitions for every KYB term, metric, fact name, model concept, and red-flag rule used in this platform.")
+
+        GLOSSARY = [
+            ("Confidence Score",        "Worth Score",    "Model-derived probability (0–1) that a business passes KYB verification. Converted to 300-850 scale: score = p × 550 + 300."),
+            ("Worth Score",             "Worth Score",    "The 300-850 version of the confidence score. Named after Worth AI. Thresholds: APPROVE ≥700, FURTHER_REVIEW 550-699, DECLINE <550."),
+            ("Fact Engine",             "Architecture",   "The integration-service component that collects facts from all vendors and selects winners using factWithHighestConfidence, combineFacts, and dependentFact rules."),
+            ("factWithHighestConfidence","Fact Engine",   "Winner-selection rule: picks the vendor with the highest confidence × weight product. Used for scalar facts like naics_code, sos_active, legal_name."),
+            ("combineFacts",            "Fact Engine",    "Merge rule: combines arrays from multiple vendors (e.g. names_found, dba_found, watchlist hits). No winner — all values are included."),
+            ("dependentFact",           "Fact Engine",    "Derived fact: computed from other facts rather than a vendor (e.g. kyb_complete depends on business_verified AND screened_people)."),
+            ("sos_active",              "KYB Fact",       "Whether the entity's Secretary of State registration is currently active. DEPENDENT fact derived from sos_filings[].active array. Source: Middesk (pid=16)."),
+            ("tin_match_boolean",       "KYB Fact",       "Whether the IRS confirmed the submitted EIN matches this business name. DEPENDENT from tin_match.value.status === 'success'. Source: Middesk (pid=16)."),
+            ("idv_passed_boolean",      "KYB Fact",       "Whether the beneficial owner passed biometric identity verification (government ID + selfie + liveness). DEPENDENT from idv_passed ≥ 1. Source: Plaid IDV (pid=18)."),
+            ("naics_code",              "KYB Fact",       "6-digit NAICS industry classification. 561499 = fallback (all vendors failed). factWithHighestConfidence across ZI, EFX, OC, SERP, Trulioo, AI enrichment."),
+            ("watchlist_hits",          "KYB Fact",       "Count of PEP or OFAC sanctions hits from the consolidated watchlist. Adverse media is EXCLUDED. Source: Trulioo PSC (pid=38) + Middesk (pid=16)."),
+            ("middesk_confidence",      "KYB Fact",       "Middesk entity-match confidence score: 0.15 (base) + 0.20 × (passing tasks / total tasks). Values below 0.25 indicate very low match quality."),
+            ("kyb_complete",            "KYB Fact",       "Whether the full KYB workflow is complete: DEPENDENT — requires business_verified=true AND screened_people is non-empty (at least 1 PSC completed)."),
+            ("561499",                  "NAICS",          "NAICS fallback code: 'All Other Business Support Services'. Assigned when all commercial vendors fail to classify the industry."),
+            ("Gap G1",                  "NAICS",          "No website submitted on the onboarding form — AI enrichment cannot use web search to classify industry."),
+            ("Gap G2",                  "NAICS",          "Website is present in facts but was not passed to AI enrichment prompt (params.website=null). Fix: pass website URL to aiEnrichment.ts."),
+            ("Gap G3",                  "NAICS",          "Website is present and passed to AI, but AI still returns 561499 — website is too generic or AI cannot determine industry from URL content."),
+            ("Pipeline A",              "Architecture",   "Real-time fact collection pipeline: onboarding form submission → integration-service → Fact Engine → rds_warehouse_public.facts."),
+            ("Pipeline B",              "Architecture",   "Batch enrichment pipeline: warehouse-service → ZoomInfo + Equifax entity matching → datascience.customer_files. Runs daily."),
+            ("platformId",              "Architecture",   "Integer ID for each data source vendor. Key ones: 0=Applicant, 16=Middesk, 17=Equifax, 22=SERP, 23=OpenCorporates, 24=ZoomInfo, 31=AI, 38=Trulioo."),
+            ("UBO",                     "Compliance",     "Ultimate Beneficial Owner — the natural person(s) who ultimately own or control a legal entity. Must be verified per KYB regulations."),
+            ("PSC",                     "Compliance",     "Person Screening Compliance — Trulioo's PEP/sanctions/adverse media check on beneficial owners. Populates screened_people fact."),
+            ("EDD",                     "Compliance",     "Enhanced Due Diligence — additional scrutiny required for high-risk businesses (watchlist hits, tax-haven states, high-risk NAICS codes)."),
+            ("Public Records",          "Worth Score",    "Worth Score category covering bankruptcies (num_bankruptcies), judgments (num_judgements), and liens (num_liens). Maximum negative impact: ~-120pts."),
+            ("Company Profile",         "Worth Score",    "Worth Score category covering NAICS6, entity age (age_business), state, entity structure (bus_struct), employee count (count_employees)."),
+            ("Financial Trends",        "Worth Score",    "Worth Score category covering macroeconomic indicators: GDP growth, CPI, VIX, T10Y2Y yield spread, unemployment, etc. External data feeds."),
+            ("Business Operations",     "Worth Score",    "Worth Score category covering revenue and revenue-based financial ratios. Primary source: ZoomInfo/Equifax firmographic data."),
+            ("Performance Measures",    "Worth Score",    "Worth Score category covering Plaid balance sheet and cash flow ratios. Null for businesses without Plaid banking connection."),
+            ("Tax-haven state",         "Risk Signal",    "Formation state in DE, NV, WY, SD, MT, or NM. High entity-resolution risk: Middesk's address-based SOS search may find the FOREIGN filing, missing the DOMESTIC primary."),
+            ("PSI",                     "Monitoring",     "Population Stability Index — measures distribution shift of a feature or score. PSI < 0.10: stable. 0.10–0.25: monitor. > 0.25: material drift."),
+            ("SHAP",                    "Model",          "SHapley Additive exPlanations — the technique used to explain individual factor contributions to the Worth Score. Stored in business_score_factors."),
+        ]
+
+        _gloss_df = pd.DataFrame(GLOSSARY, columns=["Term","Category","Definition"])
+        _gloss_search = st.text_input("🔍 Search terms or definitions:", "", key="gloss_search")
+        if _gloss_search:
+            mask = _gloss_df.apply(lambda r: _gloss_search.lower() in " ".join(str(v) for v in r.values).lower(), axis=1)
+            _gloss_df = _gloss_df[mask]
+
+        for _, row in _gloss_df.iterrows():
+            st.markdown(f"""<div style="background:#1E293B;border-left:3px solid #334155;border-radius:8px;padding:10px 14px;margin:4px 0">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span style="color:#F1F5F9;font-weight:700;font-size:.84rem">{row['Term']}</span>
+                <span style="background:#273445;color:#94A3B8;border-radius:6px;padding:2px 8px;font-size:.68rem">{row['Category']}</span>
+              </div>
+              <div style="color:#CBD5E1;font-size:.78rem;margin-top:4px">{row['Definition']}</div>
+            </div>""", unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.caption(f"📖 {len(GLOSSARY)} terms defined · covers KYB facts, model concepts, compliance terms, architecture, and risk signals.")
+
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("---")
-st.markdown(f'<div style="color:#475569;font-size:.68rem;text-align:center">KYB Intelligence Hub · Worth AI · {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}</div>',unsafe_allow_html=True)
+st.markdown(f'<div style="color:#475569;font-size:.68rem;text-align:center">KYB Intelligence Hub v2 · Worth AI · {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}</div>',unsafe_allow_html=True)
