@@ -6,7 +6,7 @@ import streamlit as st
 
 from analytics import portfolio as ana
 from ui.components import tables as tb
-from ui.components.kpi_card import panel, panel_close
+from ui.components.kpi_card import panel_header, panel_close
 
 
 def render() -> None:
@@ -22,31 +22,31 @@ def render() -> None:
 
 
 def _completeness() -> None:
-    st.markdown(panel("Feature Null-Rate Monitor", "fa-droplet", object_key="feat.null_rates"), unsafe_allow_html=True)
+    panel_header("Feature Null-Rate Monitor", "fa-droplet", object_key="feat.null_rates")
     tb.render_dataframe(ana.get_null_rates())
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _drift() -> None:
     from ui.components import charts as ch
-    st.markdown(panel("Feature Distribution Drift", "fa-wave-square", object_key="chart.feat_drift"), unsafe_allow_html=True)
+    panel_header("Feature Distribution Drift", "fa-wave-square", object_key="chart.feat_drift")
     fi = ana.get_feature_importance().sort_values("drift", ascending=False).head(8)
     st.plotly_chart(ch.bar(fi, x="feature", y="drift", horizontal=True), use_container_width=True, key="feat_drift_bar")
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _dq() -> None:
-    st.markdown(panel("Data Quality Rule Violations", "fa-list-check", object_key="dq.rules"), unsafe_allow_html=True)
+    panel_header("Data Quality Rule Violations", "fa-list-check", object_key="dq.rules")
     st.dataframe(pd.DataFrame([
         {"rule":"tin_format_valid",       "domain":"identifier",   "failed_records":142, "last_run":"2h ago"},
         {"rule":"address_country_iso",    "domain":"address",      "failed_records":37,  "last_run":"2h ago"},
         {"rule":"score_between_0_1",      "domain":"model",        "failed_records":0,   "last_run":"1h ago"},
         {"rule":"registration_date_past", "domain":"registration", "failed_records":6,   "last_run":"4h ago"},
     ]), use_container_width=True, hide_index=True)
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _sources() -> None:
-    st.markdown(panel("Source Reliability", "fa-plug", object_key="src.reliability"), unsafe_allow_html=True)
+    panel_header("Source Reliability", "fa-plug", object_key="src.reliability")
     tb.render_dataframe(ana.get_source_reliability())
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()

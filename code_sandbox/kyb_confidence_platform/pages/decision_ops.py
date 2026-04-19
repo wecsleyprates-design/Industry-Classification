@@ -6,7 +6,7 @@ import streamlit as st
 
 from analytics import portfolio as ana
 from ui.components import charts as ch, tables as tb
-from ui.components.kpi_card import kpi, panel, panel_close
+from ui.components.kpi_card import kpi, panel_header, panel_close
 
 
 def render() -> None:
@@ -22,7 +22,7 @@ def render() -> None:
 
 
 def _decision() -> None:
-    st.markdown(panel("Confidence vs. Decision Outcome", "fa-scale-balanced", object_key="chart.decision_mix"), unsafe_allow_html=True)
+    panel_header("Confidence vs. Decision Outcome", "fa-scale-balanced", object_key="chart.decision_mix")
     d = ana.get_decisions_by_band()
     if "n" not in d.columns and "count" in d.columns:
         d = d.rename(columns={"count": "n"})
@@ -33,11 +33,11 @@ def _decision() -> None:
                    barmode="stack"),
             use_container_width=True, key="decision_ops_bar",
         )
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _tat() -> None:
-    st.markdown(panel("Turnaround Time by Confidence Band", "fa-stopwatch", object_key="chart.tat"), unsafe_allow_html=True)
+    panel_header("Turnaround Time by Confidence Band", "fa-stopwatch", object_key="chart.tat")
     t = ana.get_tat_by_band()
     st.dataframe(t, use_container_width=True, hide_index=True)
     long = t.melt(id_vars=["band"], value_vars=["p50_hours","p90_hours"], var_name="percentile", value_name="hours")
@@ -45,7 +45,7 @@ def _tat() -> None:
         ch.bar(long, x="band", y="hours", color="percentile", barmode="group"),
         use_container_width=True, key="decision_ops_tat",
     )
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _manual() -> None:
@@ -54,7 +54,7 @@ def _manual() -> None:
     with c2: kpi("Open Queue",              "214",   sub="analyst workload",              object_key="manual.queue")
     with c3: kpi("SLA Breaches",            "28",    sub=">24h in review",  color="red",  object_key="manual.sla")
 
-    st.markdown(panel("Top Reasons Routed to Manual", "fa-user-gear", object_key="manual.reasons"), unsafe_allow_html=True)
+    panel_header("Top Reasons Routed to Manual", "fa-user-gear", object_key="manual.reasons")
     st.dataframe(pd.DataFrame([
         {"reason":"UBO partial verification",         "share":"28%"},
         {"reason":"Address/SOS mismatch",              "share":"22%"},
@@ -63,10 +63,10 @@ def _manual() -> None:
         {"reason":"Pipeline/Source failure",           "share":"8%"},
         {"reason":"Other",                             "share":"6%"},
     ]), use_container_width=True, hide_index=True)
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _ops() -> None:
     st.markdown(panel("Operational Exceptions (detailed)", "fa-triangle-exclamation", object_key="ops.table"), unsafe_allow_html=True)
     tb.render_dataframe(ana.get_ops_exceptions())
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()

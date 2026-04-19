@@ -6,7 +6,7 @@ import pandas as pd
 
 from knowledge.metadata_catalog import TABLES, COLUMNS, FEATURES, GLOSSARY
 from lineage import resolve_feature_lineage
-from ui.components.kpi_card import panel, panel_close
+from ui.components.kpi_card import panel_header, panel_close
 
 
 def render() -> None:
@@ -24,7 +24,7 @@ def render() -> None:
 
 
 def _tables() -> None:
-    st.markdown(panel("Table Catalog", "fa-database", object_key="catalog.tables"), unsafe_allow_html=True)
+    panel_header("Table Catalog", "fa-database", object_key="catalog.tables")
     q = st.text_input("Search schemas / tables…", "")
     rows = [t.__dict__ for t in TABLES]
     df = pd.DataFrame(rows)
@@ -32,23 +32,23 @@ def _tables() -> None:
         mask = df.apply(lambda r: q.lower() in " ".join(str(v) for v in r.values).lower(), axis=1)
         df = df[mask]
     st.dataframe(df, use_container_width=True, hide_index=True)
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _columns() -> None:
-    st.markdown(panel("Column / Field Catalog", "fa-table-columns", object_key="catalog.columns"), unsafe_allow_html=True)
+    panel_header("Column / Field Catalog", "fa-table-columns", object_key="catalog.columns")
     st.dataframe(pd.DataFrame([c.__dict__ for c in COLUMNS]), use_container_width=True, hide_index=True)
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _features() -> None:
-    st.markdown(panel("Feature Registry", "fa-boxes-stacked", object_key="feature.registry"), unsafe_allow_html=True)
+    panel_header("Feature Registry", "fa-boxes-stacked", object_key="feature.registry")
     st.dataframe(pd.DataFrame([f.__dict__ for f in FEATURES]), use_container_width=True, hide_index=True)
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _lineage() -> None:
-    st.markdown(panel("Field Lineage Explorer", "fa-diagram-project", object_key="lineage.explorer"), unsafe_allow_html=True)
+    panel_header("Field Lineage Explorer", "fa-diagram-project", object_key="lineage.explorer")
     names = [f.name for f in FEATURES]
     pick = st.selectbox("Feature", names)
     lin = resolve_feature_lineage(pick)
@@ -70,11 +70,11 @@ def _lineage() -> None:
             for p in lin.related_code: st.markdown(f"- `{p}`")
         else:
             st.caption("RAG index not built — run `python scripts/index_knowledge.py` to populate.")
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _repo() -> None:
-    st.markdown(panel("Repo Explorer", "fa-folder-tree", object_key="repo.explorer"), unsafe_allow_html=True)
+    panel_header("Repo Explorer", "fa-folder-tree", object_key="repo.explorer")
     st.dataframe(pd.DataFrame([
         {"path":"integration-service/lib/facts/kyb/index.ts",            "role":"fact definitions"},
         {"path":"integration-service/lib/facts/businessDetails/index.ts", "role":"business-detail facts"},
@@ -85,10 +85,10 @@ def _repo() -> None:
         {"path":"warehouse-service/.../customer_table.sql",               "role":"Pipeline B join"},
         {"path":"api-docs/openapi-specs/get-kyb.json",                    "role":"authoritative schema"},
     ]), use_container_width=True, hide_index=True)
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _glossary() -> None:
-    st.markdown(panel("Glossary & Definitions", "fa-book", object_key="copilot.glossary"), unsafe_allow_html=True)
+    panel_header("Glossary & Definitions", "fa-book", object_key="copilot.glossary")
     st.dataframe(pd.DataFrame(GLOSSARY, columns=["term","definition"]), use_container_width=True, hide_index=True)
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()

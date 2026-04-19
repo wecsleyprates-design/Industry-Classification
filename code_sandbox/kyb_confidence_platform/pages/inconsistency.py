@@ -8,7 +8,7 @@ from validation import (
     get_not_matching_review, get_cross_reference_checks,
 )
 from ui.components import charts as ch, tables as tb
-from ui.components.kpi_card import kpi, panel, panel_close
+from ui.components.kpi_card import kpi, panel_header, panel_close
 
 
 def render() -> None:
@@ -37,15 +37,15 @@ def _dashboard() -> None:
             with cols[i % 4]:
                 kpi(f"{cat} inconsistencies", str(count), color=color, object_key=f"incon.{cat}")
 
-    st.markdown(panel("Inconsistency Volume by Category", "fa-chart-bar", object_key="chart.incon"), unsafe_allow_html=True)
+    panel_header("Inconsistency Volume by Category", "fa-chart-bar", object_key="chart.incon")
     st.plotly_chart(ch.bar(c, x="category", y="cases"), use_container_width=True, key="incon_bar")
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _xref() -> None:
-    st.markdown(panel("Cross-Reference Checks", "fa-link-slash", object_key="xref.table"), unsafe_allow_html=True)
+    panel_header("Cross-Reference Checks", "fa-link-slash", object_key="xref.table")
     tb.render_dataframe(get_cross_reference_checks())
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _red() -> None:
@@ -56,7 +56,7 @@ def _red() -> None:
             f"<div class='kyb-flag {cls}'><b>{r['pattern']}</b> — {int(r['cases'])} cases</div>",
             unsafe_allow_html=True,
         )
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _check() -> None:
@@ -77,11 +77,11 @@ def _check() -> None:
          "recommendation":"Review escalation thresholds for UBO gaps."},
     ]
     tb.render_findings(findings)
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _notmatch() -> None:
-    st.markdown(panel("Not-Matching Result Review", "fa-code-compare", object_key="notmatch.table"), unsafe_allow_html=True)
+    panel_header("Not-Matching Result Review", "fa-code-compare", object_key="notmatch.table")
     st.caption("Cases where model output disagrees with underlying evidence.")
     tb.render_dataframe(get_not_matching_review())
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()

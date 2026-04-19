@@ -115,7 +115,7 @@ hr.thin-sep { margin: 4px 0; border-color: var(--border); }
 .kyb-kpi .delta.up   { color: var(--green); }
 .kyb-kpi .delta.down { color: var(--red); }
 
-/* ── Trust-bar (inside KPI cards and panels) ─────────────────────────────── */
+/* ── Trust-bar (legacy HTML-only, non-interactive — kept for visual fallback) */
 .trust-bar {
   display: flex; gap: 5px;
   position: absolute; top: 8px; right: 8px;
@@ -127,10 +127,62 @@ hr.thin-sep { margin: 4px 0; border-color: var(--border); }
   border: 1px solid var(--border-2);
   width: 24px; height: 24px; border-radius: 5px; cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center;
-  font-size: .68rem; line-height: 1;
-  transition: all .15s;
+  font-size: .68rem; line-height: 1; transition: all .15s;
 }
 .trust-btn:hover { color: var(--accent-2); border-color: var(--accent); }
+
+/* ── .trust-row: real interactive Streamlit buttons ─────────────────────── */
+/*
+  Rendered immediately after the KPI card HTML. Negative margin-top pulls
+  the button row UP so it visually overlaps the card's top-right area.
+  The three emoji buttons (🪄 🛡 🌳) appear inside the card corner.
+*/
+.trust-row {
+  margin-top: -34px;           /* pull up into the card above              */
+  margin-bottom: 6px;
+  display: flex;
+  justify-content: flex-end;
+  position: relative;
+  z-index: 20;
+}
+/* Constrain the stHorizontalBlock inside .trust-row */
+.trust-row > div[data-testid="stHorizontalBlock"] {
+  width: auto !important;
+  gap: 3px !important;
+  flex-wrap: nowrap !important;
+}
+/* Make each column inside trust-row auto-width */
+.trust-row [data-testid="column"] {
+  flex: 0 0 auto !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  width: auto !important;
+}
+/* Style the trust buttons to match .trust-btn exactly */
+.trust-row button[kind="secondary"] {
+  background: rgba(39,52,69,0.85) !important;   /* --bg-4 semi-transparent  */
+  border: 1px solid var(--border-2) !important;
+  color: var(--text-2) !important;
+  width: 26px !important;
+  height: 26px !important;
+  min-height: 26px !important;
+  min-width: 26px !important;
+  padding: 0 !important;
+  border-radius: 5px !important;
+  font-size: 0.78rem !important;
+  opacity: 0.65;
+  transition: all .15s;
+}
+.trust-row button[kind="secondary"]:hover {
+  background: rgba(59,130,246,0.2) !important;
+  border-color: var(--accent) !important;
+  color: var(--accent-2) !important;
+  opacity: 1 !important;
+}
+.trust-row button[kind="secondary"] p {
+  font-size: 0.78rem !important;
+  line-height: 1 !important;
+}
 
 /* ── Panels / chart wrappers ─────────────────────────────────────────────── */
 .kyb-panel {

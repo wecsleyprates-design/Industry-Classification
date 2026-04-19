@@ -14,7 +14,7 @@ from core.filters import current_filters
 from knowledge.metadata_catalog import GLOSSARY
 from investigation import build_check_agent_context
 from ui.components import tables as tb
-from ui.components.kpi_card import panel, panel_close
+from ui.components.kpi_card import panel_header, panel_close
 
 
 def render() -> None:
@@ -30,7 +30,7 @@ def render() -> None:
 
 
 def _ask() -> None:
-    st.markdown(panel("Ask the AI — Natural Language Analysis", "fa-wand-magic-sparkles", object_key="copilot.view_gen"), unsafe_allow_html=True)
+    panel_header("Ask the AI — Natural Language Analysis", "fa-wand-magic-sparkles", object_key="copilot.view_gen")
     st.caption(f"AI status: **{openai_status()}**. Without a live key, offline fallback answers are returned.")
 
     mode = st.radio("Mode", ["Chat", "AI View Generator"], horizontal=True, key="copilot_mode")
@@ -38,7 +38,7 @@ def _ask() -> None:
         _chat()
     else:
         _view_gen()
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _chat() -> None:
@@ -109,7 +109,7 @@ def _view_gen() -> None:
 
 
 def _console() -> None:
-    st.markdown(panel("Check-Agent Console", "fa-shield-virus", object_key="copilot.check"), unsafe_allow_html=True)
+    panel_header("Check-Agent Console", "fa-shield-virus", object_key="copilot.check")
     st.caption("Run a deep scan on portfolio or a specific entity. Findings include severity, evidence, and recommended action.")
 
     c1, c2, c3 = st.columns([2, 2, 1])
@@ -136,7 +136,7 @@ def _console() -> None:
         st.metric("Findings", len(res.findings))
         tb.render_findings(res.findings)
 
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _war_room() -> None:
@@ -164,10 +164,10 @@ def _war_room() -> None:
             )},
         ]
         st.markdown(f"<div class='kyb-flag blue'>{chat_completion(msgs)}</div>", unsafe_allow_html=True)
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _glossary() -> None:
-    st.markdown(panel("Glossary & Definitions", "fa-book", object_key="copilot.glossary"), unsafe_allow_html=True)
+    panel_header("Glossary & Definitions", "fa-book", object_key="copilot.glossary")
     st.dataframe(pd.DataFrame(GLOSSARY, columns=["term","definition"]), use_container_width=True, hide_index=True)
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()

@@ -5,7 +5,7 @@ import streamlit as st
 
 from analytics import portfolio as ana
 from ui.components import charts as ch, tables as tb
-from ui.components.kpi_card import kpi, panel, panel_close
+from ui.components.kpi_card import kpi, panel_header, panel_close
 
 
 def render() -> None:
@@ -33,13 +33,13 @@ def _portfolio_summary() -> None:
     with c6: kpi("Auto-Approved %",     f"{float(s.get('auto_approve_pct', 71.3)):.1f}%", sub="no manual required", color="green", object_key="kpi.auto_approve")
 
     # ── Confidence Band Distribution ──────────────────────────────────────────
-    st.markdown(panel("Confidence Band Distribution", "fa-chart-pie", object_key="chart.bands"), unsafe_allow_html=True)
+    panel_header("Confidence Band Distribution", "fa-chart-pie", object_key="chart.bands")
     bands = ana.get_confidence_bands()
     st.plotly_chart(ch.donut(bands, bands.columns[0], bands.columns[1]), use_container_width=True, key="exec_donut")
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
     # ── Decision Outcome Mix ──────────────────────────────────────────────────
-    st.markdown(panel("Decision Outcome Mix", "fa-scale-balanced", object_key="chart.decisions"), unsafe_allow_html=True)
+    panel_header("Decision Outcome Mix", "fa-scale-balanced", object_key="chart.decisions")
     d = ana.get_decisions_by_band()
     if "n" not in d.columns and "count" in d.columns:
         d = d.rename(columns={"count": "n"})
@@ -52,7 +52,7 @@ def _portfolio_summary() -> None:
         )
     else:
         st.dataframe(d, use_container_width=True, hide_index=True)
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _trend_monitoring() -> None:
@@ -61,21 +61,21 @@ def _trend_monitoring() -> None:
     t = ana.get_confidence_trend()
     y_cols = [c for c in t.columns if c.lower() != "week"]
     st.plotly_chart(ch.line(t, x=t.columns[0], y=y_cols), use_container_width=True, key="exec_trend")
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
     # ── Volume & Manual Review ────────────────────────────────────────────────
-    st.markdown(panel("Scoring Volume & Manual Review Trend", "fa-chart-column", object_key="chart.volume_trend"), unsafe_allow_html=True)
+    panel_header("Scoring Volume & Manual Review Trend", "fa-chart-column", object_key="chart.volume_trend")
     v = ana.get_volume_trend()
     st.plotly_chart(ch.bar(v, x="week", y="scored"), use_container_width=True, key="exec_vol")
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
 
 def _executive_exceptions() -> None:
     from validation import get_red_flag_ranking
-    st.markdown(panel("Top Red Flag Categories", "fa-triangle-exclamation", object_key="exec.red_flag_top"), unsafe_allow_html=True)
+    panel_header("Top Red Flag Categories", "fa-triangle-exclamation", object_key="exec.red_flag_top")
     tb.render_dataframe(get_red_flag_ranking())
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
 
-    st.markdown(panel("Operational Exceptions", "fa-gears", object_key="exec.ops_exceptions"), unsafe_allow_html=True)
+    panel_header("Operational Exceptions", "fa-gears", object_key="exec.ops_exceptions")
     tb.render_dataframe(ana.get_ops_exceptions())
-    st.markdown(panel_close(), unsafe_allow_html=True)
+    panel_close()
