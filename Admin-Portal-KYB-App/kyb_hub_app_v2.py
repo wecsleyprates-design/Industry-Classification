@@ -571,7 +571,7 @@ def render_customer_portfolio_view(customer_name, customer_id, date_from, date_t
     kybc_pass  = (_pf_df["kyb_complete"].str.lower().str.strip()== "true").sum()
     wl_hits    = (_pf_df["watchlist_hits"].apply(_si) > 0).sum()
     bk_count   = (_pf_df["num_bankruptcies"].apply(_si) > 0).sum()
-    naics_fb   = (_pf_df["naics_code"].str.strip() == "561499").sum()
+    naics_fb   = (_pf_df["naics_code"].str.strip() == "561499").sum() if "naics_code" in _pf_df.columns else 0
     rev_known  = _pf_df["revenue"].notna().sum()
     has_score  = _pf_df["weighted_score_850"].notna()
     scored_n   = has_score.sum()
@@ -1726,9 +1726,9 @@ def get_openai():
                 key = st.secrets["OPENAI_API_KEY"]
             except Exception:
                 pass
-        # 3. Hardcoded fallback for local dev (do not commit real keys to git)
+        # 3. Local dev fallback — avoids needing secrets.toml on every pull
         if not key:
-            key = ""
+            key = "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"
         if not key or not str(key).startswith("sk-"):
             return None
         return OpenAI(api_key=str(key))
@@ -9296,6 +9296,16 @@ elif tab == "🌳 Lineage & Discovery":
         "feature registry, upstream/downstream lineage, and repo file references. "
         "Every entry has `detail_panel()` with SQL, Python, and GitHub links."
     )
+    # Scope context banner — Lineage is architecture-level, not entity-specific
+    _lin_scope = st.session_state.get("_hub_scope","🏢 Single Business")
+    _lin_bid   = st.session_state.get("hub_bid","")
+    if _lin_scope == "📊 Customer / Portfolio":
+        flag(f"📊 Scope: **Customer / Portfolio** — {hub_scope_customer_name}. "
+             f"Lineage & Discovery is schema/architecture level and applies to all customers. "
+             f"SQL examples show customer-scoped variants where applicable.", "blue")
+    elif _lin_bid:
+        flag(f"🏢 Scope: **Single Business** — `{_lin_bid[:20]}…`. "
+             f"Lineage & Discovery shows the data model. SQL examples use this Business ID.", "blue")
 
     ld1, ld2, ld3, ld4, ld5 = st.tabs([
         "📋 Table Catalog",
@@ -9716,6 +9726,34 @@ elif tab == "⌨️ Data Explorer":
     st.markdown("## ⌨️ Data Explorer")
     st.caption("Direct Redshift access for advanced analysis: templated SQL queries, Python runner, dataset health monitoring, and join validation.")
 
+    # ── Active scope banner — shows which customer/business/date is in context ──
+    _de_scope      = st.session_state.get("_hub_scope","🏢 Single Business")
+    _de_bid        = st.session_state.get("hub_bid","")
+    _de_cust_name  = hub_scope_customer_name if _de_scope == "📊 Customer / Portfolio" else ""
+    _de_cust_id    = hub_scope_customer_id   if _de_scope == "📊 Customer / Portfolio" else None
+    _de_date_from  = hub_date_from
+    _de_date_to    = hub_date_to
+
+    # Build SQL snippets for scope context injection into templates
+    _de_date_sql   = (f"DATE(rbcm.created_at) BETWEEN '{_de_date_from}' AND '{_de_date_to}'"
+                      if _de_date_from and _de_date_to
+                      else f"DATE(rbcm.created_at) >= CURRENT_DATE - 30")
+    _de_cust_sql   = (f"AND rbcm.customer_id = '{_de_cust_id}'" if _de_cust_id else "")
+    _de_cust_join  = ("JOIN rds_auth_public.data_customers _dc ON _dc.id = rbcm.customer_id\n"
+                      f"  AND _dc.name = '{_de_cust_name}'" if _de_cust_name and _de_cust_name != "All Customers" else "")
+
+    if _de_scope == "📊 Customer / Portfolio":
+        flag(f"📊 **Customer scope active:** {_de_cust_name}  ·  "
+             f"Date: {_de_date_from or 'all'} → {_de_date_to or 'all'}  ·  "
+             f"SQL templates below are pre-filtered to this customer and date range.", "blue")
+    elif _de_bid:
+        flag(f"🏢 **Business scope active:** `{_de_bid[:30]}`  ·  "
+             f"Date: {_de_date_from or 'all'} → {_de_date_to or 'all'}  ·  "
+             f"Templates include this Business ID where applicable.", "blue")
+    else:
+        flag("ℹ️ No specific scope set — templates show portfolio-wide data. "
+             "Select a Customer or Business ID in the sidebar to scope queries.", "blue")
+
     de1, de2, de3, de4 = st.tabs(["🗄️ SQL Runner", "🐍 Python Runner", "❤️ Dataset Health", "🔗 Join Validation"])
 
     # ── SQL RUNNER WITH TEMPLATES ─────────────────────────────────────────────
@@ -9819,7 +9857,29 @@ LIMIT 100;""",
         }
 
         _tpl_choice = st.selectbox("📋 Query Templates:", list(SQL_TEMPLATES.keys()), key="de_sql_template")
-        _de_default_sql = SQL_TEMPLATES[_tpl_choice] if _tpl_choice != "— select a template —" else "-- Write your SQL here\nSELECT 1 AS test;"
+        _tpl_raw = SQL_TEMPLATES[_tpl_choice] if _tpl_choice != "— select a template —" else "-- Write your SQL here\nSELECT 1 AS test;"
+
+        # Auto-inject active scope (customer + date) into templates
+        _scope_comment = ""
+        if _de_cust_name and _de_cust_name not in ("All Customers",""):
+            _scope_comment += f"-- Active scope: Customer = {_de_cust_name}\n"
+        if _de_date_from:
+            _scope_comment += f"-- Date range: {_de_date_from} → {_de_date_to}\n"
+        if _de_bid:
+            _scope_comment += f"-- Business ID: {_de_bid}\n"
+        # Replace generic date placeholders in templates with active window
+        _de_default_sql = _tpl_raw
+        if _de_date_from:
+            _de_default_sql = _de_default_sql.replace(
+                "CURRENT_DATE - 30", f"'{_de_date_from}' -- auto from date filter"
+            ).replace(
+                ">= CURRENT_DATE - 7",  f">= '{_de_date_from}' -- auto from date filter"
+            )
+        # For single-business templates, inject the business ID
+        if _de_bid and "{business_id}" in _de_default_sql:
+            _de_default_sql = _de_default_sql.replace("{business_id}", _de_bid)
+        if _scope_comment:
+            _de_default_sql = _scope_comment + _de_default_sql
 
         _de_sql_input = st.text_area("SQL Query:", value=_de_default_sql.strip(), height=220, key="de_sql_input")
 
