@@ -19,14 +19,34 @@ try:
 except Exception:  # pragma: no cover
     _HAS_ST = False
 
+# Cache the Streamlit secrets dict once so we don't call st.secrets
+# on every field — each failed access fires a Streamlit warning, causing
+# the "No secrets found" banner to appear dozens of times on startup.
+_ST_SECRETS: dict[str, Any] | None = None
+_ST_SECRETS_LOADED = False
+
+
+def _load_st_secrets() -> dict[str, Any]:
+    global _ST_SECRETS, _ST_SECRETS_LOADED
+    if _ST_SECRETS_LOADED:
+        return _ST_SECRETS or {}
+    _ST_SECRETS_LOADED = True
+    if not _HAS_ST:
+        _ST_SECRETS = {}
+        return {}
+    try:
+        # Access .to_dict() to load all secrets in one call.
+        # If the file doesn't exist Streamlit raises FileNotFoundError.
+        _ST_SECRETS = dict(st.secrets)
+    except Exception:
+        _ST_SECRETS = {}
+    return _ST_SECRETS or {}
+
 
 def _get(key: str, default: Any = None) -> Any:
-    if _HAS_ST:
-        try:
-            if key in st.secrets:
-                return st.secrets[key]
-        except Exception:
-            pass
+    secrets = _load_st_secrets()
+    if key in secrets:
+        return secrets[key]
     return os.environ.get(key, default)
 
 
@@ -76,7 +96,7 @@ class Settings:
 
     # --- Deployment ---
     app_mode: str = field(default_factory=lambda: _get("APP_MODE", "local") or "local")  # local | prod
-    demo_mode: bool = field(default_factory=lambda: _get_bool("DEMO_MODE", False))  # uses fixtures if Redshift unavailable
+    demo_mode: bool = field(default_factory=lambda: _get_bool("DEMO_MODE", True))   # default True: uses fixtures when Redshift unavailable
 
     # Derived
     @property
