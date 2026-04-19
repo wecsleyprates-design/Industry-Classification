@@ -445,52 +445,91 @@ def run_sql_conn(sql, conn):
 @st.cache_data(ttl=300, show_spinner=False)
 def load_customer_portfolio(customer_id, date_from, date_to):  # type: (str|None, str|None, str|None) -> tuple
     """
-    Load aggregate KYB metrics for a customer's entire portfolio of businesses.
+    Load aggregate KYB metrics for a customer's portfolio — 2-step approach.
 
-    Uses LEFT(value, 8000) around every value access to avoid the Redshift
-    federation VARCHAR(65535) limit — the RDS value column can contain large
-    JSON blobs that exceed this limit during the federated fetch, even when
-    JSON_EXTRACT_PATH_TEXT would ultimately return a short scalar.
+    WHY two steps:
+      rds_warehouse_public.facts is a Redshift FEDERATED table backed by PostgreSQL RDS.
+      Redshift federation transfers the full `value` column from RDS to Redshift BEFORE
+      any SQL function (LEFT, SUBSTRING, JSON_EXTRACT_PATH_TEXT) can be applied.
+      Facts like naics_code and revenue store large JSON blobs with many vendor alternatives
+      (83K+ chars), exceeding the federation VARCHAR(65535) transfer limit.
+
+    Step 1: Query native Redshift tables only (rbcm + business_scores) — no federation risk.
+    Step 2: Separate pivot query on the federated facts table for ONLY the small boolean facts
+            (sos_active, tin_match_boolean, idv_passed_boolean, kyb_complete,
+             watchlist_hits, num_bankruptcies, formation_state).
+            These boolean/scalar dependent facts are always <500 chars.
+            naics_code and revenue are EXCLUDED (can be 80K+ chars due to alternatives[]).
     """
+    import pandas as _pd_port
+
     date_clause = ""
     if date_from: date_clause += f" AND DATE(rbcm.created_at) >= '{date_from}'"
     if date_to:   date_clause += f" AND DATE(rbcm.created_at) <= '{date_to}'"
     cust_clause = f" AND rbcm.customer_id = '{customer_id}'" if customer_id else ""
 
-    # LEFT(value, 8000) caps the column size before Redshift tries to receive it,
-    # preventing the "Value of VARCHAR type is too long" federation error.
-    sql = f"""
+    # ── Step 1: native Redshift — IDs + dates + scores (no federation) ────────
+    q1 = f"""
         SELECT
             rbcm.business_id,
-            DATE(rbcm.created_at)                                                              AS onboarded_date,
-            JSON_EXTRACT_PATH_TEXT(LEFT(f_sos.value,   8000), 'value')                        AS sos_active,
-            JSON_EXTRACT_PATH_TEXT(LEFT(f_tin.value,   8000), 'value')                        AS tin_match,
-            JSON_EXTRACT_PATH_TEXT(LEFT(f_idv.value,   8000), 'value')                        AS idv_passed,
-            JSON_EXTRACT_PATH_TEXT(LEFT(f_naics.value, 8000), 'value')                        AS naics_code,
-            JSON_EXTRACT_PATH_TEXT(LEFT(f_wl.value,    8000), 'value')                        AS watchlist_hits,
-            JSON_EXTRACT_PATH_TEXT(LEFT(f_bk.value,    8000), 'value')                        AS num_bankruptcies,
-            JSON_EXTRACT_PATH_TEXT(LEFT(f_rev.value,   8000), 'value')                        AS revenue,
-            JSON_EXTRACT_PATH_TEXT(LEFT(f_fs.value,    8000), 'value')                        AS formation_state,
-            JSON_EXTRACT_PATH_TEXT(LEFT(f_kybc.value,  8000), 'value')                        AS kyb_complete,
+            DATE(rbcm.created_at)   AS onboarded_date,
             bs.weighted_score_850,
             bs.risk_level,
             bs.score_decision
         FROM rds_cases_public.rel_business_customer_monitoring rbcm
-        LEFT JOIN rds_warehouse_public.facts f_sos   ON f_sos.business_id=rbcm.business_id   AND f_sos.name='sos_active'
-        LEFT JOIN rds_warehouse_public.facts f_tin   ON f_tin.business_id=rbcm.business_id   AND f_tin.name='tin_match_boolean'
-        LEFT JOIN rds_warehouse_public.facts f_idv   ON f_idv.business_id=rbcm.business_id   AND f_idv.name='idv_passed_boolean'
-        LEFT JOIN rds_warehouse_public.facts f_naics ON f_naics.business_id=rbcm.business_id AND f_naics.name='naics_code'
-        LEFT JOIN rds_warehouse_public.facts f_wl    ON f_wl.business_id=rbcm.business_id    AND f_wl.name='watchlist_hits'
-        LEFT JOIN rds_warehouse_public.facts f_bk    ON f_bk.business_id=rbcm.business_id    AND f_bk.name='num_bankruptcies'
-        LEFT JOIN rds_warehouse_public.facts f_rev   ON f_rev.business_id=rbcm.business_id   AND f_rev.name='revenue'
-        LEFT JOIN rds_warehouse_public.facts f_fs    ON f_fs.business_id=rbcm.business_id    AND f_fs.name='formation_state'
-        LEFT JOIN rds_warehouse_public.facts f_kybc  ON f_kybc.business_id=rbcm.business_id  AND f_kybc.name='kyb_complete'
-        LEFT JOIN rds_manual_score_public.data_current_scores cs ON cs.business_id=rbcm.business_id
-        LEFT JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+        LEFT JOIN rds_manual_score_public.data_current_scores cs
+          ON cs.business_id = rbcm.business_id
+        LEFT JOIN rds_manual_score_public.business_scores bs
+          ON bs.id = cs.score_id
         WHERE 1=1 {date_clause} {cust_clause}
         ORDER BY rbcm.created_at DESC
     """
-    return run_sql(sql)
+    df1, err1 = run_sql(q1)
+    if err1 or df1 is None or df1.empty:
+        return df1, err1
+
+    # ── Step 2: federated facts — ONLY boolean/scalar facts (<500 chars each) ─
+    # Use IN (bid_list) so Redshift pushes the filter down to RDS before transfer.
+    # Exclude naics_code (large alternatives[]) and revenue (large vendor JSON).
+    bid_list = ",".join(f"'{b}'" for b in df1["business_id"].tolist())
+    if not bid_list:
+        return df1, None
+
+    q2 = f"""
+        SELECT
+            business_id,
+            MAX(CASE WHEN name='sos_active'         THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS sos_active,
+            MAX(CASE WHEN name='tin_match_boolean'  THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS tin_match,
+            MAX(CASE WHEN name='idv_passed_boolean' THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS idv_passed,
+            MAX(CASE WHEN name='kyb_complete'       THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS kyb_complete,
+            MAX(CASE WHEN name='watchlist_hits'     THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS watchlist_hits,
+            MAX(CASE WHEN name='num_bankruptcies'   THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS num_bankruptcies,
+            MAX(CASE WHEN name='formation_state'    THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS formation_state,
+            MAX(CASE WHEN name='revenue'            THEN JSON_EXTRACT_PATH_TEXT(value,'value') END) AS revenue
+        FROM rds_warehouse_public.facts
+        WHERE business_id IN ({bid_list})
+          AND name IN (
+            'sos_active','tin_match_boolean','idv_passed_boolean','kyb_complete',
+            'watchlist_hits','num_bankruptcies','formation_state','revenue'
+          )
+        GROUP BY business_id
+    """
+    df2, err2 = run_sql(q2)
+
+    # Merge: left join so all businesses appear even if facts are missing
+    if df2 is not None and not df2.empty:
+        merged = df1.merge(df2, on="business_id", how="left")
+    else:
+        # Facts unavailable — add empty columns so the renderer still works
+        merged = df1.copy()
+        for col in ["sos_active","tin_match","idv_passed","kyb_complete",
+                    "watchlist_hits","num_bankruptcies","formation_state","revenue"]:
+            merged[col] = None
+        if err2:
+            # Non-fatal: return data we have with a warning annotation
+            merged["_facts_err"] = err2
+
+    return merged, None
 
 
 def render_customer_portfolio_view(customer_name, customer_id, date_from, date_to, tab_context="General"):
