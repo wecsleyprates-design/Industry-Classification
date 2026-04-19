@@ -69,22 +69,56 @@ hr.thin-sep { margin: 6px 0; border-color: #1E3A5F; }
 .kyb-pill.blue   { background:#0c1a2e; color:#93c5fd; }
 .kyb-pill.gray   { background:#273445; color:#94A3B8; }
 
-/* Trust-layer icon button strip — compact row of 3 micro-buttons */
-.trust-btn-row { display:flex; gap:4px; margin-top:2px; margin-bottom:4px; }
-/* Shrink Streamlit's default button padding for the trust-layer columns */
-div[data-testid="column"]:has(button[kind="secondary"]) button[kind="secondary"] {
-    padding: 2px 6px !important;
-    height: 26px !important;
-    min-height: 26px !important;
-    font-size: 0.82rem !important;
-    border: 1px solid rgba(255,255,255,0.12) !important;
-    background: rgba(255,255,255,0.04) !important;
-    color: #94A3B8 !important;
-    border-radius: 5px !important;
+/* ── Trust-layer icon strip ──────────────────────────────────────────────── */
+/*
+   .kpi-trust-row wraps the 3 icon buttons and pulls them up so they sit
+   in the top-right area of the card directly above. The card itself has
+   padding-bottom:28px to leave space for them.
+   margin-top: negative value pulls the row up over the bottom of the card.
+*/
+.kpi-trust-row {
+    margin-top: -30px;
+    margin-bottom: 6px;
+    display: flex;
+    justify-content: flex-end;
+    position: relative;
+    z-index: 20;
+    pointer-events: none;   /* block until the buttons re-enable it */
 }
-div[data-testid="column"]:has(button[kind="secondary"]) button[kind="secondary"]:hover {
-    background: rgba(255,255,255,0.10) !important;
-    border-color: rgba(255,255,255,0.35) !important;
+.kpi-trust-row > div[data-testid="stHorizontalBlock"] {
+    width: auto !important;
+    gap: 2px !important;
+    pointer-events: auto;
+}
+/* Make the three trust columns as small as possible */
+.kpi-trust-row [data-testid="column"] {
+    flex: 0 0 auto !important;
+    min-width: 0 !important;
+    padding: 0 !important;
+    width: auto !important;
+}
+/* Style the trust buttons: small, transparent, with hover glow */
+.kpi-trust-row button {
+    background: rgba(15,23,42,0.65) !important;
+    border: 1px solid rgba(255,255,255,0.12) !important;
+    color: #94A3B8 !important;
+    padding: 1px 5px !important;
+    height: 22px !important;
+    min-height: 22px !important;
+    min-width: 26px !important;
+    width: 26px !important;
+    border-radius: 5px !important;
+    font-size: 0.80rem !important;
+    backdrop-filter: blur(4px);
+    pointer-events: auto;
+}
+.kpi-trust-row button p {
+    font-size: 0.78rem !important;
+    line-height: 1 !important;
+}
+.kpi-trust-row button:hover {
+    background: rgba(59,130,246,0.25) !important;
+    border-color: #3B82F6 !important;
     color: #F1F5F9 !important;
 }
 </style>

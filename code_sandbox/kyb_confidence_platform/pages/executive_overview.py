@@ -43,7 +43,13 @@ def _portfolio_summary() -> None:
 
     st.subheader("Decision Outcome Mix")
     d = ana.get_decisions_by_band()
-    st.plotly_chart(ch.bar(d, x="band", y="n", color="decision", barmode="stack"), use_container_width=True, key="exec_bar")
+    # normalise column names — Redshift may return 'count' instead of 'n'
+    if "n" not in d.columns and "count" in d.columns:
+        d = d.rename(columns={"count": "n"})
+    if "n" in d.columns and "band" in d.columns:
+        st.plotly_chart(ch.bar(d, x="band", y="n", color="decision" if "decision" in d.columns else None, barmode="stack"), use_container_width=True, key="exec_bar")
+    else:
+        st.dataframe(d, use_container_width=True, hide_index=True)
 
 
 def _trend_monitoring() -> None:

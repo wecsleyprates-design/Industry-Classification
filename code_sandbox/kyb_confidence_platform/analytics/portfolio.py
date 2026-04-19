@@ -1,14 +1,16 @@
 """
 Portfolio-level analytics.
 
-Each function falls back to the fixtures module if Redshift isn't available, so
-all tabs remain demoable even without a warehouse connection.
+Each function reads the active filter window and passes it to SQL templates.
+In demo mode (no Redshift), fixture data is returned — but it is scaled by
+the window length so the numbers visually respond to the date range selector.
 """
 from __future__ import annotations
 
 from datetime import date
 
 import pandas as pd
+import streamlit as st
 
 from core.filters import current_filters
 from core.logger import get_logger
@@ -23,6 +25,11 @@ def _window() -> tuple[date, date]:
     return current_filters().resolve_window()
 
 
+def _window_days() -> int:
+    s, e = _window()
+    return max(1, (e - s).days)
+
+
 def _try_query(sql: str) -> pd.DataFrame | None:
     try:
         return rs_query(sql)
@@ -31,30 +38,56 @@ def _try_query(sql: str) -> pd.DataFrame | None:
         return None
 
 
+# ── Scale factor so demo numbers visibly respond to the date range ─────────────
+# Base window = 30 days.  Shorter windows → smaller numbers.
+def _scale(base_days: int = 30) -> float:
+    return min(_window_days() / base_days, 5.0)   # cap at 5× to stay sane
+
+
 def get_portfolio_summary() -> pd.DataFrame:
     s, e = _window()
     df = _try_query(portfolio.summary_sql(s, e))
-    return df if df is not None and not df.empty else fixtures.portfolio_summary()
+    if df is not None and not df.empty:
+        return df
+    sc = _scale()
+    base = fixtures.portfolio_summary().iloc[0].to_dict()
+    return pd.DataFrame([{
+        "total_cases":         int(base["total_cases"]         * sc),
+        "distinct_customers":  int(base["distinct_customers"]  * sc),
+        "distinct_businesses": int(base["distinct_businesses"] * sc),
+        "avg_confidence":      round(base["avg_confidence"] + (sc - 1) * 0.005, 3),
+        "median_confidence":   round(base.get("median_confidence", 0.781) + (sc - 1) * 0.003, 3),
+        "manual_review_pct":   round(max(5.0, base.get("manual_review_pct", 14.8) - (sc - 1) * 0.5), 1),
+        "auto_approve_pct":    round(min(90.0, base.get("auto_approve_pct", 71.3) + (sc - 1) * 0.4), 1),
+        "auto_decline_pct":    base.get("auto_decline_pct", 13.9),
+    }])
 
 
 def get_confidence_bands() -> pd.DataFrame:
     s, e = _window()
     df = _try_query(portfolio.bands_sql(s, e))
-    return df if df is not None and not df.empty else fixtures.confidence_bands()
+    if df is not None and not df.empty:
+        return df
+    sc = _scale()
+    base = fixtures.confidence_bands()
+    base["count"] = (base["count"] * sc).astype(int)
+    return base
 
 
 def get_confidence_trend() -> pd.DataFrame:
     s, e = _window()
     df = _try_query(portfolio.trend_sql(s, e))
-    return df if df is not None and not df.empty else fixtures.confidence_trend()
+    if df is not None and not df.empty:
+        return df
+    return fixtures.confidence_trend()
 
 
 def get_volume_trend() -> pd.DataFrame:
-    # Fixture-only for now; SQL would join scoring volume and manual review counts.
+    sc = _scale()
     return pd.DataFrame({
-        "week":    [f"W{i}" for i in range(1, 13)],
-        "scored":  [1820, 1910, 2050, 2160, 2230, 2190, 2340, 2410, 2380, 2450, 2520, 2616],
-        "manual":  [310, 295, 320, 280, 260, 250, 245, 230, 220, 215, 205, 195],
+        "week":   [f"W{i}" for i in range(1, 13)],
+        "scored": [int(v * sc) for v in [1820,1910,2050,2160,2230,2190,2340,2410,2380,2450,2520,2616]],
+        "manual": [int(v * sc) for v in [310,295,320,280,260,250,245,230,220,215,205,195]],
     })
 
 
@@ -64,7 +97,7 @@ def get_psi_trend() -> pd.DataFrame:
         return df
     return pd.DataFrame({
         "week": [f"W{i}" for i in range(1, 13)],
-        "psi":  [0.08, 0.09, 0.10, 0.12, 0.14, 0.18, 0.22, 0.21, 0.19, 0.16, 0.14, 0.13],
+        "psi":  [0.08,0.09,0.10,0.12,0.14,0.18,0.22,0.21,0.19,0.16,0.14,0.13],
     })
 
 
@@ -76,11 +109,15 @@ def get_decisions_by_band() -> pd.DataFrame:
     s, e = _window()
     df = _try_query(decisions.decision_by_band_sql(s, e))
     if df is not None and not df.empty:
+        # normalise column names
+        if "n" not in df.columns and "count" in df.columns:
+            df = df.rename(columns={"count": "n"})
         return df
+    sc = _scale()
     return pd.DataFrame({
-        "band":      ["Very Low","Low","Medium","High","Very High"] * 3,
-        "decision":  (["Approved"]*5) + (["Escalated"]*5) + (["Declined"]*5),
-        "n":         [60,220,1400,7100,8050, 52,210,1068,1861,295, 750,1510,1850,240,50],
+        "band":     ["Very Low","Low","Medium","High","Very High"] * 3,
+        "decision": (["Approved"]*5) + (["Escalated"]*5) + (["Declined"]*5),
+        "n":        [int(v * sc) for v in [60,220,1400,7100,8050,52,210,1068,1861,295,750,1510,1850,240,50]],
     })
 
 
@@ -90,9 +127,9 @@ def get_tat_by_band() -> pd.DataFrame:
     if df is not None and not df.empty:
         return df
     return pd.DataFrame({
-        "band":       ["Very Low","Low","Medium","High","Very High"],
-        "p50_hours":  [48, 24, 12, 3, 1],
-        "p90_hours":  [72, 48, 28, 8, 4],
+        "band":      ["Very Low","Low","Medium","High","Very High"],
+        "p50_hours": [48,24,12,3,1],
+        "p90_hours": [72,48,28,8,4],
     })
 
 
@@ -107,13 +144,13 @@ def get_ops_exceptions() -> pd.DataFrame:
 
 def get_source_reliability() -> pd.DataFrame:
     return pd.DataFrame([
-        dict(source="Middesk",       freshness="6h",  failure_pct=1.2, reliability="High"),
-        dict(source="OpenCorporates",freshness="12h", failure_pct=3.4, reliability="High"),
-        dict(source="Trulioo",       freshness="4h",  failure_pct=2.1, reliability="High"),
-        dict(source="Equifax",       freshness="24h", failure_pct=5.8, reliability="Medium"),
-        dict(source="ZoomInfo",      freshness="24h", failure_pct=4.1, reliability="Medium"),
-        dict(source="Plaid IDV",     freshness="2h",  failure_pct=0.9, reliability="High"),
-        dict(source="AI NAICS",      freshness="1h",  failure_pct=8.5, reliability="Low"),
+        dict(source="Middesk",        freshness="6h",  failure_pct=1.2, reliability="High"),
+        dict(source="OpenCorporates", freshness="12h", failure_pct=3.4, reliability="High"),
+        dict(source="Trulioo",        freshness="4h",  failure_pct=2.1, reliability="High"),
+        dict(source="Equifax",        freshness="24h", failure_pct=5.8, reliability="Medium"),
+        dict(source="ZoomInfo",       freshness="24h", failure_pct=4.1, reliability="Medium"),
+        dict(source="Plaid IDV",      freshness="2h",  failure_pct=0.9, reliability="High"),
+        dict(source="AI NAICS",       freshness="1h",  failure_pct=8.5, reliability="Low"),
     ])
 
 

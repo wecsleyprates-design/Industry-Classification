@@ -41,21 +41,23 @@ class TrustLayerContext:
 
 def render(object_key: str) -> None:
     """
-    Render the three compact icon buttons (🪄 🛡 🌳) for `object_key`.
+    Render the three compact icon buttons (✦ Ask AI / ⊙ Check / ⎇ Lineage).
 
-    Layout: three equal-width micro-buttons in a single row, styled to look
-    like the icon strip shown in the design reference (second image).
+    CSS class `kpi-trust-row` pulls the row upward so the buttons appear
+    in the top-right of the card above them.
     """
-    b1, b2, b3, _spacer = st.columns([1, 1, 1, 6])
+    # Wrap in a div with the CSS class that repositions the buttons
+    st.markdown("<div class='kpi-trust-row'>", unsafe_allow_html=True)
+
+    b1, b2, b3 = st.columns([1, 1, 1])
 
     with b1:
         if st.button(
-            "🪄",
+            "✦",
             key=f"ask_{object_key}",
             help="Ask AI — ask the Copilot about this metric",
             use_container_width=True,
         ):
-            # Toggle: clicking again closes the panel
             if st.session_state.get("_ask_ai_open_for") == object_key:
                 st.session_state["_ask_ai_open_for"] = None
             else:
@@ -65,7 +67,7 @@ def render(object_key: str) -> None:
 
     with b2:
         if st.button(
-            "🛡",
+            "⊙",
             key=f"chk_{object_key}",
             help="Check-Agent — run consistency scan on this object",
             use_container_width=True,
@@ -79,7 +81,7 @@ def render(object_key: str) -> None:
 
     with b3:
         if st.button(
-            "🌳",
+            "⎇",
             key=f"lin_{object_key}",
             help="Lineage — view 4-level data lineage for this field",
             use_container_width=True,
@@ -90,6 +92,8 @@ def render(object_key: str) -> None:
                 st.session_state["_lineage_modal_key"] = object_key
                 st.session_state["_ask_ai_open_for"] = None
                 st.session_state["_check_agent_open_for"] = None
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_panels(object_key: str) -> None:
