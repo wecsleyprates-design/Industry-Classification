@@ -2808,7 +2808,31 @@ with st.sidebar:
     elif _search_q:
         st.caption("Type at least 2 characters to search…")
 
-    # ── Analysis Scope ───────────────────────────────────────────────────────
+    # ── Date Range Filter (must be defined BEFORE scope/customer — they depend on it) ──
+    st.markdown("---")
+    st.markdown("**📅 Date Range**")
+    use_dates = st.toggle("Filter by date", value=False,
+                          help="Filter all queries to a specific onboarding period (received_at)")
+    if use_dates:
+        today = datetime.now(timezone.utc).date()
+        d_from = st.date_input("From", value=today - pd.Timedelta(days=30),
+                                max_value=today, key="hub_dfrom", label_visibility="collapsed")
+        d_to   = st.date_input("To",   value=today,
+                                max_value=today, key="hub_dto",   label_visibility="collapsed")
+        if d_from > d_to: d_from = d_to
+        st.caption(f"📅 {d_from} → {d_to}")
+        hub_date_from, hub_date_to = str(d_from), str(d_to)
+    else:
+        hub_date_from, hub_date_to = None, None
+        st.caption("Showing all data (no date filter)")
+
+    def hub_date_clause(col="received_at"):
+        parts = []
+        if hub_date_from: parts.append(f"{col} >= '{hub_date_from}'")
+        if hub_date_to:   parts.append(f"{col} <= '{hub_date_to} 23:59:59'")
+        return (" AND " + " AND ".join(parts)) if parts else ""
+
+    # ── Analysis Scope (after date range — uses hub_date_from/to for customer list) ──
     st.markdown("---")
     st.markdown("**🎯 Analysis Scope**")
     hub_scope = st.radio(
@@ -2845,7 +2869,6 @@ with st.sidebar:
         )
         hub_scope_customer_id   = _scope_cust_id_map.get(hub_scope_customer_label)
         hub_scope_customer_name = _scope_cust_name_map.get(hub_scope_customer_label, "All Customers")
-        # No single business in portfolio mode
         hub_bid = ""
         st.caption(f"📊 Portfolio view · {hub_scope_customer_name}")
     else:
@@ -2866,30 +2889,6 @@ with st.sidebar:
         "⚠️ Risk & Watchlist","💰 Worth Score","📋 All Facts",
         "🔍 Check-Agent","🤖 AI Agent",
         "🌳 Lineage & Discovery","⌨️ Data Explorer","🧠 Intelligence Hub"])
-
-    # ── Date Range Filter ────────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("**📅 Date Range**")
-    use_dates = st.toggle("Filter by date", value=False,
-                          help="Filter all queries to a specific onboarding period (received_at)")
-    if use_dates:
-        today = datetime.now(timezone.utc).date()
-        d_from = st.date_input("From", value=today - pd.Timedelta(days=30),
-                                max_value=today, key="hub_dfrom", label_visibility="collapsed")
-        d_to   = st.date_input("To",   value=today,
-                                max_value=today, key="hub_dto",   label_visibility="collapsed")
-        if d_from > d_to: d_from = d_to
-        st.caption(f"📅 {d_from} → {d_to}")
-        hub_date_from, hub_date_to = str(d_from), str(d_to)
-    else:
-        hub_date_from, hub_date_to = None, None
-        st.caption("Showing all data (no date filter)")
-
-    def hub_date_clause(col="received_at"):
-        parts = []
-        if hub_date_from: parts.append(f"{col} >= '{hub_date_from}'")
-        if hub_date_to:   parts.append(f"{col} <= '{hub_date_to} 23:59:59'")
-        return (" AND " + " AND ".join(parts)) if parts else ""
 
     # ── Customer Filter (linked to date range) ───────────────────────────────
     st.markdown("---")
