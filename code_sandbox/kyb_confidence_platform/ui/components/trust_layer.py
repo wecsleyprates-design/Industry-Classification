@@ -1,17 +1,15 @@
 """
-Trust-layer buttons.
+Trust-layer panel renderers.
 
-Attaches three icon actions to every KPI card:
-  🪄  Ask AI        — open Copilot chat about this metric
-  🛡  Check-Agent   — run deterministic + LLM scan on this object
-  🌳  Lineage       — view 4-level data lineage
+The trust-bar buttons are now pure HTML inside the card/panel HTML
+(rendered via kpi_card.kpi() and kpi_card.panel()). This module only
+provides render_panels() — it renders the currently-open expander for
+Ask AI / Check-Agent / Lineage when triggered from the sidebar buttons.
 
-Usage pattern (called from kpi_card.py):
-  trust_layer.render(key)          # renders the three icon buttons
-  trust_layer.render_panels(key)   # renders the active expander panel
-
-Splitting render() from render_panels() lets kpi_card.py place the
-buttons immediately below the card HTML without expander nesting issues.
+In the Streamlit context the buttons in the HTML cannot directly toggle
+session state (they're in an iframe). Instead we render three small
+Streamlit buttons below each card row that the user can also use, and
+the HTML onclick messages are handled by JavaScript injected into the page.
 """
 from __future__ import annotations
 
@@ -37,70 +35,53 @@ class TrustLayerContext:
         )
 
 
-# ── Button rendering ──────────────────────────────────────────────────────────
-
 def render(object_key: str) -> None:
     """
-    Render the three compact icon buttons (✦ Ask AI / ⊙ Check / ⎇ Lineage).
-
-    CSS class `kpi-trust-row` pulls the row upward so the buttons appear
-    in the top-right of the card above them.
+    Render three compact Streamlit buttons (✦ Ask AI / ⊙ Check / ⎇ Lineage).
+    These are the fallback interactive controls — the HTML trust-bar icons
+    inside the card render purely visually (FontAwesome) but the actual
+    Streamlit interaction is driven by these buttons.
     """
-    # Wrap in a div with the CSS class that repositions the buttons
-    st.markdown("<div class='kpi-trust-row'>", unsafe_allow_html=True)
-
     b1, b2, b3 = st.columns([1, 1, 1])
 
     with b1:
         if st.button(
-            "✦",
-            key=f"ask_{object_key}",
+            "✦", key=f"ask_{object_key}",
             help="Ask AI — ask the Copilot about this metric",
             use_container_width=True,
         ):
-            if st.session_state.get("_ask_ai_open_for") == object_key:
-                st.session_state["_ask_ai_open_for"] = None
-            else:
-                st.session_state["_ask_ai_open_for"] = object_key
-                st.session_state["_check_agent_open_for"] = None
-                st.session_state["_lineage_modal_key"] = None
+            _toggle("_ask_ai_open_for", object_key)
 
     with b2:
         if st.button(
-            "⊙",
-            key=f"chk_{object_key}",
+            "⊙", key=f"chk_{object_key}",
             help="Check-Agent — run consistency scan on this object",
             use_container_width=True,
         ):
-            if st.session_state.get("_check_agent_open_for") == object_key:
-                st.session_state["_check_agent_open_for"] = None
-            else:
-                st.session_state["_check_agent_open_for"] = object_key
-                st.session_state["_ask_ai_open_for"] = None
-                st.session_state["_lineage_modal_key"] = None
+            _toggle("_check_agent_open_for", object_key)
 
     with b3:
         if st.button(
-            "⎇",
-            key=f"lin_{object_key}",
+            "⎇", key=f"lin_{object_key}",
             help="Lineage — view 4-level data lineage for this field",
             use_container_width=True,
         ):
-            if st.session_state.get("_lineage_modal_key") == object_key:
-                st.session_state["_lineage_modal_key"] = None
-            else:
-                st.session_state["_lineage_modal_key"] = object_key
-                st.session_state["_ask_ai_open_for"] = None
-                st.session_state["_check_agent_open_for"] = None
+            _toggle("_lineage_modal_key", object_key)
 
-    st.markdown("</div>", unsafe_allow_html=True)
+
+def _toggle(state_key: str, object_key: str) -> None:
+    """Toggle: if already open for this key, close it; otherwise open it."""
+    all_keys = ["_ask_ai_open_for", "_check_agent_open_for", "_lineage_modal_key"]
+    for k in all_keys:
+        st.session_state[k] = None
+    if st.session_state.get(state_key) != object_key:
+        st.session_state[state_key] = object_key
 
 
 def render_panels(object_key: str) -> None:
     """
-    Render whichever panel (Ask AI / Check-Agent / Lineage) is currently
-    open for `object_key`. Call this outside any st.columns() block to
-    avoid nested-expander issues.
+    Render whichever panel is currently open for object_key.
+    Call this OUTSIDE any st.columns() block to avoid nesting issues.
     """
     _render_ask_ai_panel(object_key)
     _render_check_agent_panel(object_key)
@@ -117,20 +98,16 @@ def _render_ask_ai_panel(object_key: str) -> None:
             "Question", key=f"ask_q_{object_key}",
             placeholder="e.g. Why did this change? What drives this metric?",
         )
-        preset_cols = st.columns(4)
-        presets = [
-            "Why did this change?",
-            "Breakdown by segment?",
-            "Lineage of this field?",
-            "Show the SQL.",
-        ]
+        # Preset chips
+        pc = st.columns(3)
+        presets = ["Why did this change?", "Breakdown by segment?", "Show the SQL."]
         clicked = None
         for i, p in enumerate(presets):
-            if preset_cols[i].button(p, key=f"ask_preset_{object_key}_{i}"):
+            if pc[i].button(p, key=f"ask_preset_{object_key}_{i}"):
                 clicked = p
         question = clicked or q
 
-        c_ask, c_close = st.columns([1, 1])
+        c_ask, c_close = st.columns([2, 1])
         if c_ask.button("Ask", key=f"ask_btn_{object_key}", type="primary"):
             if not question:
                 st.warning("Type a question or click a preset.")
@@ -143,9 +120,7 @@ def _render_ask_ai_panel(object_key: str) -> None:
                         object_context=f"Object: {object_key}\nBusiness meaning: {ctx.l1_business}",
                         filters=(
                             f"date_range={f.date_range}, date_context={f.date_context}, "
-                            f"customer={f.customer}, business_id={f.business_id}, "
-                            f"entity_type={f.entity_type}, band={f.confidence_band}, "
-                            f"manual_only={f.manual_only}"
+                            f"customer={f.customer}, business_id={f.business_id}"
                         ),
                         rag_evidence="(RAG not included in prototype trust-layer popup)",
                         question=question,
@@ -165,19 +140,19 @@ def _render_check_agent_panel(object_key: str) -> None:
     if st.session_state.get("_check_agent_open_for") != object_key:
         return
     with st.expander(f"🛡 Check-Agent — {object_key}", expanded=True):
-        st.caption("Running deterministic rules + optional LLM auditor against this object.")
+        st.caption("Running deterministic rules + optional LLM auditor.")
         ctx = (
             st.session_state.get("_check_agent_context")
             or {"entity_id": "object", "facts": {}, "score": 0.0}
         )
         res = run_check_agent(ctx, scope=Scope.OBJECT)
+        sev_class = {"critical": "red", "high": "red", "medium": "amber", "low": "blue"}
         if not res.findings:
             st.markdown(
                 "<div class='kyb-flag green'>✅ No inconsistencies found for this object.</div>",
                 unsafe_allow_html=True,
             )
         else:
-            sev_class = {"critical": "red", "high": "red", "medium": "amber", "low": "blue"}
             for finding in res.findings:
                 cls = sev_class.get(finding.severity.value, "amber")
                 st.markdown(
@@ -202,30 +177,18 @@ def _render_lineage_panel(object_key: str) -> None:
         st.markdown(
             f"<div class='lineage-l'>"
             f"<span class='lvl-pill'>L1</span><b>Business Meaning</b><br/>"
-            f"{entry.l1_business}"
+            f"<p>{entry.l1_business}</p>"
             f"</div>",
             unsafe_allow_html=True,
         )
-        st.markdown(
-            "<div class='lineage-l'>"
-            "<span class='lvl-pill'>L2</span><b>Warehouse Source</b>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown("<div class='lineage-l'><span class='lvl-pill'>L2</span><b>Warehouse Source</b></div>",
+                    unsafe_allow_html=True)
         st.code(entry.l2_warehouse, language="sql")
-        st.markdown(
-            "<div class='lineage-l'>"
-            "<span class='lvl-pill'>L3</span><b>Transformation Logic</b>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown("<div class='lineage-l'><span class='lvl-pill'>L3</span><b>Transformation Logic</b></div>",
+                    unsafe_allow_html=True)
         st.code(entry.l3_transformation, language="sql")
-        st.markdown(
-            "<div class='lineage-l'>"
-            "<span class='lvl-pill'>L4</span><b>Repo / Code Lineage</b>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
+        st.markdown("<div class='lineage-l'><span class='lvl-pill'>L4</span><b>Repo / Code Lineage</b></div>",
+                    unsafe_allow_html=True)
         for ref in entry.l4_code_refs:
             st.markdown(f"- `{ref}`")
         if st.button("✕ Close", key=f"lin_close_{object_key}"):

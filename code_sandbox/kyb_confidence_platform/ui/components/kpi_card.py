@@ -1,16 +1,12 @@
 """
-KPI card with embedded trust-layer icon buttons.
+KPI card that exactly matches the HTML prototype reference.
 
-The three icons (🪄 Ask AI / 🛡 Check-Agent / 🌳 Lineage) are rendered as
-small HTML buttons positioned in the TOP-RIGHT corner of the card — exactly
-as shown in the design reference.
+The trust-bar (Ask AI / Check-Agent / Lineage buttons) is rendered INSIDE
+the card HTML using FontAwesome icons — positioned absolute top-right, semi-
+transparent, hover reveals full opacity. This matches the prototype exactly.
 
-Technical approach:
-  - The card itself is pure HTML (st.markdown unsafe_allow_html).
-  - The icon strip is rendered as three tightly-spaced Streamlit buttons
-    in a zero-margin column row, placed visually over the card via CSS.
-  - The card HTML includes a `data-kpi-key` attribute so the CSS can target
-    just the next sibling button row without a fragile :has() selector.
+The panel() helper wraps any content block (charts, tables) in the same
+panel HTML structure with its own trust-bar header.
 """
 from __future__ import annotations
 
@@ -29,6 +25,7 @@ def kpi(
     object_key: str | None = None,
     trust: bool = True,
 ) -> None:
+    """Render a KPI card with embedded trust-bar icons."""
     key = object_key or label
     cls = color or ""
 
@@ -38,23 +35,70 @@ def kpi(
         cls_d = "up" if delta >= 0 else "down"
         delta_html = f"<div class='delta {cls_d}'>{arrow} {abs(delta)}</div>"
 
-    # ── Card HTML ─────────────────────────────────────────────────────────────
-    # position:relative so the absolute icon strip can anchor to it
+    trust_html = ""
+    if trust:
+        trust_html = f"""
+        <div class="trust-bar">
+          <button class="trust-btn" title="Ask AI"
+            onclick="window.parent.postMessage({{type:'ask_ai',key:'{key}'}}, '*')">
+            <i class="fa-solid fa-wand-magic-sparkles"></i></button>
+          <button class="trust-btn" title="Check-Agent"
+            onclick="window.parent.postMessage({{type:'check_agent',key:'{key}'}}, '*')">
+            <i class="fa-solid fa-shield-virus"></i></button>
+          <button class="trust-btn" title="Lineage"
+            onclick="window.parent.postMessage({{type:'lineage',key:'{key}'}}, '*')">
+            <i class="fa-solid fa-sitemap"></i></button>
+        </div>"""
+
     st.markdown(
-        f"<div class='kyb-kpi {cls}' style='position:relative;padding-bottom:28px'>"
+        f"<div class='kyb-kpi {cls}'>"
+        f"{trust_html}"
         f"<div class='lbl'>{label}</div>"
         f"<div class='val'>{value}</div>"
-        f"<div class='sub'>{sub}</div>"
+        f"{'<div class=\"sub\">' + sub + '</div>' if sub else ''}"
         f"{delta_html}"
         f"</div>",
         unsafe_allow_html=True,
     )
 
-    # ── Trust icon strip ──────────────────────────────────────────────────────
-    # Rendered immediately after the card in the same column.
-    # The CSS `.kpi-trust-row` pulls it up to overlap the card bottom-right.
+    # Render the action panel (expander) if this card's button was clicked
     if trust:
-        trust_layer.render(key)
+        trust_layer.render_panels(key)
 
-    # ── Panel expanders (open below the full row) ─────────────────────────────
-    trust_layer.render_panels(key)
+
+def panel(
+    title: str,
+    icon: str = "fa-chart-bar",
+    *,
+    object_key: str | None = None,
+) -> str:
+    """
+    Return the opening HTML for a panel section with a trust-bar header.
+    Usage:
+        st.markdown(panel("My Chart", "fa-chart-pie", object_key="chart.bands"), unsafe_allow_html=True)
+        st.plotly_chart(...)
+        st.markdown("</div>", unsafe_allow_html=True)  # close panel
+
+    Or use the context-manager style helper panel_wrap() below.
+    """
+    key = object_key or title
+    return f"""
+<div class="kyb-panel">
+  <div class="trust-bar">
+    <button class="trust-btn" title="Ask AI"
+      onclick="window.parent.postMessage({{type:'ask_ai',key:'{key}'}}, '*')">
+      <i class="fa-solid fa-wand-magic-sparkles"></i></button>
+    <button class="trust-btn" title="Check-Agent"
+      onclick="window.parent.postMessage({{type:'check_agent',key:'{key}'}}, '*')">
+      <i class="fa-solid fa-shield-virus"></i></button>
+    <button class="trust-btn" title="Lineage"
+      onclick="window.parent.postMessage({{type:'lineage',key:'{key}'}}, '*')">
+      <i class="fa-solid fa-sitemap"></i></button>
+  </div>
+  <h3><i class="fa-solid {icon}"></i> {title}</h3>
+"""
+
+
+def panel_close() -> str:
+    """Return the closing </div> for a panel() block."""
+    return "</div>"

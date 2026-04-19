@@ -156,8 +156,9 @@ def _load_business_ids(start: str, end: str, date_col: str, customer: str) -> li
 def render_filter_bar() -> None:
     today = date.today()
 
-    # ── Row 1: date + entity controls ────────────────────────────────────────
-    c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1.1, 1.1, 1])
+    # ── All controls in one responsive row (matches prototype filter-bar) ──────
+    c1, c2, c3, c4, c5, c6, c7, c8, c9 = st.columns([1.2, 1.2, 1.3, 1.3, 1.0, 1.1, 0.8, 0.7, 0.7])
+
     with c1:
         st.selectbox(
             "Date Range",
@@ -172,89 +173,90 @@ def render_filter_bar() -> None:
             format_func=lambda k: DATE_CONTEXT_OPTIONS[k],
             key="flt_date_context",
         )
+
+    # Resolve window now so customer/business dropdowns are scoped correctly
+    _f_pre = current_filters()
+    _s, _e = _f_pre.resolve_window()
+    _ss, _es = _s.isoformat(), _e.isoformat()
+
     with c3:
-        st.selectbox("Entity Type", options=ENTITY_TYPES, key="flt_entity_type")
-    with c4:
-        st.selectbox("Confidence Band", options=BANDS, key="flt_confidence_band")
-    with c5:
-        st.checkbox("Manual Review only", key="flt_manual_only")
-
-    # ── Custom date row — only shown when "Custom…" is selected ──────────────
-    if st.session_state.get("flt_date_range") == "custom":
-        cc1, cc2 = st.columns(2)
-        _cs = st.session_state.get("flt_custom_start") or today - timedelta(days=30)
-        _ce = st.session_state.get("flt_custom_end")   or today
-        with cc1:
-            new_start = st.date_input(
-                "From",
-                value=_cs,
-                max_value=today,
-                key="flt_custom_start",
-            )
-        with cc2:
-            new_end = st.date_input(
-                "To",
-                value=_ce,
-                min_value=new_start,   # enforce start ≤ end in the picker
-                max_value=today,
-                key="flt_custom_end",
-            )
-        # Clamp in session state if the user somehow set start > end
-        if new_start > new_end:
-            st.session_state["flt_custom_end"] = new_start
-            st.warning("'To' date was before 'From' — adjusted automatically.")
-
-    # ── Resolve the current window for use in dynamic option loaders ──────────
-    f = current_filters()
-    start, end = f.resolve_window()
-    start_s, end_s = start.isoformat(), end.isoformat()
-    date_col = f.date_context
-
-    # ── Row 2: customer + business ID (dynamically linked to date range) ───────
-    d1, d2 = st.columns([1.5, 1.5])
-
-    with d1:
-        customers = _load_customers(start_s, end_s, date_col)
-        # Keep current value if it's still valid, otherwise reset to ALL
+        customers = _load_customers(_ss, _es, _f_pre.date_context)
         current_cust = st.session_state.get("flt_customer", "ALL")
         if current_cust not in customers:
             current_cust = "ALL"
-        cust_idx = customers.index(current_cust)
-        chosen_customer = st.selectbox(
+        st.selectbox(
             "Customer",
             options=customers,
-            index=cust_idx,
+            index=customers.index(current_cust),
             key="flt_customer",
-            help="Filtered to customers active in the selected date range.",
+            help="Customers active in the selected date range.",
         )
 
-    with d2:
-        bid_list = _load_business_ids(start_s, end_s, date_col, chosen_customer)
+    with c4:
+        chosen_cust = st.session_state.get("flt_customer", "ALL")
+        bid_list = _load_business_ids(_ss, _es, _f_pre.date_context, chosen_cust)
         if bid_list:
-            # Dropdown mode — manageable list
             current_bid = st.session_state.get("flt_business_id", "")
             options = [""] + bid_list
             if current_bid not in options:
                 current_bid = ""
-            bid_idx = options.index(current_bid)
             st.selectbox(
                 "Business ID",
                 options=options,
-                index=bid_idx,
-                format_func=lambda v: v or "— all businesses —",
+                index=options.index(current_bid),
+                format_func=lambda v: v or "— all —",
                 key="flt_business_id",
-                help="Filtered to businesses active in the selected date range and customer.",
+                help="Businesses in the selected date range & customer.",
             )
         else:
-            # Free-text fallback when the list is too large or Redshift unavailable
             st.text_input(
-                "Business ID",
-                key="flt_business_id",
-                placeholder="Paste UUID (e.g. bus_…)",
-                help="Filtered to businesses active in the selected date range.",
+                "Business ID", key="flt_business_id",
+                placeholder="bus_… (UUID)",
             )
 
-    # ── Active filter summary chip ────────────────────────────────────────────
+    with c5:
+        st.selectbox("Entity Type", options=ENTITY_TYPES, key="flt_entity_type")
+    with c6:
+        st.selectbox("Confidence Band", options=BANDS, key="flt_confidence_band")
+    with c7:
+        st.markdown("<div style='padding-top:22px'>", unsafe_allow_html=True)
+        st.checkbox("Manual only", key="flt_manual_only")
+        st.markdown("</div>", unsafe_allow_html=True)
+    with c8:
+        st.markdown("<div style='padding-top:20px'>", unsafe_allow_html=True)
+        if st.button("✓ Apply", type="primary", use_container_width=True):
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+    with c9:
+        st.markdown("<div style='padding-top:20px'>", unsafe_allow_html=True)
+        if st.button("↺ Reset", use_container_width=True):
+            st.session_state["flt_date_range"]     = "last_30d"
+            st.session_state["flt_date_context"]   = "scored_at"
+            st.session_state["flt_customer"]        = "ALL"
+            st.session_state["flt_business_id"]    = ""
+            st.session_state["flt_entity_type"]    = "ALL"
+            st.session_state["flt_confidence_band"]= "ALL"
+            st.session_state["flt_manual_only"]    = False
+            st.session_state["flt_custom_start"]   = today - timedelta(days=30)
+            st.session_state["flt_custom_end"]     = today
+            st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── Custom date picker (shown inline below when "Custom…" selected) ────────
+    if st.session_state.get("flt_date_range") == "custom":
+        _cs = st.session_state.get("flt_custom_start") or today - timedelta(days=30)
+        _ce = st.session_state.get("flt_custom_end")   or today
+        dc1, dc2, _dc3 = st.columns([1, 1, 7])
+        with dc1:
+            new_start = st.date_input("From", value=_cs, max_value=today, key="flt_custom_start")
+        with dc2:
+            new_end = st.date_input("To", value=_ce, min_value=new_start, max_value=today, key="flt_custom_end")
+        if new_start > new_end:
+            st.session_state["flt_custom_end"] = new_start
+
+    # ── Active filter summary ──────────────────────────────────────────────────
+    f = current_filters()
+    start, end = f.resolve_window()
     _render_active_filter_chip(f, start, end)
 
 
