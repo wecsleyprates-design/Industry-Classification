@@ -1716,22 +1716,30 @@ def rag_search(q,top_k=8):
 
 @st.cache_resource
 def get_openai():
+    """
+    Returns an OpenAI client or None.
+    Key resolution order (first non-empty wins):
+      1. Session state  — set via the sidebar "OpenAI Key" input
+      2. Environment variable  OPENAI_API_KEY
+      3. Streamlit secrets     OPENAI_API_KEY  (secrets.toml / Streamlit Cloud)
+    """
     try:
         from openai import OpenAI
-        # 1. Environment variable
-        key = os.getenv("OPENAI_API_KEY","")
-        # 2. Streamlit secrets (secrets.toml or Streamlit Cloud secrets)
+        key = ""
+        # 1. Sidebar input (persisted in session state for the whole session)
+        key = str(st.session_state.get("_openai_key_input","") or "").strip()
+        # 2. Environment variable
+        if not key:
+            key = os.getenv("OPENAI_API_KEY","").strip()
+        # 3. Streamlit secrets
         if not key:
             try:
-                key = st.secrets["OPENAI_API_KEY"]
+                key = str(st.secrets.get("OPENAI_API_KEY","") or "").strip()
             except Exception:
                 pass
-        # 3. Local dev fallback — avoids needing secrets.toml on every pull
-        if not key:
-            key = "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"
-        if not key or not str(key).startswith("sk-"):
+        if not key or not key.startswith("sk-"):
             return None
-        return OpenAI(api_key=str(key))
+        return OpenAI(api_key=key)
     except Exception:
         return None
 
@@ -3025,6 +3033,30 @@ with st.sidebar:
             st.caption(f"Customer names not available: `{str(cust_err)[:60]}`")
         else:
             st.caption("No customers found for this period")
+
+    # ── OpenAI API Key ───────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("**🤖 OpenAI API Key**")
+    _current_key = st.session_state.get("_openai_key_input","")
+    _key_status = "✅ Key set" if _current_key and _current_key.startswith("sk-") else "⚠️ No key"
+    _key_color  = "#22c55e" if _current_key and _current_key.startswith("sk-") else "#f59e0b"
+    st.markdown(
+        f"<div style='color:{_key_color};font-size:.75rem;margin-bottom:4px'>{_key_status}</div>",
+        unsafe_allow_html=True,
+    )
+    _new_key = st.text_input(
+        "Paste key here",
+        value=_current_key,
+        type="password",
+        key="_openai_key_input",
+        label_visibility="collapsed",
+        placeholder="sk-svcacct-…",
+        help="Paste your OpenAI API key. Stored only for this session — never committed to git.",
+    )
+    if _new_key and not _new_key.startswith("sk-"):
+        st.caption("⚠️ Key should start with `sk-`")
+    elif _new_key and _new_key.startswith("sk-"):
+        st.caption("✅ Key active for this session")
 
     st.markdown("---")
     st.markdown("**Sources**")
