@@ -3035,6 +3035,658 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════════════════════
 # HOME — Live Dashboard
 # ════════════════════════════════════════════════════════════════════════════════
+# CUSTOMER-LEVEL TAB RENDERER
+# Mirrors every entity-level tab's sub-tabs with aggregated portfolio analytics
+# ════════════════════════════════════════════════════════════════════════════════
+
+def _cust_header(cust_name, date_from, date_to):
+    """Compact scope banner shown at the top of every customer-level tab."""
+    _dr_str = f"{date_from} → {date_to}" if date_from else "All time"
+    st.markdown(
+        f"<div style='background:#0c1a2e;border-left:4px solid #3B82F6;border-radius:8px;"
+        f"padding:8px 14px;margin-bottom:12px'>"
+        f"<span style='color:#60A5FA;font-weight:700'>📊 Customer Portfolio:</span> "
+        f"<span style='color:#CBD5E1'>{cust_name}</span> &nbsp;·&nbsp; "
+        f"<span style='color:#64748b;font-size:.78rem'>{_dr_str}</span></div>",
+        unsafe_allow_html=True,
+    )
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cust_agg(customer_id, date_from, date_to, facts_list):
+    """
+    Aggregate pivot query: one row per business × one column per fact.
+    facts_list: tuple of fact names to pivot.
+    Uses LEFT(value,8000) to dodge federation VARCHAR limit.
+    """
+    date_c = ""
+    if date_from: date_c += f" AND DATE(rbcm.created_at) >= '{date_from}'"
+    if date_to:   date_c += f" AND DATE(rbcm.created_at) <= '{date_to}'"
+    cust_c = f" AND rbcm.customer_id = '{customer_id}'" if customer_id else ""
+
+    cases_list = "\n".join(
+        f"    MAX(CASE WHEN f.name='{n}' THEN JSON_EXTRACT_PATH_TEXT(LEFT(f.value,8000),'value') END) AS {n.replace('-','_')}"
+        for n in facts_list
+    )
+    sql = f"""
+        SELECT rbcm.business_id,
+               DATE(rbcm.created_at) AS onboarded_date,
+               {cases_list}
+        FROM rds_cases_public.rel_business_customer_monitoring rbcm
+        JOIN rds_warehouse_public.facts f ON f.business_id = rbcm.business_id
+          AND f.name IN ({','.join(f"'{n}'" for n in facts_list)})
+        WHERE 1=1 {date_c} {cust_c}
+        GROUP BY rbcm.business_id, DATE(rbcm.created_at)
+        ORDER BY onboarded_date DESC
+    """
+    return run_sql(sql)
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _cust_scores(customer_id, date_from, date_to):
+    """Score distribution for a customer's portfolio."""
+    date_c = ""
+    if date_from: date_c += f" AND DATE(rbcm.created_at) >= '{date_from}'"
+    if date_to:   date_c += f" AND DATE(rbcm.created_at) <= '{date_to}'"
+    cust_c = f" AND rbcm.customer_id = '{customer_id}'" if customer_id else ""
+    return run_sql(f"""
+        SELECT bs.business_id, bs.weighted_score_850, bs.risk_level, bs.score_decision,
+               bs.created_at AS scored_at
+        FROM rds_cases_public.rel_business_customer_monitoring rbcm
+        LEFT JOIN rds_manual_score_public.data_current_scores cs ON cs.business_id=rbcm.business_id
+        LEFT JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+        WHERE 1=1 {date_c} {cust_c}
+    """)
+
+def _pct_of(count, total):
+    return f"{round(100*count/max(total,1),1)}%" if total else "0%"
+
+def _bool_series(df, col):
+    """Return (pass_count, fail_count, null_count) for a true/false/null column."""
+    if col not in df.columns:
+        return 0, 0, len(df)
+    s = df[col].str.lower().str.strip()
+    p = (s=="true").sum(); f_ = (s=="false").sum(); n = len(df)-p-f_
+    return int(p), int(f_), int(n)
+
+def _stacked_bool_bar(df_col, label, color_pass="#22c55e", color_fail="#ef4444"):
+    p, f_, n = _bool_series(pd.DataFrame({"v": df_col}), "v") if not isinstance(df_col, pd.Series) else _bool_series(pd.DataFrame({"v": df_col.values}), "v")
+    return pd.DataFrame({"Status":["Pass","Fail","Missing"],"Count":[p,f_,n],
+                         "Color":[color_pass,color_fail,"#334155"]})
+
+
+def render_customer_registry(cust_name, cust_id, date_from, date_to):
+
+    _cc      = (f" AND rbcm.customer_id='{cust_id}'" if cust_id else "")
+    _cc_bid  = (f" AND a.business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE customer_id='{cust_id}')" if cust_id else "")
+    _dc_from = (f" AND DATE(rbcm.created_at)>='{date_from}'" if date_from else "")
+    _dc_to   = (f" AND DATE(rbcm.created_at)<='{date_to}'"   if date_to   else "")
+    """🏛️ Registry & Identity — mirrors the 5 entity-level sub-tabs."""
+    _cust_header(cust_name, date_from, date_to)
+
+    FACTS = ("sos_active","sos_match_boolean","tin_match_boolean","idv_passed_boolean",
+             "formation_state","kyb_complete","middesk_confidence","name_match_boolean",
+             "address_match_boolean","watchlist_hits")
+
+    with st.spinner("Loading registry signals for portfolio…"):
+        df, err = _cust_agg(cust_id, date_from, date_to, FACTS)
+    if err or df is None or df.empty:
+        flag(f"Could not load data: {err}", "amber"); return
+    n = len(df)
+
+    cr1, cr2, cr3, cr4, cr5 = st.tabs(["🏛️ SOS","🗺️ Dom/Foreign","🔐 TIN","🪪 IDV","🔗 Cross-Analysis"])
+
+    # ── SOS ──────────────────────────────────────────────────────────────────
+    with cr1:
+        st.markdown("#### 🏛️ Secretary of State — Portfolio Summary")
+        sos_p, sos_f, sos_n = _bool_series(df, "sos_active")
+        match_p, match_f, match_n = _bool_series(df, "sos_match_boolean")
+        c1,c2,c3,c4 = st.columns(4)
+        with c1: kpi("SOS Active",    str(sos_p),   _pct_of(sos_p,n),   "#22c55e" if sos_p/max(n,1)>0.8 else "#f59e0b")
+        with c2: kpi("SOS Inactive",  str(sos_f),   _pct_of(sos_f,n),   "#ef4444" if sos_f>0 else "#22c55e")
+        with c3: kpi("SOS Unknown",   str(sos_n),   _pct_of(sos_n,n),   "#64748b")
+        with c4: kpi("SOS Match",     str(match_p), _pct_of(match_p,n), "#22c55e" if match_p/max(n,1)>0.8 else "#f59e0b")
+
+        fig_sos = px.bar(pd.DataFrame({"Status":["Active","Inactive","No Data"],"Count":[sos_p,sos_f,sos_n]}),
+            x="Status", y="Count", color="Status",
+            color_discrete_map={"Active":"#22c55e","Inactive":"#ef4444","No Data":"#334155"},
+            title="SOS Status Distribution")
+        fig_sos.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10), showlegend=False)
+        st.plotly_chart(dark_chart(fig_sos), use_container_width=True)
+
+        # Middesk confidence distribution
+        if "middesk_confidence" in df.columns:
+            _mc = pd.to_numeric(df["middesk_confidence"], errors="coerce").dropna()
+            if not _mc.empty:
+                fig_mc = px.histogram(_mc, nbins=20, title="Middesk Confidence Distribution",
+                                      color_discrete_sequence=["#3B82F6"])
+                fig_mc.add_vline(x=0.25, line_dash="dash", line_color="#ef4444", annotation_text="Low threshold")
+                fig_mc.update_layout(height=240, margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_mc), use_container_width=True)
+
+        _sos_sql = f"SELECT DATE(rbcm.created_at) AS date, JSON_EXTRACT_PATH_TEXT(LEFT(f.value,8000),'value') AS sos_active, COUNT(*) AS businesses FROM rds_cases_public.rel_business_customer_monitoring rbcm JOIN rds_warehouse_public.facts f ON f.business_id=rbcm.business_id AND f.name='sos_active' WHERE 1=1{_cc}{_dc_from} GROUP BY 1,2 ORDER BY 1;"
+        detail_panel("🏛️ SOS Status — Customer Portfolio", f"{n:,} businesses · {cust_name}",
+            what_it_means=f"SOS active/inactive/unknown distribution for {cust_name}. {sos_p:,} businesses ({_pct_of(sos_p,n)}) have sos_active=true. {sos_f:,} ({_pct_of(sos_f,n)}) inactive — entity lost good standing (missed annual report, dissolved, revoked). {sos_n:,} ({_pct_of(sos_n,n)}) no SOS data at all.",
+            source_table="rds_warehouse_public.facts · name='sos_active'",
+            source_file="facts/kyb/index.ts", json_obj={"sos_active":sos_p,"sos_inactive":sos_f,"sos_unknown":sos_n,"total":n},
+            sql=_sos_sql, icon="🏛️", color="#22c55e")
+
+    # ── Dom/Foreign ───────────────────────────────────────────────────────────
+    with cr2:
+        st.markdown("#### 🗺️ Domestic vs Foreign Registration")
+        TAX_HAVENS = {"DE","NV","WY","SD","MT","NM"}
+        if "formation_state" in df.columns:
+            _fs = df["formation_state"].str.upper().str.strip()
+            th_n = _fs.isin(TAX_HAVENS).sum()
+            oth_n = (_fs.notna() & ~_fs.isin(TAX_HAVENS)).sum()
+            no_n = _fs.isna().sum() + (_fs=="").sum()
+            c1,c2,c3 = st.columns(3)
+            with c1: kpi("Tax-Haven State", str(int(th_n)), _pct_of(th_n,n), "#f59e0b")
+            with c2: kpi("Other State",     str(int(oth_n)), _pct_of(oth_n,n), "#22c55e")
+            with c3: kpi("No State Data",   str(int(no_n)), _pct_of(no_n,n), "#64748b")
+
+            fig_st = px.pie(pd.DataFrame({"Type":["Tax-Haven","Other State","No Data"],"Count":[int(th_n),int(oth_n),int(no_n)]}),
+                names="Type", values="Count", hole=0.45, title="Formation State Mix",
+                color="Type", color_discrete_map={"Tax-Haven":"#f59e0b","Other State":"#3B82F6","No Data":"#334155"})
+            fig_st.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_st), use_container_width=True)
+
+            # Top states table
+            _st_counts = _fs[_fs.notna() & (_fs!="")].value_counts().reset_index()
+            _st_counts.columns = ["State","Count"]
+            _st_counts["Tax Haven"] = _st_counts["State"].isin(TAX_HAVENS).map({True:"⚠️ Yes",False:"No"})
+            st.dataframe(_st_counts, use_container_width=True, hide_index=True)
+            detail_panel("🗺️ Formation State Distribution", f"Tax-haven: {int(th_n):,} · Other: {int(oth_n):,}",
+                what_it_means=f"Formation states for {cust_name}. Tax-haven states (DE/NV/WY/SD/MT/NM) increase entity resolution risk — Middesk's address search finds the FOREIGN qualification, missing the DOMESTIC primary filing.",
+                source_table="rds_warehouse_public.facts · name='formation_state'",
+                source_file="facts/kyb/index.ts",
+                json_obj={"tax_haven":int(th_n),"other_state":int(oth_n),"no_data":int(no_n),"top_states":_st_counts.head(10).to_dict("records")},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(LEFT(f.value,8000),'value') AS state, COUNT(*) FROM rds_warehouse_public.facts f JOIN rds_cases_public.rel_business_customer_monitoring rbcm ON rbcm.business_id=f.business_id AND f.name='formation_state' WHERE 1=1{_cc} GROUP BY 1 ORDER BY 2 DESC;",
+                icon="🗺️", color="#f59e0b")
+
+    # ── TIN ───────────────────────────────────────────────────────────────────
+    with cr3:
+        st.markdown("#### 🔐 TIN / EIN Verification")
+        tin_p, tin_f, tin_n = _bool_series(df, "tin_match_boolean")
+        c1,c2,c3 = st.columns(3)
+        with c1: kpi("TIN Verified",    str(tin_p), _pct_of(tin_p,n), "#22c55e")
+        with c2: kpi("TIN Failed",      str(tin_f), _pct_of(tin_f,n), "#ef4444" if tin_f>0 else "#22c55e")
+        with c3: kpi("TIN Not Checked", str(tin_n), _pct_of(tin_n,n), "#64748b")
+
+        fig_tin = px.pie(pd.DataFrame({"Status":["Verified","Failed","Not Checked"],"Count":[tin_p,tin_f,tin_n]}),
+            names="Status", values="Count", hole=0.45, title="TIN Verification Outcomes",
+            color="Status", color_discrete_map={"Verified":"#22c55e","Failed":"#ef4444","Not Checked":"#334155"})
+        fig_tin.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
+        st.plotly_chart(dark_chart(fig_tin), use_container_width=True)
+
+        # SOS × TIN concordance
+        st.markdown("**SOS × TIN Concordance**")
+        if "sos_active" in df.columns and "tin_match_boolean" in df.columns:
+            def _sl(v): return str(v or "").lower().strip()
+            _ct = df.copy()
+            _ct["SOS"] = _ct["sos_active"].apply(lambda v: "Active" if _sl(v)=="true" else ("Inactive" if _sl(v)=="false" else "Unknown"))
+            _ct["TIN"] = _ct["tin_match_boolean"].apply(lambda v: "Pass" if _sl(v)=="true" else ("Fail" if _sl(v)=="false" else "Not Checked"))
+            _cross = _ct.groupby(["SOS","TIN"]).size().reset_index(name="Count")
+            _cross["Signal"] = _cross.apply(lambda r: "✅ Good" if r.SOS=="Active" and r.TIN=="Pass" else "🔴 Review" if r.SOS=="Inactive" or r.TIN=="Fail" else "🟡 Check", axis=1)
+            st.dataframe(_cross, use_container_width=True, hide_index=True)
+
+        detail_panel("🔐 TIN Verification — Customer Portfolio", f"Verified: {tin_p:,} · Failed: {tin_f:,} · Not Checked: {tin_n:,}",
+            what_it_means=f"TIN/EIN verification outcomes for {cust_name}. tin_match_boolean=true means Middesk's IRS direct check confirmed the EIN matches this business name. Failures often indicate DBA vs legal name mismatch — applicant submitted trade name instead of the legal name on the EIN certificate.",
+            source_table="rds_warehouse_public.facts · name='tin_match_boolean'",
+            source_file="facts/kyb/index.ts",
+            json_obj={"verified":tin_p,"failed":tin_f,"not_checked":tin_n,"total":n},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(LEFT(f.value,8000),'value') AS tin_result, COUNT(*) FROM rds_warehouse_public.facts f JOIN rds_cases_public.rel_business_customer_monitoring rbcm ON rbcm.business_id=f.business_id AND f.name='tin_match_boolean' WHERE 1=1{_cc} GROUP BY 1 ORDER BY 2 DESC;",
+            icon="🔐", color="#22c55e")
+
+    # ── IDV ───────────────────────────────────────────────────────────────────
+    with cr4:
+        st.markdown("#### 🪪 Identity Verification (IDV)")
+        idv_p, idv_f, idv_n = _bool_series(df, "idv_passed_boolean")
+        c1,c2,c3 = st.columns(3)
+        with c1: kpi("IDV Passed",  str(idv_p), _pct_of(idv_p,n), "#22c55e")
+        with c2: kpi("IDV Failed",  str(idv_f), _pct_of(idv_f,n), "#ef4444" if idv_f>0 else "#22c55e")
+        with c3: kpi("Not Triggered",str(idv_n), _pct_of(idv_n,n), "#64748b")
+
+        fig_idv = px.pie(pd.DataFrame({"Status":["Passed","Failed","Not Triggered"],"Count":[idv_p,idv_f,idv_n]}),
+            names="Status", values="Count", hole=0.45, title="IDV (Plaid Biometrics) Outcomes",
+            color="Status", color_discrete_map={"Passed":"#22c55e","Failed":"#ef4444","Not Triggered":"#334155"})
+        fig_idv.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
+        st.plotly_chart(dark_chart(fig_idv), use_container_width=True)
+
+        detail_panel("🪪 IDV — Customer Portfolio", f"Passed: {idv_p:,} · Failed: {idv_f:,} · Not triggered: {idv_n:,}",
+            what_it_means=f"Plaid biometric IDV outcomes for {cust_name}. idv_passed_boolean=true means the beneficial owner completed government ID + selfie + liveness check via Plaid. 'Not Triggered' is common for sole proprietors.",
+            source_table="rds_warehouse_public.facts · name='idv_passed_boolean'",
+            source_file="facts/kyb/index.ts",
+            json_obj={"passed":idv_p,"failed":idv_f,"not_triggered":idv_n},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(LEFT(f.value,8000),'value') AS idv, COUNT(*) FROM rds_warehouse_public.facts f JOIN rds_cases_public.rel_business_customer_monitoring rbcm ON rbcm.business_id=f.business_id AND f.name='idv_passed_boolean' WHERE 1=1{_cc} GROUP BY 1 ORDER BY 2 DESC;",
+            icon="🪪", color="#8B5CF6")
+
+    # ── Cross-Analysis ────────────────────────────────────────────────────────
+    with cr5:
+        st.markdown("#### 🔗 Cross-Signal Analysis")
+        if all(c in df.columns for c in ["sos_active","tin_match_boolean","idv_passed_boolean"]):
+            def _sl(v): return str(v or "").lower().strip()
+            _x = df.copy()
+            _x["SOS"]  = _x["sos_active"].apply(lambda v: "✅ Active" if _sl(v)=="true" else ("❌ Inactive" if _sl(v)=="false" else "⚪ Unknown"))
+            _x["TIN"]  = _x["tin_match_boolean"].apply(lambda v: "✅ Pass" if _sl(v)=="true" else ("❌ Fail" if _sl(v)=="false" else "⚪ N/A"))
+            _x["IDV"]  = _x["idv_passed_boolean"].apply(lambda v: "✅ Pass" if _sl(v)=="true" else ("❌ Fail" if _sl(v)=="false" else "⚪ N/A"))
+
+            _x["All Pass"] = (_x["sos_active"].str.lower().str.strip()=="true") & (_x["tin_match_boolean"].str.lower().str.strip()=="true")
+            all_pass = _x["All Pass"].sum()
+            kpi_c1, kpi_c2, kpi_c3 = st.columns(3)
+            with kpi_c1: kpi("SOS ✅ + TIN ✅", str(int(all_pass)), f"{_pct_of(all_pass,n)} of portfolio", "#22c55e")
+            with kpi_c2:
+                _sos_fail_tin_ok = ((_x["sos_active"].str.lower().str.strip()=="false") & (_x["tin_match_boolean"].str.lower().str.strip()=="true")).sum()
+                kpi("SOS ❌ + TIN ✅", str(int(_sos_fail_tin_ok)), "Entity dead but EIN valid", "#f59e0b")
+            with kpi_c3:
+                _sos_ok_tin_fail = ((_x["sos_active"].str.lower().str.strip()=="true") & (_x["tin_match_boolean"].str.lower().str.strip()=="false")).sum()
+                kpi("SOS ✅ + TIN ❌", str(int(_sos_ok_tin_fail)), "Registered but EIN mismatch", "#ef4444")
+
+            # SOS × TIN heatmap
+            _cross2 = _x.groupby(["SOS","TIN"]).size().reset_index(name="Count")
+            fig_x = px.bar(_cross2, x="SOS", y="Count", color="TIN", barmode="stack",
+                           title="SOS Status × TIN Verification Cross-Tab",
+                           color_discrete_map={"✅ Pass":"#22c55e","❌ Fail":"#ef4444","⚪ N/A":"#334155"})
+            fig_x.update_layout(height=320, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_x), use_container_width=True)
+
+            detail_panel("🔗 Cross-Signal Analysis — SOS × TIN × IDV", f"{n:,} businesses",
+                what_it_means=f"Cross-tabulation of SOS, TIN and IDV signals for {cust_name}. The most risky combination is SOS Active + TIN Failed (registered entity but EIN name mismatch — classic DBA vs legal name issue).",
+                source_table="rds_warehouse_public.facts · sos_active + tin_match_boolean + idv_passed_boolean",
+                json_obj={"all_pass":int(all_pass),"sos_ok_tin_fail":int(_sos_ok_tin_fail),"sos_fail_tin_ok":int(_sos_fail_tin_ok)},
+                sql=f"SELECT JSON_EXTRACT_PATH_TEXT(LEFT(a.value,8000),'value') AS sos, JSON_EXTRACT_PATH_TEXT(LEFT(b.value,8000),'value') AS tin, COUNT(*) FROM rds_warehouse_public.facts a JOIN rds_warehouse_public.facts b ON a.business_id=b.business_id AND b.name='tin_match_boolean' WHERE a.name='sos_active'{_cc_bid} GROUP BY 1,2 ORDER BY 3 DESC;",
+                icon="🔗", color="#8B5CF6")
+
+
+def render_customer_classification(cust_name, cust_id, date_from, date_to):
+
+    _cc      = (f" AND rbcm.customer_id='{cust_id}'" if cust_id else "")
+    _cc_bid  = (f" AND a.business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE customer_id='{cust_id}')" if cust_id else "")
+    _dc_from = (f" AND DATE(rbcm.created_at)>='{date_from}'" if date_from else "")
+    _dc_to   = (f" AND DATE(rbcm.created_at)<='{date_to}'"   if date_to   else "")
+    """🏭 Classification & KYB — mirrors the 4 entity-level sub-tabs."""
+    _cust_header(cust_name, date_from, date_to)
+    FACTS = ("naics_code","kyb_submitted","kyb_complete","revenue","num_employees","website","corporation","formation_date")
+    with st.spinner("Loading classification signals…"):
+        df, err = _cust_agg(cust_id, date_from, date_to, FACTS)
+    if err or df is None or df.empty:
+        flag(f"Could not load data: {err}", "amber"); return
+    n = len(df)
+
+    cc1, cc2, cc3, cc4 = st.tabs(["🏭 NAICS/MCC Pipeline","🏢 Background & Firmographic","📬 Contact & Address","🌐 Website & Digital"])
+
+    with cc1:
+        st.markdown("#### 🏭 NAICS Industry Classification — Portfolio")
+        if "naics_code" in df.columns:
+            naics_fb  = (df["naics_code"].str.strip()=="561499").sum()
+            naics_ok  = df["naics_code"].notna().sum() - naics_fb
+            naics_nil = n - naics_ok - naics_fb
+            c1,c2,c3 = st.columns(3)
+            with c1: kpi("Classified",     str(int(naics_ok)),  _pct_of(naics_ok,n),  "#22c55e")
+            with c2: kpi("Fallback 561499",str(int(naics_fb)),  _pct_of(naics_fb,n),  "#f59e0b")
+            with c3: kpi("Missing",        str(int(naics_nil)), _pct_of(naics_nil,n), "#64748b")
+
+            # Top NAICS codes (from separate agg query — naics_code excluded from pivot)
+            _naics_sql = f"""
+                SELECT JSON_EXTRACT_PATH_TEXT(LEFT(f.value,8000),'value') AS naics_code,
+                       COUNT(DISTINCT f.business_id) AS businesses
+                FROM rds_warehouse_public.facts f
+                JOIN rds_cases_public.rel_business_customer_monitoring rbcm
+                  ON rbcm.business_id = f.business_id
+                WHERE f.name = 'naics_code'
+                {f"AND rbcm.customer_id = '{cust_id}'" if cust_id else ""}
+                {f"AND DATE(rbcm.created_at) >= '{date_from}'" if date_from else ""}
+                {f"AND DATE(rbcm.created_at) <= '{date_to}'" if date_to else ""}
+                GROUP BY 1 ORDER BY businesses DESC
+            """
+            _nc_df, _ = run_sql(_naics_sql)
+            if _nc_df is not None and not _nc_df.empty:
+                _nc_df["2-digit"] = _nc_df["naics_code"].str[:2]
+                _sector = _nc_df.groupby("2-digit")["businesses"].sum().reset_index().sort_values("businesses", ascending=True)
+                fig_nc = px.bar(_sector, x="businesses", y="2-digit", orientation="h",
+                                title="NAICS Sector Distribution (2-digit)", color_discrete_sequence=["#3B82F6"])
+                fig_nc.update_layout(height=max(260,len(_sector)*28), margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_nc), use_container_width=True)
+                st.dataframe(_nc_df.head(20), use_container_width=True, hide_index=True)
+
+            detail_panel("🏭 NAICS Classification — Portfolio", f"Classified: {int(naics_ok):,} · Fallback: {int(naics_fb):,}",
+                what_it_means=f"NAICS industry classification outcomes for {cust_name}. {_pct_of(naics_fb,n)} of businesses received the 561499 fallback — meaning all commercial vendors (ZI/EFX/OC/SERP/Trulioo) AND the AI enrichment failed to classify the industry.",
+                source_table="rds_warehouse_public.facts · name='naics_code'",
+                source_file="facts/kyb/index.ts",
+                json_obj={"classified":int(naics_ok),"fallback_561499":int(naics_fb),"missing":int(naics_nil),"total":n},
+                sql=_naics_sql, icon="🏭", color="#8B5CF6")
+
+    with cc2:
+        st.markdown("#### 🏢 Background & Firmographic")
+        kyb_s = (df["kyb_submitted"].str.lower().str.strip()=="true").sum() if "kyb_submitted" in df.columns else 0
+        kyb_c = (df["kyb_complete"].str.lower().str.strip()=="true").sum() if "kyb_complete" in df.columns else 0
+        rev_k = df["revenue"].notna().sum() if "revenue" in df.columns else 0
+        emp_k = df["num_employees"].notna().sum() if "num_employees" in df.columns else 0
+        c1,c2,c3,c4 = st.columns(4)
+        with c1: kpi("KYB Submitted",  str(int(kyb_s)), _pct_of(kyb_s,n), "#3B82F6")
+        with c2: kpi("KYB Complete",   str(int(kyb_c)), _pct_of(kyb_c,n), "#22c55e" if kyb_c/max(n,1)>0.7 else "#f59e0b")
+        with c3: kpi("Revenue Known",  str(int(rev_k)), _pct_of(rev_k,n), "#3B82F6")
+        with c4: kpi("Employees Known",str(int(emp_k)), _pct_of(emp_k,n), "#3B82F6")
+
+        fig_fw = px.bar(pd.DataFrame({"Signal":["KYB Submitted","KYB Complete","Revenue","Employees"],
+                                       "Count":[int(kyb_s),int(kyb_c),int(rev_k),int(emp_k)]}),
+                        x="Signal", y="Count", title="Firmographic Coverage",
+                        color_discrete_sequence=["#3B82F6"])
+        fig_fw.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+        st.plotly_chart(dark_chart(fig_fw), use_container_width=True)
+
+        detail_panel("🏢 Firmographic Coverage", f"{n:,} businesses",
+            what_it_means=f"KYB completion and firmographic data availability for {cust_name}. Revenue and employee count come from ZoomInfo (pid=24) and Equifax (pid=17) bulk entity matching. Missing = vendor could not match the entity.",
+            source_table="rds_warehouse_public.facts · kyb_submitted, kyb_complete, revenue, num_employees",
+            json_obj={"kyb_submitted":int(kyb_s),"kyb_complete":int(kyb_c),"revenue_known":int(rev_k),"employees_known":int(emp_k)},
+            sql=f"SELECT name, COUNT(*) AS with_value FROM rds_warehouse_public.facts f JOIN rds_cases_public.rel_business_customer_monitoring rbcm ON rbcm.business_id=f.business_id WHERE f.name IN ('kyb_submitted','kyb_complete','revenue','num_employees'){_cc} GROUP BY 1;",
+            icon="🏢", color="#3B82F6")
+
+    with cc3:
+        st.markdown("#### 📬 Contact & Address")
+        am_p, am_f, am_n = _bool_series(df, "address_match_boolean")
+        nm_p, nm_f, nm_n = _bool_series(df, "name_match_boolean")
+        c1,c2,c3,c4 = st.columns(4)
+        with c1: kpi("Address Match Pass", str(am_p), _pct_of(am_p,n), "#22c55e")
+        with c2: kpi("Address Match Fail", str(am_f), _pct_of(am_f,n), "#ef4444" if am_f>0 else "#22c55e")
+        with c3: kpi("Name Match Pass",    str(nm_p), _pct_of(nm_p,n), "#22c55e")
+        with c4: kpi("Name Match Fail",    str(nm_f), _pct_of(nm_f,n), "#ef4444" if nm_f>0 else "#22c55e")
+
+        detail_panel("📬 Address & Name Match — Portfolio", f"Address: {am_p:,} pass · Name: {nm_p:,} pass",
+            what_it_means=f"Address and business name verification for {cust_name}. address_match_boolean=true means Middesk confirmed the submitted address via SOS/USPS. name_match_boolean=true means the submitted business name matches the SOS registry name.",
+            source_table="rds_warehouse_public.facts · address_match_boolean, name_match_boolean",
+            json_obj={"address_pass":am_p,"address_fail":am_f,"name_pass":nm_p,"name_fail":nm_f},
+            sql=f"SELECT name, JSON_EXTRACT_PATH_TEXT(LEFT(value,8000),'value') AS val, COUNT(*) FROM rds_warehouse_public.facts f JOIN rds_cases_public.rel_business_customer_monitoring rbcm ON rbcm.business_id=f.business_id WHERE f.name IN ('address_match_boolean','name_match_boolean'){_cc} GROUP BY 1,2 ORDER BY 1,3 DESC;",
+            icon="📬", color="#06b6d4")
+
+    with cc4:
+        st.markdown("#### 🌐 Website & Digital Presence")
+        web_k = df["website"].notna().sum() if "website" in df.columns else 0
+        web_nil = n - int(web_k)
+        c1,c2 = st.columns(2)
+        with c1: kpi("Website Present", str(int(web_k)),  _pct_of(web_k,n),  "#22c55e")
+        with c2: kpi("No Website",      str(int(web_nil)), _pct_of(web_nil,n), "#f59e0b")
+        st.caption("No website = Gap G1 (NAICS fallback risk). These businesses had no URL for AI enrichment to classify industry from.")
+        detail_panel("🌐 Website Coverage — Portfolio", f"Present: {int(web_k):,} · Missing: {int(web_nil):,}",
+            what_it_means=f"Website URL availability for {cust_name}. Businesses without a website are at high risk of receiving NAICS=561499 (Gap G1): the AI enrichment cannot search the web to classify the industry.",
+            source_table="rds_warehouse_public.facts · name='website'",
+            json_obj={"website_present":int(web_k),"no_website":int(web_nil)},
+            sql=f"SELECT CASE WHEN JSON_EXTRACT_PATH_TEXT(LEFT(value,8000),'value') IS NOT NULL THEN 'Has Website' ELSE 'No Website' END AS status, COUNT(*) FROM rds_warehouse_public.facts f JOIN rds_cases_public.rel_business_customer_monitoring rbcm ON rbcm.business_id=f.business_id WHERE f.name='website'{_cc} GROUP BY 1;",
+            icon="🌐", color="#22c55e")
+
+
+def render_customer_risk(cust_name, cust_id, date_from, date_to):
+
+    _cc      = (f" AND rbcm.customer_id='{cust_id}'" if cust_id else "")
+    _cc_bid  = (f" AND a.business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE customer_id='{cust_id}')" if cust_id else "")
+    _dc_from = (f" AND DATE(rbcm.created_at)>='{date_from}'" if date_from else "")
+    _dc_to   = (f" AND DATE(rbcm.created_at)<='{date_to}'"   if date_to   else "")
+    """⚠️ Risk & Watchlist — mirrors the 3 entity-level sub-tabs."""
+    _cust_header(cust_name, date_from, date_to)
+    FACTS = ("watchlist_hits","adverse_media_hits","num_bankruptcies","num_judgements","num_liens","risk_score")
+    with st.spinner("Loading risk signals…"):
+        df, err = _cust_agg(cust_id, date_from, date_to, FACTS)
+    if err or df is None or df.empty:
+        flag(f"Could not load data: {err}", "amber"); return
+    n = len(df)
+
+    def _int_col(col): return pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int) if col in df.columns else pd.Series([0]*n)
+
+    wl_hits  = _int_col("watchlist_hits")
+    am_hits  = _int_col("adverse_media_hits")
+    bk_cnt   = _int_col("num_bankruptcies")
+    jd_cnt   = _int_col("num_judgements")
+    li_cnt   = _int_col("num_liens")
+
+    rw1, rw2, rw3 = st.tabs(["🔍 Watchlist Detail","📜 Public Records","🔗 Risk Combinations"])
+
+    with rw1:
+        st.markdown("#### 🔍 Watchlist & Sanctions Screening")
+        wl_biz    = (wl_hits>0).sum()
+        am_biz    = (am_hits>0).sum()
+        clean_biz = n - int(wl_biz)
+        c1,c2,c3,c4 = st.columns(4)
+        with c1: kpi("Businesses with WL Hits", str(int(wl_biz)), _pct_of(wl_biz,n), "#ef4444" if wl_biz>0 else "#22c55e")
+        with c2: kpi("Total WL Hits",            str(int(wl_hits.sum())), "across portfolio", "#ef4444" if wl_hits.sum()>0 else "#22c55e")
+        with c3: kpi("Adverse Media",            str(int(am_biz)), _pct_of(am_biz,n), "#f59e0b" if am_biz>0 else "#22c55e")
+        with c4: kpi("Clean (No Hits)",          str(int(clean_biz)), _pct_of(clean_biz,n), "#22c55e")
+
+        fig_wl = px.histogram(wl_hits[wl_hits>0], nbins=20, title="Watchlist Hit Count Distribution (businesses with hits only)",
+                              color_discrete_sequence=["#ef4444"])
+        fig_wl.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
+        if wl_biz > 0: st.plotly_chart(dark_chart(fig_wl), use_container_width=True)
+        else: st.success("✅ No watchlist hits detected for any business in this portfolio.")
+
+        detail_panel("🔍 Watchlist — Portfolio", f"Businesses with hits: {int(wl_biz):,}",
+            what_it_means=f"PEP + OFAC sanctions screening results for {cust_name}. {int(wl_biz):,} businesses ({_pct_of(wl_biz,n)}) have ≥1 watchlist hit. Adverse media is tracked separately and excluded from the consolidated watchlist fact.",
+            source_table="rds_warehouse_public.facts · watchlist_hits, adverse_media_hits",
+            json_obj={"businesses_with_hits":int(wl_biz),"total_hits":int(wl_hits.sum()),"adverse_media_biz":int(am_biz)},
+            sql=f"SELECT JSON_EXTRACT_PATH_TEXT(LEFT(f.value,8000),'value') AS hits, COUNT(*) FROM rds_warehouse_public.facts f JOIN rds_cases_public.rel_business_customer_monitoring rbcm ON rbcm.business_id=f.business_id WHERE f.name='watchlist_hits'{_cc} GROUP BY 1 ORDER BY CAST(hits AS INT) DESC;",
+            icon="🔍", color="#ef4444")
+
+    with rw2:
+        st.markdown("#### 📜 Public Records (Bankruptcies, Judgements, Liens)")
+        bk_biz = (bk_cnt>0).sum(); jd_biz = (jd_cnt>0).sum(); li_biz = (li_cnt>0).sum()
+        c1,c2,c3 = st.columns(3)
+        with c1: kpi("Bankruptcies", str(int(bk_biz)), f"{int(bk_cnt.sum())} total records", "#ef4444" if bk_biz>0 else "#22c55e")
+        with c2: kpi("Judgements",   str(int(jd_biz)), f"{int(jd_cnt.sum())} total records", "#f59e0b" if jd_biz>0 else "#22c55e")
+        with c3: kpi("Liens",        str(int(li_biz)), f"{int(li_cnt.sum())} total records", "#f59e0b" if li_biz>0 else "#22c55e")
+
+        fig_pr = px.bar(pd.DataFrame({"Type":["Bankruptcies","Judgements","Liens"],"Businesses":[int(bk_biz),int(jd_biz),int(li_biz)]}),
+            x="Type", y="Businesses", title="Public Records — Businesses Affected",
+            color="Type", color_discrete_map={"Bankruptcies":"#ef4444","Judgements":"#f59e0b","Liens":"#f97316"})
+        fig_pr.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10), showlegend=False)
+        st.plotly_chart(dark_chart(fig_pr), use_container_width=True)
+
+        detail_panel("📜 Public Records — Portfolio", f"BK: {int(bk_biz):,} · Judgements: {int(jd_biz):,} · Liens: {int(li_biz):,}",
+            what_it_means=f"Public records exposure for {cust_name}. Each bankruptcy reduces the Worth Score by ~40pts, each judgment by ~20pts, each lien by ~10pts. Source: Equifax (pid=17).",
+            source_table="rds_warehouse_public.facts · num_bankruptcies, num_judgements, num_liens",
+            json_obj={"bk_businesses":int(bk_biz),"bk_total":int(bk_cnt.sum()),"jd_businesses":int(jd_biz),"li_businesses":int(li_biz)},
+            sql=f"SELECT name, SUM(CAST(JSON_EXTRACT_PATH_TEXT(LEFT(value,8000),'value') AS INT)) AS total FROM rds_warehouse_public.facts f JOIN rds_cases_public.rel_business_customer_monitoring rbcm ON rbcm.business_id=f.business_id WHERE f.name IN ('num_bankruptcies','num_judgements','num_liens'){_cc} GROUP BY 1;",
+            icon="📜", color="#f59e0b")
+
+    with rw3:
+        st.markdown("#### 🔗 Risk Combinations")
+        _r = df.copy()
+        def _si2(v):
+            try: return int(float(v or 0))
+            except: return 0
+        def _sl2(v): return str(v or "").lower().strip()
+        if "watchlist_hits" in _r.columns and "num_bankruptcies" in _r.columns:
+            _r["wl"] = _r["watchlist_hits"].apply(_si2)
+            _r["bk"] = _r["num_bankruptcies"].apply(_si2)
+            combos = {
+                "WL Hit + BK":        ((_r["wl"]>0) & (_r["bk"]>0)).sum(),
+                "WL Hit only":        ((_r["wl"]>0) & (_r["bk"]==0)).sum(),
+                "BK only":            ((_r["wl"]==0) & (_r["bk"]>0)).sum(),
+                "Clean":              ((_r["wl"]==0) & (_r["bk"]==0)).sum(),
+            }
+            fig_combo = px.pie(pd.DataFrame({"Combination":list(combos.keys()),"Count":list(combos.values())}),
+                names="Combination", values="Count", hole=0.4, title="Risk Combination Mix",
+                color="Combination",
+                color_discrete_map={"WL Hit + BK":"#ef4444","WL Hit only":"#f97316","BK only":"#f59e0b","Clean":"#22c55e"})
+            fig_combo.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_combo), use_container_width=True)
+            st.dataframe(pd.DataFrame({"Combination":list(combos.keys()),"Businesses":list(combos.values())}), use_container_width=True, hide_index=True)
+            detail_panel("🔗 Risk Combinations — Portfolio", f"{n:,} businesses",
+                what_it_means=f"Cross-signal risk combinations for {cust_name}. WL Hit + BK = highest risk (CRITICAL — both compliance and credit risk). WL Hit only = compliance priority. BK only = credit risk priority.",
+                source_table="rds_warehouse_public.facts · watchlist_hits + num_bankruptcies",
+                json_obj={k:int(v) for k,v in combos.items()},
+                sql=f"SELECT CASE WHEN CAST(JSON_EXTRACT_PATH_TEXT(LEFT(a.value,8000),'value') AS INT)>0 AND CAST(JSON_EXTRACT_PATH_TEXT(LEFT(b.value,8000),'value') AS INT)>0 THEN 'WL+BK' WHEN CAST(JSON_EXTRACT_PATH_TEXT(LEFT(a.value,8000),'value') AS INT)>0 THEN 'WL only' WHEN CAST(JSON_EXTRACT_PATH_TEXT(LEFT(b.value,8000),'value') AS INT)>0 THEN 'BK only' ELSE 'Clean' END AS combo, COUNT(*) FROM rds_warehouse_public.facts a JOIN rds_warehouse_public.facts b ON a.business_id=b.business_id AND b.name='num_bankruptcies' WHERE a.name='watchlist_hits'{_cc_bid} GROUP BY 1 ORDER BY 2 DESC;",
+                icon="🔗", color="#ef4444")
+
+
+def render_customer_worth_score(cust_name, cust_id, date_from, date_to):
+
+    _cc      = (f" AND rbcm.customer_id='{cust_id}'" if cust_id else "")
+    _cc_bid  = (f" AND a.business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE customer_id='{cust_id}')" if cust_id else "")
+    _dc_from = (f" AND DATE(rbcm.created_at)>='{date_from}'" if date_from else "")
+    _dc_to   = (f" AND DATE(rbcm.created_at)<='{date_to}'"   if date_to   else "")
+    """💰 Worth Score — mirrors the 2 entity-level sub-tabs."""
+    _cust_header(cust_name, date_from, date_to)
+    with st.spinner("Loading Worth Score distribution…"):
+        ws_df, ws_err = _cust_scores(cust_id, date_from, date_to)
+    if ws_err or ws_df is None or ws_df.empty:
+        flag(f"Could not load scores: {ws_err}", "amber"); return
+
+    ws_df["weighted_score_850"] = pd.to_numeric(ws_df["weighted_score_850"], errors="coerce")
+    ws_df = ws_df.dropna(subset=["weighted_score_850"])
+    n = len(ws_df)
+
+    cws1, cws2 = st.tabs(["💰 Score & Architecture","📊 Waterfall & Features"])
+
+    with cws1:
+        st.markdown("#### 💰 Worth Score Distribution — Customer Portfolio")
+        avg_s   = ws_df["weighted_score_850"].mean()
+        med_s   = ws_df["weighted_score_850"].median()
+        app_n   = (ws_df["score_decision"]=="APPROVE").sum()
+        rev_n   = (ws_df["score_decision"]=="FURTHER_REVIEW_NEEDED").sum()
+        dec_n   = (ws_df["score_decision"]=="DECLINE").sum()
+
+        c1,c2,c3,c4,c5 = st.columns(5)
+        with c1: kpi("Scored Businesses", f"{n:,}", f"{cust_name}", "#3B82F6")
+        with c2: kpi("Avg Score",  f"{avg_s:.0f}", "300–850", "#22c55e" if avg_s>=700 else "#f59e0b" if avg_s>=550 else "#ef4444")
+        with c3: kpi("✅ APPROVE",  str(int(app_n)), _pct_of(app_n,n), "#22c55e")
+        with c4: kpi("🔄 REVIEW",   str(int(rev_n)), _pct_of(rev_n,n), "#f59e0b")
+        with c5: kpi("❌ DECLINE",  str(int(dec_n)), _pct_of(dec_n,n), "#ef4444")
+
+        ch1, ch2 = st.columns(2)
+        with ch1:
+            fig_hist = px.histogram(ws_df, x="weighted_score_850", nbins=30,
+                color="score_decision" if "score_decision" in ws_df.columns else None,
+                title="Score Distribution (300–850)",
+                color_discrete_map={"APPROVE":"#22c55e","FURTHER_REVIEW_NEEDED":"#f59e0b","DECLINE":"#ef4444"})
+            fig_hist.add_vline(x=700, line_dash="dash", line_color="#22c55e", annotation_text="APPROVE")
+            fig_hist.add_vline(x=550, line_dash="dash", line_color="#ef4444", annotation_text="DECLINE")
+            fig_hist.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_hist), use_container_width=True)
+        with ch2:
+            fig_dec = px.pie(pd.DataFrame({"Decision":["APPROVE","REVIEW","DECLINE"],"Count":[int(app_n),int(rev_n),int(dec_n)]}),
+                names="Decision", values="Count", hole=0.45, title="Decision Outcome Mix",
+                color="Decision", color_discrete_map={"APPROVE":"#22c55e","REVIEW":"#f59e0b","DECLINE":"#ef4444"})
+            fig_dec.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_dec), use_container_width=True)
+
+        # Risk level breakdown
+        if "risk_level" in ws_df.columns:
+            rl = ws_df["risk_level"].value_counts().reset_index()
+            rl.columns = ["Risk Level","Count"]
+            st.dataframe(rl, use_container_width=True, hide_index=True)
+
+        _ws_port_sql = f"SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision FROM rds_cases_public.rel_business_customer_monitoring rbcm JOIN rds_manual_score_public.data_current_scores cs ON cs.business_id=rbcm.business_id JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE 1=1{_cc}{_dc_from};"
+        detail_panel("💰 Worth Score Distribution — Portfolio", f"Avg: {avg_s:.0f} · {n:,} scored",
+            what_it_means=f"Worth Score distribution for {cust_name}. Score formula: probability × 550 + 300. Thresholds: APPROVE ≥700, FURTHER_REVIEW 550-699, DECLINE <550. Scores are computed by the 3-model ensemble (firmographic XGBoost + financial PyTorch + economic model).",
+            source_table="rds_manual_score_public.data_current_scores JOIN business_scores",
+            source_file="aiscore.py",
+            json_obj={"avg_score":round(avg_s,1),"median":round(float(med_s),1),"approve":int(app_n),"review":int(rev_n),"decline":int(dec_n),"total_scored":n},
+            sql=_ws_port_sql, icon="💰", color="#22c55e")
+
+    with cws2:
+        st.markdown("#### 📊 Score Factor Contributions — Portfolio Average")
+        _factor_sql = f"""
+            SELECT bsf.category_id,
+                   AVG(bsf.weighted_score_850) AS avg_contribution,
+                   COUNT(DISTINCT bsf.score_id) AS businesses
+            FROM rds_manual_score_public.business_score_factors bsf
+            JOIN rds_manual_score_public.data_current_scores cs ON cs.score_id = bsf.score_id
+            JOIN rds_cases_public.rel_business_customer_monitoring rbcm ON rbcm.business_id = cs.business_id
+            WHERE 1=1
+            {f"AND rbcm.customer_id = '{cust_id}'" if cust_id else ""}
+            {f"AND DATE(rbcm.created_at) >= '{date_from}'" if date_from else ""}
+            {f"AND DATE(rbcm.created_at) <= '{date_to}'" if date_to else ""}
+            GROUP BY 1 ORDER BY avg_contribution DESC
+        """
+        with st.spinner("Loading factor contributions…"):
+            _f_df, _f_err = run_sql(_factor_sql)
+        if _f_df is not None and not _f_df.empty:
+            _f_df["avg_contribution"] = pd.to_numeric(_f_df["avg_contribution"], errors="coerce")
+            CAT_NAMES = {"public_records":"📜 Public Records","company_profile":"🏢 Company Profile",
+                         "financial_trends":"📈 Financial Trends","business_operations":"💼 Business Operations","performance_measures":"📊 Performance"}
+            _f_df["Category"] = _f_df["category_id"].map(CAT_NAMES).fillna(_f_df["category_id"])
+            fig_f = px.bar(_f_df, x="avg_contribution", y="Category", orientation="h",
+                           title="Avg Score Factor Contribution by Category",
+                           color="avg_contribution", color_continuous_scale=["#ef4444","#f59e0b","#22c55e"])
+            fig_f.update_layout(height=320, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_f), use_container_width=True)
+            st.dataframe(_f_df[["Category","avg_contribution","businesses"]], use_container_width=True, hide_index=True)
+            detail_panel("📊 Score Factors — Portfolio Average", f"{n:,} businesses",
+                what_it_means=f"Average score factor contribution per model category for {cust_name}'s portfolio. A negative contribution means that category is reducing the score on average. The largest negative categories reveal the dominant risk drivers.",
+                source_table="rds_manual_score_public.business_score_factors",
+                source_file="aiscore.py",
+                json_obj=_f_df[["category_id","avg_contribution","businesses"]].to_dict("records"),
+                sql=_factor_sql, icon="📊", color="#8B5CF6")
+        else:
+            flag(f"Score factors not available. {_f_err or ''}", "amber")
+
+
+def render_customer_all_facts(cust_name, cust_id, date_from, date_to):
+
+    _cc      = (f" AND rbcm.customer_id='{cust_id}'" if cust_id else "")
+    _cc_bid  = (f" AND a.business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE customer_id='{cust_id}')" if cust_id else "")
+    _dc_from = (f" AND DATE(rbcm.created_at)>='{date_from}'" if date_from else "")
+    _dc_to   = (f" AND DATE(rbcm.created_at)<='{date_to}'"   if date_to   else "")
+    """📋 All Facts — fill rate heatmap + key fact null-rate analysis."""
+    _cust_header(cust_name, date_from, date_to)
+    st.markdown("#### 📋 KYB Fact Fill Rates — Customer Portfolio")
+    st.caption("Shows what percentage of businesses have each key KYB fact populated. Null = vendor did not match or check was not triggered.")
+
+    KEY_FACTS = [
+        "sos_active","sos_match_boolean","tin_match_boolean","idv_passed_boolean",
+        "kyb_submitted","kyb_complete","naics_code","formation_state","formation_date",
+        "legal_name","revenue","num_employees","website","watchlist_hits",
+        "num_bankruptcies","middesk_confidence","name_match_boolean","address_match_boolean",
+        "corporation","risk_score",
+    ]
+    _fr_sql = f"""
+        SELECT f.name,
+               COUNT(DISTINCT f.business_id) AS businesses_with_value,
+               COUNT(DISTINCT rbcm.business_id) AS total_businesses,
+               ROUND(100.0 * COUNT(DISTINCT f.business_id) / NULLIF(COUNT(DISTINCT rbcm.business_id),0), 1) AS fill_pct
+        FROM rds_cases_public.rel_business_customer_monitoring rbcm
+        LEFT JOIN rds_warehouse_public.facts f
+          ON f.business_id = rbcm.business_id
+          AND f.name IN ({','.join(f"'{n}'" for n in KEY_FACTS)})
+          AND JSON_EXTRACT_PATH_TEXT(LEFT(f.value,8000),'value') IS NOT NULL
+          AND JSON_EXTRACT_PATH_TEXT(LEFT(f.value,8000),'value') <> ''
+        WHERE 1=1
+        {f"AND rbcm.customer_id = '{cust_id}'" if cust_id else ""}
+        {f"AND DATE(rbcm.created_at) >= '{date_from}'" if date_from else ""}
+        {f"AND DATE(rbcm.created_at) <= '{date_to}'" if date_to else ""}
+        GROUP BY f.name
+        ORDER BY fill_pct ASC
+    """
+    with st.spinner("Computing fact fill rates…"):
+        _fr_df, _fr_err = run_sql(_fr_sql)
+
+    if _fr_df is not None and not _fr_df.empty:
+        _fr_df["fill_pct"] = pd.to_numeric(_fr_df["fill_pct"], errors="coerce").fillna(0)
+        _fr_df["Status"]   = _fr_df["fill_pct"].apply(lambda v: "🟢 Good" if v>=80 else "🟡 Medium" if v>=30 else "🔴 Low")
+        _fr_df["null_pct"] = (100 - _fr_df["fill_pct"]).round(1)
+
+        fig_fr = px.bar(_fr_df.sort_values("fill_pct"), x="fill_pct", y="name", orientation="h",
+                        title=f"KYB Fact Fill Rates — {cust_name}",
+                        color="Status", color_discrete_map={"🟢 Good":"#22c55e","🟡 Medium":"#f59e0b","🔴 Low":"#ef4444"},
+                        text="fill_pct")
+        fig_fr.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+        fig_fr.update_layout(height=max(320,len(_fr_df)*32), margin=dict(t=40,b=10,l=10,r=20),
+                             xaxis=dict(range=[0,115]))
+        st.plotly_chart(dark_chart(fig_fr), use_container_width=True)
+
+        st.dataframe(_fr_df[["name","businesses_with_value","total_businesses","fill_pct","null_pct","Status"]],
+                     use_container_width=True, hide_index=True)
+
+        detail_panel("📋 Fact Fill Rates — Portfolio", f"{cust_name} · {len(_fr_df)} facts analysed",
+            what_it_means=f"Fill rate = percentage of {cust_name}'s businesses that have a non-null value for each KYB fact. Low fill (<30%) means most businesses don't have that fact — either the vendor couldn't match the entity or the check wasn't triggered. Critical facts with low fill directly reduce Worth Score accuracy.",
+            source_table="rds_warehouse_public.facts · rds_cases_public.rel_business_customer_monitoring",
+            source_file="facts/kyb/index.ts",
+            json_obj=_fr_df[["name","fill_pct","Status"]].to_dict("records"),
+            sql=_fr_sql, icon="📋", color="#3B82F6")
+    else:
+        flag(f"Could not load fill rates: {_fr_err}", "amber")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# END CUSTOMER-LEVEL RENDERERS — wire them into each tab below
+# ════════════════════════════════════════════════════════════════════════════════
+
 if tab=="🏠 Home":
     st.markdown("# 🔬 KYB Intelligence Hub")
 
@@ -4996,10 +5648,12 @@ Complete data gap. Entity existence AND firmographic data both unverified — hi
 # ════════════════════════════════════════════════════════════════════════════════
 # REGISTRY & IDENTITY
 # ════════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════════
+
 elif tab=="🏛️ Registry & Identity":
     if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
         st.markdown("## 🏛️ Registry & Identity — Customer Portfolio View")
-        render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="Registry & Identity")
+        render_customer_registry(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to)
         st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab."); st.stop()
@@ -6175,7 +6829,7 @@ ORDER BY bert.created_at DESC;""",language="sql")
 elif tab=="🏭 Classification & KYB":
     if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
         st.markdown("## 🏭 Classification & KYB — Customer Portfolio View")
-        render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="Classification & KYB")
+        render_customer_classification(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to)
         st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab."); st.stop()
@@ -6781,7 +7435,7 @@ ORDER BY name, received_at DESC;""",language="sql")
 elif tab=="⚠️ Risk & Watchlist":
     if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
         st.markdown("## ⚠️ Risk & Watchlist — Customer Portfolio View")
-        render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="Risk & Watchlist")
+        render_customer_risk(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to)
         st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab."); st.stop()
@@ -7155,7 +7809,7 @@ WHERE score_id=(SELECT score_id FROM rds_manual_score_public.data_current_scores
 elif tab=="💰 Worth Score":
     if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
         st.markdown("## 💰 Worth Score — Customer Portfolio View")
-        render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="Worth Score")
+        render_customer_worth_score(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to)
         st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab."); st.stop()
@@ -7706,8 +8360,7 @@ ORDER BY ABS(weighted_score_850) DESC;""",language="sql")
 elif tab=="📋 All Facts":
     if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
         st.markdown("## 📋 All Facts — Customer Portfolio View")
-        st.info("The All Facts tab shows the complete fact profile for a single business. In Portfolio mode, use the **🧠 Intelligence Hub → Investigation Workspace** to explore individual businesses, or the **⌨️ Data Explorer** for bulk fact queries.")
-        render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="All Facts")
+        render_customer_all_facts(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to)
         st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab first, then return here."); st.stop()
@@ -8192,7 +8845,9 @@ WHERE name='watchlist' AND business_id='{bid}';
 elif tab=="🔍 Check-Agent":
     if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
         st.markdown("## 🔍 Check-Agent — Customer Portfolio View")
-        st.info("In Portfolio mode, the Check-Agent Console in **🧠 Intelligence Hub → Check-Agent Console** runs a portfolio scan. Shown below is the portfolio KYB overview for context.")
+        _cust_header(hub_scope_customer_name, hub_date_from, hub_date_to)
+        st.info("In Portfolio mode use **🧠 Intelligence Hub → Check-Agent Console** to run a full portfolio scan with severity breakdown. The Investigation Workspace also runs the Check-Agent per business within the customer portfolio.")
+        # Show the portfolio KYB overview as context
         render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="Check-Agent")
         st.stop()
     bid = st.session_state.get("hub_bid","")
