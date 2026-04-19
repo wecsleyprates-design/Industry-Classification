@@ -10422,7 +10422,8 @@ Generate a Redshift SQL query that answers this request, and specify the best ch
                         JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
                         WHERE cs.business_id='{b}' ORDER BY bs.created_at DESC LIMIT 1;""")
                 _iw_ws, _ = _load_iw_score(_iw_bid)
-                _iw_score = float(_iw_ws.iloc[0]["weighted_score_850"]) if _iw_ws is not None and not _iw_ws.empty else 0
+                _iw_score_raw = (_iw_ws.iloc[0]["weighted_score_850"] if _iw_ws is not None and not _iw_ws.empty else None)
+                _iw_score = float(_iw_score_raw) if _iw_score_raw is not None else 0
                 _iw_risk = str(_iw_ws.iloc[0]["risk_level"]) if _iw_ws is not None and not _iw_ws.empty else "—"
                 _iw_dec = str(_iw_ws.iloc[0]["score_decision"]) if _iw_ws is not None and not _iw_ws.empty else "—"
 
