@@ -50,12 +50,13 @@ def kpi(
             <i class="fa-solid fa-sitemap"></i></button>
         </div>"""
 
+    sub_html = f"<div class='sub'>{sub}</div>" if sub else ""
     st.markdown(
         f"<div class='kyb-kpi {cls}'>"
         f"{trust_html}"
         f"<div class='lbl'>{label}</div>"
         f"<div class='val'>{value}</div>"
-        f"{'<div class=\"sub\">' + sub + '</div>' if sub else ''}"
+        f"{sub_html}"
         f"{delta_html}"
         f"</div>",
         unsafe_allow_html=True,
