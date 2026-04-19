@@ -69,44 +69,23 @@ hr.thin-sep { margin: 6px 0; border-color: #1E3A5F; }
 .kyb-pill.blue   { background:#0c1a2e; color:#93c5fd; }
 .kyb-pill.gray   { background:#273445; color:#94A3B8; }
 
-/* Pull trustlayer up and format */
-div[data-testid="stVerticalBlock"] > div:has(span.trustlayer-hook) + div {
-    margin-top: -90px !important;
-    margin-bottom: 50px !important;
-    width: 110px !important;
-    float: right;
-    display: flex;
-    justify-content: flex-end;
-    position: relative;
-    z-index: 10;
-    pointer-events: none;
-    margin-right: 10px;
+/* Trust-layer icon button strip — compact row of 3 micro-buttons */
+.trust-btn-row { display:flex; gap:4px; margin-top:2px; margin-bottom:4px; }
+/* Shrink Streamlit's default button padding for the trust-layer columns */
+div[data-testid="column"]:has(button[kind="secondary"]) button[kind="secondary"] {
+    padding: 2px 6px !important;
+    height: 26px !important;
+    min-height: 26px !important;
+    font-size: 0.82rem !important;
+    border: 1px solid rgba(255,255,255,0.12) !important;
+    background: rgba(255,255,255,0.04) !important;
+    color: #94A3B8 !important;
+    border-radius: 5px !important;
 }
-div[data-testid="stVerticalBlock"] > div:has(span.trustlayer-hook) + div .stButton {
-    pointer-events: auto;
-}
-div[data-testid="stVerticalBlock"] > div:has(span.trustlayer-hook) + div [data-testid="column"] {
-    width: auto !important;
-    flex: 0 1 auto !important;
-    min-width: 0 !important;
-    padding: 0 2px !important;
-}
-div[data-testid="stVerticalBlock"] > div:has(span.trustlayer-hook) + div button {
-    background: transparent;
-    border: 1px solid rgba(255,255,255,0.1);
-    color: #94A3B8;
-    padding: 0px;
-    height: 24px;
-    width: 28px;
-    min-height: 24px;
-    border-radius: 4px;
-}
-div[data-testid="stVerticalBlock"] > div:has(span.trustlayer-hook) + div button p {
-    font-size: 0.8rem;
-}
-div[data-testid="stVerticalBlock"] > div:has(span.trustlayer-hook) + div button:hover {
-    background: rgba(255,255,255,0.1);
-    border-color: rgba(255,255,255,0.4);
+div[data-testid="column"]:has(button[kind="secondary"]) button[kind="secondary"]:hover {
+    background: rgba(255,255,255,0.10) !important;
+    border-color: rgba(255,255,255,0.35) !important;
+    color: #F1F5F9 !important;
 }
 </style>
 """
