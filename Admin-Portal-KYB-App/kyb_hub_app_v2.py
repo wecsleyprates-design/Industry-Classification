@@ -730,8 +730,8 @@ WHERE 1=1{f" AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'" if
     st.markdown("---")
     st.markdown("##### Business List")
     _disp_cols = [c for c in ["business_id","onboarded_date","sos_active","tin_match","idv_passed","naics_code","watchlist_hits","weighted_score_850","score_decision"] if c in _pf_df.columns]
-    st.dataframe(_pf_df[_disp_cols].head(200), use_container_width=True, hide_index=True)
-    st.caption(f"Showing up to 200 of {n:,} businesses. Use the SQL Runner for the full export.")
+    st.dataframe(_pf_df[_disp_cols], use_container_width=True, hide_index=True)
+    st.caption(f"Showing all {n:,} businesses.")
     dl_csv = _pf_df[_disp_cols].to_csv(index=False).encode("utf-8")
     st.download_button("⬇️ Download full list (CSV)", dl_csv,
         file_name=f"portfolio_{_cust_label.replace(' ','_')}.csv", mime="text/csv",
@@ -822,7 +822,7 @@ def load_score_factors(bid):
         FROM rds_manual_score_public.business_score_factors
         WHERE score_id=(SELECT score_id FROM rds_manual_score_public.data_current_scores
                         WHERE business_id='{bid}' LIMIT 1)
-        ORDER BY ABS(weighted_score_850) DESC LIMIT 20""")
+ ORDER BY ABS(weighted_score_850) DESC""")
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_bert(bid):
@@ -836,7 +836,7 @@ def load_bert(bid):
 # Audit is not per-business — longer TTL (30 min)
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_audit():
-    return run_sql("SELECT * FROM warehouse.worth_score_input_audit ORDER BY score_date DESC LIMIT 30")
+ return run_sql("SELECT * FROM warehouse.worth_score_input_audit ORDER BY score_date DESC ")
 
 # ── Cached Home-tab population queries ───────────────────────────────────────
 # SOURCE: rds_cases_public.rel_business_customer_monitoring (created_at = true onboarding date)
@@ -3598,7 +3598,7 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
                 yaxis=dict(title="",tickfont=dict(size=11)),
             )
             st.plotly_chart(dark_chart(fig_n),use_container_width=True)
-            _naics_sql = f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS naics_code, COUNT(DISTINCT business_id) AS businesses FROM rds_warehouse_public.facts WHERE name='naics_code' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1 ORDER BY businesses DESC LIMIT 20;"
+            _naics_sql = f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS naics_code, COUNT(DISTINCT business_id) AS businesses FROM rds_warehouse_public.facts WHERE name='naics_code' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1 ORDER BY businesses DESC;"
             detail_panel("Top Industry Sectors Chart", f"{len(naics_sector)} sectors",
                 what_it_means="Horizontal bar showing count of businesses per 2-digit NAICS sector. The 2-digit sector is derived from the first 2 digits of naics_code (6-digit). Source: Equifax/ZI/OC/SERP/Trulioo/Applicant/AI — winner selected by factWithHighestConfidence. 561499 businesses excluded from sector chart (shown separately as NAICS Fallback).",
                 source_table="rds_warehouse_public.facts · name='naics_code' (6-digit NAICS code)",
@@ -3640,7 +3640,7 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
         review     = (ws_df["score_decision"]=="FURTHER_REVIEW_NEEDED").sum()
         declined   = (ws_df["score_decision"]=="DECLINE").sum()
         median_sc  = ws_df["weighted_score_850"].median()
-        _ws_sql = f"SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, bs.created_at FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id LIMIT 5000;"
+        _ws_sql = f"SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision, bs.created_at FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id;"
         with wc1: kpi("Median Score",f"{median_sc:.0f}","300–850 scale","#3B82F6")
         with wc2: kpi("✅ Approve",f"{approved:,}",rate(approved,len(ws_df)),"#22c55e")
         with wc3: kpi("🔎 Review",f"{review:,}",rate(review,len(ws_df)),"#f59e0b")
@@ -3752,7 +3752,7 @@ SELECT COUNT(*) AS total_businesses FROM onboarded;
                                   margin=dict(t=10,b=10,l=10,r=10))
             st.plotly_chart(dark_chart(fig_dom),use_container_width=True)
             st.caption("Tax-haven states (DE, NV, WY, SD, MT, NM) are high-risk for entity resolution gaps: Middesk finds the FOREIGN filing, missing the DOMESTIC primary record.")
-            _dom_sql = f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS formation_state, COUNT(DISTINCT business_id) AS businesses FROM rds_warehouse_public.facts WHERE name='formation_state' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1 ORDER BY businesses DESC LIMIT 20;"
+            _dom_sql = f"SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS formation_state, COUNT(DISTINCT business_id) AS businesses FROM rds_warehouse_public.facts WHERE name='formation_state' AND business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from or 'current_date-30'}' AND '{hub_date_to or 'current_date'}') GROUP BY 1 ORDER BY businesses DESC;"
             detail_panel("Domestic vs Foreign Registration (donut)", f"Tax-haven: {th_count:,} · Other: {non_th:,} · No data: {no_state:,}",
                 what_it_means="Donut showing how many businesses are incorporated in tax-haven states (DE/NV/WY/SD/MT/NM) vs other states vs missing. Tax-haven incorporations are HIGH RISK for entity resolution gaps because Middesk searches by operating address (submitted) and finds the FOREIGN qualification record, missing the DOMESTIC primary. Source: formation_state fact from Middesk (pid=16).",
                 source_table="rds_warehouse_public.facts · name='formation_state'",
@@ -5467,7 +5467,7 @@ WHERE f.name='sos_filings'
   AND sos.value->>'value'='false'
   AND filing->>'foreign_domestic'='domestic'
   AND filing->>'active'='true'
-LIMIT 100;""", language="sql")
+;""", language="sql")
 
         analyst_card("🔬 Domestic vs Foreign — Complete Engineering Analysis",[
             f"CURRENT BUSINESS: formation_state={form_state_up or '(unknown)'}, "
@@ -9066,7 +9066,7 @@ LEFT JOIN rds_warehouse_public.facts f_tin   ON f_tin.business_id=o.business_id 
 LEFT JOIN rds_warehouse_public.facts f_wl    ON f_wl.business_id=o.business_id    AND f_wl.name='watchlist_hits'
 LEFT JOIN rds_warehouse_public.facts f_naics ON f_naics.business_id=o.business_id AND f_naics.name='naics_code'
 ORDER BY o.onboarded_at DESC
-LIMIT 50;""" if not bid else f"""-- Facts for business {bid}:
+;""" if not bid else f"""-- Facts for business {bid}:
 SELECT name,
     JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,
     JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS winning_pid,
@@ -9777,7 +9777,7 @@ WHERE DATE(rbcm.created_at) >= CURRENT_DATE - 30
   AND bs.weighted_score_850 < 550
 GROUP BY 1
 ORDER BY low_conf_cases DESC
-LIMIT 25;""",
+;""",
             "🔐 TIN mismatch rate by date": """
 SELECT
     DATE(rbcm.created_at)                                           AS onboarded_date,
@@ -9802,7 +9802,7 @@ WHERE f.name = 'tin_submitted'
 GROUP BY 1
 HAVING COUNT(DISTINCT f.business_id) > 1
 ORDER BY n_businesses DESC
-LIMIT 50;""",
+;""",
             "📉 Source disagreement on NAICS (winners vs alternatives)": """
 SELECT
     JSON_EXTRACT_PATH_TEXT(f.value,'value')                                AS winning_naics,
@@ -9813,7 +9813,7 @@ FROM rds_warehouse_public.facts f
 WHERE f.name = 'naics_code'
 GROUP BY 1, 2
 ORDER BY businesses DESC
-LIMIT 20;""",
+;""",
             "📈 Confidence score distribution by band (last 30d)": """
 SELECT
     CASE WHEN bs.weighted_score_850 < 400 THEN 'Very Low (<400)'
@@ -9853,7 +9853,7 @@ WHERE DATE(rbcm.created_at) >= CURRENT_DATE - 30
     OR JSON_EXTRACT_PATH_TEXT(f_tin.value,'value') = 'false'
   )
 ORDER BY rbcm.created_at DESC
-LIMIT 100;""",
+;""",
         }
 
         _tpl_choice = st.selectbox("📋 Query Templates:", list(SQL_TEMPLATES.keys()), key="de_sql_template")
@@ -10083,7 +10083,7 @@ df
                     GROUP BY business_id
                     HAVING COUNT(*) > 1
                     ORDER BY score_count DESC
-                    LIMIT 20;
+;
                 """,
                 "Customers with no onboarded businesses": """
                     SELECT c.id AS customer_id, c.name AS customer_name, c.created_at
@@ -10092,7 +10092,7 @@ df
                       ON rbcm.customer_id = c.id
                     WHERE rbcm.business_id IS NULL
                     ORDER BY c.created_at DESC
-                    LIMIT 25;
+;
                 """,
             }
             for jname, jsql in JOIN_QUERIES.items():
@@ -10449,7 +10449,7 @@ Generate a Redshift SQL query that answers this request, and specify the best ch
                     for _sev in ["CRITICAL","HIGH","MEDIUM"]:
                         if _portfolio_findings[_sev]:
                             st.markdown(f"**{SEV_ICON[_sev]} {_sev} findings:**")
-                            _fdf = pd.DataFrame(_portfolio_findings[_sev])[["business_id","name","group","description"]].head(20)
+                            _fdf = pd.DataFrame(_portfolio_findings[_sev])[["business_id","name","group","description"]]
                             st.dataframe(_fdf, use_container_width=True, hide_index=True)
                             detail_panel(f"📊 Portfolio: {_sev} Findings", f"{len(_portfolio_findings[_sev])} across {len(_port_bids)} businesses",
                                 what_it_means=f"{_sev} Check-Agent findings from {len(_port_bids)} randomly sampled businesses in the last {_ca_days} days.",
