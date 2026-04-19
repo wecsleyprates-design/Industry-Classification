@@ -1,16 +1,16 @@
 """
 Portfolio-level analytics.
 
-Each function reads the active filter window and passes it to SQL templates.
-In demo mode (no Redshift), fixture data is returned — but it is scaled by
-the window length so the numbers visually respond to the date range selector.
+Every function respects the active FilterState:
+  - date window (from resolve_window())
+  - customer filter (from customer_sql_clause())
+  - Falls back to scaled fixture data in demo mode so the UI remains usable.
 """
 from __future__ import annotations
 
 from datetime import date
 
 import pandas as pd
-import streamlit as st
 
 from core.filters import current_filters
 from core.logger import get_logger
@@ -21,32 +21,37 @@ from data_access.queries import portfolio, decisions, features
 log = get_logger(__name__)
 
 
-def _window() -> tuple[date, date]:
-    return current_filters().resolve_window()
+def _ctx():
+    """Return (start, end, customer_clause) for the active filter."""
+    f = current_filters()
+    s, e = f.resolve_window()
+    return s, e, f.customer_sql_clause()
 
 
 def _window_days() -> int:
-    s, e = _window()
+    f = current_filters()
+    s, e = f.resolve_window()
     return max(1, (e - s).days)
 
 
-def _try_query(sql: str) -> pd.DataFrame | None:
+def _scale(base_days: int = 30) -> float:
+    return min(_window_days() / base_days, 5.0)
+
+
+def _try(sql: str) -> pd.DataFrame | None:
     try:
-        return rs_query(sql)
+        df = rs_query(sql)
+        return df if df is not None and not df.empty else None
     except Exception as exc:
-        log.info("analytics: falling back to fixtures (%s)", exc)
+        log.info("analytics: query failed, using fixtures. %s", exc)
         return None
 
 
-# ── Scale factor so demo numbers visibly respond to the date range ─────────────
-# Base window = 30 days.  Shorter windows → smaller numbers.
-def _scale(base_days: int = 30) -> float:
-    return min(_window_days() / base_days, 5.0)   # cap at 5× to stay sane
-
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def get_portfolio_summary() -> pd.DataFrame:
-    s, e = _window()
-    df = _try_query(portfolio.summary_sql(s, e))
+    s, e, cust = _ctx()
+    df = _try(portfolio.summary_sql(s, e, cust))
     if df is not None and not df.empty:
         return df
     sc = _scale()
@@ -60,24 +65,29 @@ def get_portfolio_summary() -> pd.DataFrame:
         "manual_review_pct":   round(max(5.0, base.get("manual_review_pct", 14.8) - (sc - 1) * 0.5), 1),
         "auto_approve_pct":    round(min(90.0, base.get("auto_approve_pct", 71.3) + (sc - 1) * 0.4), 1),
         "auto_decline_pct":    base.get("auto_decline_pct", 13.9),
+        "delta_avg_conf":      0.018,
+        "delta_manual":        -2.1,
     }])
 
 
 def get_confidence_bands() -> pd.DataFrame:
-    s, e = _window()
-    df = _try_query(portfolio.bands_sql(s, e))
+    s, e, cust = _ctx()
+    df = _try(portfolio.bands_sql(s, e, cust))
     if df is not None and not df.empty:
         return df
     sc = _scale()
-    base = fixtures.confidence_bands()
+    base = fixtures.confidence_bands().copy()
     base["count"] = (base["count"] * sc).astype(int)
     return base
 
 
 def get_confidence_trend() -> pd.DataFrame:
-    s, e = _window()
-    df = _try_query(portfolio.trend_sql(s, e))
+    s, e, cust = _ctx()
+    df = _try(portfolio.trend_sql(s, e, cust))
     if df is not None and not df.empty:
+        # Ensure we have a usable week column
+        if "week" in df.columns:
+            df["week"] = df["week"].astype(str).str[:10]
         return df
     return fixtures.confidence_trend()
 
@@ -92,7 +102,7 @@ def get_volume_trend() -> pd.DataFrame:
 
 
 def get_psi_trend() -> pd.DataFrame:
-    df = _try_query(features.psi_weekly_sql("confidence_score"))
+    df = _try(features.psi_weekly_sql("confidence_score"))
     if df is not None and not df.empty:
         return df
     return pd.DataFrame({
@@ -106,10 +116,9 @@ def get_feature_importance() -> pd.DataFrame:
 
 
 def get_decisions_by_band() -> pd.DataFrame:
-    s, e = _window()
-    df = _try_query(decisions.decision_by_band_sql(s, e))
+    s, e, cust = _ctx()
+    df = _try(decisions.decision_by_band_sql(s, e, cust))
     if df is not None and not df.empty:
-        # normalise column names
         if "n" not in df.columns and "count" in df.columns:
             df = df.rename(columns={"count": "n"})
         return df
@@ -122,14 +131,17 @@ def get_decisions_by_band() -> pd.DataFrame:
 
 
 def get_tat_by_band() -> pd.DataFrame:
-    s, e = _window()
-    df = _try_query(decisions.tat_by_band_sql(s, e))
+    s, e, cust = _ctx()
+    df = _try(decisions.tat_by_band_sql(s, e, cust))
     if df is not None and not df.empty:
+        # Rename columns to match expected names if coming from Redshift
+        rename = {"p50_score": "p50_hours", "p90_score": "p90_hours"}
+        df = df.rename(columns={k: v for k, v in rename.items() if k in df.columns})
         return df
     return pd.DataFrame({
         "band":      ["Very Low","Low","Medium","High","Very High"],
-        "p50_hours": [48,24,12,3,1],
-        "p90_hours": [72,48,28,8,4],
+        "p50_hours": [48, 24, 12, 3, 1],
+        "p90_hours": [72, 48, 28, 8, 4],
     })
 
 
@@ -155,7 +167,7 @@ def get_source_reliability() -> pd.DataFrame:
 
 
 def get_null_rates() -> pd.DataFrame:
-    df = _try_query(features.null_rates_sql())
+    df = _try(features.null_rates_sql())
     if df is not None and not df.empty:
         return df
     return pd.DataFrame([
