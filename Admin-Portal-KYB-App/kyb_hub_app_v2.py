@@ -10069,12 +10069,12 @@ Generate a Redshift SQL query that answers this request, and specify the best ch
 
                 # 6 core KPI cards
                 _wc1,_wc2,_wc3,_wc4,_wc5,_wc6 = st.columns(6)
-                with _wc1: kpi("SOS Active",    "✅" if _gv_iw("sos_active")=="true" else "❌", _gv_iw("sos_active") or "—", "#22c55e" if _gv_iw("sos_active")=="true" else "#ef4444", object_key=f"iw_sos_{_iw_bid}")
-                with _wc2: kpi("TIN Match",     "✅" if _gv_iw("tin_match_boolean")=="true" else "❌", "", "#22c55e" if _gv_iw("tin_match_boolean")=="true" else "#ef4444", object_key=f"iw_tin_{_iw_bid}")
-                with _wc3: kpi("IDV Passed",    "✅" if _gv_iw("idv_passed_boolean")=="true" else "❌", "", "#22c55e" if _gv_iw("idv_passed_boolean")=="true" else "#ef4444", object_key=f"iw_idv_{_iw_bid}")
-                with _wc4: kpi("Watchlist",     _gv_iw("watchlist_hits") or "0", "hits", "#ef4444" if int(_gv_iw("watchlist_hits") or 0)>0 else "#22c55e", object_key=f"iw_wl_{_iw_bid}")
-                with _wc5: kpi("NAICS",         _gv_iw("naics_code") or "—", "⚠️ fallback" if _gv_iw("naics_code")=="561499" else "", "#f59e0b" if _gv_iw("naics_code")=="561499" else "#3B82F6", object_key=f"iw_naics_{_iw_bid}")
-                with _wc6: kpi("Worth Score",   f"{_iw_score:.0f}", _iw_risk, _iw_sc, object_key=f"iw_ws_{_iw_bid}")
+                with _wc1: kpi("SOS Active",    "✅" if _gv_iw("sos_active")=="true" else "❌", _gv_iw("sos_active") or "—", "#22c55e" if _gv_iw("sos_active")=="true" else "#ef4444")
+                with _wc2: kpi("TIN Match",     "✅" if _gv_iw("tin_match_boolean")=="true" else "❌", "", "#22c55e" if _gv_iw("tin_match_boolean")=="true" else "#ef4444")
+                with _wc3: kpi("IDV Passed",    "✅" if _gv_iw("idv_passed_boolean")=="true" else "❌", "", "#22c55e" if _gv_iw("idv_passed_boolean")=="true" else "#ef4444")
+                with _wc4: kpi("Watchlist",     _gv_iw("watchlist_hits") or "0", "hits", "#ef4444" if int(_gv_iw("watchlist_hits") or 0)>0 else "#22c55e")
+                with _wc5: kpi("NAICS",         _gv_iw("naics_code") or "—", "⚠️ fallback" if _gv_iw("naics_code")=="561499" else "", "#f59e0b" if _gv_iw("naics_code")=="561499" else "#3B82F6")
+                with _wc6: kpi("Worth Score",   f"{_iw_score:.0f}", _iw_risk, _iw_sc)
 
                 # Check-Agent findings
                 st.markdown("---")
