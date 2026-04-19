@@ -443,7 +443,7 @@ def run_sql_conn(sql, conn):
 # ── Customer-level data loaders ───────────────────────────────────────────────
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_customer_portfolio(customer_id: str | None, date_from: str | None, date_to: str | None) -> tuple:
+def load_customer_portfolio(customer_id, date_from, date_to):  # type: (str|None, str|None, str|None) -> tuple
     """
     Load aggregate KYB metrics for a customer's entire portfolio of businesses.
     Returns a DataFrame with one row per business and key KYB fact signals.
@@ -488,9 +488,7 @@ def load_customer_portfolio(customer_id: str | None, date_from: str | None, date
     return run_sql(sql)
 
 
-def render_customer_portfolio_view(customer_name: str, customer_id: str | None,
-                                   date_from: str | None, date_to: str | None,
-                                   tab_context: str = "General") -> None:
+def render_customer_portfolio_view(customer_name, customer_id, date_from, date_to, tab_context="General"):
     """
     Renders the full customer-level portfolio dashboard.
     Called from every entity-level tab when scope == 'Customer / Portfolio'.
