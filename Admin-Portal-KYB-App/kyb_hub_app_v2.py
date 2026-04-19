@@ -446,27 +446,32 @@ def run_sql_conn(sql, conn):
 def load_customer_portfolio(customer_id, date_from, date_to):  # type: (str|None, str|None, str|None) -> tuple
     """
     Load aggregate KYB metrics for a customer's entire portfolio of businesses.
-    Returns a DataFrame with one row per business and key KYB fact signals.
-    customer_id=None means all customers.
+
+    Uses LEFT(value, 8000) around every value access to avoid the Redshift
+    federation VARCHAR(65535) limit — the RDS value column can contain large
+    JSON blobs that exceed this limit during the federated fetch, even when
+    JSON_EXTRACT_PATH_TEXT would ultimately return a short scalar.
     """
     date_clause = ""
     if date_from: date_clause += f" AND DATE(rbcm.created_at) >= '{date_from}'"
     if date_to:   date_clause += f" AND DATE(rbcm.created_at) <= '{date_to}'"
     cust_clause = f" AND rbcm.customer_id = '{customer_id}'" if customer_id else ""
 
+    # LEFT(value, 8000) caps the column size before Redshift tries to receive it,
+    # preventing the "Value of VARCHAR type is too long" federation error.
     sql = f"""
         SELECT
             rbcm.business_id,
-            DATE(rbcm.created_at)                                                       AS onboarded_date,
-            JSON_EXTRACT_PATH_TEXT(f_sos.value,  'value')                               AS sos_active,
-            JSON_EXTRACT_PATH_TEXT(f_tin.value,  'value')                               AS tin_match,
-            JSON_EXTRACT_PATH_TEXT(f_idv.value,  'value')                               AS idv_passed,
-            JSON_EXTRACT_PATH_TEXT(f_naics.value,'value')                               AS naics_code,
-            JSON_EXTRACT_PATH_TEXT(f_wl.value,   'value')                               AS watchlist_hits,
-            JSON_EXTRACT_PATH_TEXT(f_bk.value,   'value')                               AS num_bankruptcies,
-            JSON_EXTRACT_PATH_TEXT(f_rev.value,  'value')                               AS revenue,
-            JSON_EXTRACT_PATH_TEXT(f_fs.value,   'value')                               AS formation_state,
-            JSON_EXTRACT_PATH_TEXT(f_kybc.value, 'value')                               AS kyb_complete,
+            DATE(rbcm.created_at)                                                              AS onboarded_date,
+            JSON_EXTRACT_PATH_TEXT(LEFT(f_sos.value,   8000), 'value')                        AS sos_active,
+            JSON_EXTRACT_PATH_TEXT(LEFT(f_tin.value,   8000), 'value')                        AS tin_match,
+            JSON_EXTRACT_PATH_TEXT(LEFT(f_idv.value,   8000), 'value')                        AS idv_passed,
+            JSON_EXTRACT_PATH_TEXT(LEFT(f_naics.value, 8000), 'value')                        AS naics_code,
+            JSON_EXTRACT_PATH_TEXT(LEFT(f_wl.value,    8000), 'value')                        AS watchlist_hits,
+            JSON_EXTRACT_PATH_TEXT(LEFT(f_bk.value,    8000), 'value')                        AS num_bankruptcies,
+            JSON_EXTRACT_PATH_TEXT(LEFT(f_rev.value,   8000), 'value')                        AS revenue,
+            JSON_EXTRACT_PATH_TEXT(LEFT(f_fs.value,    8000), 'value')                        AS formation_state,
+            JSON_EXTRACT_PATH_TEXT(LEFT(f_kybc.value,  8000), 'value')                        AS kyb_complete,
             bs.weighted_score_850,
             bs.risk_level,
             bs.score_decision
