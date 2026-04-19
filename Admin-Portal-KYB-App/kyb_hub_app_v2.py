@@ -440,6 +440,262 @@ def run_sql_conn(sql, conn):
     except Exception as e:
         return None, str(e)
 
+# ── Customer-level data loaders ───────────────────────────────────────────────
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_customer_portfolio(customer_id: str | None, date_from: str | None, date_to: str | None) -> tuple:
+    """
+    Load aggregate KYB metrics for a customer's entire portfolio of businesses.
+    Returns a DataFrame with one row per business and key KYB fact signals.
+    customer_id=None means all customers.
+    """
+    date_clause = ""
+    if date_from: date_clause += f" AND DATE(rbcm.created_at) >= '{date_from}'"
+    if date_to:   date_clause += f" AND DATE(rbcm.created_at) <= '{date_to}'"
+    cust_clause = f" AND rbcm.customer_id = '{customer_id}'" if customer_id else ""
+
+    sql = f"""
+        SELECT
+            rbcm.business_id,
+            DATE(rbcm.created_at)                                                       AS onboarded_date,
+            JSON_EXTRACT_PATH_TEXT(f_sos.value,  'value')                               AS sos_active,
+            JSON_EXTRACT_PATH_TEXT(f_tin.value,  'value')                               AS tin_match,
+            JSON_EXTRACT_PATH_TEXT(f_idv.value,  'value')                               AS idv_passed,
+            JSON_EXTRACT_PATH_TEXT(f_naics.value,'value')                               AS naics_code,
+            JSON_EXTRACT_PATH_TEXT(f_wl.value,   'value')                               AS watchlist_hits,
+            JSON_EXTRACT_PATH_TEXT(f_bk.value,   'value')                               AS num_bankruptcies,
+            JSON_EXTRACT_PATH_TEXT(f_rev.value,  'value')                               AS revenue,
+            JSON_EXTRACT_PATH_TEXT(f_fs.value,   'value')                               AS formation_state,
+            JSON_EXTRACT_PATH_TEXT(f_kybc.value, 'value')                               AS kyb_complete,
+            bs.weighted_score_850,
+            bs.risk_level,
+            bs.score_decision
+        FROM rds_cases_public.rel_business_customer_monitoring rbcm
+        LEFT JOIN rds_warehouse_public.facts f_sos   ON f_sos.business_id=rbcm.business_id   AND f_sos.name='sos_active'
+        LEFT JOIN rds_warehouse_public.facts f_tin   ON f_tin.business_id=rbcm.business_id   AND f_tin.name='tin_match_boolean'
+        LEFT JOIN rds_warehouse_public.facts f_idv   ON f_idv.business_id=rbcm.business_id   AND f_idv.name='idv_passed_boolean'
+        LEFT JOIN rds_warehouse_public.facts f_naics ON f_naics.business_id=rbcm.business_id AND f_naics.name='naics_code'
+        LEFT JOIN rds_warehouse_public.facts f_wl    ON f_wl.business_id=rbcm.business_id    AND f_wl.name='watchlist_hits'
+        LEFT JOIN rds_warehouse_public.facts f_bk    ON f_bk.business_id=rbcm.business_id    AND f_bk.name='num_bankruptcies'
+        LEFT JOIN rds_warehouse_public.facts f_rev   ON f_rev.business_id=rbcm.business_id   AND f_rev.name='revenue'
+        LEFT JOIN rds_warehouse_public.facts f_fs    ON f_fs.business_id=rbcm.business_id    AND f_fs.name='formation_state'
+        LEFT JOIN rds_warehouse_public.facts f_kybc  ON f_kybc.business_id=rbcm.business_id  AND f_kybc.name='kyb_complete'
+        LEFT JOIN rds_manual_score_public.data_current_scores cs ON cs.business_id=rbcm.business_id
+        LEFT JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+        WHERE 1=1 {date_clause} {cust_clause}
+        ORDER BY rbcm.created_at DESC
+    """
+    return run_sql(sql)
+
+
+def render_customer_portfolio_view(customer_name: str, customer_id: str | None,
+                                   date_from: str | None, date_to: str | None,
+                                   tab_context: str = "General") -> None:
+    """
+    Renders the full customer-level portfolio dashboard.
+    Called from every entity-level tab when scope == 'Customer / Portfolio'.
+    tab_context controls which charts are emphasised.
+    """
+    _cust_label = customer_name if customer_name != "All Customers" else "All Customers"
+    st.markdown(f"""<div style="background:#0c1a2e;border-left:4px solid #3B82F6;border-radius:8px;
+        padding:10px 16px;margin-bottom:12px">
+      <div style="color:#60A5FA;font-weight:700;font-size:.90rem">
+        📊 Portfolio view — {_cust_label}
+      </div>
+      <div style="color:#94A3B8;font-size:.76rem;margin-top:2px">
+        {f'{date_from} → {date_to}' if date_from else 'All time'} · Analysing context: {tab_context}
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    with st.spinner("Loading portfolio data…"):
+        _pf_df, _pf_err = load_customer_portfolio(customer_id, date_from, date_to)
+
+    if _pf_err or _pf_df is None or _pf_df.empty:
+        flag(f"Could not load portfolio data: {_pf_err or 'No data for this customer / date range.'}", "amber")
+        return
+
+    n = len(_pf_df)
+
+    def _pct(num, den): return f"{round(100*num/max(den,1), 1)}%" if den else "—"
+    def _si(v):
+        try: return int(float(v or 0))
+        except: return 0
+    def _sl(v): return str(v or "").lower().strip()
+
+    # Compute signals
+    sos_pass   = (_pf_df["sos_active"].str.lower().str.strip()  == "true").sum()
+    tin_pass   = (_pf_df["tin_match"].str.lower().str.strip()   == "true").sum()
+    idv_pass   = (_pf_df["idv_passed"].str.lower().str.strip()  == "true").sum()
+    kybc_pass  = (_pf_df["kyb_complete"].str.lower().str.strip()== "true").sum()
+    wl_hits    = (_pf_df["watchlist_hits"].apply(_si) > 0).sum()
+    bk_count   = (_pf_df["num_bankruptcies"].apply(_si) > 0).sum()
+    naics_fb   = (_pf_df["naics_code"].str.strip() == "561499").sum()
+    rev_known  = _pf_df["revenue"].notna().sum()
+    has_score  = _pf_df["weighted_score_850"].notna()
+    scored_n   = has_score.sum()
+    avg_score  = float(_pf_df.loc[has_score,"weighted_score_850"].astype(float).mean()) if scored_n else 0
+    approve_n  = (_pf_df["score_decision"] == "APPROVE").sum()
+    review_n   = (_pf_df["score_decision"] == "FURTHER_REVIEW_NEEDED").sum()
+    decline_n  = (_pf_df["score_decision"] == "DECLINE").sum()
+
+    # ── KPI Row 1: KYB verification signals ──────────────────────────────────
+    st.markdown("##### KYB Verification Rates")
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+    with c1: kpi("Total Businesses", f"{n:,}", f"{date_from or 'all time'}", "#3B82F6")
+    with c2: kpi("SOS Pass",   _pct(sos_pass,  n), f"{sos_pass:,} businesses",   "#22c55e" if sos_pass/max(n,1) > 0.8 else "#f59e0b")
+    with c3: kpi("TIN Pass",   _pct(tin_pass,  n), f"{tin_pass:,} businesses",   "#22c55e" if tin_pass/max(n,1) > 0.8 else "#f59e0b")
+    with c4: kpi("IDV Pass",   _pct(idv_pass,  n), f"{idv_pass:,} businesses",   "#22c55e" if idv_pass/max(n,1) > 0.7 else "#f59e0b")
+    with c5: kpi("KYB Complete",_pct(kybc_pass,n), f"{kybc_pass:,} businesses", "#22c55e" if kybc_pass/max(n,1) > 0.7 else "#f59e0b")
+    with c6: kpi("Watchlist Hits", str(wl_hits), f"{_pct(wl_hits,n)} of portfolio", "#ef4444" if wl_hits > 0 else "#22c55e")
+
+    # SQL for detail_panel
+    _port_sql = f"""
+SELECT rbcm.business_id, DATE(rbcm.created_at) AS onboarded,
+  JSON_EXTRACT_PATH_TEXT(f1.value,'value') AS sos_active,
+  JSON_EXTRACT_PATH_TEXT(f2.value,'value') AS tin_match_boolean,
+  JSON_EXTRACT_PATH_TEXT(f3.value,'value') AS idv_passed_boolean,
+  bs.weighted_score_850, bs.score_decision
+FROM rds_cases_public.rel_business_customer_monitoring rbcm
+{f"JOIN rds_auth_public.data_customers c ON c.id=rbcm.customer_id AND c.id='{customer_id}'" if customer_id else ""}
+LEFT JOIN rds_warehouse_public.facts f1 ON f1.business_id=rbcm.business_id AND f1.name='sos_active'
+LEFT JOIN rds_warehouse_public.facts f2 ON f2.business_id=rbcm.business_id AND f2.name='tin_match_boolean'
+LEFT JOIN rds_warehouse_public.facts f3 ON f3.business_id=rbcm.business_id AND f3.name='idv_passed_boolean'
+LEFT JOIN rds_manual_score_public.data_current_scores cs ON cs.business_id=rbcm.business_id
+LEFT JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+WHERE 1=1{f" AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'" if date_from else ""};"""
+
+    detail_panel("📊 KYB Verification Rates", f"{n:,} businesses · {_cust_label}",
+        what_it_means=(
+            f"Portfolio-level KYB verification pass rates for {_cust_label}.\n\n"
+            f"**SOS:** {sos_pass:,}/{n:,} ({_pct(sos_pass,n)}) businesses have sos_active=true.\n"
+            f"**TIN:** {tin_pass:,}/{n:,} ({_pct(tin_pass,n)}) have tin_match_boolean=true.\n"
+            f"**IDV:** {idv_pass:,}/{n:,} ({_pct(idv_pass,n)}) have idv_passed_boolean=true.\n"
+            f"**KYB Complete:** {kybc_pass:,}/{n:,} ({_pct(kybc_pass,n)}) fully verified.\n"
+            f"**Watchlist:** {wl_hits:,} businesses have ≥1 watchlist hit."
+        ),
+        source_table="rds_warehouse_public.facts · rds_cases_public.rel_business_customer_monitoring",
+        source_file="facts/kyb/index.ts",
+        json_obj={"customer":_cust_label,"total":n,"sos_pass":int(sos_pass),"tin_pass":int(tin_pass),
+                  "idv_pass":int(idv_pass),"kyb_complete":int(kybc_pass),"watchlist_hits":int(wl_hits)},
+        sql=_port_sql, icon="📊", color="#3B82F6")
+
+    st.markdown("---")
+
+    # ── Row 2: Worth Score distribution + Decision mix ────────────────────────
+    if scored_n > 0:
+        st.markdown("##### Worth Score Distribution")
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        with sc1: kpi("Avg Score", f"{avg_score:.0f}", f"{scored_n:,} scored", "#22c55e" if avg_score>=700 else "#f59e0b" if avg_score>=550 else "#ef4444")
+        with sc2: kpi("✅ APPROVE",  str(approve_n), _pct(approve_n, scored_n), "#22c55e")
+        with sc3: kpi("🔄 REVIEW",   str(review_n),  _pct(review_n,  scored_n), "#f59e0b")
+        with sc4: kpi("❌ DECLINE",  str(decline_n), _pct(decline_n, scored_n), "#ef4444")
+
+        chart_col1, chart_col2 = st.columns(2)
+        with chart_col1:
+            _score_df = _pf_df[has_score].copy()
+            _score_df["weighted_score_850"] = _score_df["weighted_score_850"].astype(float)
+            fig_hist = px.histogram(_score_df, x="weighted_score_850", nbins=30,
+                                    title="Score Distribution (300–850)",
+                                    color_discrete_sequence=["#3B82F6"])
+            fig_hist.add_vline(x=700, line_dash="dash", line_color="#22c55e", annotation_text="APPROVE")
+            fig_hist.add_vline(x=550, line_dash="dash", line_color="#ef4444", annotation_text="DECLINE")
+            fig_hist.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_hist), use_container_width=True)
+
+        with chart_col2:
+            _dec_df = pd.DataFrame({"Decision":["APPROVE","REVIEW","DECLINE"],
+                                    "Count":[int(approve_n),int(review_n),int(decline_n)]})
+            fig_dec = px.pie(_dec_df, names="Decision", values="Count", hole=0.45,
+                             title="Decision Outcome Mix",
+                             color="Decision",
+                             color_discrete_map={"APPROVE":"#22c55e","REVIEW":"#f59e0b","DECLINE":"#ef4444"})
+            fig_dec.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_dec), use_container_width=True)
+
+        detail_panel("💰 Worth Score Distribution", f"Avg: {avg_score:.0f} · {scored_n:,} scored",
+            what_it_means=f"Score distribution across {scored_n:,} scored businesses for {_cust_label}. APPROVE ≥700, FURTHER_REVIEW 550-699, DECLINE <550.",
+            source_table="rds_manual_score_public.data_current_scores JOIN business_scores",
+            source_file="aiscore.py",
+            json_obj={"avg_score":round(avg_score,1),"approve":int(approve_n),"review":int(review_n),"decline":int(decline_n),"scored":int(scored_n)},
+            sql=_port_sql, icon="💰", color="#22c55e")
+        st.markdown("---")
+
+    # ── Row 3: KYB Health Stacked Bar + NAICS/Risk signals ───────────────────
+    st.markdown("##### KYB Signal Breakdown")
+    bar_col, pie_col = st.columns(2)
+
+    with bar_col:
+        _hbar_data = pd.DataFrame({
+            "Signal": ["SOS Active","TIN Matched","IDV Passed","KYB Complete","No Watchlist","Revenue Known"],
+            "Pass":   [int(sos_pass), int(tin_pass), int(idv_pass), int(kybc_pass), int(n-wl_hits), int(rev_known)],
+            "Fail":   [int(n-sos_pass), int(n-tin_pass), int(n-idv_pass), int(n-kybc_pass), int(wl_hits), int(n-rev_known)],
+        })
+        _hbar_melt = _hbar_data.melt(id_vars="Signal", value_vars=["Pass","Fail"], var_name="Status", value_name="Count")
+        fig_bar = px.bar(_hbar_melt, x="Count", y="Signal", color="Status", orientation="h",
+                         barmode="stack", title="KYB Signals — Pass vs Fail/Missing",
+                         color_discrete_map={"Pass":"#22c55e","Fail":"#ef4444"})
+        fig_bar.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
+        st.plotly_chart(dark_chart(fig_bar), use_container_width=True)
+
+    with pie_col:
+        TAX_HAVENS = {"DE","NV","WY","SD","MT","NM"}
+        _fs_series = _pf_df["formation_state"].str.upper().str.strip()
+        _th_n  = _fs_series.isin(TAX_HAVENS).sum()
+        _oth_n = _fs_series.notna().sum() - _th_n
+        _no_st = int(n) - int(_fs_series.notna().sum())
+        fig_st = px.pie(
+            pd.DataFrame({"Category":["Tax-Haven State","Other State","No State Data"],
+                          "Count":[int(_th_n),int(_oth_n),int(_no_st)]}),
+            names="Category", values="Count", hole=0.45,
+            title="Formation State Mix",
+            color="Category",
+            color_discrete_map={"Tax-Haven State":"#f59e0b","Other State":"#3B82F6","No State Data":"#334155"})
+        fig_st.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
+        st.plotly_chart(dark_chart(fig_st), use_container_width=True)
+
+    detail_panel("🏢 KYB Signal Breakdown", f"{_cust_label} · {n:,} businesses",
+        what_it_means=(
+            f"Stacked bar showing Pass vs Fail/Missing for each KYB signal across {_cust_label}'s portfolio.\n\n"
+            f"**NAICS Fallback (561499):** {int(naics_fb):,} businesses ({_pct(naics_fb,n)}) — industry unclassified.\n"
+            f"**Bankruptcies:** {int(bk_count):,} businesses have ≥1 bankruptcy record.\n"
+            f"**Tax-haven state:** {int(_th_n):,} businesses incorporated in DE/NV/WY/SD/MT/NM."
+        ),
+        source_table="rds_warehouse_public.facts · rds_cases_public.rel_business_customer_monitoring",
+        source_file="facts/kyb/index.ts",
+        json_obj={"naics_fallback":int(naics_fb),"bankruptcy_count":int(bk_count),
+                  "tax_haven":int(_th_n),"other_state":int(_oth_n),"no_state":int(_no_st)},
+        sql=_port_sql, icon="🏢", color="#8B5CF6")
+
+    # ── Onboarding trend ─────────────────────────────────────────────────────
+    if "onboarded_date" in _pf_df.columns:
+        st.markdown("---")
+        st.markdown("##### Onboarding Trend")
+        _trend = _pf_df.groupby("onboarded_date").size().reset_index(name="businesses")
+        _trend["onboarded_date"] = _trend["onboarded_date"].astype(str)
+        fig_trend = px.area(_trend, x="onboarded_date", y="businesses",
+                            title=f"Daily Onboarding Volume — {_cust_label}",
+                            color_discrete_sequence=["#3B82F6"])
+        fig_trend.update_layout(height=240, margin=dict(t=40,b=10,l=10,r=10))
+        st.plotly_chart(dark_chart(fig_trend), use_container_width=True)
+        _trend_cust_clause = f" AND customer_id='{customer_id}'" if customer_id else ""
+        detail_panel("📅 Onboarding Trend", f"{n:,} businesses over time",
+            what_it_means=f"Daily count of businesses onboarded for {_cust_label}. Source: rds_cases_public.rel_business_customer_monitoring.created_at.",
+            source_table="rds_cases_public.rel_business_customer_monitoring",
+            sql=f"SELECT DATE(created_at) AS date, COUNT(DISTINCT business_id) AS businesses FROM rds_cases_public.rel_business_customer_monitoring WHERE 1=1{_trend_cust_clause} GROUP BY 1 ORDER BY 1;",
+            icon="📅", color="#3B82F6")
+
+    # ── Businesses table ──────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### Business List")
+    _disp_cols = [c for c in ["business_id","onboarded_date","sos_active","tin_match","idv_passed","naics_code","watchlist_hits","weighted_score_850","score_decision"] if c in _pf_df.columns]
+    st.dataframe(_pf_df[_disp_cols].head(200), use_container_width=True, hide_index=True)
+    st.caption(f"Showing up to 200 of {n:,} businesses. Use the SQL Runner for the full export.")
+    dl_csv = _pf_df[_disp_cols].to_csv(index=False).encode("utf-8")
+    st.download_button("⬇️ Download full list (CSV)", dl_csv,
+        file_name=f"portfolio_{_cust_label.replace(' ','_')}.csv", mime="text/csv",
+        use_container_width=False, key="port_dl_csv")
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_facts(bid):
     """2-query bulk loader: 1 query for names, 1 bulk query for all small facts."""
@@ -2554,6 +2810,58 @@ with st.sidebar:
     elif _search_q:
         st.caption("Type at least 2 characters to search…")
 
+    # ── Analysis Scope ───────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("**🎯 Analysis Scope**")
+    hub_scope = st.radio(
+        "Scope",
+        ["📊 Customer / Portfolio", "🏢 Single Business"],
+        key="hub_scope",
+        label_visibility="collapsed",
+        help="Portfolio mode shows aggregate analytics for a customer. Business mode shows per-entity detail.",
+    )
+    st.session_state["_hub_scope"] = hub_scope
+
+    if hub_scope == "📊 Customer / Portfolio":
+        # Load customer list for the current date window
+        with st.spinner("Loading customers…"):
+            _scope_cust_df, _ = load_customer_names(hub_date_from, hub_date_to)
+        _scope_cust_options = ["All Customers"]
+        _scope_cust_id_map  = {"All Customers": None}
+        _scope_cust_name_map = {"All Customers": "All Customers"}
+        if _scope_cust_df is not None and not _scope_cust_df.empty:
+            for _, _row in _scope_cust_df.sort_values("business_count", ascending=False).iterrows():
+                _nm  = _row.get("customer_name","")
+                _cid = _row.get("customer_id","")
+                _bc  = int(_row.get("business_count",0))
+                if _nm:
+                    _lbl = f"{_nm} ({_bc:,} biz)"
+                    _scope_cust_options.append(_lbl)
+                    _scope_cust_id_map[_lbl]   = _cid
+                    _scope_cust_name_map[_lbl] = _nm
+        hub_scope_customer_label = st.selectbox(
+            "Customer", _scope_cust_options,
+            key="hub_scope_customer",
+            label_visibility="collapsed",
+            help="Select a customer to view their portfolio analytics across all tabs.",
+        )
+        hub_scope_customer_id   = _scope_cust_id_map.get(hub_scope_customer_label)
+        hub_scope_customer_name = _scope_cust_name_map.get(hub_scope_customer_label, "All Customers")
+        # No single business in portfolio mode
+        hub_bid = ""
+        st.caption(f"📊 Portfolio view · {hub_scope_customer_name}")
+    else:
+        hub_scope_customer_id   = None
+        hub_scope_customer_name = "All Customers"
+        hub_bid = st.session_state.get("hub_bid","")
+        if hub_bid:
+            st.caption(f"🏢 Business: `{hub_bid[:20]}…`")
+        else:
+            st.caption("Enter a UUID via Home tab or Investigation Workspace")
+
+    # Propagate hub_bid so all tabs still work
+    st.session_state["hub_bid"] = hub_bid
+
     st.markdown("---")
     tab=st.radio("Section",[
         "🏠 Home","🏛️ Registry & Identity","🏭 Classification & KYB",
@@ -4648,6 +4956,10 @@ Complete data gap. Entity existence AND firmographic data both unverified — hi
 # REGISTRY & IDENTITY
 # ════════════════════════════════════════════════════════════════════════════════
 elif tab=="🏛️ Registry & Identity":
+    if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
+        st.markdown("## 🏛️ Registry & Identity — Customer Portfolio View")
+        render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="Registry & Identity")
+        st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab."); st.stop()
     st.markdown(f"## 🏛️ Registry & Identity — `{bid[:16]}…`")
@@ -5820,6 +6132,10 @@ ORDER BY bert.created_at DESC;""",language="sql")
 # CLASSIFICATION & KYB
 # ════════════════════════════════════════════════════════════════════════════════
 elif tab=="🏭 Classification & KYB":
+    if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
+        st.markdown("## 🏭 Classification & KYB — Customer Portfolio View")
+        render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="Classification & KYB")
+        st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab."); st.stop()
     st.markdown(f"## 🏭 Classification & KYB — `{bid[:16]}…`")
@@ -6422,6 +6738,10 @@ ORDER BY name, received_at DESC;""",language="sql")
 # RISK & WATCHLIST
 # ════════════════════════════════════════════════════════════════════════════════
 elif tab=="⚠️ Risk & Watchlist":
+    if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
+        st.markdown("## ⚠️ Risk & Watchlist — Customer Portfolio View")
+        render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="Risk & Watchlist")
+        st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab."); st.stop()
     st.markdown(f"## ⚠️ Risk & Watchlist — `{bid[:16]}…`")
@@ -6792,6 +7112,10 @@ WHERE score_id=(SELECT score_id FROM rds_manual_score_public.data_current_scores
 # WORTH SCORE
 # ════════════════════════════════════════════════════════════════════════════════
 elif tab=="💰 Worth Score":
+    if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
+        st.markdown("## 💰 Worth Score — Customer Portfolio View")
+        render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="Worth Score")
+        st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab."); st.stop()
     st.markdown(f"## 💰 Worth Score — `{bid[:16]}…`")
@@ -7339,6 +7663,11 @@ ORDER BY ABS(weighted_score_850) DESC;""",language="sql")
 # ALL FACTS — grouped, enriched, with lineage
 # ════════════════════════════════════════════════════════════════════════════════
 elif tab=="📋 All Facts":
+    if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
+        st.markdown("## 📋 All Facts — Customer Portfolio View")
+        st.info("The All Facts tab shows the complete fact profile for a single business. In Portfolio mode, use the **🧠 Intelligence Hub → Investigation Workspace** to explore individual businesses, or the **⌨️ Data Explorer** for bulk fact queries.")
+        render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="All Facts")
+        st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab first, then return here."); st.stop()
     st.markdown(f"## 📋 All Facts — `{bid[:16]}…`")
@@ -7820,6 +8149,11 @@ WHERE name='watchlist' AND business_id='{bid}';
 # CHECK-AGENT
 # ════════════════════════════════════════════════════════════════════════════════
 elif tab=="🔍 Check-Agent":
+    if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
+        st.markdown("## 🔍 Check-Agent — Customer Portfolio View")
+        st.info("In Portfolio mode, the Check-Agent Console in **🧠 Intelligence Hub → Check-Agent Console** runs a portfolio scan. Shown below is the portfolio KYB overview for context.")
+        render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="Check-Agent")
+        st.stop()
     bid = st.session_state.get("hub_bid","")
     st.markdown("## 🔍 KYB Check-Agent — Deep Verification Engine")
     st.caption(
@@ -8549,6 +8883,12 @@ elif tab=="🔍 Check-Agent":
 # AI AGENT
 # ════════════════════════════════════════════════════════════════════════════════
 elif tab=="🤖 AI Agent":
+    if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
+        st.markdown("## 🤖 AI Agent — Customer Portfolio View")
+        st.info(f"In Portfolio mode, the AI Agent answers questions about **{hub_scope_customer_name}**'s portfolio. The AI View Generator in **🧠 Intelligence Hub** is the best tool for portfolio-level natural-language analysis. The chat below has customer context injected automatically.")
+        render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="AI Agent")
+        st.markdown("---")
+        # Fall through to chat (context will include customer name)
     bid=st.session_state.get("hub_bid","")
     st.markdown("## 🤖 KYB Intelligence AI Agent")
     st.markdown("Ask anything about KYB data, field lineage, source attribution, confidence formulas, SQL queries, or any result for this business.")
