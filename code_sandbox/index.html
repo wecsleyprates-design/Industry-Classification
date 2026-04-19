@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>KYB Confidence Intelligence Platform — Prototype</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+<!-- ========== TOP BAR ========== -->
+<header class="topbar">
+  <div class="topbar-left">
+    <div class="logo"><i class="fa-solid fa-shield-halved"></i> KYB <span class="logo-accent">Confidence</span> Platform</div>
+    <span class="env-badge">LOCAL · NO AUTH</span>
+  </div>
+  <div class="topbar-right">
+    <span class="conn-chip ok"><i class="fa-solid fa-database"></i> Redshift: mocked</span>
+    <span class="conn-chip warn"><i class="fa-solid fa-robot"></i> OpenAI: fake-key fallback</span>
+    <button class="btn-ghost" onclick="openDeepLinkModal()"><i class="fa-solid fa-link"></i> Share</button>
+    <button class="btn-ghost" onclick="openExportModal()"><i class="fa-solid fa-file-export"></i> Export</button>
+  </div>
+</header>
+
+<!-- ========== GLOBAL FILTER BAR ========== -->
+<section class="filter-bar">
+  <div class="filter-group">
+    <label>Date Range</label>
+    <select id="flt-date-range">
+      <option>Last 7 days</option>
+      <option selected>Last 30 days</option>
+      <option>Last 90 days</option>
+      <option>YTD</option>
+      <option>Custom…</option>
+    </select>
+  </div>
+  <div class="filter-group">
+    <label>Date Context</label>
+    <select id="flt-date-ctx">
+      <option>Submitted At</option>
+      <option selected>Scored At</option>
+      <option>Decision At</option>
+      <option>Activation At</option>
+    </select>
+  </div>
+  <div class="filter-group">
+    <label>Customer</label>
+    <select id="flt-customer">
+      <option selected>All Customers</option>
+      <option>Acme Holdings Inc.</option>
+      <option>Northwind Capital</option>
+      <option>Globex Partners LLC</option>
+    </select>
+  </div>
+  <div class="filter-group">
+    <label>Business ID</label>
+    <input type="text" id="flt-business" placeholder="bus_… (UUID)" />
+  </div>
+  <div class="filter-group">
+    <label>Entity Type</label>
+    <select>
+      <option selected>All</option>
+      <option>Domestic</option>
+      <option>Foreign</option>
+    </select>
+  </div>
+  <div class="filter-group">
+    <label>Confidence Band</label>
+    <select>
+      <option selected>All</option>
+      <option>Low (0–0.4)</option>
+      <option>Medium (0.4–0.7)</option>
+      <option>High (0.7–1.0)</option>
+    </select>
+  </div>
+  <div class="filter-group">
+    <label>&nbsp;</label>
+    <label class="chk-inline"><input type="checkbox" /> Manual Review only</label>
+  </div>
+  <button class="btn-primary" onclick="applyFilters()"><i class="fa-solid fa-filter"></i> Apply</button>
+  <button class="btn-ghost" onclick="resetFilters()"><i class="fa-solid fa-rotate-left"></i> Reset</button>
+</section>
+
+<!-- ========== TABS ========== -->
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="1"><i class="fa-solid fa-gauge-high"></i> Executive Overview</button>
+  <button class="tab" data-tab="2"><i class="fa-solid fa-chart-line"></i> KYB Confidence</button>
+  <button class="tab" data-tab="3"><i class="fa-solid fa-heart-pulse"></i> Feature Health</button>
+  <button class="tab" data-tab="4"><i class="fa-solid fa-scale-balanced"></i> Decision & Ops</button>
+  <button class="tab" data-tab="5"><i class="fa-solid fa-user-magnifying-glass"></i> Customer / Business 360</button>
+  <button class="tab" data-tab="6"><i class="fa-solid fa-triangle-exclamation"></i> Inconsistency & Red Flags</button>
+  <button class="tab" data-tab="7"><i class="fa-solid fa-sitemap"></i> Lineage & Discovery</button>
+  <button class="tab" data-tab="8"><i class="fa-solid fa-terminal"></i> Data Explorer</button>
+  <button class="tab" data-tab="9"><i class="fa-solid fa-robot"></i> AI Copilot & Check-Agent</button>
+</nav>
+
+<main class="page-container" id="page-container">
+  <!-- Pages injected by js/pages.js -->
+</main>
+
+<!-- ========== LINEAGE MODAL ========== -->
+<div class="modal-backdrop" id="lineage-modal" onclick="closeModalOnBackdrop(event,'lineage-modal')">
+  <div class="modal">
+    <header class="modal-header">
+      <h3><i class="fa-solid fa-sitemap"></i> Lineage — <span id="lineage-title">—</span></h3>
+      <button class="btn-close" onclick="closeModal('lineage-modal')">&times;</button>
+    </header>
+    <div class="modal-body">
+      <div class="lineage-level">
+        <h4><span class="lvl-pill">L1</span> Business Meaning</h4>
+        <p id="lineage-l1"></p>
+      </div>
+      <div class="lineage-level">
+        <h4><span class="lvl-pill">L2</span> Warehouse Source</h4>
+        <pre id="lineage-l2"></pre>
+      </div>
+      <div class="lineage-level">
+        <h4><span class="lvl-pill">L3</span> Transformation Logic</h4>
+        <pre id="lineage-l3"></pre>
+      </div>
+      <div class="lineage-level">
+        <h4><span class="lvl-pill">L4</span> Repo / Code Lineage</h4>
+        <div id="lineage-l4"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== ASK-AI MODAL ========== -->
+<div class="modal-backdrop" id="ask-ai-modal" onclick="closeModalOnBackdrop(event,'ask-ai-modal')">
+  <div class="modal">
+    <header class="modal-header">
+      <h3><i class="fa-solid fa-wand-magic-sparkles"></i> Ask AI — <span id="ask-ai-context">Current Object</span></h3>
+      <button class="btn-close" onclick="closeModal('ask-ai-modal')">&times;</button>
+    </header>
+    <div class="modal-body">
+      <p class="muted small">Context is automatically attached: active filters, selected object, lineage, and data shape.</p>
+      <div class="ask-ai-chat" id="ask-ai-chat"></div>
+      <div class="ask-ai-input">
+        <input type="text" id="ask-ai-q" placeholder="Ask a question about this object…" />
+        <button class="btn-primary" onclick="sendAskAi()"><i class="fa-solid fa-paper-plane"></i></button>
+      </div>
+      <div class="ask-ai-suggestions">
+        <span class="chip" onclick="presetAsk('Why did this metric change?')">Why did this metric change?</span>
+        <span class="chip" onclick="presetAsk('Show breakdown by segment.')">Show breakdown by segment</span>
+        <span class="chip" onclick="presetAsk('What is the lineage of this field?')">Lineage of this field</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== CHECK-AGENT MODAL ========== -->
+<div class="modal-backdrop" id="check-agent-modal" onclick="closeModalOnBackdrop(event,'check-agent-modal')">
+  <div class="modal">
+    <header class="modal-header">
+      <h3><i class="fa-solid fa-shield-virus"></i> Check-Agent — <span id="check-agent-title">Scan</span></h3>
+      <button class="btn-close" onclick="closeModal('check-agent-modal')">&times;</button>
+    </header>
+    <div class="modal-body" id="check-agent-body">
+    </div>
+  </div>
+</div>
+
+<!-- ========== DEEP LINK MODAL ========== -->
+<div class="modal-backdrop" id="deeplink-modal" onclick="closeModalOnBackdrop(event,'deeplink-modal')">
+  <div class="modal small">
+    <header class="modal-header">
+      <h3><i class="fa-solid fa-link"></i> Shareable Deep Link</h3>
+      <button class="btn-close" onclick="closeModal('deeplink-modal')">&times;</button>
+    </header>
+    <div class="modal-body">
+      <p class="muted small">This link preserves the current tab, sub-tab, filters, and selected entity.</p>
+      <input type="text" id="deeplink-url" readonly />
+      <button class="btn-primary" onclick="copyDeepLink()"><i class="fa-solid fa-copy"></i> Copy</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== EXPORT MODAL ========== -->
+<div class="modal-backdrop" id="export-modal" onclick="closeModalOnBackdrop(event,'export-modal')">
+  <div class="modal small">
+    <header class="modal-header">
+      <h3><i class="fa-solid fa-file-export"></i> Export Current View</h3>
+      <button class="btn-close" onclick="closeModal('export-modal')">&times;</button>
+    </header>
+    <div class="modal-body">
+      <div class="export-options">
+        <button class="btn-secondary"><i class="fa-solid fa-file-csv"></i> CSV</button>
+        <button class="btn-secondary"><i class="fa-solid fa-file-excel"></i> XLSX</button>
+        <button class="btn-secondary"><i class="fa-solid fa-file-pdf"></i> PDF Snapshot</button>
+        <button class="btn-secondary"><i class="fa-solid fa-code"></i> JSON</button>
+      </div>
+      <p class="muted small" style="margin-top:10px">Export includes filter state and lineage metadata.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ========== SCRIPTS ========== -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="js/mock-data.js"></script>
+<script src="js/pages.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
