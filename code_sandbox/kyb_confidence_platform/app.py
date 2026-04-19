@@ -117,6 +117,11 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="collapsed",
     )
+    # Overlay st.secrets AFTER set_page_config — calling st.secrets before
+    # set_page_config raises StreamlitSetPageConfigMustBeFirstCommandError.
+    from config.settings import SETTINGS
+    SETTINGS.refresh()
+
     inject_theme()
     ensure_session_state()
     restore_state_from_query_params()
