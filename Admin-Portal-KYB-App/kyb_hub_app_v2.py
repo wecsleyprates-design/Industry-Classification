@@ -2688,6 +2688,19 @@ def ai_popup(key, context, questions, bid):
             st.markdown(ans)   # render markdown so links are clickable
 
 # ════════════════════════════════════════════════════════════════════════════════
+# PRE-RENDER: handle pending scope switch BEFORE any widget renders
+# Writing to st.session_state[widget_key] after the widget renders raises
+# StreamlitAPIException. Handle it here at the top of the script run instead.
+# ════════════════════════════════════════════════════════════════════════════════
+if st.session_state.get("_pending_scope_switch"):
+    del st.session_state["_pending_scope_switch"]
+    # Switch the radio to Single Business by setting its backing key
+    # This is safe here — no widget has rendered yet this run
+    st.session_state["hub_scope"] = "🏢 Single Business"
+    # Clear the portfolio customer so the entity tabs use hub_bid
+    st.session_state["hub_scope_customer"] = "All Customers"
+
+# ════════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ════════════════════════════════════════════════════════════════════════════════
 _,is_live,conn_err=get_conn()
@@ -3284,28 +3297,78 @@ def render_customer_registry(cust_name, cust_id, date_from, date_to):
         with c3: kpi("SOS Unknown",   str(sos_n),   _pct_of(sos_n,n),   "#64748b")
         with c4: kpi("SOS Match",     str(match_p), _pct_of(match_p,n), "#22c55e" if match_p/max(n,1)>0.8 else "#f59e0b")
 
+        # SOS bar chart
         fig_sos = px.bar(pd.DataFrame({"Status":["Active","Inactive","No Data"],"Count":[sos_p,sos_f,sos_n]}),
             x="Status", y="Count", color="Status",
             color_discrete_map={"Active":"#22c55e","Inactive":"#ef4444","No Data":"#334155"},
             title="SOS Status Distribution")
-        fig_sos.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10), showlegend=False)
+        fig_sos.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10), showlegend=False)
         st.plotly_chart(dark_chart(fig_sos), use_container_width=True)
+
+        # Onboarding trend by SOS status
+        if "onboarded_date" in df.columns and "sos_active" in df.columns:
+            st.markdown("**SOS Status trend over time**")
+            _sl2 = lambda v: "Active" if str(v or "").lower().strip()=="true" else ("Inactive" if str(v or "").lower().strip()=="false" else "Unknown")
+            _trend_df = df.copy()
+            _trend_df["SOS Status"] = _trend_df["sos_active"].apply(_sl2)
+            _trend_df["onboarded_date"] = _trend_df["onboarded_date"].astype(str)
+            _trend_g = _trend_df.groupby(["onboarded_date","SOS Status"]).size().reset_index(name="Count")
+            if not _trend_g.empty:
+                fig_trend_sos = px.line(_trend_g, x="onboarded_date", y="Count", color="SOS Status",
+                    color_discrete_map={"Active":"#22c55e","Inactive":"#ef4444","Unknown":"#64748b"},
+                    title="Daily Onboarding by SOS Status", markers=True)
+                fig_trend_sos.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_trend_sos), use_container_width=True)
 
         # Middesk confidence distribution
         if "middesk_confidence" in df.columns:
             _mc = pd.to_numeric(df["middesk_confidence"], errors="coerce").dropna()
             if not _mc.empty:
-                fig_mc = px.histogram(_mc, nbins=20, title="Middesk Confidence Distribution",
+                st.markdown("**Middesk Entity-Match Confidence Distribution**")
+                st.caption("Formula: 0.15 (base) + 0.20 × (passing tasks / total tasks). Score <0.25 = unreliable entity match.")
+                fig_mc = px.histogram(_mc, nbins=25, title="Middesk Confidence Distribution",
                                       color_discrete_sequence=["#3B82F6"])
-                fig_mc.add_vline(x=0.25, line_dash="dash", line_color="#ef4444", annotation_text="Low threshold")
+                fig_mc.add_vline(x=0.25, line_dash="dash", line_color="#ef4444", annotation_text="Low (<0.25)")
+                fig_mc.add_vline(x=0.50, line_dash="dash", line_color="#f59e0b", annotation_text="Medium")
                 fig_mc.update_layout(height=240, margin=dict(t=40,b=10,l=10,r=10))
                 st.plotly_chart(dark_chart(fig_mc), use_container_width=True)
+                _low_conf = int((_mc < 0.25).sum())
+                _high_conf = int((_mc >= 0.50).sum())
+                _mc1,_mc2,_mc3 = st.columns(3)
+                with _mc1: kpi("Low Confidence (<0.25)", str(_low_conf), _pct_of(_low_conf,n), "#ef4444")
+                with _mc2: kpi("Medium (0.25–0.50)", str(int((_mc.between(0.25,0.50)).sum())), "", "#f59e0b")
+                with _mc3: kpi("High (≥0.50)", str(_high_conf), _pct_of(_high_conf,n), "#22c55e")
 
-        _sos_sql = f"SELECT DATE(rbcm.created_at) AS date, JSON_EXTRACT_PATH_TEXT(LEFT(f.value,8000),'value') AS sos_active, COUNT(*) AS businesses FROM rds_cases_public.rel_business_customer_monitoring rbcm JOIN rds_warehouse_public.facts f ON f.business_id=rbcm.business_id AND f.name='sos_active' WHERE 1=1{_cc}{_dc_from} GROUP BY 1,2 ORDER BY 1;"
+        # SOS Inactive businesses table — live query
+        st.markdown("**SOS Inactive businesses — investigate these**")
+        if sos_f > 0 and "sos_active" in df.columns:
+            _inactive_bids = df[df["sos_active"].astype(str).str.lower().str.strip()=="false"]["business_id"].tolist()
+            st.dataframe(pd.DataFrame({"business_id": _inactive_bids[:50]}), use_container_width=True, hide_index=True)
+            st.caption(f"Showing {min(50,len(_inactive_bids))} of {len(_inactive_bids):,} SOS Inactive businesses. Copy a UUID to the Business ID picker above for full entity-level investigation.")
+
+        _sos_sql = f"""
+SELECT DATE(rbcm.created_at) AS date,
+       JSON_EXTRACT_PATH_TEXT(f.value,'value') AS sos_active,
+       COUNT(*) AS businesses
+FROM rds_cases_public.rel_business_customer_monitoring rbcm
+JOIN rds_warehouse_public.facts f
+  ON f.business_id = rbcm.business_id AND f.name = 'sos_active'
+WHERE 1=1{_cc}{_dc_from}{_dc_to}
+GROUP BY 1, 2
+ORDER BY 1 DESC;"""
         detail_panel("🏛️ SOS Status — Customer Portfolio", f"{n:,} businesses · {cust_name}",
-            what_it_means=f"SOS active/inactive/unknown distribution for {cust_name}. {sos_p:,} businesses ({_pct_of(sos_p,n)}) have sos_active=true. {sos_f:,} ({_pct_of(sos_f,n)}) inactive — entity lost good standing (missed annual report, dissolved, revoked). {sos_n:,} ({_pct_of(sos_n,n)}) no SOS data at all.",
+            what_it_means=(
+                f"SOS active/inactive/unknown distribution for {cust_name}.\n\n"
+                f"**Active:** {sos_p:,} ({_pct_of(sos_p,n)}) — SOS filing is in good standing.\n"
+                f"**Inactive:** {sos_f:,} ({_pct_of(sos_f,n)}) — entity lost good standing "
+                f"(missed annual report, voluntarily dissolved, or administratively revoked).\n"
+                f"**No Data:** {sos_n:,} ({_pct_of(sos_n,n)}) — Middesk could not match the entity at all.\n\n"
+                f"**Middesk confidence** = 0.15 (base) + 0.20 × (passing tasks / total tasks). "
+                f"Values below 0.25 indicate the entity match is unreliable."
+            ),
             source_table="rds_warehouse_public.facts · name='sos_active'",
-            source_file="facts/kyb/index.ts", json_obj={"sos_active":sos_p,"sos_inactive":sos_f,"sos_unknown":sos_n,"total":n},
+            source_file="facts/kyb/index.ts",
+            json_obj={"sos_active":sos_p,"sos_inactive":sos_f,"sos_unknown":sos_n,"total":n,"match_pass":match_p,"match_fail":match_f},
             sql=_sos_sql, icon="🏛️", color="#22c55e")
 
     # ── Dom/Foreign ───────────────────────────────────────────────────────────
@@ -3350,14 +3413,36 @@ def render_customer_registry(cust_name, cust_id, date_from, date_to):
         with c2: kpi("TIN Failed",      str(tin_f), _pct_of(tin_f,n), "#ef4444" if tin_f>0 else "#22c55e")
         with c3: kpi("TIN Not Checked", str(tin_n), _pct_of(tin_n,n), "#64748b")
 
-        fig_tin = px.pie(pd.DataFrame({"Status":["Verified","Failed","Not Checked"],"Count":[tin_p,tin_f,tin_n]}),
-            names="Status", values="Count", hole=0.45, title="TIN Verification Outcomes",
-            color="Status", color_discrete_map={"Verified":"#22c55e","Failed":"#ef4444","Not Checked":"#334155"})
-        fig_tin.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
-        st.plotly_chart(dark_chart(fig_tin), use_container_width=True)
+        col_tin1, col_tin2 = st.columns(2)
+        with col_tin1:
+            fig_tin = px.pie(pd.DataFrame({"Status":["Verified","Failed","Not Checked"],"Count":[tin_p,tin_f,tin_n]}),
+                names="Status", values="Count", hole=0.45, title="TIN Verification Outcomes",
+                color="Status", color_discrete_map={"Verified":"#22c55e","Failed":"#ef4444","Not Checked":"#334155"})
+            fig_tin.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_tin), use_container_width=True)
+        with col_tin2:
+            # TIN trend over time
+            if "onboarded_date" in df.columns and "tin_match_boolean" in df.columns:
+                _tin_trend = df.copy()
+                _tin_trend["TIN"] = _tin_trend["tin_match_boolean"].astype(str).str.lower().str.strip().map({"true":"Verified","false":"Failed"}).fillna("Not Checked")
+                _tin_trend["onboarded_date"] = _tin_trend["onboarded_date"].astype(str)
+                _tg = _tin_trend.groupby(["onboarded_date","TIN"]).size().reset_index(name="Count")
+                if not _tg.empty:
+                    fig_tin_t = px.bar(_tg, x="onboarded_date", y="Count", color="TIN",
+                        color_discrete_map={"Verified":"#22c55e","Failed":"#ef4444","Not Checked":"#334155"},
+                        barmode="stack", title="TIN Outcomes Over Time")
+                    fig_tin_t.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+                    st.plotly_chart(dark_chart(fig_tin_t), use_container_width=True)
+
+        # TIN Failed businesses list
+        if tin_f > 0:
+            st.markdown("**⚠️ TIN Failed businesses — likely DBA vs legal name mismatch**")
+            _tin_fail_bids = df[df["tin_match_boolean"].astype(str).str.lower().str.strip()=="false"]["business_id"].tolist()
+            st.dataframe(pd.DataFrame({"business_id": _tin_fail_bids[:30]}), use_container_width=True, hide_index=True)
+            st.caption(f"Showing {min(30,len(_tin_fail_bids))} of {len(_tin_fail_bids):,} TIN Failed businesses. Root cause: applicant submitted DBA/trade name instead of the legal name on the EIN certificate (Form CP-575/147C).")
 
         # SOS × TIN concordance
-        st.markdown("**SOS × TIN Concordance**")
+        st.markdown("**SOS × TIN Concordance — key risk combinations**")
         if "sos_active" in df.columns and "tin_match_boolean" in df.columns:
             def _sl(v): return str(v or "").lower().strip()
             _ct = df.copy()
@@ -3478,13 +3563,43 @@ def render_customer_classification(cust_name, cust_id, date_from, date_to):
             """
             _nc_df, _ = run_sql(_naics_sql)
             if _nc_df is not None and not _nc_df.empty:
-                _nc_df["2-digit"] = _nc_df["naics_code"].str[:2]
-                _sector = _nc_df.groupby("2-digit")["businesses"].sum().reset_index().sort_values("businesses", ascending=True)
-                fig_nc = px.bar(_sector, x="businesses", y="2-digit", orientation="h",
-                                title="NAICS Sector Distribution (2-digit)", color_discrete_sequence=["#3B82F6"])
-                fig_nc.update_layout(height=max(260,len(_sector)*28), margin=dict(t=40,b=10,l=10,r=10))
-                st.plotly_chart(dark_chart(fig_nc), use_container_width=True)
-                st.dataframe(_nc_df.head(20), use_container_width=True, hide_index=True)
+                _nc_df["2-digit"] = _nc_df["naics_code"].astype(str).str[:2]
+
+                _naics_col1, _naics_col2 = st.columns(2)
+                with _naics_col1:
+                    _sector = _nc_df.groupby("2-digit")["businesses"].sum().reset_index().sort_values("businesses", ascending=True)
+                    SECTOR_NAMES = {"11":"Agriculture","21":"Mining","22":"Utilities","23":"Construction",
+                        "31":"Manufacturing","32":"Manufacturing","33":"Manufacturing","42":"Wholesale",
+                        "44":"Retail","45":"Retail","48":"Transportation","49":"Transportation",
+                        "51":"Information","52":"Finance/Insurance","53":"Real Estate",
+                        "54":"Professional Svcs","55":"Management","56":"Admin/Support",
+                        "61":"Education","62":"Healthcare","71":"Arts/Entertainment",
+                        "72":"Accommodation/Food","81":"Other Services","92":"Public Admin","56":"Admin/Support"}
+                    _sector["Sector Name"] = _sector["2-digit"].map(SECTOR_NAMES).fillna("Other")
+                    _sector["Label"] = _sector["2-digit"] + " — " + _sector["Sector Name"]
+                    fig_nc = px.bar(_sector, x="businesses", y="Label", orientation="h",
+                        title="Industry Sector Distribution (2-digit NAICS)", color_discrete_sequence=["#3B82F6"])
+                    fig_nc.update_layout(height=max(280,len(_sector)*30), margin=dict(t=40,b=10,l=10,r=10))
+                    st.plotly_chart(dark_chart(fig_nc), use_container_width=True)
+
+                with _naics_col2:
+                    # NAICS fallback trend
+                    if "onboarded_date" in df.columns and "naics_code" in df.columns:
+                        _nt = df.copy()
+                        _nt["NAICS Type"] = _nt["naics_code"].astype(str).str.strip().apply(
+                            lambda v: "Fallback (561499)" if v=="561499" else ("Classified" if v not in ("nan","None","") else "Missing"))
+                        _nt["onboarded_date"] = _nt["onboarded_date"].astype(str)
+                        _ntg = _nt.groupby(["onboarded_date","NAICS Type"]).size().reset_index(name="Count")
+                        if not _ntg.empty:
+                            fig_nt = px.bar(_ntg, x="onboarded_date", y="Count", color="NAICS Type",
+                                color_discrete_map={"Classified":"#22c55e","Fallback (561499)":"#f59e0b","Missing":"#334155"},
+                                barmode="stack", title="NAICS Classification Trend")
+                            fig_nt.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+                            st.plotly_chart(dark_chart(fig_nt), use_container_width=True)
+
+                st.markdown("**Top NAICS codes for this customer:**")
+                st.dataframe(_nc_df.rename(columns={"naics_code":"NAICS Code","businesses":"Businesses"}),
+                             use_container_width=True, hide_index=True)
 
             detail_panel("🏭 NAICS Classification — Portfolio", f"Classified: {int(naics_ok):,} · Fallback: {int(naics_fb):,}",
                 what_it_means=f"NAICS industry classification outcomes for {cust_name}. {_pct_of(naics_fb,n)} of businesses received the 561499 fallback — meaning all commercial vendors (ZI/EFX/OC/SERP/Trulioo) AND the AI enrichment failed to classify the industry.",
@@ -3505,12 +3620,42 @@ def render_customer_classification(cust_name, cust_id, date_from, date_to):
         with c3: kpi("Revenue Known",  str(int(rev_k)), _pct_of(rev_k,n), "#3B82F6")
         with c4: kpi("Employees Known",str(int(emp_k)), _pct_of(emp_k,n), "#3B82F6")
 
-        fig_fw = px.bar(pd.DataFrame({"Signal":["KYB Submitted","KYB Complete","Revenue","Employees"],
-                                       "Count":[int(kyb_s),int(kyb_c),int(rev_k),int(emp_k)]}),
-                        x="Signal", y="Count", title="Firmographic Coverage",
-                        color_discrete_sequence=["#3B82F6"])
-        fig_fw.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
-        st.plotly_chart(dark_chart(fig_fw), use_container_width=True)
+        fw_col1, fw_col2 = st.columns(2)
+        with fw_col1:
+            fig_fw = px.bar(pd.DataFrame({
+                "Signal":["KYB Submitted","KYB Complete","Revenue Known","Employees Known"],
+                "Count":[int(kyb_s),int(kyb_c),int(rev_k),int(emp_k)],
+                "Missing":[n-int(kyb_s),n-int(kyb_c),n-int(rev_k),n-int(emp_k)]}),
+                x="Signal", y=["Count","Missing"], barmode="stack",
+                color_discrete_map={"Count":"#22c55e","Missing":"#334155"},
+                title="Firmographic Coverage — Present vs Missing")
+            fig_fw.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_fw), use_container_width=True)
+
+        with fw_col2:
+            # Revenue distribution when available
+            if "revenue" in df.columns:
+                _rev_df = pd.to_numeric(df["revenue"], errors="coerce").dropna()
+                if not _rev_df.empty:
+                    fig_rev = px.histogram(_rev_df, nbins=20, title="Revenue Distribution ($)",
+                                          color_discrete_sequence=["#22c55e"], log_x=True)
+                    fig_rev.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+                    st.plotly_chart(dark_chart(fig_rev), use_container_width=True)
+                    _median_rev = _rev_df.median()
+                    st.caption(f"Median revenue: ${_median_rev:,.0f} · {len(_rev_df):,} businesses with revenue data")
+
+        # KYB completion gap analysis
+        st.markdown("**KYB Completion Gap Analysis**")
+        _kybc_gap = n - int(kybc_pass if 'kybc_pass' in dir() else kyb_c)
+        if _kybc_gap > 0:
+            st.markdown(f"""<div style="background:#1c1917;border-left:3px solid #f59e0b;border-radius:6px;padding:8px 14px;font-size:.80rem">
+              <span style="color:#fde68a;font-weight:700">⚠️ {_kybc_gap:,} businesses have not completed KYB</span>
+              <div style="color:#94A3B8;margin-top:4px">
+              kyb_complete=false means either (1) business_verified=false (entity not verified by Middesk) 
+              OR (2) screened_people is empty (PSC/Trulioo person screening not triggered). 
+              Check which condition applies for each business.
+              </div>
+            </div>""", unsafe_allow_html=True)
 
         detail_panel("🏢 Firmographic Coverage", f"{n:,} businesses",
             what_it_means=f"KYB completion and firmographic data availability for {cust_name}. Revenue and employee count come from ZoomInfo (pid=24) and Equifax (pid=17) bulk entity matching. Missing = vendor could not match the entity.",
@@ -3588,11 +3733,34 @@ def render_customer_risk(cust_name, cust_id, date_from, date_to):
         with c3: kpi("Adverse Media",            str(int(am_biz)), _pct_of(am_biz,n), "#f59e0b" if am_biz>0 else "#22c55e")
         with c4: kpi("Clean (No Hits)",          str(int(clean_biz)), _pct_of(clean_biz,n), "#22c55e")
 
-        fig_wl = px.histogram(wl_hits[wl_hits>0], nbins=20, title="Watchlist Hit Count Distribution (businesses with hits only)",
-                              color_discrete_sequence=["#ef4444"])
-        fig_wl.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
-        if wl_biz > 0: st.plotly_chart(dark_chart(fig_wl), use_container_width=True)
-        else: st.success("✅ No watchlist hits detected for any business in this portfolio.")
+        if wl_biz > 0:
+            wl_col1, wl_col2 = st.columns(2)
+            with wl_col1:
+                fig_wl = px.histogram(wl_hits[wl_hits>0], nbins=20, title="Watchlist Hit Count Distribution",
+                                      color_discrete_sequence=["#ef4444"])
+                fig_wl.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_wl), use_container_width=True)
+            with wl_col2:
+                # Watchlist trend over time
+                if "onboarded_date" in df.columns:
+                    _wlt = df.copy()
+                    _wlt["Has WL Hit"] = (pd.to_numeric(_wlt["watchlist_hits"], errors="coerce").fillna(0) > 0).map({True:"Has Hit",False:"Clean"})
+                    _wlt["onboarded_date"] = _wlt["onboarded_date"].astype(str)
+                    _wlg = _wlt.groupby(["onboarded_date","Has WL Hit"]).size().reset_index(name="Count")
+                    fig_wlt = px.bar(_wlg, x="onboarded_date", y="Count", color="Has WL Hit",
+                        color_discrete_map={"Has Hit":"#ef4444","Clean":"#22c55e"},
+                        barmode="stack", title="Watchlist Status by Onboarding Date")
+                    fig_wlt.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
+                    st.plotly_chart(dark_chart(fig_wlt), use_container_width=True)
+
+            # Businesses with watchlist hits — actionable table
+            st.markdown("**⚠️ Businesses with watchlist hits — require compliance review:**")
+            _wl_bids = df[pd.to_numeric(df["watchlist_hits"],errors="coerce").fillna(0)>0][["business_id","watchlist_hits"]].sort_values("watchlist_hits",ascending=False)
+            _wl_bids["watchlist_hits"] = pd.to_numeric(_wl_bids["watchlist_hits"],errors="coerce").astype(int)
+            st.dataframe(_wl_bids, use_container_width=True, hide_index=True)
+            st.caption(f"Each of these {len(_wl_bids):,} businesses has PEP or OFAC sanctions hits. Requires compliance team review before approval. Use the business picker above to investigate each one.")
+        else:
+            st.success("✅ No watchlist hits detected for any business in this portfolio.")
 
         detail_panel("🔍 Watchlist — Portfolio", f"Businesses with hits: {int(wl_biz):,}",
             what_it_means=f"PEP + OFAC sanctions screening results for {cust_name}. {int(wl_biz):,} businesses ({_pct_of(wl_biz,n)}) have ≥1 watchlist hit. Adverse media is tracked separately and excluded from the consolidated watchlist fact.",
@@ -3704,18 +3872,63 @@ def render_customer_worth_score(cust_name, cust_id, date_from, date_to):
             fig_dec.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
             st.plotly_chart(dark_chart(fig_dec), use_container_width=True)
 
-        # Risk level breakdown
-        if "risk_level" in ws_df.columns:
-            rl = ws_df["risk_level"].value_counts().reset_index()
-            rl.columns = ["Risk Level","Count"]
-            st.dataframe(rl, use_container_width=True, hide_index=True)
+        # Score trend over time
+        if "scored_at" in ws_df.columns:
+            st.markdown("**Score trend over time**")
+            _ws_t = ws_df.copy()
+            _ws_t["scored_date"] = pd.to_datetime(_ws_t["scored_at"],errors="coerce").dt.date.astype(str)
+            _ws_daily = _ws_t.groupby("scored_date")["weighted_score_850"].mean().reset_index()
+            _ws_daily.columns = ["date","avg_score"]
+            fig_ws_t = px.line(_ws_daily, x="date", y="avg_score",
+                title="Average Worth Score by Scoring Date",
+                color_discrete_sequence=["#3B82F6"], markers=True)
+            fig_ws_t.add_hline(y=700,line_dash="dash",line_color="#22c55e",annotation_text="APPROVE")
+            fig_ws_t.add_hline(y=550,line_dash="dash",line_color="#ef4444",annotation_text="DECLINE")
+            fig_ws_t.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_ws_t), use_container_width=True)
 
-        _ws_port_sql = f"SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision FROM rds_cases_public.rel_business_customer_monitoring rbcm JOIN rds_manual_score_public.data_current_scores cs ON cs.business_id=rbcm.business_id JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE 1=1{_cc}{_dc_from};"
-        detail_panel("💰 Worth Score Distribution — Portfolio", f"Avg: {avg_s:.0f} · {n:,} scored",
-            what_it_means=f"Worth Score distribution for {cust_name}. Score formula: probability × 550 + 300. Thresholds: APPROVE ≥700, FURTHER_REVIEW 550-699, DECLINE <550. Scores are computed by the 3-model ensemble (firmographic XGBoost + financial PyTorch + economic model).",
+        # Risk level breakdown + actionable tables
+        rl_col1, rl_col2 = st.columns(2)
+        with rl_col1:
+            if "risk_level" in ws_df.columns:
+                st.markdown("**Risk Level Breakdown**")
+                rl = ws_df["risk_level"].value_counts().reset_index()
+                rl.columns = ["Risk Level","Count"]
+                rl["Pct"] = (rl["Count"]/n*100).round(1).astype(str)+"%"
+                rl_color = {"HIGH":"#ef4444","MODERATE":"#f59e0b","LOW":"#22c55e"}
+                for _, rrow in rl.iterrows():
+                    _rc = rl_color.get(str(rrow["Risk Level"]),"#64748b")
+                    st.markdown(f"<div style='background:#1E293B;border-left:3px solid {_rc};border-radius:6px;padding:6px 12px;margin:3px 0'>"
+                        f"<span style='color:{_rc};font-weight:700'>{rrow['Risk Level']}</span>"
+                        f"<span style='color:#CBD5E1;margin-left:10px'>{rrow['Count']:,} businesses</span>"
+                        f"<span style='color:#64748b;font-size:.75rem;margin-left:8px'>({rrow['Pct']})</span></div>",
+                        unsafe_allow_html=True)
+        with rl_col2:
+            # Declined businesses — most actionable
+            _declined = ws_df[ws_df["score_decision"]=="DECLINE"][["business_id","weighted_score_850"]].sort_values("weighted_score_850") if "business_id" in ws_df.columns else pd.DataFrame()
+            if not _declined.empty:
+                st.markdown("**❌ DECLINE businesses — lowest scores:**")
+                st.dataframe(_declined.rename(columns={"weighted_score_850":"Score"}), use_container_width=True, hide_index=True)
+
+        _ws_port_sql = f"""
+SELECT cs.business_id, bs.weighted_score_850, bs.risk_level, bs.score_decision, bs.created_at
+FROM rds_cases_public.rel_business_customer_monitoring rbcm
+JOIN rds_manual_score_public.data_current_scores cs ON cs.business_id=rbcm.business_id
+JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+WHERE 1=1{_cc}{_dc_from}{_dc_to}
+ORDER BY bs.weighted_score_850 ASC;"""
+        detail_panel("💰 Worth Score Distribution — Portfolio", f"Avg: {avg_s:.0f} · Median: {med_s:.0f} · {n:,} scored",
+            what_it_means=(
+                f"Worth Score distribution for {cust_name}.\n\n"
+                f"**Formula:** probability × 550 + 300.\n"
+                f"**Thresholds:** APPROVE ≥700 · FURTHER_REVIEW 550-699 · DECLINE <550.\n"
+                f"**Model:** 3-model ensemble (Firmographic XGBoost + Financial PyTorch + Economic model).\n"
+                f"**Avg score:** {avg_s:.0f} · **Median:** {med_s:.0f}\n"
+                f"**APPROVE:** {int(app_n):,} ({_pct_of(app_n,n)}) · **REVIEW:** {int(rev_n):,} · **DECLINE:** {int(dec_n):,}"
+            ),
             source_table="rds_manual_score_public.data_current_scores JOIN business_scores",
             source_file="aiscore.py",
-            json_obj={"avg_score":round(avg_s,1),"median":round(float(med_s),1),"approve":int(app_n),"review":int(rev_n),"decline":int(dec_n),"total_scored":n},
+            json_obj={"avg":round(avg_s,1),"median":round(float(med_s),1),"approve":int(app_n),"review":int(rev_n),"decline":int(dec_n),"total":n},
             sql=_ws_port_sql, icon="💰", color="#22c55e")
 
     with cws2:
@@ -5808,7 +6021,7 @@ elif tab=="🏛️ Registry & Identity":
         _reg_bid = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="reg_bid")
         if _reg_bid:
             st.session_state["hub_bid"] = _reg_bid
-            st.session_state["hub_scope"] = "🏢 Single Business"
+            st.session_state["_pending_scope_switch"] = True
             st.rerun()
         st.stop()
     bid=st.session_state.get("hub_bid","")
@@ -6991,7 +7204,7 @@ elif tab=="🏭 Classification & KYB":
         _cls_bid = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="cls_bid")
         if _cls_bid:
             st.session_state["hub_bid"] = _cls_bid
-            st.session_state["hub_scope"] = "🏢 Single Business"
+            st.session_state["_pending_scope_switch"] = True
             st.rerun()
         st.stop()
     bid=st.session_state.get("hub_bid","")
@@ -7604,7 +7817,7 @@ elif tab=="⚠️ Risk & Watchlist":
         _rsk_bid = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="rsk_bid")
         if _rsk_bid:
             st.session_state["hub_bid"] = _rsk_bid
-            st.session_state["hub_scope"] = "🏢 Single Business"
+            st.session_state["_pending_scope_switch"] = True
             st.rerun()
         st.stop()
     bid=st.session_state.get("hub_bid","")
@@ -7985,7 +8198,7 @@ elif tab=="💰 Worth Score":
         _ws_bid = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="ws_bid")
         if _ws_bid:
             st.session_state["hub_bid"] = _ws_bid
-            st.session_state["hub_scope"] = "🏢 Single Business"
+            st.session_state["_pending_scope_switch"] = True
             st.rerun()
         st.stop()
     bid=st.session_state.get("hub_bid","")
@@ -9036,7 +9249,7 @@ elif tab=="🔍 Check-Agent":
         _ca_bid_pick = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="ca_bid_pick")
         if _ca_bid_pick:
             st.session_state["hub_bid"] = _ca_bid_pick
-            st.session_state["hub_scope"] = "🏢 Single Business"
+            st.session_state["_pending_scope_switch"] = True
             st.rerun()
         st.stop()
     bid = st.session_state.get("hub_bid","")
@@ -9775,7 +9988,7 @@ elif tab=="🤖 AI Agent":
         _ai_bid_pick = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="ai_bid_pick")
         if _ai_bid_pick:
             st.session_state["hub_bid"] = _ai_bid_pick
-            st.session_state["hub_scope"] = "🏢 Single Business"
+            st.session_state["_pending_scope_switch"] = True
             st.rerun()
         # Also show the general AI chat without specific business context
         st.markdown("---")
@@ -10598,7 +10811,30 @@ elif tab == "🧠 Intelligence Hub":
         )
 
         if not get_openai():
-            flag("OpenAI API key not configured — add OPENAI_API_KEY to .streamlit/secrets.toml.", "amber")
+            st.markdown("""<div style="background:#1c1917;border-left:4px solid #f59e0b;border-radius:8px;padding:14px 18px;margin:8px 0">
+              <div style="color:#fde68a;font-weight:700;font-size:.90rem">⚠️ OpenAI API key required for AI View Generator</div>
+              <div style="color:#CBD5E1;font-size:.82rem;margin-top:8px">
+                Set your key using <strong>one</strong> of these methods, then restart the app:
+              </div>
+              <div style="margin-top:10px">
+                <div style="color:#94A3B8;font-size:.76rem;margin-bottom:4px">Option A — Terminal (fastest, no file editing):</div>
+                <code style="background:#0f172a;color:#60A5FA;padding:6px 10px;border-radius:4px;display:block;font-size:.78rem">
+                  export OPENAI_API_KEY="sk-..."<br/>
+                  python3 -m streamlit run kyb_hub_app_v2.py
+                </code>
+              </div>
+              <div style="margin-top:10px">
+                <div style="color:#94A3B8;font-size:.76rem;margin-bottom:4px">Option B — secrets.toml (persists across restarts):</div>
+                <code style="background:#0f172a;color:#60A5FA;padding:6px 10px;border-radius:4px;display:block;font-size:.78rem">
+                  # In Admin-Portal-KYB-App/.streamlit/secrets.toml<br/>
+                  OPENAI_API_KEY = "sk-..."
+                </code>
+              </div>
+              <div style="color:#64748b;font-size:.74rem;margin-top:8px">
+                ⚠️ Note: keys starting with <code>sk-svcacct-</code> are service account keys that may expire.
+                If you get a 401 error, generate a fresh key at platform.openai.com/api-keys
+              </div>
+            </div>""", unsafe_allow_html=True)
         else:
             # Preset chips
             VIEW_PRESETS = [
