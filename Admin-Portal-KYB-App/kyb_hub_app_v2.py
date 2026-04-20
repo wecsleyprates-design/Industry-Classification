@@ -3692,9 +3692,7 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
     fig_sos_bar.update_layout(height=300, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
     st.plotly_chart(dark_chart(fig_sos_bar), use_container_width=True)
 
-    # Drilldown on the bar chart
-    _drilldown_table("sos_found",  "SOS Registry Found", _SOS_COLS)
-    _drilldown_table("no_sos",     "No SOS Found", _SOS_COLS)
+    # Note: drilldowns for sos_found and no_sos are already rendered after the KPI row above
     detail_panel("🏛️ SOS Registration Funnel",
         f"Domestic reg: {_domestic_sos_found:,} · State match: {_state_match:,} · No SOS: {_sos_not_found:,}",
         what_it_means=(
