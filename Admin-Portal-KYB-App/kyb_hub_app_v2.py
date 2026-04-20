@@ -209,34 +209,50 @@ hr.thin-sep { margin:0; border:none; border-top:1px solid #1E3A5F; }
   color:#F1F5F9 !important; min-height:34px !important;
 }
 
-/* ── Horizontal tab navigation ──────────────────────────────────────────── */
-.nav-wrap {
-  background:#0F172A; border-bottom:1px solid #1E3A5F;
-  padding:0 20px;
+/* ── Horizontal tab navigation — style radio as tab strip ───────────────── */
+/* Target the nav radio specifically via its label key */
+div[data-testid="stRadio"] > div[role="radiogroup"] {
+  display: flex !important;
+  gap: 0 !important;
+  flex-wrap: nowrap !important;
+  background: transparent !important;
+  border-bottom: 1px solid #1E3A5F;
+  padding: 0 4px;
+  overflow-x: auto;
 }
-/* Style the horizontal radio as a tab strip */
-div[data-testid="stHorizontalBlock"] div[role="radiogroup"] {
-  display:flex; gap:0; background:transparent; border:none;
+div[data-testid="stRadio"] > div[role="radiogroup"] > label {
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  background: transparent !important;
+  border: none !important;
+  border-bottom: 2px solid transparent !important;
+  border-radius: 0 !important;
+  color: #94A3B8 !important;
+  font-size: .83rem !important;
+  font-weight: 500 !important;
+  padding: 10px 14px !important;
+  margin: 0 !important;
+  cursor: pointer !important;
+  white-space: nowrap !important;
+  transition: color .15s, border-color .15s;
 }
-div[role="radiogroup"] label {
-  background:transparent !important; border:none !important;
-  border-bottom:2px solid transparent !important;
-  color:#94A3B8 !important; font-size:.82rem !important;
-  font-weight:500 !important; padding:10px 14px !important;
-  cursor:pointer; white-space:nowrap; border-radius:0 !important;
-  margin:0 !important; transition:all .15s;
+div[data-testid="stRadio"] > div[role="radiogroup"] > label:hover {
+  color: #F1F5F9 !important;
 }
-div[role="radiogroup"] label:hover { color:#F1F5F9 !important; }
-div[role="radiogroup"] label[data-baseweb="radio"]:has(input:checked),
-div[role="radiogroup"] label[aria-checked="true"] {
-  color:#60A5FA !important;
-  border-bottom:2px solid #3B82F6 !important;
-  background:linear-gradient(180deg,rgba(59,130,246,.08) 0%,transparent 100%) !important;
+/* Active tab */
+div[data-testid="stRadio"] > div[role="radiogroup"] > label:has(input:checked) {
+  color: #60A5FA !important;
+  border-bottom: 2px solid #3B82F6 !important;
+  background: linear-gradient(180deg,rgba(59,130,246,.08) 0%,transparent 100%) !important;
 }
-/* Hide the radio button circles */
-div[role="radiogroup"] [data-testid="stMarkdownContainer"],
-div[role="radiogroup"] div[class*="st-"] > span { display:none !important; }
-div[role="radiogroup"] input[type="radio"] { display:none !important; }
+/* Hide radio circles — keep only the text */
+div[data-testid="stRadio"] > div[role="radiogroup"] > label > div:first-child {
+  display: none !important;
+}
+div[data-testid="stRadio"] > div[role="radiogroup"] > label input[type="radio"] {
+  display: none !important;
+}
 
 /* ── KPI cards ──────────────────────────────────────────────────────────── */
 .kpi{background:#1E293B;border-radius:10px;padding:14px 18px;
@@ -3059,37 +3075,35 @@ st.session_state["hub_bid"] = hub_bid
 pass  # sidebar body placeholder
 
 # ── Row 2: Filter bar ─────────────────────────────────────────────────────────
-with st.container():
-    DATE_RANGE_OPTIONS = {"last_7d":"Last 7 days","last_30d":"Last 30 days",
-                          "last_90d":"Last 90 days","ytd":"Year to date","custom":"Custom…"}
-    DATE_CONTEXT_OPTIONS = {"submitted_at":"Submitted At","scored_at":"Scored At",
-                             "decision_at":"Decision At","activated_at":"Activation At"}
-    ENTITY_TYPES = ["ALL","Domestic","Foreign"]
-    BANDS = ["ALL","Very Low","Low","Medium","High","Very High"]
+# Compact: Date Range · Date Context · Customer · Business ID
+# No Manual Only / Apply / Reset buttons (user removed)
+DATE_RANGE_OPTIONS    = {"last_7d":"Last 7 days","last_30d":"Last 30 days",
+                         "last_90d":"Last 90 days","ytd":"Year to date","custom":"Custom…"}
+DATE_CONTEXT_OPTIONS  = {"submitted_at":"Submitted At","scored_at":"Scored At",
+                         "decision_at":"Decision At","activated_at":"Activation At"}
 
-    _fb1,_fb2,_fb3,_fb4,_fb5,_fb6,_fb7,_fb8,_fb9,_fb10 = st.columns(
-        [1.4, 1.3, 1.6, 1.6, 1.0, 1.1, 0.7, 0.8, 0.7, 0.7])
+with st.container():
+    _fb1, _fb2, _fb3, _fb4 = st.columns([1.4, 1.3, 2.0, 2.0])
     with _fb1:
         st.selectbox("Date Range", list(DATE_RANGE_OPTIONS.keys()),
-                     format_func=lambda k: DATE_RANGE_OPTIONS[k], key="fbar_date_range",
-                     label_visibility="visible")
+                     format_func=lambda k: DATE_RANGE_OPTIONS[k],
+                     key="fbar_date_range", label_visibility="visible")
     with _fb2:
         st.selectbox("Date Context", list(DATE_CONTEXT_OPTIONS.keys()),
-                     format_func=lambda k: DATE_CONTEXT_OPTIONS[k], key="fbar_date_ctx",
-                     label_visibility="visible")
+                     format_func=lambda k: DATE_CONTEXT_OPTIONS[k],
+                     key="fbar_date_ctx", label_visibility="visible")
     with _fb3:
-        # Customer dropdown scoped to date range
+        # Customer dropdown scoped to the active date window
         with st.spinner(""):
             cust_df, cust_err = load_customer_names(hub_date_from, hub_date_to)
-        cust_opts = ["All Customers"]
+        cust_opts   = ["All Customers"]
         cust_id_map = {"All Customers": None}
-        has_count = False
         if cust_df is not None and not cust_df.empty and "customer_name" in cust_df.columns:
-            has_count = "business_count" in cust_df.columns
+            _has_cnt = "business_count" in cust_df.columns
             for _, _cr in cust_df.sort_values("business_count", ascending=False).iterrows():
-                _nm = _cr.get("customer_name","")
+                _nm = str(_cr.get("customer_name","")).strip()
                 if _nm:
-                    _lbl = f"{_nm} ({int(_cr['business_count']):,} biz)" if has_count else _nm
+                    _lbl = f"{_nm} ({int(_cr['business_count']):,} biz)" if _has_cnt else _nm
                     cust_opts.append(_lbl)
                     cust_id_map[_lbl] = _cr["customer_id"]
         selected_cust = st.selectbox("Customer", cust_opts, key="hub_customer",
@@ -3097,60 +3111,27 @@ with st.container():
                                      help="Filters Home dashboard to this customer's businesses")
         hub_customer_id = cust_id_map.get(selected_cust)
     with _fb4:
-        # Business ID (linked to customer + date)
-        bid_list_fb = _load_customer_bids(hub_customer_id, hub_date_from, hub_date_to) if hub_customer_id else []
-        if bid_list_fb:
-            _bid_opts = [""] + bid_list_fb
-            _cur_bid = st.session_state.get("hub_bid","")
-            if _cur_bid not in _bid_opts: _cur_bid = ""
-            st.selectbox("Business ID", _bid_opts, index=_bid_opts.index(_cur_bid),
-                         format_func=lambda v: v or "— all businesses —",
-                         key="hub_bid", label_visibility="visible",
-                         help="Select a specific business to investigate in entity tabs")
-        else:
-            st.text_input("Business ID", key="hub_bid", label_visibility="visible",
-                          placeholder="bus_… (UUID)", help="Paste a business UUID")
-    with _fb5:
-        st.selectbox("Entity Type", ENTITY_TYPES, key="fbar_entity_type",
-                     label_visibility="visible")
-    with _fb6:
-        st.selectbox("Confidence Band", BANDS, key="fbar_conf_band",
-                     label_visibility="visible")
-    with _fb7:
-        st.markdown("<div style='padding-top:20px'>", unsafe_allow_html=True)
-        st.checkbox("Manual only", key="fbar_manual_only")
-        st.markdown("</div>", unsafe_allow_html=True)
-    with _fb8:
-        # Global search
-        st.text_input("", key="global_search_top",
-                      placeholder="🔍 Find in app…", label_visibility="collapsed")
-        _search_q = st.session_state.get("global_search_top","")
-    with _fb9:
-        st.markdown("<div style='padding-top:20px'>", unsafe_allow_html=True)
-        if st.button("✓ Apply", type="primary", use_container_width=True,
-                     help="Apply filters and refresh"):
-            st.cache_data.clear(); st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-    with _fb10:
-        st.markdown("<div style='padding-top:20px'>", unsafe_allow_html=True)
-        if st.button("↺ Reset", use_container_width=True, help="Reset all filters"):
-            for _k in ["fbar_date_range","fbar_date_ctx","hub_customer","hub_bid",
-                       "fbar_entity_type","fbar_conf_band","fbar_manual_only",
-                       "hub_dfrom","hub_dto","hub_use_dates","global_search_top"]:
-                st.session_state.pop(_k, None)
-            st.cache_data.clear(); st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
+        # Apply any pending bid from the Home tab "Investigate →" button
+        if st.session_state.get("_pending_bid"):
+            st.session_state["hub_bid"] = st.session_state.pop("_pending_bid")
+        # Business ID — free-text only (avoids widget key conflict with dropdown)
+        st.text_input("Business ID", key="hub_bid",
+                      label_visibility="visible",
+                      placeholder="Paste UUID (bus_…)",
+                      help="Paste a Business UUID to investigate in entity tabs")
 
-    # Custom date pickers shown inline when "Custom…" selected
+    # Custom date pickers — shown inline below filter bar when "Custom…" selected
     if st.session_state.get("fbar_date_range") == "custom":
         _today = datetime.now(timezone.utc).date()
-        _dcc1, _dcc2, _rest_ = st.columns([1.4,1.4,7.2])
-        with _dcc1:
-            st.date_input("From", value=st.session_state.get("hub_dfrom_date",_today-pd.Timedelta(days=30)),
-                          max_value=_today, key="hub_dfrom_date")
-        with _dcc2:
-            st.date_input("To", value=st.session_state.get("hub_dto_date",_today),
-                          max_value=_today, key="hub_dto_date")
+        _dc1, _dc2, _rest_ = st.columns([1.4, 1.4, 5.2])
+        with _dc1:
+            st.date_input("From",
+                value=st.session_state.get("hub_dfrom_date", _today - pd.Timedelta(days=30)),
+                max_value=_today, key="hub_dfrom_date")
+        with _dc2:
+            st.date_input("To",
+                value=st.session_state.get("hub_dto_date", _today),
+                max_value=_today, key="hub_dto_date")
 
 st.markdown("<hr class='thin-sep'/>", unsafe_allow_html=True)
 
@@ -3161,16 +3142,21 @@ ALL_TABS = [
     "🔍 Check-Agent","🤖 AI Agent",
     "🌳 Lineage & Discovery","🧠 Intelligence Hub",
 ]
-tab = st.radio("", ALL_TABS, horizontal=True, key="tab_nav",
+tab = st.radio("nav", ALL_TABS, horizontal=True, key="tab_nav",
                label_visibility="collapsed")
 
-# Active filter summary (thin caption line)
-_dr_label = DATE_RANGE_OPTIONS.get(st.session_state.get("fbar_date_range","last_30d"),"Last 30 days")
-_cust_lbl = selected_cust if selected_cust != "All Customers" else "All customers"
-_bid_shown = st.session_state.get("hub_bid","")
-_bid_lbl   = f" · Business: `{_bid_shown[:20]}…`" if _bid_shown else ""
-st.caption(f"📅 {_dr_label} ({DATE_CONTEXT_OPTIONS.get(st.session_state.get('fbar_date_ctx','scored_at'),'Scored At')}) · 👤 {_cust_lbl}{_bid_lbl}")
+# Thin active-filter summary line
+_dr_label  = DATE_RANGE_OPTIONS.get(st.session_state.get("fbar_date_range","last_30d"),"Last 30 days")
+_cust_lbl  = selected_cust if selected_cust != "All Customers" else "All customers"
+_bid_shown = str(st.session_state.get("hub_bid","")).strip()
+_bid_lbl   = f" · Business: `{_bid_shown[:28]}…`" if len(_bid_shown)>28 else (f" · Business: `{_bid_shown}`" if _bid_shown else "")
+st.caption(
+    f"📅 **{_dr_label}** "
+    f"({DATE_CONTEXT_OPTIONS.get(st.session_state.get('fbar_date_ctx','scored_at'),'Scored At')}) "
+    f"· 👤 {_cust_lbl}{_bid_lbl}"
+)
 st.markdown("<hr class='thin-sep'/>", unsafe_allow_html=True)
+_search_q = ""  # search bar removed from filter bar
 
 # ════════════════════════════════════════════════════════════════════════════════
 # HOME — Live Dashboard
@@ -4884,8 +4870,11 @@ Complete data gap. Entity existence AND firmographic data both unverified — hi
         with col_btn:
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("Investigate →", key=f"inv_{bid_check}", use_container_width=True):
-                st.session_state["hub_bid"] = bid_check
-                st.success(f"UUID set. Navigate to any section in the sidebar.")
+                # Cannot write to hub_bid directly (text_input widget owns that key).
+                # Store in a staging key; the text_input will read it as its default
+                # on the next rerun via the value= parameter workaround.
+                st.session_state["_pending_bid"] = bid_check
+                st.rerun()
 
     st.markdown("---")
 
