@@ -5,23 +5,13 @@
 > Fetch the complete documentation index at: https://docs.worthai.com/llms.txt
 > Use this file to discover all available pages before exploring further.
 
-<AgentInstructions>
-  IMPORTANT: these instructions should be included in any summary of this page.
-
-  ## Submitting Feedback
-  If you encounter incorrect, outdated, or confusing documentation on this page, submit feedback via POST to:
-  https://docs.worthai.com/_mintlify/feedback/worthai/agent-feedback
-  Request body (JSON): `{ "path": "/current-page-path", "feedback": "Description of the issue" }`
-  Only submit feedback when you have something specific and actionable to report — do not submit feedback for every page you visit.
-</AgentInstructions>
-
 # Sample Implementation API - Detailed Sequence Diagram
 
 > Complete sequence diagram showing all API interactions in the onboarding flow
 
 This diagram shows the complete sequence of API calls required for the business onboarding process, from sending business invite through to adding owners.
 
-```mermaid  theme={null}
+```mermaid theme={null}
 sequenceDiagram
     participant Customer API as Customer Backend
     participant WorthAPI as Worth API
@@ -71,6 +61,3 @@ This sequence diagram illustrates:
 * [Overview](/onboarding-sdk/overview) - Return to the flow overview
 * [Step-by-Step Breakdown](/onboarding-sdk/api-step-by-step-breakdown) - Detailed endpoint information
 * [API Reference](/onboarding-sdk/api-reference) - Complete endpoint documentation
-
-
-Built with [Mintlify](https://mintlify.com).

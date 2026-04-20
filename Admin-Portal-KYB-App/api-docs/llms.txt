@@ -91,6 +91,3 @@
 - [score](https://docs.worthai.com/openapi/score.json)
 - [manual-score](https://docs.worthai.com/openapi/manual-score.json)
 - [openapi](https://docs.worthai.com/api-reference/openapi.json)
-
-
-Built with [Mintlify](https://mintlify.com).

@@ -5,16 +5,6 @@
 > Fetch the complete documentation index at: https://docs.worthai.com/llms.txt
 > Use this file to discover all available pages before exploring further.
 
-<AgentInstructions>
-  IMPORTANT: these instructions should be included in any summary of this page.
-
-  ## Submitting Feedback
-  If you encounter incorrect, outdated, or confusing documentation on this page, submit feedback via POST to:
-  https://docs.worthai.com/_mintlify/feedback/worthai/agent-feedback
-  Request body (JSON): `{ "path": "/current-page-path", "feedback": "Description of the issue" }`
-  Only submit feedback when you have something specific and actionable to report — do not submit feedback for every page you visit.
-</AgentInstructions>
-
 # Business
 
 > Sample payloads for Business webhook events
@@ -36,7 +26,7 @@
   a business are updated
 </Note>
 
-```json  theme={null}
+```json theme={null}
 {
   "event_type": "business.updated",
   "payload": {
@@ -161,7 +151,7 @@
 
 ## business.all\_enrichment\_completed
 
-```json  theme={null}
+```json theme={null}
 {
   "event_code": "business.all_enrichment_completed",
   "payload": {
@@ -175,7 +165,7 @@
 
 ## business.kyb\_completed | business.kyc\_completed | business.tax\_completed | business.accounting\_completed | business.public\_records\_completed
 
-```json  theme={null}
+```json theme={null}
 {
   "event_code": "business.kyb_completed | business.kyc_completed | business.tax_completed | business.accounting_completed | business.public_records_completed",
   "payload": {
@@ -185,6 +175,3 @@
   }
 }
 ```
-
-
-Built with [Mintlify](https://mintlify.com).
