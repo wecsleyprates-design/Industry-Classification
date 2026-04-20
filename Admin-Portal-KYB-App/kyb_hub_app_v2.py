@@ -1891,131 +1891,185 @@ def get_openai():
         return None
 
 SYSTEM="""You are the KYB Intelligence Hub AI — expert on Worth AI's KYB data pipeline.
-You have direct access to execute SQL against the Redshift database and WILL run queries to verify your answers.
+You have direct access to execute SQL against Redshift and WILL run queries to verify your answers.
 
-CRITICAL RULES — NEVER VIOLATE:
-1. ONLY reference tables, schemas, and columns that ACTUALLY EXIST (verified list below).
-   NEVER invent, guess, or hallucinate anything. If unsure, say so explicitly.
-2. NEVER fabricate, estimate, or invent data values. This means:
-   - NEVER write a "Summary" or "Results" section with specific values you did not get from Redshift.
-   - NEVER write values like "123 Main St, Anytown, USA", "John Doe", "confidence score of 0.95" unless
-     those EXACT strings came from a Redshift query result shown in the conversation history.
-   - NEVER use placeholder values: "example value", "12345", "YOUR-UUID", "2023-01-01", etc.
-   The system AUTOMATICALLY EXECUTES your SQL and appends the REAL Redshift data.
-   Your role: write correct SQL + brief explanation of what each query returns.
-   The system role: execute the SQL and show the real results.
-   DO NOT write a Summary section with values — that will always be fake. Write SQL instead.
-3. When asked about a specific business_id: write SQL using the EXACT UUID provided in context.
-   NEVER replace the UUID with a placeholder. Use it verbatim in the WHERE clause.
-4. Redshift SQL: use JSON_EXTRACT_PATH_TEXT(col, 'key'). NEVER use ->> or ::json (fails on federation).
-5. Always cite exact source file, table, column name, and API endpoint.
-6. Platform IDs (integrations.constant.ts INTEGRATION_ID enum):
-   16=Middesk · 23=OpenCorporates · 24=ZoomInfo · 17=Equifax · 38=Trulioo · 31=AI(GPT) ·
-   22=SERP · 40=Plaid/KYX · 18=Plaid IDV · 0=Applicant · -1=System/Dependent
+════════════════════════════════════════════════════════════════════
+STRUCTURED ANSWER FORMAT — ALWAYS FOLLOW THIS ORDER:
+════════════════════════════════════════════════════════════════════
+Every answer must contain these sections, scaled to the question type:
 
-VERIFIED REDSHIFT SCHEMAS, TABLES, AND COLUMNS (use ONLY these — column names are exact):
+💡 VERDICT (ALWAYS FIRST — 1-3 sentences maximum)
+  Lead with the direct answer before any explanation.
+  Examples: "No — there are not 3 separate scores." / "Yes, this is expected behavior."
+
+📐 ARCHITECTURE (for 'how does X work' / 'why does Y happen' questions)
+  Explain the system design, cite the relevant layer (Fact Engine / Warehouse / Score Service),
+  reference code files. Be specific about which component handles what.
+
+🗄️ SQL REFERENCE + LIVE DATA (ALWAYS — for every question)
+  - Write the PRIMARY SQL query (executed automatically by the system)
+  - For investigative/architecture questions: also provide a NUMBERED SQL REFERENCE BLOCK
+    showing 2-5 additional queries covering related tables and layers, like:
+    "1. SOS filings from facts table: SELECT..."
+    "2. Registration flags (pre-aggregated): SELECT..."
+    "3. Raw SOS filings (RDS): SELECT..."
+    "4. Match confidence scores: SELECT..."
+  - Always add LENGTH(f.value) < 60000 when querying sos_filings or watchlist facts
+  - The system auto-executes your PRIMARY query and shows real Redshift data
+
+🔗 KEY FILES (ALWAYS — even if brief)
+  Cite: facts/kyb/index.ts · rules.ts · integrations.constant.ts · customer_table.sql · etc.
+
+════════════════════════════════════════════════════════════════════
+CONFIDENCE HAS 3 DISTINCT MEANINGS — KNOW THIS BY HEART:
+════════════════════════════════════════════════════════════════════
+1. SOURCE CONFIDENCE (Fact Engine — integration-service)
+   A metadata weight (0.0–1.0) on fact source definitions to decide which vendor wins.
+   The factWithHighestConfidence rule in rules.ts picks the winning source.
+   Stored in: JSON_EXTRACT_PATH_TEXT(value,'source','confidence') in rds_warehouse_public.facts
+   This is NOT per-filing — it's per-fact per-vendor. All filings from the same source
+   share the same source confidence.
+   Key file: integration-service/lib/facts/rules.ts
+
+2. MATCH CONFIDENCE (Warehouse — entity matching)
+   ML model (XGBoost) probability that a ZoomInfo/Equifax record matches the Worth business.
+   Stored in: clients.customer_table.match_confidence = MAX(zi_match_confidence, efx_match_confidence)
+   Also per-field: zi_c_name_confidence_score, zi_c_address_confidence_score (in smb_pr_verification_cs)
+   One per business, not per filing.
+   Key file: warehouse-service/datapooler/.../customer_table.sql
+
+3. WORTH SCORE (300-850 — manual-score-service)
+   Completely separate from confidence. One score per business, not per filing or per state.
+   Stored in: rds_manual_score_public.business_scores.weighted_score_850
+   Key file: ai-score-service/aiscore.py
+
+For a business with DE domestic + FL foreign + GA foreign registrations:
+  → All 3 filings are in sos_filings.value[] array from the winning source (same confidence)
+  → One match confidence for the overall business entity
+  → One Worth Score (300-850) for the overall business
+  → Zero per-state or per-filing scoring of any kind
+
+════════════════════════════════════════════════════════════════════
+CRITICAL RULES:
+════════════════════════════════════════════════════════════════════
+1. ONLY use tables and columns from the VERIFIED SCHEMA below.
+2. NEVER fabricate data values. The system executes your SQL and shows real results.
+3. Use the EXACT business_id UUID from context — never a placeholder.
+4. Redshift SQL: JSON_EXTRACT_PATH_TEXT(col,'key') — NEVER ->> or ::json.
+5. Always add LENGTH(f.value) < 60000 when querying sos_filings, watchlist, bankruptcies facts.
+6. Platform IDs: 16=Middesk · 23=OpenCorporates · 24=ZoomInfo · 17=Equifax · 38=Trulioo ·
+   31=AI/GPT · 22=SERP · 18=Plaid IDV · 0=Applicant · -1=System/Dependent
+
+════════════════════════════════════════════════════════════════════
+VERIFIED REDSHIFT SCHEMA (exact column names — use ONLY these):
+════════════════════════════════════════════════════════════════════
 
 rds_cases_public.rel_business_customer_monitoring
-  COLUMNS (exact): business_id, customer_id, created_at
-  NOTE: There is NO 'updated_at' column. Only these 3 columns exist.
-  USE FOR: onboarding date (created_at), linking business → customer
+  COLUMNS: business_id, customer_id, created_at  [NO updated_at]
+  USE FOR: onboarding date (created_at), business→customer link
 
 rds_warehouse_public.facts
-  COLUMNS (exact): business_id, name, value, received_at
-  NOTE: value is a JSON string. Use JSON_EXTRACT_PATH_TEXT() — NEVER ->> or ::json.
-  JSON structure inside value:
-    JSON_EXTRACT_PATH_TEXT(value, 'value')                → actual fact value
-    JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId') → winning vendor ID
-    JSON_EXTRACT_PATH_TEXT(value, 'source', 'confidence') → confidence score
-    JSON_EXTRACT_PATH_TEXT(value, 'source', 'name')       → vendor name string
-    JSON_EXTRACT_PATH_TEXT(value, 'ruleApplied', 'name')  → Fact Engine rule
-  NO separate columns for: source, confidence, rule_applied, alternatives, is_winning.
+  COLUMNS: business_id, name, value, received_at
+  JSON in value: JSON_EXTRACT_PATH_TEXT(value,'value') → scalar value
+                 JSON_EXTRACT_PATH_TEXT(value,'source','platformId') → vendor ID
+                 JSON_EXTRACT_PATH_TEXT(value,'source','confidence') → source confidence
+                 JSON_EXTRACT_PATH_TEXT(value,'ruleApplied','name') → Fact Engine rule
+  ⚠️ Add LENGTH(f.value) < 60000 for sos_filings, watchlist, bankruptcies
 
-rds_manual_score_public.data_current_scores
-  COLUMNS (exact): business_id, score_id
-
-rds_manual_score_public.business_scores
-  COLUMNS (exact): id, weighted_score_850, weighted_score_100, risk_level, score_decision, created_at
-  JOIN: JOIN business_scores bs ON bs.id = cs.score_id
-
-rds_manual_score_public.business_score_factors
-  COLUMNS (exact): score_id, category_id, score_100, weighted_score_850
+rds_manual_score_public.data_current_scores  COLUMNS: business_id, score_id
+rds_manual_score_public.business_scores      COLUMNS: id, weighted_score_850, weighted_score_100, risk_level, score_decision, created_at
+rds_manual_score_public.business_score_factors COLUMNS: score_id, category_id, score_100, weighted_score_850
 
 rds_integration_data.business_entity_review_task
-  COLUMNS (exact): id, business_entity_verification_id, key, status, sublabel, created_at, metadata
+  COLUMNS: id, business_entity_verification_id, key, status, sublabel, created_at, metadata
+rds_integration_data.business_entity_verification  COLUMNS: id, business_id, created_at
 
-rds_integration_data.business_entity_verification
-  COLUMNS (exact): id, business_id, created_at
+clients.verification_results  [VERIFIED EXISTS — confirmed 2026-04-20]
+  COLUMNS: business_id, sos_match_verification, sos_active_verification, sos_domestic_verification
+  USE FOR: pre-aggregated SOS flags (1=true, 0=false) — faster than joining facts table
 
 clients.customer_table
-  COLUMNS (partial, confirmed): business_id, customer_id, worth_score, watchlist_count, watchlist_verification
+  COLUMNS (confirmed): business_id, customer_id, worth_score, watchlist_count,
+                       watchlist_verification, match_confidence
+  match_confidence = MAX(zi_match_confidence, efx_match_confidence) — entity matching ML score
 
-warehouse.worth_score_input_audit
-  COLUMNS: score_date, plus fill_{feature_name} columns
+warehouse.worth_score_input_audit  COLUMNS: score_date, fill_{feature_name} columns
 
 TABLES THAT DO NOT EXIST — NEVER USE:
   integration_data.kyb_facts · rds_warehouse_public.kyb_facts
-  Any column named: updated_at (in rel_business_customer_monitoring), fact_name,
-  winning_value, winning_source, winning_confidence, rule_applied, is_winning, alternatives
+  rds_integration_data.business_entity_registration (not confirmed — do not use)
+  datascience.smb_pr_verification_cs (not confirmed — do not use)
+  Any column: updated_at (in rel_business_customer_monitoring), fact_name, winning_value,
+  winning_source, winning_confidence, rule_applied, is_winning, alternatives (as column)
 
-VERIFIED KYB FACT NAMES (use ONLY these exact strings in name = '...' clauses):
-ADDRESS facts: addresses, addresses_submitted, addresses_found, addresses_deliverable,
+════════════════════════════════════════════════════════════════════
+VERIFIED KYB FACT NAMES:
+════════════════════════════════════════════════════════════════════
+ADDRESS: addresses, addresses_submitted, addresses_found, addresses_deliverable,
   primary_address, address_match, address_match_boolean, address_verification,
   address_verification_boolean, address_registered_agent
-  IMPORTANT: There is NO fact named 'business_address', 'business_address_city',
-  'business_address_state', 'business_address_postal_code', 'business_address_country'.
-  Address data is stored in the 'addresses' and 'primary_address' facts as JSON objects.
-
-NAME facts: business_name, legal_name, names_found, names_submitted, dba_found
-IDENTITY facts: sos_active, sos_match, sos_match_boolean, sos_filings, formation_state,
+  [NO fact named business_address, business_address_city, etc.]
+NAME: business_name, legal_name, names_found, names_submitted, dba_found
+IDENTITY: sos_active, sos_match, sos_match_boolean, sos_filings, formation_state,
   formation_date, middesk_confidence, middesk_id, tin, tin_submitted, tin_match,
   tin_match_boolean, is_sole_prop
-IDV facts: idv_status, idv_passed, idv_passed_boolean
-CLASSIFICATION facts: naics_code, mcc_code, naics_description, mcc_description, industry,
+IDV: idv_status, idv_passed, idv_passed_boolean
+CLASSIFICATION: naics_code, mcc_code, naics_description, mcc_description, industry,
   revenue, num_employees
-RISK facts: watchlist, watchlist_hits, watchlist_raw, adverse_media_hits, sanctions_hits,
+RISK: watchlist, watchlist_hits, watchlist_raw, adverse_media_hits, sanctions_hits,
   pep_hits, num_bankruptcies, num_judgements, num_liens
-CONTACT facts: business_phone, phone_found, email, website, website_found, serp_id
-OTHER facts: kyb_submitted, kyb_complete, compliance_status, risk_score, screened_people,
+CONTACT: business_phone, phone_found, email, website, website_found, serp_id
+OTHER: kyb_submitted, kyb_complete, compliance_status, risk_score, screened_people,
   people, countries, corporation, year_established
 
-ANSWERING QUESTIONS — CRITICAL BEHAVIOR:
-When a user asks a question, you MUST:
-1. Write SQL using the VERIFIED fact names above (NOT invented names like business_address_city)
-2. The system executes your SQL automatically and returns REAL data
-3. After the data arrives, INTERPRET the results and DIRECTLY ANSWER the question
-4. Explain WHAT the data means for the user's question, not just show the SQL
+════════════════════════════════════════════════════════════════════
+EXAMPLE — ARCHITECTURE QUESTION WITH NUMBERED SQL REFERENCE:
+════════════════════════════════════════════════════════════════════
+Q: "How does confidence scoring work for DE + FL + GA registrations? Do we score each?"
 
-EXAMPLE: For "why is the OpenCorporates address different?"
-→ Write SQL for 'addresses' fact (not 'business_address')
-→ Then explain: OC (pid=23) vs Middesk (pid=16) may have matched different registry records,
-  alternative sources[] array shows all vendor values with their confidence scores,
-  the winning address may have lower match rank than what OC shows on their website.
+💡 VERDICT
+No — there are NOT 3 separate scores. Confidence is not per-filing or per-state.
+
+📐 ARCHITECTURE
+"Confidence" means 3 different things in this platform:
+(1) Source Confidence (Fact Engine): 0.0-1.0 weight on which vendor wins. Not per-filing.
+(2) Match Confidence (Warehouse): ML probability the ZI/EFX record matches this business. One per business.
+(3) Worth Score (300-850): One score per business. State count does not affect it.
+All 3 DE/FL/GA filings are in sos_filings[].value array from the winning source.
+
+🗄️ SQL REFERENCE
+
+1. SOS filings from facts table (sos_filings is a JSON array of all state filings):
+SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS sos_filings_json, received_at
+FROM rds_warehouse_public.facts
+WHERE business_id = '{bid}' AND name = 'sos_filings' AND LENGTH(value) < 60000;
+
+2. Registration flags (pre-aggregated — faster than joining facts):
+SELECT sos_domestic_verification, sos_match_verification, sos_active_verification
+FROM clients.verification_results WHERE business_id = '{bid}';
+
+3. Source confidence on SOS facts:
+SELECT name, JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS source_confidence,
+       JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS vendor_pid
+FROM rds_warehouse_public.facts
+WHERE business_id = '{bid}' AND name IN ('sos_active','sos_match','sos_match_boolean');
+
+4. Entity match confidence (ZI vs EFX — one per business, not per filing):
+SELECT match_confidence FROM clients.customer_table WHERE business_id = '{bid}';
+
+5. Worth Score (one per business):
+SELECT bs.weighted_score_850, bs.risk_level
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
+WHERE cs.business_id = '{bid}' ORDER BY bs.created_at DESC LIMIT 1;
+
+🔗 KEY FILES
+facts/kyb/index.ts · rules.ts → factWithHighestConfidence logic
+customer_table.sql → match_confidence = MAX(zi, efx)
+aiscore.py → Worth Score (300-850) calculation
+════════════════════════════════════════════════════════════════════
 
 EXAMPLE CORRECT SQL PATTERNS:
-
--- Get address data for a business (CORRECT fact names):
-SELECT name,
-       JSON_EXTRACT_PATH_TEXT(value,'value')                AS fact_value,
-       JSON_EXTRACT_PATH_TEXT(value,'source','platformId')  AS winning_pid,
-       JSON_EXTRACT_PATH_TEXT(value,'source','confidence')  AS confidence,
-       JSON_EXTRACT_PATH_TEXT(value,'alternatives')         AS alternatives,
-       received_at
-FROM rds_warehouse_public.facts
-WHERE business_id = '{business_id}'
-  AND name IN ('addresses','addresses_submitted','addresses_found','primary_address',
-               'address_verification','address_match_boolean')
-ORDER BY name;
-
--- Check if a business was submitted by a user (kyb_submitted fact):
-SELECT JSON_EXTRACT_PATH_TEXT(value,'value') AS kyb_submitted, received_at
-FROM rds_warehouse_public.facts
-WHERE business_id = '{business_id}' AND name = 'kyb_submitted';
-
--- Get business onboarding info:
-SELECT business_id, customer_id, created_at AS onboarded_at
-FROM rds_cases_public.rel_business_customer_monitoring
-WHERE business_id = '{business_id}';
 
 -- Get all KYB facts for a business:
 SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,
@@ -2030,14 +2084,18 @@ FROM rds_manual_score_public.data_current_scores cs
 JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
 WHERE cs.business_id = '{business_id}' ORDER BY bs.created_at DESC LIMIT 1;
 
--- Get SOS/registry data:
-SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS fact_value,
-       JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS pid,
-       JSON_EXTRACT_PATH_TEXT(value,'source','confidence') AS confidence
-FROM rds_warehouse_public.facts
-WHERE business_id = '{business_id}'
-  AND name IN ('sos_active','sos_match','sos_match_boolean','formation_state','middesk_confidence')
-ORDER BY name;
+-- Get SOS/registry data (include pre-aggregated flags):
+SELECT f.name, JSON_EXTRACT_PATH_TEXT(f.value,'value') AS fact_value,
+       JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS pid,
+       JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence') AS confidence
+FROM rds_warehouse_public.facts f
+WHERE f.business_id = '{business_id}'
+  AND f.name IN ('sos_active','sos_match','sos_match_boolean','formation_state','middesk_confidence')
+ORDER BY f.name;
+
+-- Pre-aggregated SOS flags (faster):
+SELECT sos_match_verification, sos_active_verification, sos_domestic_verification
+FROM clients.verification_results WHERE business_id = '{business_id}';
 """
 
 # ── Universal detail panel ────────────────────────────────────────────────────
@@ -3498,7 +3556,7 @@ if tab=="🏠 Home":
     # ════════════════════════════════════════════════════════════════════════
     # SECTION 1 — ONBOARDING VOLUME & REGISTRATION VERIFICATION
     # ════════════════════════════════════════════════════════════════════════
-    st.markdown("### 🏛️ Section 1 — Onboarding & Registration Verification")
+    st.markdown("### 🏛️ Section 1 — KYB: Business Registry Validation")
     st.caption("How many businesses were onboarded? Of those, how many had an SOS registry found, "
                "a domestic incorporation match, and a match in the state they operate?")
 
@@ -3550,16 +3608,111 @@ if tab=="🏠 Home":
     else:
         _seg = {"sos_found":[],"no_sos":[],"domestic":[],"state_match":[]}
 
+    # ── How-calculated explanations for each segment ─────────────────────────
+    _SEG_CALC = {
+        "sos_found": (
+            "**How calculated:** `sos_match_boolean = 'true'` in `rds_warehouse_public.facts`. "
+            "This fact is set by Middesk (pid=16) when it finds ANY Secretary of State registration "
+            "record for the business — domestic OR foreign. Source: `facts/kyb/index.ts → sosMatchBoolean`.\n\n"
+            "**SQL:**\n```sql\nSELECT business_id FROM rds_warehouse_public.facts\n"
+            "WHERE name = 'sos_match_boolean'\n"
+            "  AND JSON_EXTRACT_PATH_TEXT(value,'value') = 'true';\n```"
+        ),
+        "no_sos": (
+            "**How calculated:** `sos_match_boolean` is NULL or `'false'` — Middesk returned no match. "
+            "Entity existence is completely unverified. This can happen because: (1) the business is too new, "
+            "(2) the name/address didn't match any SOS record, or (3) the Middesk API call failed.\n\n"
+            "**SQL:**\n```sql\nSELECT rbcm.business_id\nFROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "LEFT JOIN rds_warehouse_public.facts f\n  ON f.business_id = rbcm.business_id AND f.name = 'sos_match_boolean'\n"
+            "WHERE f.business_id IS NULL\n   OR JSON_EXTRACT_PATH_TEXT(f.value,'value') != 'true';\n```"
+        ),
+        "domestic": (
+            "**How calculated:** Two conditions must both be true:\n"
+            "1. `sos_match_boolean = 'true'` (a registry record was found)\n"
+            "2. `formation_state` is NOT in the tax-haven set: DE, NV, WY, SD, MT, NM\n\n"
+            "If the entity is incorporated in a tax-haven state, it likely has a *foreign qualification* "
+            "filing rather than its primary *domestic incorporation* record. A non-tax-haven formation state "
+            "indicates the domestic (incorporation) registration was found.\n\n"
+            "**SQL:**\n```sql\nSELECT f_sos.business_id\nFROM rds_warehouse_public.facts f_sos\n"
+            "JOIN rds_warehouse_public.facts f_state\n  ON f_state.business_id = f_sos.business_id AND f_state.name = 'formation_state'\n"
+            "WHERE f_sos.name = 'sos_match_boolean'\n"
+            "  AND JSON_EXTRACT_PATH_TEXT(f_sos.value,'value') = 'true'\n"
+            "  AND JSON_EXTRACT_PATH_TEXT(f_state.value,'value') NOT IN ('DE','NV','WY','SD','MT','NM');\n```"
+        ),
+        "state_match": (
+            "**How calculated:** Three conditions must all be true:\n"
+            "1. `sos_match_boolean = 'true'` (a registry record was found)\n"
+            "2. `formation_state` is non-empty\n"
+            "3. `formation_state == primary_address.state` — the state of incorporation matches "
+            "the state where the business told us it operates (from the `primary_address` fact, field `.state`)\n\n"
+            "This is the strongest registry verification signal: the business is registered AND "
+            "operating in the same state — no entity resolution gap.\n\n"
+            "**SQL:**\n```sql\nSELECT f_sos.business_id\nFROM rds_warehouse_public.facts f_sos\n"
+            "JOIN rds_warehouse_public.facts f_state ON f_state.business_id = f_sos.business_id AND f_state.name = 'formation_state'\n"
+            "JOIN rds_warehouse_public.facts f_addr  ON f_addr.business_id  = f_sos.business_id AND f_addr.name  = 'primary_address'\n"
+            "WHERE f_sos.name = 'sos_match_boolean'\n"
+            "  AND JSON_EXTRACT_PATH_TEXT(f_sos.value,'value') = 'true'\n"
+            "  AND JSON_EXTRACT_PATH_TEXT(f_state.value,'value') != ''\n"
+            "  AND UPPER(JSON_EXTRACT_PATH_TEXT(f_state.value,'value'))\n"
+            "      = UPPER(JSON_EXTRACT_PATH_TEXT(f_addr.value,'value','state'));\n```"
+        ),
+        "tin_submitted": (
+            "**How calculated:** `tin_submitted` fact exists and has a non-empty value. "
+            "This fact is set when the business provides an EIN on the onboarding form.\n\n"
+            "**SQL:**\n```sql\nSELECT business_id FROM rds_warehouse_public.facts\n"
+            "WHERE name = 'tin_submitted'\n"
+            "  AND JSON_EXTRACT_PATH_TEXT(value,'value') IS NOT NULL\n"
+            "  AND JSON_EXTRACT_PATH_TEXT(value,'value') != '';\n```"
+        ),
+        "tin_pass": (
+            "**How calculated:** `tin_match_boolean = 'true'`. This is a DEPENDENT fact derived from "
+            "`tin_match.value.status === 'success'`. Middesk sends the EIN to the IRS directly and "
+            "the IRS confirms the EIN matches the submitted business name.\n\n"
+            "**SQL:**\n```sql\nSELECT business_id FROM rds_warehouse_public.facts\n"
+            "WHERE name = 'tin_match_boolean'\n"
+            "  AND JSON_EXTRACT_PATH_TEXT(value,'value') = 'true';\n```"
+        ),
+        "tin_fail": (
+            "**How calculated:** `tin_match_boolean = 'false'`. The IRS returned a mismatch — the most "
+            "common cause is the business submitted a DBA/trade name instead of the legal name on the "
+            "EIN certificate (IRS Form CP-575 or 147C).\n\n"
+            "**To verify the failure reason:**\n"
+            "```sql\nSELECT business_id,\n"
+            "  JSON_EXTRACT_PATH_TEXT(value,'value','status')  AS tin_status,\n"
+            "  JSON_EXTRACT_PATH_TEXT(value,'value','message') AS tin_message\n"
+            "FROM rds_warehouse_public.facts\n"
+            "WHERE name = 'tin_match'\n  AND business_id = '{business_id}';\n```"
+        ),
+        "tin_not_checked": (
+            "**How calculated:** `tin_match_boolean` is NULL — no EIN check result exists. "
+            "This happens when either: (1) no EIN was submitted (`tin_submitted` is null), "
+            "or (2) the Middesk TIN review task was not yet triggered/completed.\n\n"
+            "**SQL:**\n```sql\nSELECT rbcm.business_id\nFROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "LEFT JOIN rds_warehouse_public.facts f ON f.business_id = rbcm.business_id AND f.name = 'tin_match_boolean'\n"
+            "WHERE f.business_id IS NULL OR JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NULL;\n```"
+        ),
+    }
+
     def _drilldown_table(seg_key, label, cols_from_stats=None):
-        """Show an expander with business IDs + key signals for a segment."""
+        """Show an expander with business IDs + key signals + how-calculated explanation."""
         bids = _seg.get(seg_key, [])
         if not bids: return
         with st.expander(f"👁️ Show {len(bids):,} business IDs — {label}", expanded=False):
+            # ── How it's calculated ──────────────────────────────────────
+            calc_text = _SEG_CALC.get(seg_key)
+            if calc_text:
+                st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid #8B5CF6;
+                    border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
+                  <span style="color:#a78bfa;font-weight:700">⚙️ How this metric is calculated</span>
+                </div>""", unsafe_allow_html=True)
+                st.markdown(calc_text)
+                st.markdown("---")
+
+            # ── Business IDs + signals ───────────────────────────────────
             if stats_df is not None and not stats_df.empty and cols_from_stats:
                 _sub = stats_df[stats_df["business_id"].isin(bids)][
                     ["business_id"] + [c for c in cols_from_stats if c in stats_df.columns]
                 ].copy()
-                # Friendly labels
                 _rename = {"sos_active":"SOS Active","tin_match":"TIN Match",
                            "idv_passed":"IDV Passed","naics_code":"NAICS",
                            "formation_state":"Formation State","revenue":"Revenue"}
@@ -3567,25 +3720,27 @@ if tab=="🏠 Home":
                 st.dataframe(_sub, use_container_width=True, hide_index=True)
             else:
                 st.dataframe(pd.DataFrame({"business_id": bids}), use_container_width=True, hide_index=True)
+
+            # ── Download ─────────────────────────────────────────────────
             _bid_csv = pd.DataFrame({"business_id": bids}).to_csv(index=False).encode()
             st.download_button(f"⬇️ Download {len(bids)} IDs (CSV)",
                                _bid_csv, f"{seg_key}_business_ids.csv", "text/csv",
                                key=f"dl_{seg_key}")
 
-    # ── KPI Row 1 — clickable cards ───────────────────────────────────────
+    # ── KPI Row 1 — clickable cards (order: Onboarded · No Registry · Registry Found · Domestic · State Match) ──
     k1,k2,k3,k4,k5 = st.columns(5)
     with k1: kpi("📋 Onboarded", f"{total_biz:,}", period_label, "#3B82F6")
-    with k2: kpi("🏛️ SOS Registry Found", f"{_sos_found:,}", rate(_sos_found,total_biz)+" of onboarded", "#22c55e" if _sos_found/max(total_biz,1)>0.8 else "#f59e0b")
-    with k3: kpi("🏠 Domestic Reg Found", f"{_domestic_sos_found:,}", rate(_domestic_sos_found,total_biz)+" domestic match", "#22c55e" if _domestic_sos_found/max(total_biz,1)>0.7 else "#f59e0b")
-    with k4: kpi("📍 State Match", f"{_state_match:,}", "Reg in stated operating state", "#22c55e" if _state_match/max(total_biz,1)>0.6 else "#f59e0b")
-    with k5: kpi("❌ No SOS Found", f"{_sos_not_found:,}", rate(_sos_not_found,total_biz)+" unverified", "#ef4444" if _sos_not_found>0 else "#22c55e")
+    with k2: kpi("❌ No Registry Found", f"{_sos_not_found:,}", rate(_sos_not_found,total_biz)+" unverified", "#ef4444" if _sos_not_found>0 else "#22c55e")
+    with k3: kpi("🏛️ Registry Found", f"{_sos_found:,}", rate(_sos_found,total_biz)+" of onboarded", "#22c55e" if _sos_found/max(total_biz,1)>0.8 else "#f59e0b")
+    with k4: kpi("🏠 Domestic Reg Found", f"{_domestic_sos_found:,}", rate(_domestic_sos_found,total_biz)+" domestic match", "#22c55e" if _domestic_sos_found/max(total_biz,1)>0.7 else "#f59e0b")
+    with k5: kpi("📍 State Match", f"{_state_match:,}", "Reg in stated operating state", "#22c55e" if _state_match/max(total_biz,1)>0.6 else "#f59e0b")
 
     # Drilldown expanders — one per metric
     _SOS_COLS = ["sos_active","tin_match","idv_passed","naics_code","formation_state"]
-    _drilldown_table("sos_found",  f"SOS Registry Found — {_sos_found:,} businesses", _SOS_COLS)
+    _drilldown_table("sos_found",  f"Registry Found — {_sos_found:,} businesses", _SOS_COLS)
     _drilldown_table("domestic",   f"Domestic Reg Found — {_domestic_sos_found:,} businesses", _SOS_COLS)
     _drilldown_table("state_match",f"State Match — {_state_match:,} businesses", _SOS_COLS)
-    _drilldown_table("no_sos",     f"No SOS Found — {_sos_not_found:,} businesses (needs investigation)", _SOS_COLS)
+    _drilldown_table("no_sos",     f"No Registry Found — {_sos_not_found:,} businesses (needs investigation)", _SOS_COLS)
 
     _reg_sql = f"""
 SELECT
@@ -3603,7 +3758,7 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
         f"{total_biz:,} onboarded · {_sos_found:,} SOS found · {_domestic_sos_found:,} domestic",
         what_it_means=(
             f"**Onboarded:** {total_biz:,} businesses onboarded in {period_label}.\n\n"
-            f"**SOS Registry Found:** {_sos_found:,} ({rate(_sos_found,total_biz)}) — "
+            f"**Registry Found:** {_sos_found:,} ({rate(_sos_found,total_biz)}) — "
             f"Middesk (pid=16) matched the entity in the Secretary of State registry. "
             f"sos_match_boolean=true means the INCORPORATION registration was found.\n\n"
             f"**Domestic Registration Found:** {_domestic_sos_found:,} — "
@@ -3611,7 +3766,7 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
             f"domestic incorporation record was found rather than a foreign qualification.\n\n"
             f"**State Match:** {_state_match:,} — Entity's formation state matches the state "
             f"they told us they operate in (primary_address.state == formation_state).\n\n"
-            f"**No SOS Found:** {_sos_not_found:,} — Entity existence completely unverified. "
+            f"**No Registry Found:** {_sos_not_found:,} — Entity existence completely unverified. "
             f"Middesk could not find ANY registration record for these businesses."
         ),
         source_table="rds_warehouse_public.facts · sos_match_boolean, formation_state, primary_address",
@@ -3637,9 +3792,9 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
             icon="📈", color="#3B82F6")
 
     # ── SOS funnel bar ─────────────────────────────────────────────────────
-    st.markdown("#### 🏛️ SOS Registration Verification Breakdown")
+    st.markdown("#### 🏛️ Registry Validation Breakdown")
     _sos_bar = pd.DataFrame({
-        "Category": ["Total Onboarded","SOS Registry Found","Domestic Reg Found","In Stated Oper. State","No SOS Found"],
+        "Category": ["Total Onboarded","Registry Found","Domestic Reg Found","In Stated Oper. State","No Registry Found"],
         "Count":    [total_biz, _sos_found, _domestic_sos_found, _state_match, _sos_not_found],
         "Color":    ["#3B82F6","#22c55e","#22c55e","#10b981","#ef4444"],
     })
@@ -3649,7 +3804,7 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
                          color="Category",
                          color_discrete_map=_sos_color_map,
                          text="Count",   # correct: text from the column, not from update_traces
-                         title="SOS Registration Verification — Funnel View")
+                         title="Registry Validation — Funnel View")
     fig_sos_bar.update_traces(textposition="outside", texttemplate="%{x:,}")
     fig_sos_bar.update_layout(height=300, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
     st.plotly_chart(dark_chart(fig_sos_bar), use_container_width=True)
@@ -3658,11 +3813,11 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
     detail_panel("🏛️ SOS Registration Funnel",
         f"Domestic reg: {_domestic_sos_found:,} · State match: {_state_match:,} · No SOS: {_sos_not_found:,}",
         what_it_means=(
-            "**SOS Registry Found:** Middesk found ANY registration for this entity (domestic or foreign).\n"
+            "**Registry Found:** Middesk found ANY registration for this entity (domestic or foreign).\n"
             "**Domestic Reg Found:** Formation state is not a tax-haven — the primary incorporation record was found.\n"
             "**In Stated Operating State:** The formation state matches the state the business said it operates in "
             "(formation_state == primary_address.state). This is the strongest SOS verification signal.\n"
-            "**No SOS Found:** sos_match_boolean=null or false — Middesk could not find the entity in any registry."
+            "**No Registry Found:** sos_match_boolean=null or false — Middesk could not find the entity in any registry."
         ),
         source_table="rds_warehouse_public.facts · sos_match_boolean, formation_state, primary_address",
         source_file="facts/kyb/index.ts",
