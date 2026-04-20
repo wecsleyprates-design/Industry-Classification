@@ -3037,26 +3037,39 @@ with st.sidebar:
     # ── OpenAI API Key ───────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("**🤖 OpenAI API Key**")
-    _current_key = st.session_state.get("_openai_key_input","")
-    _key_status = "✅ Key set" if _current_key and _current_key.startswith("sk-") else "⚠️ No key"
-    _key_color  = "#22c55e" if _current_key and _current_key.startswith("sk-") else "#f59e0b"
-    st.markdown(
-        f"<div style='color:{_key_color};font-size:.75rem;margin-bottom:4px'>{_key_status}</div>",
-        unsafe_allow_html=True,
-    )
-    _new_key = st.text_input(
-        "Paste key here",
-        value=_current_key,
+    _current_key = str(st.session_state.get("_openai_key_input","") or "").strip()
+
+    # Test the key live when it's set
+    _key_ok = False
+    if _current_key and _current_key.startswith("sk-"):
+        try:
+            from openai import OpenAI as _OAI_test
+            _test_client = _OAI_test(api_key=_current_key)
+            # Cheap test: list models (tiny request)
+            _test_client.models.list()
+            _key_ok = True
+        except Exception as _ktest_err:
+            _key_ok = False
+            _key_err_msg = str(_ktest_err)[:80]
+    else:
+        _key_err_msg = ""
+
+    if _key_ok:
+        st.markdown("<div style='color:#22c55e;font-size:.75rem'>✅ Key verified and active</div>", unsafe_allow_html=True)
+    elif _current_key:
+        st.markdown(f"<div style='color:#ef4444;font-size:.75rem'>❌ Key rejected by OpenAI — paste a valid key</div>", unsafe_allow_html=True)
+    else:
+        st.markdown("<div style='color:#f59e0b;font-size:.75rem'>⚠️ No key — AI features disabled</div>", unsafe_allow_html=True)
+
+    st.text_input(
+        "OpenAI key",
         type="password",
         key="_openai_key_input",
         label_visibility="collapsed",
-        placeholder="sk-svcacct-…",
-        help="Paste your OpenAI API key. Stored only for this session — never committed to git.",
+        placeholder="sk-svcacct-… (paste here)",
+        help="Paste your OpenAI API key. Stored in session only — never saved to disk or git.",
     )
-    if _new_key and not _new_key.startswith("sk-"):
-        st.caption("⚠️ Key should start with `sk-`")
-    elif _new_key and _new_key.startswith("sk-"):
-        st.caption("✅ Key active for this session")
+    st.caption("Key is verified live. Paste a new key anytime to update.")
 
     st.markdown("---")
     st.markdown("**Sources**")
@@ -3086,31 +3099,62 @@ def _cust_header(cust_name, date_from, date_to):
 @st.cache_data(ttl=300, show_spinner=False)
 def _cust_agg(customer_id, date_from, date_to, facts_list):
     """
-    Aggregate pivot query: one row per business × one column per fact.
-    facts_list: tuple of fact names to pivot.
-    Uses LEFT(value,8000) to dodge federation VARCHAR limit.
+    2-step aggregate pivot — avoids Redshift federation VARCHAR(65535) error.
+
+    WHY 2 steps:
+      Redshift federation transfers the full `value` column from PostgreSQL RDS
+      to Redshift BEFORE any function (LEFT, JSON_EXTRACT_PATH_TEXT) runs.
+      Facts with many vendor alternatives (e.g. watchlist, naics_code) can be
+      83K+ chars → exceeds the 65535 transfer limit even with LEFT(value,8000).
+
+    Step 1 — native Redshift only: get the list of business_id + onboarded_date
+              for the date/customer filter.  No facts table touched → no federation.
+    Step 2 — federated facts: query WITH business_id IN (...) so PostgreSQL
+              filters rows server-side before sending them over the wire.
+              Only matching rows are transferred → each row is short.
     """
+    import pandas as _pd_agg
+
+    # ── Step 1: native Redshift — get portfolio business IDs ─────────────────
     date_c = ""
     if date_from: date_c += f" AND DATE(rbcm.created_at) >= '{date_from}'"
     if date_to:   date_c += f" AND DATE(rbcm.created_at) <= '{date_to}'"
     cust_c = f" AND rbcm.customer_id = '{customer_id}'" if customer_id else ""
 
-    cases_list = ",\n".join(
-        f"    MAX(CASE WHEN f.name='{n}' THEN JSON_EXTRACT_PATH_TEXT(LEFT(f.value,8000),'value') END) AS {n.replace('-','_')}"
-        for n in facts_list
-    )
-    sql = f"""
-        SELECT rbcm.business_id,
-               DATE(rbcm.created_at) AS onboarded_date,
-               {cases_list}
+    q1 = f"""
+        SELECT DISTINCT rbcm.business_id, DATE(rbcm.created_at) AS onboarded_date
         FROM rds_cases_public.rel_business_customer_monitoring rbcm
-        JOIN rds_warehouse_public.facts f ON f.business_id = rbcm.business_id
-          AND f.name IN ({','.join(f"'{n}'" for n in facts_list)})
         WHERE 1=1 {date_c} {cust_c}
-        GROUP BY rbcm.business_id, DATE(rbcm.created_at)
         ORDER BY onboarded_date DESC
     """
-    return run_sql(sql)
+    df1, err1 = run_sql(q1)
+    if err1 or df1 is None or df1.empty:
+        return df1, err1
+
+    # ── Step 2: federated facts pivot filtered by IN (bid_list) ──────────────
+    bid_list = ",".join(f"'{b}'" for b in df1["business_id"].tolist())
+    cases_list = ",\n".join(
+        f"    MAX(CASE WHEN f.name='{n}' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS {n.replace('-','_')}"
+        for n in facts_list
+    )
+    q2 = f"""
+        SELECT f.business_id,
+               {cases_list}
+        FROM rds_warehouse_public.facts f
+        WHERE f.business_id IN ({bid_list})
+          AND f.name IN ({','.join(f"'{n}'" for n in facts_list)})
+        GROUP BY f.business_id
+    """
+    df2, err2 = run_sql(q2)
+
+    # Merge: df1 (IDs + dates) LEFT JOIN df2 (fact values)
+    if df2 is not None and not df2.empty:
+        merged = df1.merge(df2, on="business_id", how="left")
+    else:
+        merged = df1.copy()
+        for n in facts_list:
+            merged[n.replace("-","_")] = None
+    return merged, None
 
 @st.cache_data(ttl=300, show_spinner=False)
 def _cust_scores(customer_id, date_from, date_to):
@@ -3127,6 +3171,45 @@ def _cust_scores(customer_id, date_from, date_to):
         LEFT JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
         WHERE 1=1 {date_c} {cust_c}
     """)
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _load_customer_bids(customer_id, date_from, date_to):
+    """Load business IDs for a customer within the date range."""
+    date_c = ""
+    if date_from: date_c += f" AND DATE(rbcm.created_at) >= '{date_from}'"
+    if date_to:   date_c += f" AND DATE(rbcm.created_at) <= '{date_to}'"
+    cust_c = f" AND rbcm.customer_id = '{customer_id}'" if customer_id else ""
+    df, _ = run_sql(f"""
+        SELECT DISTINCT rbcm.business_id
+        FROM rds_cases_public.rel_business_customer_monitoring rbcm
+        WHERE 1=1 {date_c} {cust_c}
+        ORDER BY rbcm.business_id
+    """)
+    if df is not None and not df.empty:
+        return df["business_id"].tolist()
+    return []
+
+
+def _render_customer_business_picker(customer_id, date_from, date_to, key="cust_bid_pick"):
+    """
+    Shows a selectbox of business IDs for the customer + date range.
+    When the user picks one, the caller can set hub_bid and rerun.
+    Returns the selected business_id string (or "" if none selected).
+    """
+    bids = _load_customer_bids(customer_id, date_from, date_to)
+    if not bids:
+        st.info("No businesses found for this customer in the selected date range.")
+        return ""
+    options = ["— select a business —"] + bids
+    chosen = st.selectbox(
+        f"Select a business from {len(bids):,} in this customer's portfolio:",
+        options=options, key=key,
+        help="Select a business to see the full entity-level analysis (same as Single Business mode)."
+    )
+    if chosen == "— select a business —":
+        return ""
+    return chosen
+
 
 def _pct_of(count, total):
     return f"{round(100*count/max(total,1),1)}%" if total else "0%"
@@ -5694,8 +5777,15 @@ Complete data gap. Entity existence AND firmographic data both unverified — hi
 
 elif tab=="🏛️ Registry & Identity":
     if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
-        st.markdown("## 🏛️ Registry & Identity — Customer Portfolio View")
+        st.markdown(f"## 🏛️ Registry & Identity — {hub_scope_customer_name}")
         render_customer_registry(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to)
+        st.markdown("---")
+        st.markdown("##### 🔍 Drill into a specific business (full entity-level view)")
+        _reg_bid = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="reg_bid")
+        if _reg_bid:
+            st.session_state["hub_bid"] = _reg_bid
+            st.session_state["_hub_scope"] = "🏢 Single Business"
+            st.rerun()
         st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab."); st.stop()
@@ -6870,8 +6960,15 @@ ORDER BY bert.created_at DESC;""",language="sql")
 # ════════════════════════════════════════════════════════════════════════════════
 elif tab=="🏭 Classification & KYB":
     if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
-        st.markdown("## 🏭 Classification & KYB — Customer Portfolio View")
+        st.markdown(f"## 🏭 Classification & KYB — {hub_scope_customer_name}")
         render_customer_classification(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to)
+        st.markdown("---")
+        st.markdown("##### 🔍 Drill into a specific business (full entity-level view)")
+        _cls_bid = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="cls_bid")
+        if _cls_bid:
+            st.session_state["hub_bid"] = _cls_bid
+            st.session_state["_hub_scope"] = "🏢 Single Business"
+            st.rerun()
         st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab."); st.stop()
@@ -7476,8 +7573,15 @@ ORDER BY name, received_at DESC;""",language="sql")
 # ════════════════════════════════════════════════════════════════════════════════
 elif tab=="⚠️ Risk & Watchlist":
     if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
-        st.markdown("## ⚠️ Risk & Watchlist — Customer Portfolio View")
+        st.markdown(f"## ⚠️ Risk & Watchlist — {hub_scope_customer_name}")
         render_customer_risk(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to)
+        st.markdown("---")
+        st.markdown("##### 🔍 Drill into a specific business (full entity-level view)")
+        _rsk_bid = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="rsk_bid")
+        if _rsk_bid:
+            st.session_state["hub_bid"] = _rsk_bid
+            st.session_state["_hub_scope"] = "🏢 Single Business"
+            st.rerun()
         st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab."); st.stop()
@@ -7850,8 +7954,15 @@ WHERE score_id=(SELECT score_id FROM rds_manual_score_public.data_current_scores
 # ════════════════════════════════════════════════════════════════════════════════
 elif tab=="💰 Worth Score":
     if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
-        st.markdown("## 💰 Worth Score — Customer Portfolio View")
+        st.markdown(f"## 💰 Worth Score — {hub_scope_customer_name}")
         render_customer_worth_score(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to)
+        st.markdown("---")
+        st.markdown("##### 🔍 Drill into a specific business (full entity-level view)")
+        _ws_bid = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="ws_bid")
+        if _ws_bid:
+            st.session_state["hub_bid"] = _ws_bid
+            st.session_state["_hub_scope"] = "🏢 Single Business"
+            st.rerun()
         st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab."); st.stop()
@@ -8402,7 +8513,16 @@ ORDER BY ABS(weighted_score_850) DESC;""",language="sql")
 elif tab=="📋 All Facts":
     if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
         st.markdown("## 📋 All Facts — Customer Portfolio View")
+        _cust_header(hub_scope_customer_name, hub_date_from, hub_date_to)
+        # Show fill-rate overview, then let user pick a business to drill into
         render_customer_all_facts(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to)
+        st.markdown("---")
+        st.markdown("##### 🔍 Drill into a specific business")
+        st.caption("Select any business below to see the full entity-level All Facts view with complete fact lineage.")
+        _af_bid = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="af_bid")
+        if _af_bid:
+            st.session_state["hub_bid"] = _af_bid
+            st.rerun()
         st.stop()
     bid=st.session_state.get("hub_bid","")
     if not bid: st.warning("Set UUID on Home tab first, then return here."); st.stop()
@@ -8886,11 +9006,14 @@ WHERE name='watchlist' AND business_id='{bid}';
 # ════════════════════════════════════════════════════════════════════════════════
 elif tab=="🔍 Check-Agent":
     if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
-        st.markdown("## 🔍 Check-Agent — Customer Portfolio View")
+        st.markdown(f"## 🔍 Check-Agent — {hub_scope_customer_name}")
         _cust_header(hub_scope_customer_name, hub_date_from, hub_date_to)
-        st.info("In Portfolio mode use **🧠 Intelligence Hub → Check-Agent Console** to run a full portfolio scan with severity breakdown. The Investigation Workspace also runs the Check-Agent per business within the customer portfolio.")
-        # Show the portfolio KYB overview as context
-        render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="Check-Agent")
+        st.caption("Select a business to run the full 4-layer Check-Agent (same as Single Business mode). Or use **🧠 Intelligence Hub → Check-Agent Console** for a portfolio-wide scan.")
+        _ca_bid_pick = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="ca_bid_pick")
+        if _ca_bid_pick:
+            st.session_state["hub_bid"] = _ca_bid_pick
+            st.session_state["_hub_scope"] = "🏢 Single Business"
+            st.rerun()
         st.stop()
     bid = st.session_state.get("hub_bid","")
     st.markdown("## 🔍 KYB Check-Agent — Deep Verification Engine")
@@ -9622,10 +9745,18 @@ elif tab=="🔍 Check-Agent":
 # ════════════════════════════════════════════════════════════════════════════════
 elif tab=="🤖 AI Agent":
     if st.session_state.get("_hub_scope","🏢 Single Business") == "📊 Customer / Portfolio":
-        st.markdown("## 🤖 AI Agent — Customer Portfolio View")
-        st.info(f"In Portfolio mode, the AI Agent answers questions about **{hub_scope_customer_name}**'s portfolio. The AI View Generator in **🧠 Intelligence Hub** is the best tool for portfolio-level natural-language analysis. The chat below has customer context injected automatically.")
-        render_customer_portfolio_view(hub_scope_customer_name, hub_scope_customer_id, hub_date_from, hub_date_to, tab_context="AI Agent")
+        st.markdown(f"## 🤖 AI Agent — {hub_scope_customer_name}")
+        _cust_header(hub_scope_customer_name, hub_date_from, hub_date_to)
+        st.caption("Select a business to run the full AI Agent with business context (same as Single Business mode). For portfolio-level AI analysis use **🧠 Intelligence Hub → AI View Generator**.")
+        _ai_bid_pick = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="ai_bid_pick")
+        if _ai_bid_pick:
+            st.session_state["hub_bid"] = _ai_bid_pick
+            st.session_state["_hub_scope"] = "🏢 Single Business"
+            st.rerun()
+        # Also show the general AI chat without specific business context
         st.markdown("---")
+        st.markdown("##### Or ask a portfolio-level question below:")
+        st.caption(f"Customer context: **{hub_scope_customer_name}** · {hub_date_from or 'all time'} → {hub_date_to or 'present'}")
         # Fall through to chat (context will include customer name)
     bid=st.session_state.get("hub_bid","")
     st.markdown("## 🤖 KYB Intelligence AI Agent")
