@@ -534,18 +534,19 @@ def load_customer_portfolio(customer_id, date_from, date_to):  # type: (str|None
 
 def render_customer_portfolio_view(customer_name, customer_id, date_from, date_to, tab_context="General"):
     """
-    Renders the full customer-level portfolio dashboard.
-    Called from every entity-level tab when scope == 'Customer / Portfolio'.
-    tab_context controls which charts are emphasised.
+    Comprehensive customer-level portfolio dashboard.
+    Matches the richness of the entity-level views with portfolio-aggregated analytics.
     """
     _cust_label = customer_name if customer_name != "All Customers" else "All Customers"
+    _cc  = (f" AND rbcm.customer_id='{customer_id}'" if customer_id else "")
+    _dcf = (f" AND DATE(rbcm.created_at)>='{date_from}'" if date_from else "")
+    _dct = (f" AND DATE(rbcm.created_at)<='{date_to}'" if date_to else "")
+
     st.markdown(f"""<div style="background:#0c1a2e;border-left:4px solid #3B82F6;border-radius:8px;
         padding:10px 16px;margin-bottom:12px">
-      <div style="color:#60A5FA;font-weight:700;font-size:.90rem">
-        📊 Portfolio view — {_cust_label}
-      </div>
+      <div style="color:#60A5FA;font-weight:700;font-size:.90rem">📊 Portfolio view — {_cust_label}</div>
       <div style="color:#94A3B8;font-size:.76rem;margin-top:2px">
-        {f'{date_from} → {date_to}' if date_from else 'All time'} · Analysing context: {tab_context}
+        {f'{date_from} → {date_to}' if date_from else 'All time'} · Context: {tab_context}
       </div>
     </div>""", unsafe_allow_html=True)
 
@@ -562,151 +563,211 @@ def render_customer_portfolio_view(customer_name, customer_id, date_from, date_t
     def _si(v):
         try: return int(float(v or 0))
         except: return 0
-    def _sl(v): return str(v or "").lower().strip()
 
-    # Compute signals
-    sos_pass   = (_pf_df["sos_active"].str.lower().str.strip()  == "true").sum()
-    tin_pass   = (_pf_df["tin_match"].str.lower().str.strip()   == "true").sum()
-    idv_pass   = (_pf_df["idv_passed"].str.lower().str.strip()  == "true").sum()
-    kybc_pass  = (_pf_df["kyb_complete"].str.lower().str.strip()== "true").sum()
-    wl_hits    = (_pf_df["watchlist_hits"].apply(_si) > 0).sum()
-    bk_count   = (_pf_df["num_bankruptcies"].apply(_si) > 0).sum()
-    naics_fb   = (_pf_df["naics_code"].str.strip() == "561499").sum() if "naics_code" in _pf_df.columns else 0
-    rev_known  = _pf_df["revenue"].notna().sum()
-    has_score  = _pf_df["weighted_score_850"].notna()
-    scored_n   = has_score.sum()
-    avg_score  = float(_pf_df.loc[has_score,"weighted_score_850"].astype(float).mean()) if scored_n else 0
-    approve_n  = (_pf_df["score_decision"] == "APPROVE").sum()
-    review_n   = (_pf_df["score_decision"] == "FURTHER_REVIEW_NEEDED").sum()
-    decline_n  = (_pf_df["score_decision"] == "DECLINE").sum()
+    # ── Compute all signals ───────────────────────────────────────────────────
+    def _bool_count(col, val="true"):
+        if col not in _pf_df.columns: return 0
+        return (_pf_df[col].astype(str).str.lower().str.strip() == val).sum()
 
-    # ── KPI Row 1: KYB verification signals ──────────────────────────────────
-    st.markdown("##### KYB Verification Rates")
-    c1,c2,c3,c4,c5,c6 = st.columns(6)
-    with c1: kpi("Total Businesses", f"{n:,}", f"{date_from or 'all time'}", "#3B82F6")
-    with c2: kpi("SOS Pass",   _pct(sos_pass,  n), f"{sos_pass:,} businesses",   "#22c55e" if sos_pass/max(n,1) > 0.8 else "#f59e0b")
-    with c3: kpi("TIN Pass",   _pct(tin_pass,  n), f"{tin_pass:,} businesses",   "#22c55e" if tin_pass/max(n,1) > 0.8 else "#f59e0b")
-    with c4: kpi("IDV Pass",   _pct(idv_pass,  n), f"{idv_pass:,} businesses",   "#22c55e" if idv_pass/max(n,1) > 0.7 else "#f59e0b")
-    with c5: kpi("KYB Complete",_pct(kybc_pass,n), f"{kybc_pass:,} businesses", "#22c55e" if kybc_pass/max(n,1) > 0.7 else "#f59e0b")
-    with c6: kpi("Watchlist Hits", str(wl_hits), f"{_pct(wl_hits,n)} of portfolio", "#ef4444" if wl_hits > 0 else "#22c55e")
+    sos_pass  = _bool_count("sos_active")
+    sos_fail  = _bool_count("sos_active", "false")
+    tin_pass  = _bool_count("tin_match")
+    tin_fail  = _bool_count("tin_match", "false")
+    idv_pass  = _bool_count("idv_passed")
+    idv_fail  = _bool_count("idv_passed", "false")
+    kybc_pass = _bool_count("kyb_complete")
+    wl_biz    = (_pf_df["watchlist_hits"].apply(_si) > 0).sum() if "watchlist_hits" in _pf_df.columns else 0
+    bk_biz    = (_pf_df["num_bankruptcies"].apply(_si) > 0).sum() if "num_bankruptcies" in _pf_df.columns else 0
+    naics_fb  = (_pf_df["naics_code"].astype(str).str.strip() == "561499").sum() if "naics_code" in _pf_df.columns else 0
+    rev_known = _pf_df["revenue"].notna().sum() if "revenue" in _pf_df.columns else 0
+    has_score = _pf_df["weighted_score_850"].notna() if "weighted_score_850" in _pf_df.columns else pd.Series([False]*n)
+    scored_n  = int(has_score.sum())
+    avg_score = float(_pf_df.loc[has_score,"weighted_score_850"].astype(float).mean()) if scored_n else 0
+    approve_n = (_pf_df["score_decision"] == "APPROVE").sum() if "score_decision" in _pf_df.columns else 0
+    review_n  = (_pf_df["score_decision"] == "FURTHER_REVIEW_NEEDED").sum() if "score_decision" in _pf_df.columns else 0
+    decline_n = (_pf_df["score_decision"] == "DECLINE").sum() if "score_decision" in _pf_df.columns else 0
+
+    # ── Row 1: Core KPI strip ─────────────────────────────────────────────────
+    st.markdown("##### 📊 Portfolio KPI Summary")
+    c1,c2,c3,c4,c5,c6,c7,c8 = st.columns(8)
+    _sc = "#22c55e" if avg_score>=700 else "#f59e0b" if avg_score>=550 else "#ef4444"
+    with c1: kpi("Total Businesses", f"{n:,}",           f"{date_from or 'all time'}", "#3B82F6")
+    with c2: kpi("SOS Active",  _pct(sos_pass,n),  f"{sos_pass:,}",  "#22c55e" if sos_pass/max(n,1)>0.8 else "#f59e0b")
+    with c3: kpi("TIN Passed",  _pct(tin_pass,n),  f"{tin_pass:,}",  "#22c55e" if tin_pass/max(n,1)>0.8 else "#f59e0b")
+    with c4: kpi("IDV Passed",  _pct(idv_pass,n),  f"{idv_pass:,}",  "#22c55e" if idv_pass/max(n,1)>0.7 else "#f59e0b")
+    with c5: kpi("KYB Complete",_pct(kybc_pass,n), f"{kybc_pass:,}", "#22c55e" if kybc_pass/max(n,1)>0.7 else "#f59e0b")
+    with c6: kpi("Watchlist",   str(int(wl_biz)),  _pct(wl_biz,n),  "#ef4444" if wl_biz>0 else "#22c55e")
+    with c7: kpi("Avg Score",   f"{avg_score:.0f}" if scored_n else "—", f"{scored_n:,} scored", _sc)
+    with c8: kpi("NAICS Fallback",str(int(naics_fb)),_pct(naics_fb,n),"#f59e0b" if naics_fb>0 else "#22c55e")
 
     # SQL for detail_panel
     _port_sql = f"""
 SELECT rbcm.business_id, DATE(rbcm.created_at) AS onboarded,
-  JSON_EXTRACT_PATH_TEXT(f1.value,'value') AS sos_active,
-  JSON_EXTRACT_PATH_TEXT(f2.value,'value') AS tin_match_boolean,
-  JSON_EXTRACT_PATH_TEXT(f3.value,'value') AS idv_passed_boolean,
-  bs.weighted_score_850, bs.score_decision
+  cs.business_id AS scored_bid, bs.weighted_score_850, bs.score_decision, bs.risk_level
 FROM rds_cases_public.rel_business_customer_monitoring rbcm
-{f"JOIN rds_auth_public.data_customers c ON c.id=rbcm.customer_id AND c.id='{customer_id}'" if customer_id else ""}
-LEFT JOIN rds_warehouse_public.facts f1 ON f1.business_id=rbcm.business_id AND f1.name='sos_active'
-LEFT JOIN rds_warehouse_public.facts f2 ON f2.business_id=rbcm.business_id AND f2.name='tin_match_boolean'
-LEFT JOIN rds_warehouse_public.facts f3 ON f3.business_id=rbcm.business_id AND f3.name='idv_passed_boolean'
 LEFT JOIN rds_manual_score_public.data_current_scores cs ON cs.business_id=rbcm.business_id
 LEFT JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
-WHERE 1=1{f" AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'" if date_from else ""};"""
+WHERE 1=1{_cc}{_dcf}{_dct};"""
 
-    detail_panel("📊 KYB Verification Rates", f"{n:,} businesses · {_cust_label}",
+    detail_panel("📊 Portfolio KPI Summary", f"{n:,} businesses · {_cust_label}",
         what_it_means=(
-            f"Portfolio-level KYB verification pass rates for {_cust_label}.\n\n"
-            f"**SOS:** {sos_pass:,}/{n:,} ({_pct(sos_pass,n)}) businesses have sos_active=true.\n"
-            f"**TIN:** {tin_pass:,}/{n:,} ({_pct(tin_pass,n)}) have tin_match_boolean=true.\n"
-            f"**IDV:** {idv_pass:,}/{n:,} ({_pct(idv_pass,n)}) have idv_passed_boolean=true.\n"
-            f"**KYB Complete:** {kybc_pass:,}/{n:,} ({_pct(kybc_pass,n)}) fully verified.\n"
-            f"**Watchlist:** {wl_hits:,} businesses have ≥1 watchlist hit."
+            f"KPI strip for {_cust_label}. SOS={_pct(sos_pass,n)} pass · "
+            f"TIN={_pct(tin_pass,n)} pass · IDV={_pct(idv_pass,n)} pass · "
+            f"KYB Complete={_pct(kybc_pass,n)} · Watchlist hits={wl_biz:,} businesses · "
+            f"NAICS fallback={_pct(naics_fb,n)}."
         ),
-        source_table="rds_warehouse_public.facts · rds_cases_public.rel_business_customer_monitoring",
+        source_table="rds_warehouse_public.facts · rel_business_customer_monitoring · business_scores",
         source_file="facts/kyb/index.ts",
-        json_obj={"customer":_cust_label,"total":n,"sos_pass":int(sos_pass),"tin_pass":int(tin_pass),
-                  "idv_pass":int(idv_pass),"kyb_complete":int(kybc_pass),"watchlist_hits":int(wl_hits)},
+        json_obj={"sos_pass":int(sos_pass),"tin_pass":int(tin_pass),"idv_pass":int(idv_pass),
+                  "kyb_complete":int(kybc_pass),"watchlist":int(wl_biz),"naics_fb":int(naics_fb)},
         sql=_port_sql, icon="📊", color="#3B82F6")
 
     st.markdown("---")
 
-    # ── Row 2: Worth Score distribution + Decision mix ────────────────────────
+    # ── Section 2: KYB Verification Funnel ───────────────────────────────────
+    st.markdown("##### 🔄 KYB Verification Funnel")
+    st.caption("How many businesses pass each verification stage? This funnel shows the attrition from onboarding through full KYB completion.")
+    _funnel_stages  = ["Onboarded","SOS Active","TIN Verified","IDV Passed","KYB Complete","No Watchlist Hits"]
+    _funnel_counts  = [n, int(sos_pass), int(tin_pass), int(idv_pass), int(kybc_pass), int(n-wl_biz)]
+    _funnel_colors  = ["#3B82F6","#22c55e","#22c55e","#8B5CF6","#22c55e","#22c55e"]
+    fig_funnel = go.Figure(go.Funnel(
+        y=_funnel_stages, x=_funnel_counts,
+        textinfo="value+percent initial",
+        marker=dict(color=_funnel_colors),
+        connector=dict(line=dict(color="#334155",width=1)),
+    ))
+    fig_funnel.update_layout(height=360, margin=dict(t=20,b=10,l=10,r=10))
+    st.plotly_chart(dark_chart(fig_funnel), use_container_width=True)
+    detail_panel("🔄 KYB Verification Funnel", f"{n:,} → {int(kybc_pass):,} fully verified",
+        what_it_means=f"Verification funnel for {_cust_label}. Drop-off between Onboarded and KYB Complete shows how many businesses have incomplete verification. Each stage is a pre-requisite for the next in the compliance workflow.",
+        source_table="rds_warehouse_public.facts · rel_business_customer_monitoring",
+        source_file="facts/kyb/index.ts",
+        json_obj=dict(zip(_funnel_stages, _funnel_counts)),
+        sql=f"SELECT COUNT(DISTINCT rbcm.business_id) AS total FROM rds_cases_public.rel_business_customer_monitoring rbcm WHERE 1=1{_cc}{_dcf}{_dct};",
+        icon="🔄", color="#3B82F6")
+
+    st.markdown("---")
+
+    # ── Section 3: Worth Score + Decision Mix ─────────────────────────────────
     if scored_n > 0:
-        st.markdown("##### Worth Score Distribution")
-        sc1, sc2, sc3, sc4 = st.columns(4)
-        with sc1: kpi("Avg Score", f"{avg_score:.0f}", f"{scored_n:,} scored", "#22c55e" if avg_score>=700 else "#f59e0b" if avg_score>=550 else "#ef4444")
-        with sc2: kpi("✅ APPROVE",  str(approve_n), _pct(approve_n, scored_n), "#22c55e")
-        with sc3: kpi("🔄 REVIEW",   str(review_n),  _pct(review_n,  scored_n), "#f59e0b")
-        with sc4: kpi("❌ DECLINE",  str(decline_n), _pct(decline_n, scored_n), "#ef4444")
+        st.markdown("##### 💰 Worth Score Distribution & Decision Outcomes")
+        sc1,sc2,sc3,sc4,sc5 = st.columns(5)
+        with sc1: kpi("Avg Score",    f"{avg_score:.0f}",   f"{scored_n:,} scored", "#22c55e" if avg_score>=700 else "#f59e0b" if avg_score>=550 else "#ef4444")
+        with sc2: kpi("✅ APPROVE",   str(int(approve_n)),  _pct(approve_n,scored_n), "#22c55e")
+        with sc3: kpi("🔄 REVIEW",    str(int(review_n)),   _pct(review_n,scored_n),  "#f59e0b")
+        with sc4: kpi("❌ DECLINE",   str(int(decline_n)),  _pct(decline_n,scored_n), "#ef4444")
+        with sc5: kpi("Not Scored",   str(n-scored_n),      _pct(n-scored_n,n),       "#64748b")
 
-        chart_col1, chart_col2 = st.columns(2)
-        with chart_col1:
-            _score_df = _pf_df[has_score].copy()
-            _score_df["weighted_score_850"] = _score_df["weighted_score_850"].astype(float)
-            fig_hist = px.histogram(_score_df, x="weighted_score_850", nbins=30,
-                                    title="Score Distribution (300–850)",
-                                    color_discrete_sequence=["#3B82F6"])
-            fig_hist.add_vline(x=700, line_dash="dash", line_color="#22c55e", annotation_text="APPROVE")
-            fig_hist.add_vline(x=550, line_dash="dash", line_color="#ef4444", annotation_text="DECLINE")
-            fig_hist.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+        sh1, sh2 = st.columns(2)
+        with sh1:
+            _score_df = _pf_df.loc[has_score].copy()
+            _score_df["weighted_score_850"] = pd.to_numeric(_score_df["weighted_score_850"], errors="coerce")
+            fig_hist = px.histogram(_score_df, x="weighted_score_850", nbins=25,
+                color="score_decision" if "score_decision" in _score_df.columns else None,
+                title="Score Distribution (300–850)",
+                color_discrete_map={"APPROVE":"#22c55e","FURTHER_REVIEW_NEEDED":"#f59e0b","DECLINE":"#ef4444"})
+            fig_hist.add_vline(x=700,line_dash="dash",line_color="#22c55e",annotation_text="APPROVE ≥700")
+            fig_hist.add_vline(x=550,line_dash="dash",line_color="#ef4444",annotation_text="DECLINE <550")
+            fig_hist.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
             st.plotly_chart(dark_chart(fig_hist), use_container_width=True)
-
-        with chart_col2:
-            _dec_df = pd.DataFrame({"Decision":["APPROVE","REVIEW","DECLINE"],
-                                    "Count":[int(approve_n),int(review_n),int(decline_n)]})
-            fig_dec = px.pie(_dec_df, names="Decision", values="Count", hole=0.45,
-                             title="Decision Outcome Mix",
-                             color="Decision",
-                             color_discrete_map={"APPROVE":"#22c55e","REVIEW":"#f59e0b","DECLINE":"#ef4444"})
-            fig_dec.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+        with sh2:
+            fig_dec = px.pie(
+                pd.DataFrame({"Decision":["APPROVE","FURTHER REVIEW","DECLINE","NOT SCORED"],
+                              "Count":[int(approve_n),int(review_n),int(decline_n),int(n-scored_n)]}),
+                names="Decision", values="Count", hole=0.45, title="Decision Outcome Mix",
+                color="Decision",
+                color_discrete_map={"APPROVE":"#22c55e","FURTHER REVIEW":"#f59e0b","DECLINE":"#ef4444","NOT SCORED":"#334155"})
+            fig_dec.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
             st.plotly_chart(dark_chart(fig_dec), use_container_width=True)
 
         detail_panel("💰 Worth Score Distribution", f"Avg: {avg_score:.0f} · {scored_n:,} scored",
-            what_it_means=f"Score distribution across {scored_n:,} scored businesses for {_cust_label}. APPROVE ≥700, FURTHER_REVIEW 550-699, DECLINE <550.",
+            what_it_means=f"Score distribution for {_cust_label}. Formula: probability × 550 + 300. APPROVE ≥700, FURTHER_REVIEW 550-699, DECLINE <550. {n-scored_n:,} businesses not yet scored.",
             source_table="rds_manual_score_public.data_current_scores JOIN business_scores",
             source_file="aiscore.py",
-            json_obj={"avg_score":round(avg_score,1),"approve":int(approve_n),"review":int(review_n),"decline":int(decline_n),"scored":int(scored_n)},
-            sql=_port_sql, icon="💰", color="#22c55e")
+            json_obj={"avg":round(avg_score,1),"approve":int(approve_n),"review":int(review_n),"decline":int(decline_n),"not_scored":int(n-scored_n)},
+            sql=f"SELECT bs.weighted_score_850, bs.score_decision FROM rds_cases_public.rel_business_customer_monitoring rbcm JOIN rds_manual_score_public.data_current_scores cs ON cs.business_id=rbcm.business_id JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE 1=1{_cc}{_dcf}{_dct};",
+            icon="💰", color="#22c55e")
         st.markdown("---")
 
-    # ── Row 3: KYB Health Stacked Bar + NAICS/Risk signals ───────────────────
-    st.markdown("##### KYB Signal Breakdown")
-    bar_col, pie_col = st.columns(2)
-
-    with bar_col:
-        _hbar_data = pd.DataFrame({
-            "Signal": ["SOS Active","TIN Matched","IDV Passed","KYB Complete","No Watchlist","Revenue Known"],
-            "Pass":   [int(sos_pass), int(tin_pass), int(idv_pass), int(kybc_pass), int(n-wl_hits), int(rev_known)],
-            "Fail":   [int(n-sos_pass), int(n-tin_pass), int(n-idv_pass), int(n-kybc_pass), int(wl_hits), int(n-rev_known)],
+    # ── Section 4: KYB Signal Stacked Bar + Cross-tab ─────────────────────────
+    st.markdown("##### 🏢 KYB Signal Analysis")
+    sb1, sb2 = st.columns(2)
+    with sb1:
+        _hbar = pd.DataFrame({
+            "Signal": ["SOS Active","TIN Verified","IDV Passed","KYB Complete","No Watchlist","Revenue Known"],
+            "Pass":   [int(sos_pass), int(tin_pass), int(idv_pass), int(kybc_pass), int(n-wl_biz), int(rev_known)],
+            "Fail":   [int(sos_fail), int(tin_fail), int(idv_fail), int(n-kybc_pass), int(wl_biz), int(n-rev_known)],
         })
-        _hbar_melt = _hbar_data.melt(id_vars="Signal", value_vars=["Pass","Fail"], var_name="Status", value_name="Count")
-        fig_bar = px.bar(_hbar_melt, x="Count", y="Signal", color="Status", orientation="h",
-                         barmode="stack", title="KYB Signals — Pass vs Fail/Missing",
-                         color_discrete_map={"Pass":"#22c55e","Fail":"#ef4444"})
-        fig_bar.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
-        st.plotly_chart(dark_chart(fig_bar), use_container_width=True)
+        _hm = _hbar.melt(id_vars="Signal",value_vars=["Pass","Fail"],var_name="Status",value_name="Count")
+        fig_sb = px.bar(_hm, x="Count", y="Signal", color="Status", orientation="h", barmode="stack",
+                        title="KYB Signals — Pass vs Fail/Missing",
+                        color_discrete_map={"Pass":"#22c55e","Fail":"#ef4444"})
+        fig_sb.update_layout(height=320, margin=dict(t=40,b=10,l=10,r=10))
+        st.plotly_chart(dark_chart(fig_sb), use_container_width=True)
 
-    with pie_col:
-        TAX_HAVENS = {"DE","NV","WY","SD","MT","NM"}
-        _fs_series = _pf_df["formation_state"].str.upper().str.strip()
-        _th_n  = _fs_series.isin(TAX_HAVENS).sum()
-        _oth_n = _fs_series.notna().sum() - _th_n
-        _no_st = int(n) - int(_fs_series.notna().sum())
-        fig_st = px.pie(
-            pd.DataFrame({"Category":["Tax-Haven State","Other State","No State Data"],
-                          "Count":[int(_th_n),int(_oth_n),int(_no_st)]}),
-            names="Category", values="Count", hole=0.45,
-            title="Formation State Mix",
-            color="Category",
-            color_discrete_map={"Tax-Haven State":"#f59e0b","Other State":"#3B82F6","No State Data":"#334155"})
-        fig_st.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
-        st.plotly_chart(dark_chart(fig_st), use_container_width=True)
+    with sb2:
+        # SOS × TIN cross-tab
+        if "sos_active" in _pf_df.columns and "tin_match" in _pf_df.columns:
+            _x = _pf_df.copy()
+            _x["SOS"] = _x["sos_active"].astype(str).str.lower().str.strip().map({"true":"✅ Active","false":"❌ Inactive"}).fillna("⚪ Unknown")
+            _x["TIN"] = _x["tin_match"].astype(str).str.lower().str.strip().map({"true":"✅ Pass","false":"❌ Fail"}).fillna("⚪ N/A")
+            _cross = _x.groupby(["SOS","TIN"]).size().reset_index(name="Count")
+            fig_cross = px.bar(_cross, x="SOS", y="Count", color="TIN", barmode="stack",
+                               title="SOS Status × TIN Verification Cross-Tab",
+                               color_discrete_map={"✅ Pass":"#22c55e","❌ Fail":"#ef4444","⚪ N/A":"#334155"})
+            fig_cross.update_layout(height=320, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_cross), use_container_width=True)
 
     detail_panel("🏢 KYB Signal Breakdown", f"{_cust_label} · {n:,} businesses",
-        what_it_means=(
-            f"Stacked bar showing Pass vs Fail/Missing for each KYB signal across {_cust_label}'s portfolio.\n\n"
-            f"**NAICS Fallback (561499):** {int(naics_fb):,} businesses ({_pct(naics_fb,n)}) — industry unclassified.\n"
-            f"**Bankruptcies:** {int(bk_count):,} businesses have ≥1 bankruptcy record.\n"
-            f"**Tax-haven state:** {int(_th_n):,} businesses incorporated in DE/NV/WY/SD/MT/NM."
-        ),
-        source_table="rds_warehouse_public.facts · rds_cases_public.rel_business_customer_monitoring",
+        what_it_means=f"Signal coverage and cross-tab for {_cust_label}. Stacked bar shows how many businesses pass vs fail each check. SOS×TIN cross-tab reveals combinations like 'SOS Active + TIN Fail' (DBA vs legal name mismatch — most common issue).",
+        source_table="rds_warehouse_public.facts · rel_business_customer_monitoring",
         source_file="facts/kyb/index.ts",
-        json_obj={"naics_fallback":int(naics_fb),"bankruptcy_count":int(bk_count),
-                  "tax_haven":int(_th_n),"other_state":int(_oth_n),"no_state":int(_no_st)},
-        sql=_port_sql, icon="🏢", color="#8B5CF6")
+        json_obj={"sos_pass":int(sos_pass),"sos_fail":int(sos_fail),"tin_pass":int(tin_pass),"tin_fail":int(tin_fail),"wl_biz":int(wl_biz),"bk_biz":int(bk_biz),"naics_fb":int(naics_fb)},
+        sql=f"SELECT JSON_EXTRACT_PATH_TEXT(f.value,'value') AS sos, COUNT(*) FROM rds_warehouse_public.facts f JOIN rds_cases_public.rel_business_customer_monitoring rbcm ON rbcm.business_id=f.business_id WHERE f.name='sos_active'{_cc}{_dcf}{_dct} GROUP BY 1 ORDER BY 2 DESC;",
+        icon="🏢", color="#8B5CF6")
+
+    # ── Section 5: Formation State + Public Records ───────────────────────────
+    st.markdown("---")
+    st.markdown("##### 🗺️ Entity Profile & Risk Signals")
+    ep1, ep2 = st.columns(2)
+    with ep1:
+        if "formation_state" in _pf_df.columns:
+            TAX_HAVENS = {"DE","NV","WY","SD","MT","NM"}
+            _fs = _pf_df["formation_state"].astype(str).str.upper().str.strip()
+            _th = int(_fs.isin(TAX_HAVENS).sum())
+            _oth= int((_fs.notna() & (_fs!="NAN") & ~_fs.isin(TAX_HAVENS)).sum())
+            _no = n - _th - _oth
+            fig_st = px.pie(pd.DataFrame({"Type":["Tax-Haven","Other State","Unknown"],"Count":[_th,_oth,_no]}),
+                names="Type", values="Count", hole=0.4, title="Formation State Mix",
+                color="Type", color_discrete_map={"Tax-Haven":"#f59e0b","Other State":"#3B82F6","Unknown":"#334155"})
+            fig_st.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_st), use_container_width=True)
+            # Top states
+            _st_top = _fs[_fs.notna() & (_fs!="NAN")].value_counts().head(8).reset_index()
+            _st_top.columns = ["State","Count"]
+            _st_top["Tax Haven"] = _st_top["State"].isin(TAX_HAVENS).map({True:"⚠️","False":""})
+            st.dataframe(_st_top, use_container_width=True, hide_index=True)
+
+    with ep2:
+        _risk_data = pd.DataFrame({
+            "Risk Type": ["Watchlist Hits","Bankruptcies","NAICS Fallback","No SOS Data","TIN Failed","No Revenue"],
+            "Businesses": [int(wl_biz), int(bk_biz), int(naics_fb), int(sos_fail+n-sos_pass-sos_fail),
+                           int(tin_fail), int(n-rev_known)],
+        })
+        _risk_data = _risk_data[_risk_data["Businesses"]>0].sort_values("Businesses",ascending=True)
+        if not _risk_data.empty:
+            fig_risk = px.bar(_risk_data, x="Businesses", y="Risk Type", orientation="h",
+                              title="Risk Signals — Businesses Affected",
+                              color_discrete_sequence=["#ef4444"])
+            fig_risk.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_risk), use_container_width=True)
+
+    detail_panel("🗺️ Entity Profile & Risk Signals", f"Formation states + risk indicators for {_cust_label}",
+        what_it_means=f"Formation state mix shows how many businesses are incorporated in tax-haven states (DE/NV/WY/SD/MT/NM) — these have higher entity resolution risk. Risk signals bar shows how many businesses trigger each flag.",
+        source_table="rds_warehouse_public.facts · formation_state, watchlist_hits, num_bankruptcies, naics_code",
+        json_obj={"watchlist_biz":int(wl_biz),"bk_biz":int(bk_biz),"naics_fb":int(naics_fb)},
+        sql=f"SELECT JSON_EXTRACT_PATH_TEXT(f.value,'value') AS state, COUNT(DISTINCT f.business_id) AS n FROM rds_warehouse_public.facts f JOIN rds_cases_public.rel_business_customer_monitoring rbcm ON rbcm.business_id=f.business_id WHERE f.name='formation_state'{_cc}{_dcf}{_dct} GROUP BY 1 ORDER BY n DESC;",
+        icon="🗺️", color="#f59e0b")
 
     # ── Onboarding trend ─────────────────────────────────────────────────────
     if "onboarded_date" in _pf_df.columns:
@@ -1718,17 +1779,23 @@ def rag_search(q,top_k=8):
 def get_openai():
     """
     Returns an OpenAI client, or None if no valid key is configured.
-    Key resolution order:
+    Key resolution order (re-evaluated on every call — no caching):
       1. Environment variable  OPENAI_API_KEY
       2. Streamlit secrets     OPENAI_API_KEY  (.streamlit/secrets.toml)
-    No sidebar input required — same behaviour as before the customer-level feature.
+         — st.secrets is re-read directly to pick up the file without
+           needing SETTINGS.refresh() to have run first.
     """
     try:
         from openai import OpenAI
+        # 1. Env var
         key = os.getenv("OPENAI_API_KEY","").strip()
+        # 2. secrets.toml — read directly, not via SETTINGS, so it always reflects
+        #    the current file content regardless of when the app started.
         if not key:
             try:
-                key = str(st.secrets.get("OPENAI_API_KEY","") or "").strip()
+                # st.secrets lazily reloads secrets.toml on each access
+                _s = dict(st.secrets)
+                key = str(_s.get("OPENAI_API_KEY","") or "").strip()
             except Exception:
                 pass
         if not key or not key.startswith("sk-"):
@@ -5741,7 +5808,7 @@ elif tab=="🏛️ Registry & Identity":
         _reg_bid = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="reg_bid")
         if _reg_bid:
             st.session_state["hub_bid"] = _reg_bid
-            st.session_state["_hub_scope"] = "🏢 Single Business"
+            st.session_state["hub_scope"] = "🏢 Single Business"
             st.rerun()
         st.stop()
     bid=st.session_state.get("hub_bid","")
@@ -6924,7 +6991,7 @@ elif tab=="🏭 Classification & KYB":
         _cls_bid = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="cls_bid")
         if _cls_bid:
             st.session_state["hub_bid"] = _cls_bid
-            st.session_state["_hub_scope"] = "🏢 Single Business"
+            st.session_state["hub_scope"] = "🏢 Single Business"
             st.rerun()
         st.stop()
     bid=st.session_state.get("hub_bid","")
@@ -7537,7 +7604,7 @@ elif tab=="⚠️ Risk & Watchlist":
         _rsk_bid = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="rsk_bid")
         if _rsk_bid:
             st.session_state["hub_bid"] = _rsk_bid
-            st.session_state["_hub_scope"] = "🏢 Single Business"
+            st.session_state["hub_scope"] = "🏢 Single Business"
             st.rerun()
         st.stop()
     bid=st.session_state.get("hub_bid","")
@@ -7918,7 +7985,7 @@ elif tab=="💰 Worth Score":
         _ws_bid = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="ws_bid")
         if _ws_bid:
             st.session_state["hub_bid"] = _ws_bid
-            st.session_state["_hub_scope"] = "🏢 Single Business"
+            st.session_state["hub_scope"] = "🏢 Single Business"
             st.rerun()
         st.stop()
     bid=st.session_state.get("hub_bid","")
@@ -8969,7 +9036,7 @@ elif tab=="🔍 Check-Agent":
         _ca_bid_pick = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="ca_bid_pick")
         if _ca_bid_pick:
             st.session_state["hub_bid"] = _ca_bid_pick
-            st.session_state["_hub_scope"] = "🏢 Single Business"
+            st.session_state["hub_scope"] = "🏢 Single Business"
             st.rerun()
         st.stop()
     bid = st.session_state.get("hub_bid","")
@@ -9708,7 +9775,7 @@ elif tab=="🤖 AI Agent":
         _ai_bid_pick = _render_customer_business_picker(hub_scope_customer_id, hub_date_from, hub_date_to, key="ai_bid_pick")
         if _ai_bid_pick:
             st.session_state["hub_bid"] = _ai_bid_pick
-            st.session_state["_hub_scope"] = "🏢 Single Business"
+            st.session_state["hub_scope"] = "🏢 Single Business"
             st.rerun()
         # Also show the general AI chat without specific business context
         st.markdown("---")
