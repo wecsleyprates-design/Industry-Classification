@@ -12,16 +12,23 @@ import os, json, hashlib
 import streamlit as st
 from openai import OpenAI
 
-# ── API key (never hardcoded) ─────────────────────────────────────────────────
-def _get_api_key():
-    try:
-        return st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY","")
-    except Exception:
-        return os.getenv("OPENAI_API_KEY","")
+# ── API key — same resolution order as kyb_hub_app_v2.get_openai() ────────────
+def _get_api_key() -> str:
+    """Read the OpenAI key fresh on every call — env var takes priority."""
+    # 1. Environment variable (set with: export OPENAI_API_KEY=sk-...)
+    key = os.getenv("OPENAI_API_KEY","").strip()
+    # 2. secrets.toml
+    if not key:
+        try:
+            key = str(st.secrets.get("OPENAI_API_KEY","") or "").strip()
+        except Exception:
+            pass
+    return key
+
 
 def get_openai_client():
     key = _get_api_key()
-    if not key:
+    if not key or not key.startswith("sk-"):
         return None
     return OpenAI(api_key=key)
 
@@ -802,15 +809,17 @@ def build_fact_summary(facts: dict) -> dict:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def run_llm_audit(facts_json: str, business_id: str, score_json: str = "") -> tuple:
+def run_llm_audit(facts_json: str, business_id: str, score_json: str = "",
+                  _api_key_hint: str = "") -> tuple:
     """
-    Run GPT-powered deep audit. Cached per (facts_hash, bid) for 30 min.
-    Takes JSON strings (not dicts) so st.cache_data can hash them.
+    Run GPT-powered deep audit. Cached per (facts_hash, bid, api_key_hint).
+    _api_key_hint: last 8 chars of the active key — included so a new key
+    automatically busts the old cached 401 error without forcing a full rerun.
     Returns (result_dict, error_str).
     """
     client = get_openai_client()
     if not client:
-        return None, "OpenAI API key not configured."
+        return None, "OpenAI API key not configured — set OPENAI_API_KEY env var or secrets.toml."
 
     try:
         facts = json.loads(facts_json)

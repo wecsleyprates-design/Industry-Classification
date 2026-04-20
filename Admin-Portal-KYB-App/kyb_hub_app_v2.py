@@ -8888,7 +8888,7 @@ elif tab=="🔍 Check-Agent":
                     with st.spinner("AI analyst writing case memo… (~15 seconds)"):
                         _facts_json = json.dumps(facts, default=str)
                         _score_json = json.dumps(score_info, default=str)
-                        _audit_result, _audit_err = run_llm_audit(_facts_json, bid, _score_json)
+                        _api_hint = (_get_api_key()[-8:] if hasattr(__builtins__, '__import__') else '') ; _audit_result, _audit_err = run_llm_audit(_facts_json, bid, _score_json, _api_key_hint=os.getenv('OPENAI_API_KEY','')[-8:])
                     if _audit_err:
                         flag(f"AI audit error: {_audit_err}", "red")
                     elif _audit_result:
@@ -10301,7 +10301,7 @@ Generate a Redshift SQL query that answers this request, and specify the best ch
                         with st.spinner("AI analyst generating explanation…"):
                             _iw_fj = json.dumps(_iw_facts, default=str)
                             _iw_sj = json.dumps({"score":_iw_score,"risk":_iw_risk,"decision":_iw_dec}, default=str)
-                            _iw_audit, _ = run_llm_audit(_iw_fj, _iw_bid, _iw_sj)
+                            _iw_audit, _ = run_llm_audit(_iw_fj, _iw_bid, _iw_sj, _api_key_hint=os.getenv('OPENAI_API_KEY','')[-8:])
                             st.session_state[_iw_cache_key] = _iw_audit
                     _iw_audit = st.session_state.get(_iw_cache_key)
                     if _iw_audit:
