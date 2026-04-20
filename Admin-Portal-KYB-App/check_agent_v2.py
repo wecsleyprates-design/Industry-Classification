@@ -12,18 +12,15 @@ import os, json, hashlib
 import streamlit as st
 from openai import OpenAI
 
-# ── API key — same resolution order as kyb_hub_app_v2.get_openai() ────────────
+# ── API key — identical pattern to kyb_hub_app.py v1 ─────────────────────────
 def _get_api_key() -> str:
-    """Read the OpenAI key fresh on every call — env var takes priority."""
-    # 1. Environment variable (set with: export OPENAI_API_KEY=sk-...)
-    key = os.getenv("OPENAI_API_KEY","").strip()
-    # 2. secrets.toml
+    key = os.getenv("OPENAI_API_KEY", "")
     if not key:
         try:
-            key = str(st.secrets.get("OPENAI_API_KEY","") or "").strip()
+            key = st.secrets["OPENAI_API_KEY"]
         except Exception:
             pass
-    return key
+    return str(key) if key else ""
 
 
 def get_openai_client():

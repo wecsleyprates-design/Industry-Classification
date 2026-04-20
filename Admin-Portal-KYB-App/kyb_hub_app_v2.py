@@ -1873,58 +1873,20 @@ def rag_search(q,top_k=8):
 
 @st.cache_resource
 def get_openai():
-    """
-    Returns an OpenAI client using the CURRENT valid API key.
-
-    Priority order:
-      1. OPENAI_API_KEY environment variable  (inline: OPENAI_API_KEY=sk-... python3 -m streamlit run ...)
-      2. .streamlit/secrets.toml              (OPENAI_API_KEY = "sk-...")
-
-    Auto-persist: when a valid env-var key is found, it is immediately written
-    to secrets.toml — overwriting any stale key already there.
-    This ensures a single `OPENAI_API_KEY=... python3 -m streamlit run ...` command
-    persists the key for all future restarts.
-    """
+    """Identical to kyb_hub_app.py (v1) — simple, no caching complexity."""
     try:
         from openai import OpenAI
-        import re as _re2
-
-        _secrets_path = Path(__file__).parent / ".streamlit" / "secrets.toml"
-
-        # 1. Environment variable
-        env_key = os.getenv("OPENAI_API_KEY","").strip()
-
-        # 2. secrets.toml
-        toml_key = ""
-        try:
-            _s = dict(st.secrets)
-            toml_key = str(_s.get("OPENAI_API_KEY","") or "").strip()
-        except Exception:
-            pass
-
-        if env_key and env_key.startswith("sk-"):
-            key = env_key
-            # Always overwrite secrets.toml with the current env-var key
-            # (removes any stale/expired key stored there)
+        # 1. Environment variable (set with: export OPENAI_API_KEY=sk-...)
+        key = os.getenv("OPENAI_API_KEY", "")
+        # 2. Streamlit secrets (.streamlit/secrets.toml)
+        if not key:
             try:
-                _secrets_path.parent.mkdir(parents=True, exist_ok=True)
-                _existing = _secrets_path.read_text() if _secrets_path.exists() else ""
-                if "OPENAI_API_KEY" in _existing:
-                    _existing = _re2.sub(r'OPENAI_API_KEY\s*=\s*"[^"]*"',
-                                         f'OPENAI_API_KEY = "{key}"', _existing)
-                else:
-                    _existing = f'OPENAI_API_KEY = "{key}"\n' + _existing
-                _secrets_path.write_text(_existing)
+                key = st.secrets["OPENAI_API_KEY"]
             except Exception:
                 pass
-        elif toml_key and toml_key.startswith("sk-"):
-            key = toml_key
-        else:
-            key = ""
-
-        if not key or not key.startswith("sk-"):
+        if not key or not str(key).startswith("sk-"):
             return None
-        return OpenAI(api_key=key)
+        return OpenAI(api_key=str(key))
     except Exception:
         return None
 
