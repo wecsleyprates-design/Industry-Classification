@@ -2739,43 +2739,9 @@ def ask_ai(question, context="", history=None, auto_execute=True):
 
             if executed_results:
                 answer += "\n\n---\n**🔬 Live Results from Redshift:**" + "".join(executed_results)
-
-                # ── Ask AI to interpret the results and answer the original question ──
-                # Collect actual data rows from successful queries
-                _data_for_interpretation = []
-                for i, sql in enumerate(sql_blocks[:3]):
-                    df_check, _, _, _ = _execute_sql_with_retry(sql)
-                    if df_check is not None and not df_check.empty:
-                        _data_for_interpretation.append(
-                            f"Query {i+1} results ({len(df_check)} rows):\n"
-                            + df_check.head(15).to_string(index=False)
-                        )
-
-                if _data_for_interpretation:
-                    try:
-                        _interp_prompt = (
-                            f"The user asked: \"{question}\"\n\n"
-                            f"You queried Redshift and got these REAL results:\n\n"
-                            + "\n\n".join(_data_for_interpretation)
-                            + "\n\nNow DIRECTLY ANSWER the user's question based on this data. "
-                            f"Be specific — reference actual values from the results. "
-                            f"Explain what the data means for their question. "
-                            f"If they asked about discrepancies, explain WHY (e.g. Middesk vs OC different search methods, "
-                            f"confidence scores, when data was last updated, alternatives[] showing other vendor values). "
-                            f"Do NOT just describe the SQL — answer the question."
-                        )
-                        _interp_r = get_openai().chat.completions.create(
-                            model="gpt-4o-mini",
-                            messages=[
-                                {"role":"system","content":SYSTEM},
-                                {"role":"user","content":_interp_prompt}
-                            ],
-                            max_tokens=800, temperature=0.3
-                        )
-                        _interpretation = _interp_r.choices[0].message.content
-                        answer += f"\n\n---\n**💡 Answer to your question:**\n\n{_interpretation}"
-                    except Exception:
-                        pass  # interpretation is best-effort — don't fail if it errors
+                # Note: no second AI interpretation call — the initial structured answer
+                # (VERDICT → ARCHITECTURE → SQL REFERENCE → KEY FILES) already covers this.
+                # A second call would duplicate the verdict/architecture sections.
 
         # ── Source citations ──────────────────────────────────────────────────
         if chunks:
@@ -2803,13 +2769,37 @@ def ask_ai(question, context="", history=None, auto_execute=True):
 
             answer += "\n\n---\n**📁 Sources used for this answer** *(click to open in GitHub)*:\n"
             answer += "\n".join(cited_lines)
-            answer += (
-                "\n\n**🔗 Key reference files:**\n"
-                f"- [facts/kyb/index.ts]({GITHUB_LINKS.get('facts/kyb/index.ts','')}) — all KYB fact definitions\n"
-                f"- [facts/rules.ts]({GITHUB_LINKS.get('facts/rules.ts','')}) — factWithHighestConfidence algorithm\n"
-                f"- [integrations.constant.ts]({GITHUB_LINKS.get('integrations.constant.ts','')}) — vendor platform IDs\n"
-                f"- [API Reference]({GITHUB_LINKS.get('openapi/integration','')}) — /kyb endpoint schema (openapi)"
-            )
+
+        # ── Key reference files — dynamic: only show files mentioned in the answer ──
+        # Always add 3-4 core files, plus any additional ones the AI cited by name
+        _KEY_FILE_REGISTRY = [
+            ("facts/kyb/index.ts",          "all KYB fact definitions"),
+            ("facts/rules.ts",              "factWithHighestConfidence algorithm"),
+            ("integrations.constant.ts",    "vendor platform IDs"),
+            ("worth_score_model.py",        "Worth Score model features"),
+            ("aiscore.py",                  "Worth Score pipeline"),
+            ("lookups.py",                  "feature defaults & imputation"),
+            ("consolidatedWatchlist.ts",    "watchlist merge logic"),
+            ("customer_table.sql",          "Pipeline B join & match confidence"),
+            ("api-docs/kyb.md",             "KYB API reference"),
+            ("openapi/integration",         "/kyb endpoint schema (openapi)"),
+        ]
+        _answer_lower = answer.lower()
+        _key_links = []
+        for _file_key, _file_desc in _KEY_FILE_REGISTRY:
+            # Include if the file is mentioned in the answer or is a core reference
+            _is_core = _file_key in ("facts/kyb/index.ts","facts/rules.ts","integrations.constant.ts")
+            _is_mentioned = any(part in _answer_lower for part in _file_key.lower().split("/"))
+            if _is_core or _is_mentioned:
+                _url = GITHUB_LINKS.get(_file_key,"")
+                if _url:
+                    _key_links.append(f"- [{_file_key}]({_url}) — {_file_desc}")
+                else:
+                    _key_links.append(f"- `{_file_key}` — {_file_desc}")
+
+        if _key_links:
+            answer += "\n\n**🔗 Key reference files:**\n" + "\n".join(_key_links[:6])
+
         return answer
     except Exception as e: return f"⚠️ AI error: {e}"
 
