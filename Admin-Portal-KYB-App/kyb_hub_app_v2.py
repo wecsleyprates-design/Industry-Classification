@@ -1875,25 +1875,54 @@ def rag_search(q,top_k=8):
 def get_openai():
     """
     Returns an OpenAI client, or None if no valid key is configured.
-    Key resolution order (re-evaluated on every call — no caching):
-      1. Environment variable  OPENAI_API_KEY
+    Key resolution order (re-evaluated on every call):
+      1. Environment variable  OPENAI_API_KEY  (set with: export OPENAI_API_KEY=sk-...)
       2. Streamlit secrets     OPENAI_API_KEY  (.streamlit/secrets.toml)
-         — st.secrets is re-read directly to pick up the file without
-           needing SETTINGS.refresh() to have run first.
+
+    Auto-persist: if a valid key is found in the env var but NOT in secrets.toml,
+    the key is automatically written to secrets.toml so future runs (even in
+    different terminals where the export is not set) continue to work.
     """
     try:
         from openai import OpenAI
-        # 1. Env var
-        key = os.getenv("OPENAI_API_KEY","").strip()
-        # 2. secrets.toml — read directly, not via SETTINGS, so it always reflects
-        #    the current file content regardless of when the app started.
-        if not key:
-            try:
-                # st.secrets lazily reloads secrets.toml on each access
-                _s = dict(st.secrets)
-                key = str(_s.get("OPENAI_API_KEY","") or "").strip()
-            except Exception:
-                pass
+        key = ""
+
+        # 1. Environment variable (set in the current terminal session)
+        env_key = os.getenv("OPENAI_API_KEY","").strip()
+
+        # 2. secrets.toml
+        toml_key = ""
+        try:
+            _s = dict(st.secrets)
+            toml_key = str(_s.get("OPENAI_API_KEY","") or "").strip()
+        except Exception:
+            pass
+
+        # Prefer env var; fall back to toml
+        if env_key and env_key.startswith("sk-"):
+            key = env_key
+            # Auto-persist to secrets.toml if not already there
+            if key != toml_key:
+                try:
+                    _secrets_path = Path(__file__).parent / ".streamlit" / "secrets.toml"
+                    _secrets_path.parent.mkdir(exist_ok=True)
+                    # Read existing content to preserve other keys
+                    _existing = _secrets_path.read_text() if _secrets_path.exists() else ""
+                    import re as _re
+                    if "OPENAI_API_KEY" in _existing:
+                        _existing = _re.sub(
+                            r'OPENAI_API_KEY\s*=\s*"[^"]*"',
+                            f'OPENAI_API_KEY = "{key}"',
+                            _existing
+                        )
+                    else:
+                        _existing = f'OPENAI_API_KEY = "{key}"\n' + _existing
+                    _secrets_path.write_text(_existing)
+                except Exception:
+                    pass  # non-fatal — env var still works this session
+        elif toml_key and toml_key.startswith("sk-"):
+            key = toml_key
+
         if not key or not key.startswith("sk-"):
             return None
         return OpenAI(api_key=key)
@@ -3119,6 +3148,10 @@ with st.container():
                       label_visibility="visible",
                       placeholder="Paste UUID (bus_…)",
                       help="Paste a Business UUID to investigate in entity tabs")
+        # Confirmation toast when Investigate → was clicked
+        _just_set = st.session_state.pop("_bid_just_set", None)
+        if _just_set:
+            st.success(f"✅ Business set: `{_just_set[:22]}…`  →  navigate to any tab", icon="🔍")
 
     # Custom date pickers — shown inline below filter bar when "Custom…" selected
     if st.session_state.get("fbar_date_range") == "custom":
@@ -4870,10 +4903,8 @@ Complete data gap. Entity existence AND firmographic data both unverified — hi
         with col_btn:
             st.markdown("<br>", unsafe_allow_html=True)
             if st.button("Investigate →", key=f"inv_{bid_check}", use_container_width=True):
-                # Cannot write to hub_bid directly (text_input widget owns that key).
-                # Store in a staging key; the text_input will read it as its default
-                # on the next rerun via the value= parameter workaround.
                 st.session_state["_pending_bid"] = bid_check
+                st.session_state["_bid_just_set"] = bid_check
                 st.rerun()
 
     st.markdown("---")
