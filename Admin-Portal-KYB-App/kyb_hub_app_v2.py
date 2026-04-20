@@ -1874,20 +1874,24 @@ def rag_search(q,top_k=8):
 @st.cache_resource
 def get_openai():
     """
-    Returns an OpenAI client, or None if no valid key is configured.
-    Key resolution order (re-evaluated on every call):
-      1. Environment variable  OPENAI_API_KEY  (set with: export OPENAI_API_KEY=sk-...)
-      2. Streamlit secrets     OPENAI_API_KEY  (.streamlit/secrets.toml)
+    Returns an OpenAI client using the CURRENT valid API key.
 
-    Auto-persist: if a valid key is found in the env var but NOT in secrets.toml,
-    the key is automatically written to secrets.toml so future runs (even in
-    different terminals where the export is not set) continue to work.
+    Priority order:
+      1. OPENAI_API_KEY environment variable  (inline: OPENAI_API_KEY=sk-... python3 -m streamlit run ...)
+      2. .streamlit/secrets.toml              (OPENAI_API_KEY = "sk-...")
+
+    Auto-persist: when a valid env-var key is found, it is immediately written
+    to secrets.toml — overwriting any stale key already there.
+    This ensures a single `OPENAI_API_KEY=... python3 -m streamlit run ...` command
+    persists the key for all future restarts.
     """
     try:
         from openai import OpenAI
-        key = ""
+        import re as _re2
 
-        # 1. Environment variable (set in the current terminal session)
+        _secrets_path = Path(__file__).parent / ".streamlit" / "secrets.toml"
+
+        # 1. Environment variable
         env_key = os.getenv("OPENAI_API_KEY","").strip()
 
         # 2. secrets.toml
@@ -1898,30 +1902,25 @@ def get_openai():
         except Exception:
             pass
 
-        # Prefer env var; fall back to toml
         if env_key and env_key.startswith("sk-"):
             key = env_key
-            # Auto-persist to secrets.toml if not already there
-            if key != toml_key:
-                try:
-                    _secrets_path = Path(__file__).parent / ".streamlit" / "secrets.toml"
-                    _secrets_path.parent.mkdir(exist_ok=True)
-                    # Read existing content to preserve other keys
-                    _existing = _secrets_path.read_text() if _secrets_path.exists() else ""
-                    import re as _re
-                    if "OPENAI_API_KEY" in _existing:
-                        _existing = _re.sub(
-                            r'OPENAI_API_KEY\s*=\s*"[^"]*"',
-                            f'OPENAI_API_KEY = "{key}"',
-                            _existing
-                        )
-                    else:
-                        _existing = f'OPENAI_API_KEY = "{key}"\n' + _existing
-                    _secrets_path.write_text(_existing)
-                except Exception:
-                    pass  # non-fatal — env var still works this session
+            # Always overwrite secrets.toml with the current env-var key
+            # (removes any stale/expired key stored there)
+            try:
+                _secrets_path.parent.mkdir(parents=True, exist_ok=True)
+                _existing = _secrets_path.read_text() if _secrets_path.exists() else ""
+                if "OPENAI_API_KEY" in _existing:
+                    _existing = _re2.sub(r'OPENAI_API_KEY\s*=\s*"[^"]*"',
+                                         f'OPENAI_API_KEY = "{key}"', _existing)
+                else:
+                    _existing = f'OPENAI_API_KEY = "{key}"\n' + _existing
+                _secrets_path.write_text(_existing)
+            except Exception:
+                pass
         elif toml_key and toml_key.startswith("sk-"):
             key = toml_key
+        else:
+            key = ""
 
         if not key or not key.startswith("sk-"):
             return None
@@ -3398,30 +3397,68 @@ if tab=="🏠 Home":
             try: return int(float(v or 0))
             except: return 0
 
+        # ── Build funnel lookup for registration signals ──────────────────────
+        _funnel_lookup = {}
+        if funnel_df is not None and not funnel_df.empty:
+            TAX_H = {"DE","NV","WY","SD","MT","NM"}
+            for _, fr in funnel_df.iterrows():
+                _fid  = fr["business_id"]
+                _fstate = str(fr.get("formation_state","") or "").upper().strip()
+                _opstate= str(fr.get("operating_state","") or "").upper().strip()
+                _funnel_lookup[_fid] = {
+                    "sos_found":      str(fr.get("sos_match_boolean","") or "").lower().strip()=="true",
+                    "is_domestic":    bool(_fstate and _fstate not in TAX_H),
+                    "state_match":    bool(_fstate and _opstate and _fstate == _opstate),
+                    "tin_submitted":  bool(str(fr.get("tin_submitted","") or "").strip() not in ("","None","nan")),
+                    "tin_bool":       str(fr.get("tin_match_boolean","") or "").lower().strip(),
+                }
+
         for _, sr in stats_df.iterrows():
             bid_check = sr["business_id"]
             flags=[]; score=0
-            if _safe_str(sr["sos_active"])=="false":
-                flags.append(("🔴","SOS Inactive","Entity cannot legally operate")); score+=10
-            if _safe_str(sr["sos_active"])=="":
-                flags.append(("🔴","No SOS data","Entity existence unverified")); score+=8
-            if _safe_str(sr["tin_match"])=="false":
-                flags.append(("🔴","TIN Failed","EIN-name mismatch per IRS")); score+=6
-            if _safe_str(sr["tin_match"])=="":
-                flags.append(("🟡","TIN Missing","EIN not submitted")); score+=3
-            wl=_safe_int(sr["watchlist_hits"])
+            fl = _funnel_lookup.get(bid_check, {})
+
+            # ── BULLET-POINT FEATURES (highest priority) ─────────────────────
+            # 1. No SOS registry found — entity existence unverified
+            if not fl.get("sos_found", _safe_str(sr.get("sos_active",""))!=""):
+                if _safe_str(sr.get("sos_active",""))=="":
+                    flags.append(("🔴","No SOS Registry","No registration found by Middesk")); score+=15
+
+            # 2. No domestic registration (only foreign/tax-haven state filing found)
+            if fl.get("sos_found") and not fl.get("is_domestic"):
+                flags.append(("🔴","No Domestic Reg","Only foreign/tax-haven registration found")); score+=12
+
+            # 3. Registration NOT found in operating state
+            if fl.get("sos_found") and fl.get("is_domestic") and not fl.get("state_match"):
+                flags.append(("🟠","Reg State ≠ Operating","Not registered in stated operating state")); score+=10
+
+            # 4. TIN not submitted (didn't provide EIN at all)
+            if not fl.get("tin_submitted") and _safe_str(sr.get("tin_match",""))=="":
+                flags.append(("🔴","TIN Not Submitted","No EIN provided — cannot verify identity")); score+=8
+
+            # 5. TIN submitted but check pending (submitted but no pass/fail yet)
+            if fl.get("tin_submitted") and _safe_str(sr.get("tin_match",""))=="":
+                flags.append(("🟡","TIN Pending Check","EIN submitted but IRS check not completed")); score+=4
+
+            # ── EXISTING HIGH-PRIORITY SIGNALS ───────────────────────────────
+            wl=_safe_int(sr.get("watchlist_hits",""))
             if wl>0:
-                flags.append(("🔴",f"Watchlist {wl} hit(s)","Sanctions/PEP hit")); score+=12
-            nc=_safe_str(sr["naics_code"])
+                flags.append(("🔴",f"Watchlist {wl} hit(s)","Sanctions/PEP screening hit")); score+=12
+            if _safe_str(sr.get("sos_active",""))=="false":
+                flags.append(("🔴","SOS Inactive","Entity lost good standing with Secretary of State")); score+=8
+            if _safe_str(sr.get("tin_match",""))=="false":
+                flags.append(("🔴","TIN Failed","IRS EIN-name mismatch — DBA vs legal name likely")); score+=6
+            if _safe_str(sr.get("idv_passed",""))=="false":
+                flags.append(("🟡","IDV Failed","Beneficial owner identity not confirmed")); score+=4
+            nc=_safe_str(sr.get("naics_code",""))
             if nc=="561499":
-                flags.append(("🟡","NAICS Fallback","Industry unclassified")); score+=2
+                flags.append(("🟡","NAICS Fallback","Industry unclassified (561499)")); score+=2
             elif nc=="":
                 flags.append(("🟡","No NAICS","Classification missing")); score+=3
-            if _safe_str(sr["idv_passed"])=="false":
-                flags.append(("🟡","IDV Failed","Identity verification failed")); score+=4
-            bk=_safe_int(sr["num_bankruptcies"])
+            bk=_safe_int(sr.get("num_bankruptcies",""))
             if bk>0:
                 flags.append(("🟡",f"BK: {bk}","Bankruptcy on record")); score+=3*bk
+
             if flags: biz_flags[bid_check]={"flags":flags,"score":score}
 
     # Merge flags into recent_df
@@ -4068,100 +4105,70 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
                     st.rerun()
 
         st.markdown("---")
+        st.markdown("---")
         st.markdown("#### 🧮 Red Flag Score — Methodology Card")
         st.markdown("""<div style="background:#1E293B;border-left:4px solid #6366f1;border-radius:10px;padding:16px 20px;margin:8px 0">
-
-<div style="color:#a5b4fc;font-weight:700;font-size:.95rem;margin-bottom:6px">
-  📐 What is this score?
-</div>
+<div style="color:#a5b4fc;font-weight:700;font-size:.95rem;margin-bottom:6px">📐 What is this score?</div>
 <div style="color:#CBD5E1;font-size:.82rem;line-height:1.7">
-  This is a <strong>custom additive heuristic</strong> built specifically for this dashboard.
-  It is <em>not</em> sourced from any external scoring model, regulatory framework, or vendor.
-  It is not the Worth Score, not an AML risk score, and not a credit score.
-  It exists solely to <strong>rank and surface businesses needing manual review</strong>
-  on the Home tab — a triage signal, not a decisioning tool.
+A <strong>custom additive triage heuristic</strong> that ranks businesses needing manual review.
+It prioritises the three core KYB registration verification questions:<br/>
+<em>(1) Was a registration found in an SOS registry?<br/>
+(2) Was a domestic (incorporation) registration found?<br/>
+(3) Was a registration found in the state the business operates in?<br/>
+(4) Did the business submit a TIN and did it pass the IRS check?</em>
 </div>
-
-<div style="color:#a5b4fc;font-weight:700;font-size:.95rem;margin:12px 0 6px">
-  ⚙️ How is it calculated?
-</div>
+<div style="color:#a5b4fc;font-weight:700;font-size:.95rem;margin:12px 0 6px">⚙️ How is it calculated?</div>
 <div style="color:#CBD5E1;font-size:.82rem;line-height:1.7">
-  Each detected condition adds a fixed integer to a running total.
-  Conditions are checked independently — a business can accumulate multiple flags.
-  The final score is the <strong>sum of all triggered weights</strong>.
-  There is no normalization, no probability model, and no ML inference involved.
+Each condition adds a fixed integer. A business accumulates multiple flags independently.
+Final score = sum of all triggered weights. Higher score = more urgent review needed.
 </div>
-
-<div style="color:#a5b4fc;font-weight:700;font-size:.95rem;margin:12px 0 6px">
-  🏗️ Why these specific weights?
-</div>
+<div style="color:#a5b4fc;font-weight:700;font-size:.95rem;margin:12px 0 6px">🏗️ Score weights — ordered by priority</div>
 <div style="color:#CBD5E1;font-size:.82rem;line-height:1.7">
-  Weights reflect <strong>compliance and underwriting priority order</strong>, derived from
-  the internal KYB decision logic documented across the Fact Engine, integration-service rules,
-  and the Worth Score model feature importance. The relative ordering follows these principles:
-  <ul style="margin:6px 0 0 16px;color:#CBD5E1">
-    <li><strong>Sanctions/Watchlist (+12)</strong> — regulatory hard stop per OFAC/FinCEN guidance.
-      Any watchlist hit mandates compliance review before any other action. Highest weight.</li>
-    <li><strong>SOS Inactive (+10)</strong> — a business that is not in good standing with its
-      Secretary of State cannot legally operate. Maps to the <code>sos_active</code> fact from Middesk.</li>
-    <li><strong>No SOS data (+8)</strong> — entity existence is completely unverified.
-      Slightly lower than inactive because the vendor lookup may simply have failed,
-      not because the entity is confirmed bad.</li>
-    <li><strong>TIN Failed (+6)</strong> — IRS EIN-name mismatch (Middesk TIN check).
-      Indicates possible identity fraud or incorrect filing. Serious but recoverable
-      with corrected documentation.</li>
-    <li><strong>IDV Failed (+4)</strong> — beneficial owner identity not confirmed (Trulioo/IDology).
-      Significant for KYC but does not by itself block merchant from existing.</li>
-    <li><strong>Missing TIN / NAICS (+2–3)</strong> — data gaps. May be timing (not yet enriched)
-      rather than a true problem. Lower weight to avoid false alarms on newly onboarded merchants.</li>
-    <li><strong>Bankruptcy (+3 each)</strong> — public record on file. Weighted per occurrence
-      because multiple bankruptcies compound the credit risk signal.</li>
-  </ul>
+<ul style="margin:6px 0 0 16px;color:#CBD5E1">
+<li><strong>🔴 No SOS Registry Found (+15)</strong> — Middesk could not find ANY registration record. Entity existence completely unverified. Cannot confirm the business exists.</li>
+<li><strong>🔴 No Domestic Registration (+12)</strong> — A record was found but only a foreign qualification (tax-haven state DE/NV/WY/SD/MT/NM). The primary incorporation record is missing.</li>
+<li><strong>🔴 Watchlist Hit (+12 per hit)</strong> — OFAC/FinCEN sanctions or PEP screening hit. Regulatory hard stop — compliance review required before any other action.</li>
+<li><strong>🟠 Reg State ≠ Operating State (+10)</strong> — Entity formation state does not match the state they told us they operate in. Middesk may have found the wrong filing.</li>
+<li><strong>🔴 TIN Not Submitted (+8)</strong> — No EIN provided at onboarding. IRS TIN check is impossible. Cannot verify tax identity at all.</li>
+<li><strong>🔴 SOS Inactive (+8)</strong> — Entity lost good standing with its Secretary of State (missed annual report, dissolved, or revoked). Cannot legally operate.</li>
+<li><strong>🔴 TIN Failed (+6)</strong> — EIN submitted but IRS returned a name mismatch. Most common cause: DBA/trade name submitted instead of legal name on EIN certificate (CP-575).</li>
+<li><strong>🟡 TIN Pending Check (+4)</strong> — EIN was submitted but Middesk IRS check has not yet returned a result. Monitor — may resolve shortly.</li>
+<li><strong>🟡 IDV Failed (+4)</strong> — Beneficial owner did not complete biometric identity verification (Plaid/Trulioo).</li>
+<li><strong>🟡 No NAICS (+3)</strong> — Industry classification completely missing.</li>
+<li><strong>🟡 NAICS Fallback 561499 (+2)</strong> — AI enrichment used as last resort; industry classification uncertain.</li>
+<li><strong>🟡 Bankruptcy (+3 each)</strong> — Public record on file; additive per occurrence.</li>
+</ul>
 </div>
-
-<div style="color:#a5b4fc;font-weight:700;font-size:.95rem;margin:12px 0 6px">
-  ⚠️ Limitations & intended use
-</div>
+<div style="color:#a5b4fc;font-weight:700;font-size:.95rem;margin:12px 0 6px">⚠️ Limitations</div>
 <div style="color:#CBD5E1;font-size:.82rem;line-height:1.7">
-  <ul style="margin:4px 0 0 16px">
-    <li>This score is a <strong>triage / prioritisation tool only</strong>. It should not be used
-      for automated approval or decline decisions.</li>
-    <li>Weights are <strong>not statistically calibrated</strong>. They have not been validated
-      against historical default or fraud rates.</li>
-    <li>A score of 0 does not mean the business is safe — it means no flags were detected
-      in the facts currently stored in Redshift.</li>
-    <li>Data latency in <code>rds_warehouse_public.facts</code> means some flags may appear
-      minutes or hours after onboarding.</li>
-    <li>To make this score production-grade, replace it with the Worth Score
-      (<code>rds_manual_score_public.business_scores</code>) or the BERT review signal
-      (<code>rds_integration_data.business_entity_review_task</code>).</li>
-  </ul>
-</div>
-
-<div style="color:#475569;font-size:.72rem;margin-top:12px;border-top:1px solid #334155;padding-top:8px">
-  Source: Custom dashboard heuristic. Internal reference:
-  integration-service <code>lib/facts/rules.ts</code> (rule priority ordering),
-  Worth Score feature importance (<code>ai-score-service/worth_score_model.py</code>),
-  OFAC/FinCEN KYC guidance (watchlist hard-stop).
-  Not a regulatory-compliant risk score.
+<ul style="margin:4px 0 0 16px">
+<li>Triage tool only — not for automated approve/decline decisions.</li>
+<li>Weights not statistically calibrated against historical fraud or default rates.</li>
+<li>Score = 0 means no flags detected in current Redshift data, not necessarily safe.</li>
+</ul>
 </div>
 </div>""", unsafe_allow_html=True)
 
         st.markdown("**Score weights at a glance:**")
         st.markdown("""
-| Flag | Score | Regulatory / operational basis |
+| Flag | Score | What it checks |
 |---|---|---|
-| 🔴 Watchlist hit | +12 | OFAC/FinCEN hard stop — highest compliance priority |
-| 🔴 SOS Inactive | +10 | Entity legally cannot operate in its state |
-| 🔴 No SOS data | +8 | Entity existence unverifiable — vendor lookup may have failed |
-| 🔴 TIN Failed | +6 | IRS EIN-name mismatch — potential identity fraud signal |
-| 🟡 IDV Failed | +4 | Beneficial owner identity not confirmed |
-| 🟡 Missing TIN | +3 | EIN not submitted or not yet checked |
-| 🟡 No / Fallback NAICS | +2–3 | Classification gap — industry unverified |
-| 🟡 Bankruptcy (per occurrence) | +3 | Public record — additive per filing |
+| 🔴 No SOS Registry Found | +15 | Middesk found no registration — entity existence unverified |
+| 🔴 No Domestic Registration | +12 | Only foreign/tax-haven filing found — incorporation record missing |
+| 🔴 Watchlist Hit | +12 | OFAC/FinCEN sanctions/PEP — compliance hard stop |
+| 🟠 Reg State ≠ Operating State | +10 | Not registered in stated operating state |
+| 🔴 TIN Not Submitted | +8 | No EIN given — IRS check impossible |
+| 🔴 SOS Inactive | +8 | Lost good standing — cannot legally operate |
+| 🔴 TIN Failed | +6 | IRS EIN-name mismatch — DBA vs legal name |
+| 🟡 TIN Pending Check | +4 | EIN submitted but IRS result not yet returned |
+| 🟡 IDV Failed | +4 | Beneficial owner biometrics not confirmed |
+| 🟡 No NAICS | +3 | Industry classification missing |
+| 🟡 NAICS Fallback 561499 | +2 | AI last resort — industry uncertain |
+| 🟡 Bankruptcy (per occurrence) | +3 | Public record on file |
 
-**Score ≥ 12** = Critical · **8–11** = High · **1–7** = Medium · **0** = No flags detected
+**Score ≥ 15** = Critical · **10–14** = High · **1–9** = Medium · **0** = No flags
         """)
+
 
 # ════════════════════════════════════════════════════════════════════════════════
 # REGISTRY & IDENTITY
