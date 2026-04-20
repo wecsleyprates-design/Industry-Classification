@@ -5055,8 +5055,9 @@ Complete data gap. Entity existence AND firmographic data both unverified — hi
             with col_btn:
                 st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("Investigate →", key=f"top10_{bid_check}", use_container_width=True):
-                    st.session_state["hub_bid"] = bid_check
-                    st.success("UUID set. Navigate to any section in the sidebar.")
+                    st.session_state["_pending_bid"] = bid_check
+                    st.session_state["_bid_just_set"] = bid_check
+                    st.rerun()
 
         st.markdown("---")
         st.markdown("#### 🧮 Red Flag Score — Methodology Card")
