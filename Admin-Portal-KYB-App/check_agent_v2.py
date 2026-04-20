@@ -808,18 +808,43 @@ def build_fact_summary(facts: dict) -> dict:
     return summary
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def run_llm_audit(facts_json: str, business_id: str, score_json: str = "",
-                  _api_key_hint: str = "") -> tuple:
+def run_llm_audit(facts_json: str, business_id: str, score_json: str = "") -> tuple:
     """
-    Run GPT-powered deep audit. Cached per (facts_hash, bid, api_key_hint).
-    _api_key_hint: last 8 chars of the active key — included so a new key
-    automatically busts the old cached 401 error without forcing a full rerun.
+    Run GPT-powered deep audit with session-state caching.
+
+    Why session_state instead of @st.cache_data:
+      st.cache_data ignores parameters prefixed with _ (they can't be hashed),
+      and its disk cache persists 401 errors across restarts even after the key
+      changes. session_state is per-session and includes the key suffix in the
+      cache key, so a new API key immediately produces a fresh result.
+
+    Cache TTL: 30 minutes (1800 s) — same as before.
     Returns (result_dict, error_str).
     """
+    import time as _time
+
+    # ── Build a cache key that includes the active API key suffix ─────────────
+    active_key = _get_api_key()
+    key_suffix  = active_key[-8:] if active_key else "nokey"
+    facts_hash  = hashlib.md5(facts_json.encode()).hexdigest()[:10]
+    cache_key   = f"_llm_audit_{business_id}_{facts_hash}_{key_suffix}"
+
+    # ── Return cached result if still fresh ───────────────────────────────────
+    try:
+        cached = st.session_state.get(cache_key)
+        if cached and (_time.time() - cached.get("ts", 0)) < 1800:
+            return cached["result"], cached["err"]
+    except Exception:
+        pass
+
+    # ── Build client fresh (reads env var / secrets.toml now) ─────────────────
     client = get_openai_client()
     if not client:
-        return None, "OpenAI API key not configured — set OPENAI_API_KEY env var or secrets.toml."
+        return None, (
+            "OpenAI API key not configured.\n"
+            "Fix: run  OPENAI_API_KEY='sk-...' python3 -m streamlit run kyb_hub_app_v2.py\n"
+            "Or add OPENAI_API_KEY = 'sk-...' to Admin-Portal-KYB-App/.streamlit/secrets.toml"
+        )
 
     try:
         facts = json.loads(facts_json)
@@ -828,21 +853,19 @@ def run_llm_audit(facts_json: str, business_id: str, score_json: str = "",
         return None, f"JSON parse error: {e}"
 
     fact_summary = build_fact_summary(facts)
-
-    user_prompt = (
+    user_prompt  = (
         f"Analyze this business entity for KYB compliance risk and data quality.\n\n"
         f"Business ID: {business_id}\n\n"
         f"FACT PROFILE:\n{json.dumps(fact_summary, indent=2, default=str)}\n"
     )
     if score:
         user_prompt += f"\nWORTH SCORE INFO:\n{json.dumps(score, indent=2, default=str)}\n"
-
     user_prompt += (
         "\nFocus your analysis on:\n"
-        "1. Cross-field inconsistencies (e.g., SOS active but TIN failed)\n"
+        "1. Cross-field inconsistencies (SOS active but TIN failed, etc.)\n"
         "2. Missing critical KYB data (SOS, TIN, IDV, NAICS)\n"
         "3. High-risk indicators (watchlist, bankruptcies, tax-haven states)\n"
-        "4. Shell entity signals (high revenue + few employees, RA address, no digital footprint)\n"
+        "4. Shell entity signals (high revenue + few employees, RA address)\n"
         "5. Entity resolution concerns (formation vs operating state)\n"
         "6. Worth Score impact of missing data\n"
         "7. Industry-specific risk from NAICS code\n\n"
@@ -860,9 +883,20 @@ def run_llm_audit(facts_json: str, business_id: str, score_json: str = "",
             max_tokens=4000,
             response_format={"type": "json_object"},
         )
-        return json.loads(response.choices[0].message.content), None
+        result = json.loads(response.choices[0].message.content)
+        err    = None
     except Exception as e:
-        return None, str(e)
+        result = None
+        err    = str(e)
+
+    # ── Cache in session state (only success — don't cache API errors) ─────────
+    try:
+        if result is not None:
+            st.session_state[cache_key] = {"result": result, "err": err, "ts": _time.time()}
+    except Exception:
+        pass
+
+    return result, err
 
 
 def facts_cache_key(facts: dict) -> str:
