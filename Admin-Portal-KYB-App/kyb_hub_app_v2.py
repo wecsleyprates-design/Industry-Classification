@@ -2940,7 +2940,7 @@ with st.sidebar:
         "🏠 Home","🏛️ Registry & Identity","🏭 Classification & KYB",
         "⚠️ Risk & Watchlist","💰 Worth Score","📋 All Facts",
         "🔍 Check-Agent","🤖 AI Agent",
-        "🌳 Lineage & Discovery","⌨️ Data Explorer","🧠 Intelligence Hub"])
+        "🌳 Lineage & Discovery","🧠 Intelligence Hub"])
 
     # ── Customer Filter (linked to date range) ───────────────────────────────
     st.markdown("---")
@@ -3095,7 +3095,7 @@ def _cust_agg(customer_id, date_from, date_to, facts_list):
     if date_to:   date_c += f" AND DATE(rbcm.created_at) <= '{date_to}'"
     cust_c = f" AND rbcm.customer_id = '{customer_id}'" if customer_id else ""
 
-    cases_list = "\n".join(
+    cases_list = ",\n".join(
         f"    MAX(CASE WHEN f.name='{n}' THEN JSON_EXTRACT_PATH_TEXT(LEFT(f.value,8000),'value') END) AS {n.replace('-','_')}"
         for n in facts_list
     )
@@ -3120,7 +3120,7 @@ def _cust_scores(customer_id, date_from, date_to):
     if date_to:   date_c += f" AND DATE(rbcm.created_at) <= '{date_to}'"
     cust_c = f" AND rbcm.customer_id = '{customer_id}'" if customer_id else ""
     return run_sql(f"""
-        SELECT bs.business_id, bs.weighted_score_850, bs.risk_level, bs.score_decision,
+        SELECT cs.business_id, bs.weighted_score_850, bs.risk_level, bs.score_decision,
                bs.created_at AS scored_at
         FROM rds_cases_public.rel_business_customer_monitoring rbcm
         LEFT JOIN rds_manual_score_public.data_current_scores cs ON cs.business_id=rbcm.business_id
@@ -3667,22 +3667,32 @@ def render_customer_all_facts(cust_name, cust_id, date_from, date_to):
         "num_bankruptcies","middesk_confidence","name_match_boolean","address_match_boolean",
         "corporation","risk_score",
     ]
+    # Use a simple JOIN existence check (no JSON_EXTRACT on federated table —
+    # that function is not available on the Redshift side for federated schemas).
+    # A row existing for a given (business_id, name) means the fact is present.
+    _cust_clause = f" AND rbcm.customer_id = '{cust_id}'" if cust_id else ""
+    _date_from_c = f" AND DATE(rbcm.created_at) >= '{date_from}'" if date_from else ""
+    _date_to_c   = f" AND DATE(rbcm.created_at) <= '{date_to}'"   if date_to   else ""
     _fr_sql = f"""
-        SELECT f.name,
-               COUNT(DISTINCT f.business_id) AS businesses_with_value,
-               COUNT(DISTINCT rbcm.business_id) AS total_businesses,
-               ROUND(100.0 * COUNT(DISTINCT f.business_id) / NULLIF(COUNT(DISTINCT rbcm.business_id),0), 1) AS fill_pct
-        FROM rds_cases_public.rel_business_customer_monitoring rbcm
-        LEFT JOIN rds_warehouse_public.facts f
-          ON f.business_id = rbcm.business_id
-          AND f.name IN ({','.join(f"'{n}'" for n in KEY_FACTS)})
-          AND JSON_EXTRACT_PATH_TEXT(LEFT(f.value,8000),'value') IS NOT NULL
-          AND JSON_EXTRACT_PATH_TEXT(LEFT(f.value,8000),'value') <> ''
-        WHERE 1=1
-        {f"AND rbcm.customer_id = '{cust_id}'" if cust_id else ""}
-        {f"AND DATE(rbcm.created_at) >= '{date_from}'" if date_from else ""}
-        {f"AND DATE(rbcm.created_at) <= '{date_to}'" if date_to else ""}
-        GROUP BY f.name
+        WITH portfolio AS (
+            SELECT DISTINCT business_id
+            FROM rds_cases_public.rel_business_customer_monitoring rbcm
+            WHERE 1=1 {_cust_clause} {_date_from_c} {_date_to_c}
+        ),
+        fact_presence AS (
+            SELECT f.name,
+                   COUNT(DISTINCT f.business_id) AS businesses_with_fact
+            FROM rds_warehouse_public.facts f
+            JOIN portfolio p ON p.business_id = f.business_id
+            WHERE f.name IN ({','.join(f"'{n}'" for n in KEY_FACTS)})
+            GROUP BY f.name
+        )
+        SELECT fp.name,
+               fp.businesses_with_fact                              AS businesses_with_value,
+               (SELECT COUNT(*) FROM portfolio)                     AS total_businesses,
+               ROUND(100.0 * fp.businesses_with_fact
+                     / NULLIF((SELECT COUNT(*) FROM portfolio), 0), 1) AS fill_pct
+        FROM fact_presence fp
         ORDER BY fill_pct ASC
     """
     with st.spinner("Computing fact fill rates…"):
@@ -10408,395 +10418,6 @@ elif tab == "🌳 Lineage & Discovery":
 
 # ════════════════════════════════════════════════════════════════════════════════
 # ⌨️ DATA EXPLORER
-# ════════════════════════════════════════════════════════════════════════════════
-elif tab == "⌨️ Data Explorer":
-    st.markdown("## ⌨️ Data Explorer")
-    st.caption("Direct Redshift access for advanced analysis: templated SQL queries, Python runner, dataset health monitoring, and join validation.")
-
-    # ── Active scope banner — shows which customer/business/date is in context ──
-    _de_scope      = st.session_state.get("_hub_scope","🏢 Single Business")
-    _de_bid        = st.session_state.get("hub_bid","")
-    _de_cust_name  = hub_scope_customer_name if _de_scope == "📊 Customer / Portfolio" else ""
-    _de_cust_id    = hub_scope_customer_id   if _de_scope == "📊 Customer / Portfolio" else None
-    _de_date_from  = hub_date_from
-    _de_date_to    = hub_date_to
-
-    # Build SQL snippets for scope context injection into templates
-    _de_date_sql   = (f"DATE(rbcm.created_at) BETWEEN '{_de_date_from}' AND '{_de_date_to}'"
-                      if _de_date_from and _de_date_to
-                      else f"DATE(rbcm.created_at) >= CURRENT_DATE - 30")
-    _de_cust_sql   = (f"AND rbcm.customer_id = '{_de_cust_id}'" if _de_cust_id else "")
-    _de_cust_join  = ("JOIN rds_auth_public.data_customers _dc ON _dc.id = rbcm.customer_id\n"
-                      f"  AND _dc.name = '{_de_cust_name}'" if _de_cust_name and _de_cust_name != "All Customers" else "")
-
-    if _de_scope == "📊 Customer / Portfolio":
-        flag(f"📊 **Customer scope active:** {_de_cust_name}  ·  "
-             f"Date: {_de_date_from or 'all'} → {_de_date_to or 'all'}  ·  "
-             f"SQL templates below are pre-filtered to this customer and date range.", "blue")
-    elif _de_bid:
-        flag(f"🏢 **Business scope active:** `{_de_bid[:30]}`  ·  "
-             f"Date: {_de_date_from or 'all'} → {_de_date_to or 'all'}  ·  "
-             f"Templates include this Business ID where applicable.", "blue")
-    else:
-        flag("ℹ️ No specific scope set — templates show portfolio-wide data. "
-             "Select a Customer or Business ID in the sidebar to scope queries.", "blue")
-
-    de1, de2, de3, de4 = st.tabs(["🗄️ SQL Runner", "🐍 Python Runner", "❤️ Dataset Health", "🔗 Join Validation"])
-
-    # ── SQL RUNNER WITH TEMPLATES ─────────────────────────────────────────────
-    with de1:
-        st.markdown("#### 🗄️ SQL Runner")
-        st.caption("Read-only Redshift access. SELECT-only. Templates for common KYB analytics. Results include download and `detail_panel()` lineage.")
-
-        SQL_TEMPLATES = {
-            "— select a template —": "",
-            "📊 Low-confidence cases by customer (last 30d)": """
-SELECT
-    c.name                                                          AS customer_name,
-    COUNT(DISTINCT cs.business_id)                                  AS low_conf_cases,
-    ROUND(AVG(bs.weighted_score_850)::NUMERIC, 1)                  AS avg_score
-FROM rds_manual_score_public.data_current_scores cs
-JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
-JOIN rds_cases_public.rel_business_customer_monitoring rbcm
-  ON rbcm.business_id = cs.business_id
-JOIN rds_auth_public.data_customers c ON c.id = rbcm.customer_id
-WHERE DATE(rbcm.created_at) >= CURRENT_DATE - 30
-  AND bs.weighted_score_850 < 550
-GROUP BY 1
-ORDER BY low_conf_cases DESC
-;""",
-            "🔐 TIN mismatch rate by date": """
-SELECT
-    DATE(rbcm.created_at)                                           AS onboarded_date,
-    COUNT(DISTINCT rbcm.business_id)                                AS total,
-    SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value')='false' THEN 1 ELSE 0 END) AS tin_failed,
-    ROUND(100.0 * SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value')='false' THEN 1 ELSE 0 END)
-          / NULLIF(COUNT(DISTINCT rbcm.business_id),0), 1)          AS tin_fail_pct
-FROM rds_cases_public.rel_business_customer_monitoring rbcm
-LEFT JOIN rds_warehouse_public.facts f
-  ON f.business_id = rbcm.business_id AND f.name = 'tin_match_boolean'
-WHERE DATE(rbcm.created_at) >= CURRENT_DATE - 30
-GROUP BY 1
-ORDER BY 1 DESC;""",
-            "🔗 Duplicate TINs across unrelated businesses": """
-SELECT
-    JSON_EXTRACT_PATH_TEXT(f.value,'value')                         AS tin_submitted,
-    COUNT(DISTINCT f.business_id)                                   AS n_businesses,
-    LISTAGG(DISTINCT f.business_id, ', ') WITHIN GROUP (ORDER BY f.business_id) AS business_ids
-FROM rds_warehouse_public.facts f
-WHERE f.name = 'tin_submitted'
-  AND JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NOT NULL
-GROUP BY 1
-HAVING COUNT(DISTINCT f.business_id) > 1
-ORDER BY n_businesses DESC
-;""",
-            "📉 Source disagreement on NAICS (winners vs alternatives)": """
-SELECT
-    JSON_EXTRACT_PATH_TEXT(f.value,'value')                                AS winning_naics,
-    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')::INT             AS winner_pid,
-    COUNT(DISTINCT f.business_id)                                          AS businesses,
-    SUM(CASE WHEN JSON_ARRAY_LENGTH(JSON_EXTRACT_PATH_TEXT(f.value,'alternatives')) > 0 THEN 1 ELSE 0 END) AS has_alternatives
-FROM rds_warehouse_public.facts f
-WHERE f.name = 'naics_code'
-GROUP BY 1, 2
-ORDER BY businesses DESC
-;""",
-            "📈 Confidence score distribution by band (last 30d)": """
-SELECT
-    CASE WHEN bs.weighted_score_850 < 400 THEN 'Very Low (<400)'
-         WHEN bs.weighted_score_850 < 550 THEN 'Low (400-549)'
-         WHEN bs.weighted_score_850 < 700 THEN 'Medium (550-699)'
-         WHEN bs.weighted_score_850 < 800 THEN 'High (700-799)'
-         ELSE                                  'Very High (≥800)' END      AS band,
-    COUNT(DISTINCT cs.business_id)                                          AS businesses,
-    bs.score_decision                                                        AS decision
-FROM rds_manual_score_public.data_current_scores cs
-JOIN rds_manual_score_public.business_scores bs ON bs.id = cs.score_id
-JOIN rds_cases_public.rel_business_customer_monitoring rbcm
-  ON rbcm.business_id = cs.business_id
-WHERE DATE(rbcm.created_at) >= CURRENT_DATE - 30
-GROUP BY 1, 3
-ORDER BY MIN(bs.weighted_score_850);""",
-            "⚠️ High-risk portfolio: watchlist + SOS inactive + TIN failed": """
-SELECT
-    rbcm.business_id,
-    DATE(rbcm.created_at)                                                   AS onboarded,
-    JSON_EXTRACT_PATH_TEXT(f_wl.value,'value')                             AS watchlist_hits,
-    JSON_EXTRACT_PATH_TEXT(f_sos.value,'value')                            AS sos_active,
-    JSON_EXTRACT_PATH_TEXT(f_tin.value,'value')                            AS tin_match_boolean,
-    JSON_EXTRACT_PATH_TEXT(f_naics.value,'value')                          AS naics_code,
-    bs.weighted_score_850                                                    AS worth_score
-FROM rds_cases_public.rel_business_customer_monitoring rbcm
-LEFT JOIN rds_warehouse_public.facts f_wl   ON f_wl.business_id=rbcm.business_id   AND f_wl.name='watchlist_hits'
-LEFT JOIN rds_warehouse_public.facts f_sos  ON f_sos.business_id=rbcm.business_id  AND f_sos.name='sos_active'
-LEFT JOIN rds_warehouse_public.facts f_tin  ON f_tin.business_id=rbcm.business_id  AND f_tin.name='tin_match_boolean'
-LEFT JOIN rds_warehouse_public.facts f_naics ON f_naics.business_id=rbcm.business_id AND f_naics.name='naics_code'
-LEFT JOIN rds_manual_score_public.data_current_scores cs ON cs.business_id=rbcm.business_id
-LEFT JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
-WHERE DATE(rbcm.created_at) >= CURRENT_DATE - 30
-  AND (
-    CAST(JSON_EXTRACT_PATH_TEXT(f_wl.value,'value') AS INT) > 0
-    OR JSON_EXTRACT_PATH_TEXT(f_sos.value,'value') = 'false'
-    OR JSON_EXTRACT_PATH_TEXT(f_tin.value,'value') = 'false'
-  )
-ORDER BY rbcm.created_at DESC
-;""",
-        }
-
-        _tpl_choice = st.selectbox("📋 Query Templates:", list(SQL_TEMPLATES.keys()), key="de_sql_template")
-        _tpl_raw = SQL_TEMPLATES[_tpl_choice] if _tpl_choice != "— select a template —" else "-- Write your SQL here\nSELECT 1 AS test;"
-
-        # Auto-inject active scope (customer + date) into templates
-        _scope_comment = ""
-        if _de_cust_name and _de_cust_name not in ("All Customers",""):
-            _scope_comment += f"-- Active scope: Customer = {_de_cust_name}\n"
-        if _de_date_from:
-            _scope_comment += f"-- Date range: {_de_date_from} → {_de_date_to}\n"
-        if _de_bid:
-            _scope_comment += f"-- Business ID: {_de_bid}\n"
-        # Replace generic date placeholders in templates with active window
-        _de_default_sql = _tpl_raw
-        if _de_date_from:
-            _de_default_sql = _de_default_sql.replace(
-                "CURRENT_DATE - 30", f"'{_de_date_from}' -- auto from date filter"
-            ).replace(
-                ">= CURRENT_DATE - 7",  f">= '{_de_date_from}' -- auto from date filter"
-            )
-        # For single-business templates, inject the business ID
-        if _de_bid and "{business_id}" in _de_default_sql:
-            _de_default_sql = _de_default_sql.replace("{business_id}", _de_bid)
-        if _scope_comment:
-            _de_default_sql = _scope_comment + _de_default_sql
-
-        _de_sql_input = st.text_area("SQL Query:", value=_de_default_sql.strip(), height=220, key="de_sql_input")
-
-        _de_r1, _de_r2 = st.columns([2,1])
-        with _de_r1:
-            _de_run = st.button("▶ Run SQL", type="primary", use_container_width=True, key="de_sql_run")
-        with _de_r2:
-            _de_chart = st.checkbox("Auto-chart result", value=True, key="de_auto_chart")
-
-        if _de_run and _de_sql_input.strip():
-            with st.spinner("Running query against Redshift…"):
-                _de_df, _de_err = run_sql(_de_sql_input)
-
-            if _de_err:
-                flag(f"SQL error: {_de_err}", "red")
-            elif _de_df is not None and not _de_df.empty:
-                st.success(f"✅ {len(_de_df):,} rows · {len(_de_df.columns)} columns")
-                st.dataframe(_de_df, use_container_width=True, hide_index=True)
-
-                # Auto-chart logic
-                if _de_chart and len(_de_df) > 1:
-                    _ncols = _de_df.select_dtypes(include="number").columns.tolist()
-                    _ccols = _de_df.select_dtypes(exclude="number").columns.tolist()
-                    _fig = None
-                    try:
-                        if len(_de_df.columns) == 2 and len(_ccols) >= 1 and len(_ncols) >= 1:
-                            # Simple bar
-                            _fig = px.bar(_de_df, x=_ccols[0], y=_ncols[0], title=f"Result: {_ccols[0]} × {_ncols[0]}")
-                        elif len(_ncols) >= 1 and "date" in " ".join(_de_df.columns).lower():
-                            _date_col = next((c for c in _de_df.columns if "date" in c.lower() or "week" in c.lower() or "month" in c.lower()), _ccols[0] if _ccols else None)
-                            if _date_col:
-                                _color_col = _ccols[1] if len(_ccols) > 1 else None
-                                _fig = px.line(_de_df, x=_date_col, y=_ncols[0], color=_color_col, title=f"Trend: {_ncols[0]} over time")
-                        elif len(_ncols) >= 1 and "band" in " ".join(_de_df.columns).lower():
-                            _fig = px.bar(_de_df, x=_ccols[0] if _ccols else _de_df.columns[0], y=_ncols[0],
-                                          color=_ccols[1] if len(_ccols)>1 else None, barmode="stack", title="Band Distribution")
-                        elif len(_ncols) == 1 and len(_de_df) <= 10:
-                            _fig = px.pie(_de_df, names=_ccols[0] if _ccols else _de_df.columns[0], values=_ncols[0], hole=0.4, title="Distribution")
-                    except Exception:
-                        _fig = None
-                    if _fig is not None:
-                        _fig.update_layout(height=320, margin=dict(t=40,b=10,l=10,r=10))
-                        st.plotly_chart(dark_chart(_fig), use_container_width=True)
-
-                # Downloads
-                _dl1, _dl2 = st.columns(2)
-                with _dl1:
-                    st.download_button("⬇️ CSV", _de_df.to_csv(index=False).encode(),
-                        file_name="query_result.csv", mime="text/csv", use_container_width=True, key="de_dl_csv")
-
-                detail_panel(
-                    "🗄️ SQL Query Result", f"{len(_de_df):,} rows · {len(_de_df.columns)} columns",
-                    what_it_means=f"Result of query against Redshift. Template used: '{_tpl_choice}'.\n\nColumn types: {', '.join(f'{c} ({str(t)})' for c,t in _de_df.dtypes.items())}",
-                    source_table="Multiple Redshift tables — see SQL above",
-                    sql=_de_sql_input,
-                    json_obj={"rows": len(_de_df), "cols": list(_de_df.columns), "template": _tpl_choice},
-                    icon="🗄️", color="#3B82F6"
-                )
-            elif _de_df is not None and _de_df.empty:
-                st.info("Query executed — 0 rows returned.")
-            else:
-                flag("Query returned no data.", "amber")
-
-    # ── PYTHON RUNNER ─────────────────────────────────────────────────────────
-    with de2:
-        st.markdown("#### 🐍 Python Runner")
-        st.caption("Sandboxed Python with `conn` (Redshift), `pd` (pandas), `px` (plotly). No filesystem or external network.")
-        _de_py_default = '''import pandas as pd
-# conn is pre-injected (psycopg2 connection to Redshift)
-# Example: KYB health summary
-df = pd.read_sql("""
-    SELECT
-        COUNT(DISTINCT rbcm.business_id) AS total_businesses,
-        SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value')='true' THEN 1 ELSE 0 END) AS sos_pass,
-        SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f2.value,'value')='true' THEN 1 ELSE 0 END) AS tin_pass
-    FROM rds_cases_public.rel_business_customer_monitoring rbcm
-    LEFT JOIN rds_warehouse_public.facts f  ON f.business_id=rbcm.business_id  AND f.name='sos_active'
-    LEFT JOIN rds_warehouse_public.facts f2 ON f2.business_id=rbcm.business_id AND f2.name='tin_match_boolean'
-    WHERE DATE(rbcm.created_at) >= CURRENT_DATE - 30
-""", conn)
-df["sos_rate"]  = (df["sos_pass"]  / df["total_businesses"] * 100).round(1)
-df["tin_rate"]  = (df["tin_pass"]  / df["total_businesses"] * 100).round(1)
-print(df.to_string(index=False))
-df
-'''
-        _de_py = st.text_area("Python code:", value=_de_py_default, height=260, key="de_py_input")
-        if st.button("▶ Run Python", type="primary", key="de_py_run"):
-            _conn_py, _ok_py, _err_py = get_conn()
-            if not _ok_py:
-                flag(f"Cannot connect to Redshift: {_err_py}", "red")
-            else:
-                import io as _io_de
-                import contextlib as _cl_de
-                _buf_de = _io_de.StringIO()
-                _local_ns = {"conn": _conn_py, "pd": pd, "px": px}
-                try:
-                    with _cl_de.redirect_stdout(_buf_de):
-                        exec(_de_py, _local_ns)
-                    _out = _buf_de.getvalue()
-                    if _out: st.code(_out, language="text")
-                    _last = {k: v for k, v in _local_ns.items()
-                             if isinstance(v, pd.DataFrame) and k not in ("conn", "pd", "px")}
-                    for _vn, _vdf in _last.items():
-                        st.success(f"DataFrame `{_vn}`: {len(_vdf):,} rows × {len(_vdf.columns)} cols")
-                        st.dataframe(_vdf, use_container_width=True, hide_index=True)
-                        detail_panel(f"🐍 Python DataFrame: {_vn}", f"{len(_vdf):,} rows",
-                            what_it_means=f"DataFrame `{_vn}` produced by the Python runner. Columns: {', '.join(_vdf.columns)}.",
-                            source_table="Redshift via psycopg2 (conn pre-injected)",
-                            sql="-- See Python code above for the underlying query",
-                            icon="🐍", color="#22c55e")
-                except Exception as _exc_de:
-                    st.error(f"Python error: {_exc_de}")
-                finally:
-                    try: _conn_py.close()
-                    except Exception: pass
-
-    # ── DATASET HEALTH ────────────────────────────────────────────────────────
-    with de3:
-        st.markdown("#### ❤️ Dataset Health")
-        st.caption("Live health metrics across all key Redshift tables: row counts, freshness, null rates, and anomaly detection.")
-
-        if st.button("🔄 Refresh Health Metrics", type="primary", key="de_health_refresh"):
-            st.session_state["de_health_run"] = True
-
-        if st.session_state.get("de_health_run"):
-            HEALTH_QUERIES = {
-                "Row Counts": """
-                    SELECT 'rds_warehouse_public.facts'                           AS table_name, COUNT(*)    AS rows, MAX(received_at) AS latest FROM rds_warehouse_public.facts
-                    UNION ALL SELECT 'rel_business_customer_monitoring',           COUNT(*), MAX(created_at)  FROM rds_cases_public.rel_business_customer_monitoring
-                    UNION ALL SELECT 'rds_auth_public.data_customers',             COUNT(*), MAX(created_at)  FROM rds_auth_public.data_customers
-                    UNION ALL SELECT 'rds_manual_score_public.business_scores',    COUNT(*), MAX(created_at)  FROM rds_manual_score_public.business_scores
-                    UNION ALL SELECT 'rds_manual_score_public.data_current_scores',COUNT(*), NULL             FROM rds_manual_score_public.data_current_scores
-                    ORDER BY rows DESC;
-                """,
-                "Null Rate — Key Facts": """
-                    SELECT name,
-                           COUNT(*) AS total,
-                           SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(value,'value') IS NULL
-                                      OR JSON_EXTRACT_PATH_TEXT(value,'value') = '' THEN 1 ELSE 0 END) AS null_count,
-                           ROUND(100.0 * SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(value,'value') IS NULL
-                                                     OR JSON_EXTRACT_PATH_TEXT(value,'value') = '' THEN 1 ELSE 0 END)
-                                 / NULLIF(COUNT(*),0), 1) AS null_pct
-                    FROM rds_warehouse_public.facts
-                    WHERE name IN ('sos_active','tin_match_boolean','naics_code','idv_passed_boolean',
-                                   'formation_state','revenue','num_employees','watchlist_hits')
-                    GROUP BY 1
-                    ORDER BY null_pct DESC;
-                """,
-                "Recent Onboarding Volume": """
-                    SELECT DATE(created_at) AS date, COUNT(DISTINCT business_id) AS new_businesses
-                    FROM rds_cases_public.rel_business_customer_monitoring
-                    WHERE DATE(created_at) >= CURRENT_DATE - 14
-                    GROUP BY 1
-                    ORDER BY 1 DESC;
-                """,
-            }
-            for qname, qsql in HEALTH_QUERIES.items():
-                with st.spinner(f"Running {qname}…"):
-                    _h_df, _h_err = run_sql(qsql)
-                st.markdown(f"**{qname}**")
-                if _h_df is not None and not _h_df.empty:
-                    st.dataframe(_h_df, use_container_width=True, hide_index=True)
-                    detail_panel(f"❤️ Dataset Health: {qname}", f"{len(_h_df)} rows",
-                        what_it_means=f"Live dataset health check: {qname}. Run this regularly to catch freshness issues, null spikes, or unexpected row count drops.",
-                        source_table="Multiple Redshift system and data tables",
-                        sql=qsql.strip(), icon="❤️", color="#22c55e")
-                else:
-                    flag(f"{qname}: {_h_err or 'No data'}", "amber")
-        else:
-            st.info("Click **Refresh Health Metrics** to run live health checks against Redshift.")
-
-    # ── JOIN VALIDATION ───────────────────────────────────────────────────────
-    with de4:
-        st.markdown("#### 🔗 Join & Key Validation")
-        st.caption("Cross-table join coverage, orphan records, duplicate keys, and missing join keys across all KYB tables.")
-
-        if st.button("🔄 Run Join Validation", type="primary", key="de_join_run"):
-            JOIN_QUERIES = {
-                "Facts ↔ Business Customer Monitoring (join coverage)": """
-                    SELECT
-                        COUNT(DISTINCT f.business_id) AS fact_businesses,
-                        COUNT(DISTINCT rbcm.business_id) AS rbcm_businesses,
-                        COUNT(DISTINCT CASE WHEN rbcm.business_id IS NOT NULL THEN f.business_id END) AS matched,
-                        COUNT(DISTINCT CASE WHEN rbcm.business_id IS NULL THEN f.business_id END) AS orphan_in_facts
-                    FROM (SELECT DISTINCT business_id FROM rds_warehouse_public.facts) f
-                    LEFT JOIN (SELECT DISTINCT business_id FROM rds_cases_public.rel_business_customer_monitoring) rbcm
-                      ON f.business_id = rbcm.business_id;
-                """,
-                "Scored Businesses ↔ Facts (score with no facts)": """
-                    SELECT
-                        COUNT(DISTINCT cs.business_id) AS scored_businesses,
-                        COUNT(DISTINCT f.business_id) AS scored_with_facts,
-                        COUNT(DISTINCT CASE WHEN f.business_id IS NULL THEN cs.business_id END) AS scored_no_facts
-                    FROM rds_manual_score_public.data_current_scores cs
-                    LEFT JOIN (SELECT DISTINCT business_id FROM rds_warehouse_public.facts) f
-                      ON f.business_id = cs.business_id;
-                """,
-                "Duplicate business_id in data_current_scores (should be 0)": """
-                    SELECT business_id, COUNT(*) AS score_count
-                    FROM rds_manual_score_public.data_current_scores
-                    GROUP BY business_id
-                    HAVING COUNT(*) > 1
-                    ORDER BY score_count DESC
-;
-                """,
-                "Customers with no onboarded businesses": """
-                    SELECT c.id AS customer_id, c.name AS customer_name, c.created_at
-                    FROM rds_auth_public.data_customers c
-                    LEFT JOIN rds_cases_public.rel_business_customer_monitoring rbcm
-                      ON rbcm.customer_id = c.id
-                    WHERE rbcm.business_id IS NULL
-                    ORDER BY c.created_at DESC
-;
-                """,
-            }
-            for jname, jsql in JOIN_QUERIES.items():
-                with st.spinner(f"{jname}…"):
-                    _j_df, _j_err = run_sql(jsql)
-                st.markdown(f"**{jname}**")
-                if _j_df is not None and not _j_df.empty:
-                    st.dataframe(_j_df, use_container_width=True, hide_index=True)
-                    detail_panel(f"🔗 Join Check: {jname}", f"{len(_j_df)} rows",
-                        what_it_means=f"Join validation: {jname}. Orphan records or coverage gaps indicate data pipeline issues (missing facts, unlinked businesses, duplicate score records).",
-                        source_table="Cross-table join between key KYB tables",
-                        sql=jsql.strip(), icon="🔗", color="#f59e0b")
-                else:
-                    flag(f"{jname}: {_j_err or 'No data / 0 rows (good!)'}", "amber" if _j_err else "green")
-
-# ════════════════════════════════════════════════════════════════════════════════
-# 🧠 INTELLIGENCE HUB
 # ════════════════════════════════════════════════════════════════════════════════
 elif tab == "🧠 Intelligence Hub":
     st.markdown("## 🧠 Intelligence Hub")
