@@ -3570,13 +3570,60 @@ if tab=="🏠 Home":
         _sos_found = sos_ok; _sos_not_found = total_biz - sos_ok
         _domestic_sos_found = sos_ok; _only_domestic_reg = sos_ok; _state_match = 0
 
-    # ── KPI Row 1 ─────────────────────────────────────────────────────────
+    # ── Build business-ID segment maps from funnel_df for drilldowns ─────────
+    _seg = {}  # segment_key → list of business_ids
+    if not _funnel.empty:
+        _sl_f = lambda v: str(v or "").lower().strip()
+        _seg["sos_found"]      = _funnel[_funnel["sos_match_boolean"].apply(_sl_f)=="true"]["business_id"].tolist()
+        _seg["no_sos"]         = _funnel[~_funnel["business_id"].isin(_seg["sos_found"])]["business_id"].tolist()
+        _seg["domestic"]       = _funnel[
+            (_funnel["sos_match_boolean"].apply(_sl_f)=="true") &
+            (_funnel["formation_state"].str.upper().str.strip().apply(
+                lambda s: s not in TAX_HAVENS and s!=""))]["business_id"].tolist()
+        _seg["state_match"]    = _funnel[
+            (_funnel["sos_match_boolean"].apply(_sl_f)=="true") &
+            (_funnel["formation_state"].str.upper().str.strip() ==
+             _funnel.get("operating_state",pd.Series([""]*len(_funnel))).astype(str).str.upper().str.strip()) &
+            (_funnel["formation_state"].str.strip()!="")]["business_id"].tolist()
+    else:
+        _seg = {"sos_found":[],"no_sos":[],"domestic":[],"state_match":[]}
+
+    def _drilldown_table(seg_key, label, cols_from_stats=None):
+        """Show an expander with business IDs + key signals for a segment."""
+        bids = _seg.get(seg_key, [])
+        if not bids: return
+        with st.expander(f"👁️ Show {len(bids):,} business IDs — {label}", expanded=False):
+            if stats_df is not None and not stats_df.empty and cols_from_stats:
+                _sub = stats_df[stats_df["business_id"].isin(bids)][
+                    ["business_id"] + [c for c in cols_from_stats if c in stats_df.columns]
+                ].copy()
+                # Friendly labels
+                _rename = {"sos_active":"SOS Active","tin_match":"TIN Match",
+                           "idv_passed":"IDV Passed","naics_code":"NAICS",
+                           "formation_state":"Formation State","revenue":"Revenue"}
+                _sub = _sub.rename(columns=_rename)
+                st.dataframe(_sub, use_container_width=True, hide_index=True)
+            else:
+                st.dataframe(pd.DataFrame({"business_id": bids}), use_container_width=True, hide_index=True)
+            _bid_csv = pd.DataFrame({"business_id": bids}).to_csv(index=False).encode()
+            st.download_button(f"⬇️ Download {len(bids)} IDs (CSV)",
+                               _bid_csv, f"{seg_key}_business_ids.csv", "text/csv",
+                               key=f"dl_{seg_key}")
+
+    # ── KPI Row 1 — clickable cards ───────────────────────────────────────
     k1,k2,k3,k4,k5 = st.columns(5)
     with k1: kpi("📋 Onboarded", f"{total_biz:,}", period_label, "#3B82F6")
     with k2: kpi("🏛️ SOS Registry Found", f"{_sos_found:,}", rate(_sos_found,total_biz)+" of onboarded", "#22c55e" if _sos_found/max(total_biz,1)>0.8 else "#f59e0b")
     with k3: kpi("🏠 Domestic Reg Found", f"{_domestic_sos_found:,}", rate(_domestic_sos_found,total_biz)+" domestic match", "#22c55e" if _domestic_sos_found/max(total_biz,1)>0.7 else "#f59e0b")
     with k4: kpi("📍 State Match", f"{_state_match:,}", "Reg in stated operating state", "#22c55e" if _state_match/max(total_biz,1)>0.6 else "#f59e0b")
     with k5: kpi("❌ No SOS Found", f"{_sos_not_found:,}", rate(_sos_not_found,total_biz)+" unverified", "#ef4444" if _sos_not_found>0 else "#22c55e")
+
+    # Drilldown expanders — one per metric
+    _SOS_COLS = ["sos_active","tin_match","idv_passed","naics_code","formation_state"]
+    _drilldown_table("sos_found",  f"SOS Registry Found — {_sos_found:,} businesses", _SOS_COLS)
+    _drilldown_table("domestic",   f"Domestic Reg Found — {_domestic_sos_found:,} businesses", _SOS_COLS)
+    _drilldown_table("state_match",f"State Match — {_state_match:,} businesses", _SOS_COLS)
+    _drilldown_table("no_sos",     f"No SOS Found — {_sos_not_found:,} businesses (needs investigation)", _SOS_COLS)
 
     _reg_sql = f"""
 SELECT
@@ -3634,13 +3681,20 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
         "Count":    [total_biz, _sos_found, _domestic_sos_found, _state_match, _sos_not_found],
         "Color":    ["#3B82F6","#22c55e","#22c55e","#10b981","#ef4444"],
     })
+    # Use color_discrete_map (not color="Category" + sequence) to avoid multi-trace label mismatch
+    _sos_color_map = dict(zip(_sos_bar["Category"], _sos_bar["Color"]))
     fig_sos_bar = px.bar(_sos_bar, x="Count", y="Category", orientation="h",
                          color="Category",
-                         color_discrete_sequence=_sos_bar["Color"].tolist(),
+                         color_discrete_map=_sos_color_map,
+                         text="Count",   # correct: text from the column, not from update_traces
                          title="SOS Registration Verification — Funnel View")
-    fig_sos_bar.update_layout(height=300, showlegend=False, margin=dict(t=40,b=10,l=10,r=40))
-    fig_sos_bar.update_traces(text=_sos_bar["Count"], textposition="outside")
+    fig_sos_bar.update_traces(textposition="outside", texttemplate="%{x:,}")
+    fig_sos_bar.update_layout(height=300, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
     st.plotly_chart(dark_chart(fig_sos_bar), use_container_width=True)
+
+    # Drilldown on the bar chart
+    _drilldown_table("sos_found",  "SOS Registry Found", _SOS_COLS)
+    _drilldown_table("no_sos",     "No SOS Found", _SOS_COLS)
     detail_panel("🏛️ SOS Registration Funnel",
         f"Domestic reg: {_domestic_sos_found:,} · State match: {_state_match:,} · No SOS: {_sos_not_found:,}",
         what_it_means=(
@@ -3680,6 +3734,17 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
         _tin_reconcile   = tin_ok + tin_fail
         _tin_gap         = 0
 
+    # ── Build TIN segment maps ────────────────────────────────────────────
+    if not _funnel.empty:
+        _sl_f2 = lambda v: str(v or "").lower().strip()
+        _tin_sub_mask = ~_funnel["tin_submitted"].astype(str).str.strip().isin(["","None","nan"])
+        _seg["tin_submitted"]   = _funnel[_tin_sub_mask]["business_id"].tolist()
+        _seg["tin_pass"]        = _funnel[_funnel["tin_match_boolean"].apply(_sl_f2)=="true"]["business_id"].tolist()
+        _seg["tin_fail"]        = _funnel[_funnel["tin_match_boolean"].apply(_sl_f2)=="false"]["business_id"].tolist()
+        _seg["tin_not_checked"] = _funnel[_funnel["tin_match_boolean"].apply(_sl_f2).isin(["","none","nan"])]["business_id"].tolist()
+
+    _TIN_COLS = ["tin_match","sos_active","naics_code","formation_state"]
+
     # KPI Row 2 — TIN
     t1,t2,t3,t4,t5,t6 = st.columns(6)
     with t1: kpi("📋 Onboarded", f"{total_biz:,}", "total", "#3B82F6")
@@ -3688,11 +3753,17 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
     with t4: kpi("❌ TIN Fail", f"{_tin_fail:,}", rate(_tin_fail,total_biz)+" IRS mismatch", "#ef4444" if _tin_fail>0 else "#22c55e")
     with t5: kpi("⚪ Not Checked", f"{_tin_not_checked:,}", rate(_tin_not_checked,total_biz)+" no EIN check", "#64748b")
     with t6:
-        _reconcile_ok = abs(_tin_gap) <= 2  # allow small rounding gap
+        _reconcile_ok = abs(_tin_gap) <= 2
         kpi("🔍 Pass+Fail=Sub?",
             "✅ Yes" if _reconcile_ok else f"⚠️ Gap: {_tin_gap:+,}",
             f"Submitted={_tin_submitted:,} · P+F={_tin_reconcile:,}",
             "#22c55e" if _reconcile_ok else "#f59e0b")
+
+    # TIN drilldowns
+    _drilldown_table("tin_submitted",   f"TIN Submitted — {_tin_submitted:,} gave EIN", _TIN_COLS)
+    _drilldown_table("tin_pass",        f"TIN Pass — {_tin_pass:,} IRS confirmed", _TIN_COLS)
+    _drilldown_table("tin_fail",        f"TIN Fail — {_tin_fail:,} IRS mismatch (investigate!)", _TIN_COLS)
+    _drilldown_table("tin_not_checked", f"TIN Not Checked — {_tin_not_checked:,} (no EIN check)", _TIN_COLS)
 
     _tin_sql = f"""
 SELECT
@@ -3746,8 +3817,8 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
                                  "Onboarded":"#3B82F6","TIN Submitted":"#8B5CF6",
                                  "TIN Pass":"#22c55e","TIN Fail":"#ef4444","Not Checked":"#334155"},
                              title="TIN Verification Funnel")
-        fig_tin_bar.update_traces(text=_tin_bar["Count"], textposition="outside")
-        fig_tin_bar.update_layout(height=300, showlegend=False, margin=dict(t=40,b=10,l=10,r=40))
+        fig_tin_bar.update_traces(textposition="outside", texttemplate="%{x:,}")
+        fig_tin_bar.update_layout(height=300, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
         st.plotly_chart(dark_chart(fig_tin_bar), use_container_width=True)
 
     with tin_col2:
@@ -3842,6 +3913,22 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
             sql=f"SELECT name, JSON_EXTRACT_PATH_TEXT(value,'value') AS val, COUNT(*) AS businesses FROM rds_warehouse_public.facts WHERE name IN ('sos_active','tin_match_boolean','idv_passed_boolean','naics_code') AND business_id IN ({','.join(repr(b) for b in _authoritative_bids[:10])},...) GROUP BY 1,2 ORDER BY 1,3 DESC;",
             icon="🩺", color="#22c55e")
 
+        # ── Health Rate drilldowns ─────────────────────────────────────────
+        _ALL_COLS = ["sos_active","tin_match","idv_passed","naics_code","formation_state","revenue"]
+        if stats_df is not None and not stats_df.empty:
+            _sl3 = lambda v: str(v or "").lower().strip()
+            _seg["sos_fail_h"]  = stats_df[stats_df["sos_active"].apply(_sl3)=="false"]["business_id"].tolist()
+            _seg["tin_fail_h"]  = stats_df[stats_df["tin_match"].apply(_sl3)=="false"]["business_id"].tolist()
+            _seg["idv_fail_h"]  = stats_df[stats_df["idv_passed"].apply(_sl3)=="false"]["business_id"].tolist()
+            _seg["naics_fb_h"]  = stats_df[stats_df["naics_code"].apply(_sl3)=="561499"]["business_id"].tolist()
+            _seg["no_rev_h"]    = stats_df[stats_df["revenue"].isna()]["business_id"].tolist()
+        st.markdown("**👁️ Click to see business IDs per health signal:**")
+        _drilldown_table("sos_fail_h",  f"SOS Inactive — {len(_seg.get('sos_fail_h',[]))} businesses", _ALL_COLS)
+        _drilldown_table("tin_fail_h",  f"TIN Failed — {len(_seg.get('tin_fail_h',[]))} businesses", _ALL_COLS)
+        _drilldown_table("idv_fail_h",  f"IDV Failed — {len(_seg.get('idv_fail_h',[]))} businesses", _ALL_COLS)
+        _drilldown_table("naics_fb_h",  f"NAICS Fallback 561499 — {len(_seg.get('naics_fb_h',[]))} businesses", _ALL_COLS)
+        _drilldown_table("no_rev_h",    f"Revenue Missing — {len(_seg.get('no_rev_h',[]))} businesses", _ALL_COLS)
+
     # ════════════════════════════════════════════════════════════════════════
     # SECTION 4 — RED FLAG DISTRIBUTION
     # ════════════════════════════════════════════════════════════════════════
@@ -3902,6 +3989,27 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
                 source_file="facts/kyb/index.ts",
                 json_obj=flag_type_counts,
                 sql=_rf_sql, icon="🚩", color="#ef4444")
+
+            # ── Red Flag drilldowns — click to see business IDs per flag type ──
+            if stats_df is not None and not stats_df.empty:
+                _sl4 = lambda v: str(v or "").lower().strip()
+                _si4 = lambda v: int(float(v or 0)) if str(v or "").replace(".","").isdigit() else 0
+                _seg["rf_sos_inactive"] = stats_df[stats_df["sos_active"].apply(_sl4)=="false"]["business_id"].tolist()
+                _seg["rf_no_sos"]       = stats_df[stats_df["sos_active"].apply(_sl4)==""]["business_id"].tolist()
+                _seg["rf_tin_fail"]     = stats_df[stats_df["tin_match"].apply(_sl4)=="false"]["business_id"].tolist()
+                _seg["rf_tin_miss"]     = stats_df[stats_df["tin_match"].apply(_sl4)==""]["business_id"].tolist()
+                _seg["rf_watchlist"]    = stats_df[stats_df["watchlist_hits"].apply(_si4)>0]["business_id"].tolist()
+                _seg["rf_naics_fb"]     = stats_df[stats_df["naics_code"].apply(_sl4)=="561499"]["business_id"].tolist()
+                _seg["rf_idv_fail"]     = stats_df[stats_df["idv_passed"].apply(_sl4)=="false"]["business_id"].tolist()
+                st.markdown("**👁️ Click any red flag category to see the affected business IDs:**")
+                _RF_COLS = ["sos_active","tin_match","idv_passed","naics_code","watchlist_hits","num_bankruptcies"]
+                _drilldown_table("rf_sos_inactive", f"SOS Inactive — {len(_seg.get('rf_sos_inactive',[]))} businesses", _RF_COLS)
+                _drilldown_table("rf_no_sos",       f"No SOS Data — {len(_seg.get('rf_no_sos',[]))} businesses (unverified)", _RF_COLS)
+                _drilldown_table("rf_tin_fail",     f"TIN Failed — {len(_seg.get('rf_tin_fail',[]))} businesses", _RF_COLS)
+                _drilldown_table("rf_tin_miss",     f"TIN Missing — {len(_seg.get('rf_tin_miss',[]))} businesses", _RF_COLS)
+                _drilldown_table("rf_watchlist",    f"Watchlist Hits — {len(_seg.get('rf_watchlist',[]))} businesses", _RF_COLS)
+                _drilldown_table("rf_naics_fb",     f"NAICS Fallback 561499 — {len(_seg.get('rf_naics_fb',[]))} businesses", _RF_COLS)
+                _drilldown_table("rf_idv_fail",     f"IDV Failed — {len(_seg.get('rf_idv_fail',[]))} businesses", _RF_COLS)
 
     # ════════════════════════════════════════════════════════════════════════
     # SECTION 5 — RECENTLY ONBOARDED + TOP 10 AT RISK
