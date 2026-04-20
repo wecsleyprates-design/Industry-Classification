@@ -1717,21 +1717,15 @@ def rag_search(q,top_k=8):
 @st.cache_resource
 def get_openai():
     """
-    Returns an OpenAI client or None.
-    Key resolution order (first non-empty wins):
-      1. Session state  — set via the sidebar "OpenAI Key" input
-      2. Environment variable  OPENAI_API_KEY
-      3. Streamlit secrets     OPENAI_API_KEY  (secrets.toml / Streamlit Cloud)
+    Returns an OpenAI client, or None if no valid key is configured.
+    Key resolution order:
+      1. Environment variable  OPENAI_API_KEY
+      2. Streamlit secrets     OPENAI_API_KEY  (.streamlit/secrets.toml)
+    No sidebar input required — same behaviour as before the customer-level feature.
     """
     try:
         from openai import OpenAI
-        key = ""
-        # 1. Sidebar input (persisted in session state for the whole session)
-        key = str(st.session_state.get("_openai_key_input","") or "").strip()
-        # 2. Environment variable
-        if not key:
-            key = os.getenv("OPENAI_API_KEY","").strip()
-        # 3. Streamlit secrets
+        key = os.getenv("OPENAI_API_KEY","").strip()
         if not key:
             try:
                 key = str(st.secrets.get("OPENAI_API_KEY","") or "").strip()
@@ -3033,43 +3027,6 @@ with st.sidebar:
             st.caption(f"Customer names not available: `{str(cust_err)[:60]}`")
         else:
             st.caption("No customers found for this period")
-
-    # ── OpenAI API Key ───────────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("**🤖 OpenAI API Key**")
-    _current_key = str(st.session_state.get("_openai_key_input","") or "").strip()
-
-    # Test the key live when it's set
-    _key_ok = False
-    if _current_key and _current_key.startswith("sk-"):
-        try:
-            from openai import OpenAI as _OAI_test
-            _test_client = _OAI_test(api_key=_current_key)
-            # Cheap test: list models (tiny request)
-            _test_client.models.list()
-            _key_ok = True
-        except Exception as _ktest_err:
-            _key_ok = False
-            _key_err_msg = str(_ktest_err)[:80]
-    else:
-        _key_err_msg = ""
-
-    if _key_ok:
-        st.markdown("<div style='color:#22c55e;font-size:.75rem'>✅ Key verified and active</div>", unsafe_allow_html=True)
-    elif _current_key:
-        st.markdown(f"<div style='color:#ef4444;font-size:.75rem'>❌ Key rejected by OpenAI — paste a valid key</div>", unsafe_allow_html=True)
-    else:
-        st.markdown("<div style='color:#f59e0b;font-size:.75rem'>⚠️ No key — AI features disabled</div>", unsafe_allow_html=True)
-
-    st.text_input(
-        "OpenAI key",
-        type="password",
-        key="_openai_key_input",
-        label_visibility="collapsed",
-        placeholder="sk-svcacct-… (paste here)",
-        help="Paste your OpenAI API key. Stored in session only — never saved to disk or git.",
-    )
-    st.caption("Key is verified live. Paste a new key anytime to update.")
 
     st.markdown("---")
     st.markdown("**Sources**")
