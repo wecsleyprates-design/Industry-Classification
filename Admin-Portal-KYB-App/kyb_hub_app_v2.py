@@ -3530,8 +3530,11 @@ if tab=="🏠 Home":
         """Load granular SOS and TIN facts needed for funnel analysis.
         Returns one row per business with:
           - tin_submitted, tin_match_status (from tin_match.value.status)
-          - sos_match_boolean, sos_active, formation_state
-          - primary_address_state (from primary_address.value.state)
+          - sos_match_boolean, sos_active, formation_state, operating_state
+          - idv_last4_ssn: last 4 of SSN from Plaid IDV identity_verification.meta
+            (used for the Possible Sole Prop detection: tin_submitted[-4] == idv_last4_ssn)
+            Source: integration-service/lib/facts/kyb/index.ts:606
+              type === IDNumberType.UsSsnLast4 && value === tin.slice(-4) → is_sole_prop=true
         """
         if not bid_tuple:
             return None, "No business IDs"
@@ -3554,8 +3557,15 @@ if tab=="🏠 Home":
                 MAX(CASE WHEN f.name='primary_address'
                     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','state') END)       AS operating_state,
                 MAX(CASE WHEN f.name='middesk_confidence'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS middesk_confidence
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS middesk_confidence,
+                -- Plaid IDV SSN last-4: from integration_data.identity_verification.meta
+                -- index.ts:606: type===UsSsnLast4 && value===tin.slice(-4) → is_sole_prop=true
+                -- meta->>'user'->>'id_number'->>'value' where type='us_ssn_last_4'
+                MAX(CASE WHEN iv.meta IS NOT NULL
+                    THEN iv.meta::json->'user'->'id_number'->>'value' END)          AS idv_last4_ssn
             FROM rds_warehouse_public.facts f
+            LEFT JOIN rds_integration_data.identity_verification iv
+                ON iv.business_id = f.business_id
             WHERE f.business_id IN ({bid_list})
               AND f.name IN ('tin_submitted','tin_match','tin_match_boolean',
                              'sos_match_boolean','sos_active','formation_state',
@@ -3806,48 +3816,102 @@ if tab=="🏠 Home":
 
     # Compute SOS-level signals from funnel_df
     if not _funnel.empty:
-        _sos_found     = int((_funnel["sos_match_boolean"].astype(str).str.lower().str.strip()=="true").sum())
-        _sos_not_found = total_biz - _sos_found
-
         TAX_HAVENS = {"DE","NV","WY","SD","MT","NM"}
         def _sl(v): return str(v or "").lower().strip()
 
-        # Domestic = formation_state is NOT a tax-haven state AND sos_match_boolean=true
-        _has_form    = _funnel["formation_state"].notna() & (_funnel["formation_state"].str.strip()!="")
-        _is_domestic = _funnel["formation_state"].str.upper().str.strip().apply(
-            lambda s: s not in TAX_HAVENS and s != ""
-        ) & (_funnel["formation_state"].notna())
-        _domestic_sos_found = int((_is_domestic & (_funnel["sos_match_boolean"].astype(str).str.lower()=="true")).sum())
-        _only_domestic_reg  = _domestic_sos_found   # simplified: 1 domestic registration found
+        _smb = _funnel["sos_match_boolean"].astype(str).str.lower().str.strip()
 
-        # Operating state match: formation_state == operating_state AND sos found
+        # ── KPI 1: No Registry Found — strictly sos_match_boolean = 'false' ──
+        # index.ts:1421: sos_match_boolean = engine.getResolvedFact('sos_match')?.value === 'success'
+        # 'false' means the vendor actively returned 'failure' (not missing/null)
+        _no_reg_mask   = (_smb == "false")
+        _sos_not_found = int(_no_reg_mask.sum())
+        _sos_found     = int((_smb == "true").sum())
+
+        # ── KPI 2: No Registry but Possible Sole Prop ────────────────────────
+        # Of the sos_match_boolean=false group, how many have last 4 of tin_submitted
+        # matching last 4 of SSN from Plaid IDV (idv_last4_ssn)?
+        # Source: index.ts:606 — type===UsSsnLast4 && value===tin.slice(-4) → is_sole_prop=true
+        _has_idv_last4 = "idv_last4_ssn" in _funnel.columns
+        if _has_idv_last4:
+            _tin_last4 = _funnel["tin_submitted"].astype(str).str.strip().str[-4:]
+            _ssn_last4 = _funnel["idv_last4_ssn"].astype(str).str.strip()
+            _sole_prop_mask = (
+                _no_reg_mask &
+                _tin_last4.notna() & (_tin_last4 != "") & (_tin_last4 != "nan") &
+                _ssn_last4.notna() & (_ssn_last4 != "") & (_ssn_last4 != "nan") &
+                (_tin_last4 == _ssn_last4)
+            )
+        else:
+            _sole_prop_mask = pd.Series([False] * len(_funnel), index=_funnel.index)
+        _possible_sole_prop = int(_sole_prop_mask.sum())
+
+        # ── KPI 3: No Domestic Reg Found ─────────────────────────────────────
+        # sos_match_boolean != 'false' (true OR null/missing) BUT no domestic registration
+        # "Domestic" = formation_state NOT in tax-haven set AND sos_match_boolean=true
+        # So "No Domestic Reg Found" = sos_match_boolean != 'false' AND NOT domestic
+        _not_false_mask = (_smb != "false")    # true OR null/missing
+        _is_domestic = (
+            (_smb == "true") &
+            _funnel["formation_state"].notna() &
+            _funnel["formation_state"].str.strip().ne("") &
+            _funnel["formation_state"].str.upper().str.strip().apply(
+                lambda s: s not in TAX_HAVENS and s != "")
+        )
+        _no_domestic_mask = _not_false_mask & ~_is_domestic
+        _no_domestic_found = int(_no_domestic_mask.sum())
+
+        # Keep _domestic_sos_found for existing bar chart / detail panels
+        _domestic_sos_found = int(_is_domestic.sum())
+        _only_domestic_reg  = _domestic_sos_found
+
+        # ── KPI 4: No State Match ─────────────────────────────────────────────
+        # sos_match_boolean != 'false' BUT no registry found in the state they submitted
+        # i.e. formation_state != operating_state (or formation_state missing entirely)
         _op_state     = _funnel.get("operating_state", pd.Series([""] * len(_funnel)))
-        _form_state   = _funnel["formation_state"].str.upper().str.strip().fillna("")
+        _form_state   = _funnel["formation_state"].astype(str).str.upper().str.strip().fillna("")
         _op_state_up  = _op_state.astype(str).str.upper().str.strip().fillna("")
-        _state_match  = ((_form_state == _op_state_up) & (_form_state != "") &
-                         (_funnel["sos_match_boolean"].astype(str).str.lower()=="true")).sum()
-        _state_match  = int(_state_match)
+        _state_match_mask = (
+            (_smb == "true") &
+            (_form_state != "") &
+            (_form_state == _op_state_up)
+        )
+        _state_match  = int(_state_match_mask.sum())
+        # No state match = sos_match_boolean != 'false' but formation_state != operating_state
+        _no_state_match_mask = _not_false_mask & ~_state_match_mask
+        _no_state_match = int(_no_state_match_mask.sum())
+
     else:
         _sos_found = sos_ok; _sos_not_found = total_biz - sos_ok
-        _domestic_sos_found = sos_ok; _only_domestic_reg = sos_ok; _state_match = 0
+        _possible_sole_prop = 0
+        _domestic_sos_found = sos_ok; _only_domestic_reg = sos_ok
+        _no_domestic_found  = 0
+        _state_match = 0; _no_state_match = 0
+        _no_reg_mask = pd.Series(dtype=bool)
+        _sole_prop_mask = pd.Series(dtype=bool)
+        _no_domestic_mask = pd.Series(dtype=bool)
+        _no_state_match_mask = pd.Series(dtype=bool)
+        _state_match_mask = pd.Series(dtype=bool)
+        _is_domestic = pd.Series(dtype=bool)
 
     # ── Build business-ID segment maps from funnel_df for drilldowns ─────────
     _seg = {}  # segment_key → list of business_ids
     if not _funnel.empty:
         _sl_f = lambda v: str(v or "").lower().strip()
-        _seg["sos_found"]      = _funnel[_funnel["sos_match_boolean"].apply(_sl_f)=="true"]["business_id"].tolist()
-        _seg["no_sos"]         = _funnel[~_funnel["business_id"].isin(_seg["sos_found"])]["business_id"].tolist()
-        _seg["domestic"]       = _funnel[
-            (_funnel["sos_match_boolean"].apply(_sl_f)=="true") &
-            (_funnel["formation_state"].str.upper().str.strip().apply(
-                lambda s: s not in TAX_HAVENS and s!=""))]["business_id"].tolist()
-        _seg["state_match"]    = _funnel[
-            (_funnel["sos_match_boolean"].apply(_sl_f)=="true") &
-            (_funnel["formation_state"].str.upper().str.strip() ==
-             _funnel.get("operating_state",pd.Series([""]*len(_funnel))).astype(str).str.upper().str.strip()) &
-            (_funnel["formation_state"].str.strip()!="")]["business_id"].tolist()
+        _seg["sos_found"]        = _funnel[_funnel["sos_match_boolean"].apply(_sl_f)=="true"]["business_id"].tolist()
+        # KPI 1: strictly false
+        _seg["no_sos"]           = _funnel[_no_reg_mask]["business_id"].tolist()
+        # KPI 2: possible sole props (subset of no_sos)
+        _seg["possible_sole_prop"] = _funnel[_sole_prop_mask]["business_id"].tolist()
+        _seg["domestic"]         = _funnel[_is_domestic]["business_id"].tolist()
+        _seg["state_match"]      = _funnel[_state_match_mask]["business_id"].tolist()
+        # KPI 3: not-false but no domestic
+        _seg["no_domestic"]      = _funnel[_no_domestic_mask]["business_id"].tolist()
+        # KPI 4: not-false but no state match
+        _seg["no_state_match"]   = _funnel[_no_state_match_mask]["business_id"].tolist()
     else:
-        _seg = {"sos_found":[],"no_sos":[],"domestic":[],"state_match":[]}
+        _seg = {"sos_found":[],"no_sos":[],"possible_sole_prop":[],
+                "domestic":[],"state_match":[],"no_domestic":[],"no_state_match":[]}
 
     # ── How-calculated explanations for each segment ─────────────────────────
     # Source files read: integration-service-main/lib/facts/kyb/index.ts (lines 1371-1435)
@@ -4054,6 +4118,181 @@ if tab=="🏠 Home":
             "  AND UPPER(JSON_EXTRACT_PATH_TEXT(f_state.value,'value'))\n"
             "      != UPPER(JSON_EXTRACT_PATH_TEXT(f_addr.value,'value','state'));\n```\n\n"
             "**Source:** `integration-service/lib/facts/kyb/index.ts` · "
+            "`warehouse-service/.../verification_results.sql` (sos_domestic_verification)"
+        ),
+        # ── SECTION 1 — new KPI definitions (strict sos_match_boolean=false + sole prop) ──
+        "no_sos": (
+            "**What 'No Registry Found' means (strict definition):**\n"
+            "`sos_match_boolean = 'false'` — the vendor actively returned a failure result. "
+            "NOT null/missing (which means the vendor was never called or pipeline is incomplete).\n\n"
+            "**Exact derivation (index.ts:1421):**\n"
+            "```typescript\nsos_match_boolean = engine.getResolvedFact('sos_match')?.value === 'success'\n"
+            "// 'false' = sos_match returned 'failure' (vendor called, found nothing)\n"
+            "// null    = sos_match was never written (vendor not called)\n```\n\n"
+            "**`sos_match` returns 'failure' when (index.ts:1371-1419):**\n"
+            "- Middesk (pid=16): `reviewTasks.find(t => t.key === 'sos_match').status === 'failure'`\n"
+            "- OpenCorporates (pid=23): `!company_number AND sosFilings.length === 0`\n"
+            "- Trulioo (pid=38): `!registrationNumber OR !formationDate OR !state`\n\n"
+            "**Decision tree:**\n"
+            "```\nsos_match_boolean = 'false'  → Vendor called, returned failure → No Registry Found ❌\n"
+            "sos_match_boolean = 'true'   → At least one vendor found a record ✅\n"
+            "sos_match_boolean = null     → Vendor not called or fact not yet written ❓\n```\n\n"
+            "**Diagnostic SQL:**\n"
+            "```sql\n-- Returns: businesses where sos_match_boolean is strictly 'false'\n"
+            "SELECT rbcm.business_id,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_bool.value,'value')  AS sos_match_boolean,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_match.value,'value') AS sos_match_status,\n"
+            "       vr.sos_match_verification, vr.sos_domestic_verification\n"
+            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "JOIN rds_warehouse_public.facts f_bool\n"
+            "  ON f_bool.business_id = rbcm.business_id AND f_bool.name = 'sos_match_boolean'\n"
+            "  AND JSON_EXTRACT_PATH_TEXT(f_bool.value,'value') = 'false'\n"
+            "LEFT JOIN rds_warehouse_public.facts f_match\n"
+            "  ON f_match.business_id = rbcm.business_id AND f_match.name = 'sos_match'\n"
+            "  AND LENGTH(f_match.value) < 60000\n"
+            "LEFT JOIN clients.verification_results vr ON vr.business_id = rbcm.business_id\n"
+            "WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "**Source:** `integration-service/lib/facts/kyb/index.ts` lines 1371-1424"
+        ),
+        "possible_sole_prop": (
+            "**What 'No Registry but Possible Sole Prop' means:**\n"
+            "Of the businesses with `sos_match_boolean='false'` (No Registry Found), how many "
+            "have the **last 4 digits of their submitted EIN** (`tin_submitted[-4:]`) matching "
+            "the **last 4 digits of the SSN** provided during Plaid IDV (`identity_verification.meta`)?\n\n"
+            "**Why this matters:**\n"
+            "Sole proprietors often use their personal SSN as their business EIN (IRS allows this). "
+            "When they do: (1) Middesk's IRS EIN check fails (designed for employer EINs, not SSNs), "
+            "and (2) SOS returns nothing (sole props are not registered with the Secretary of State). "
+            "The SSN-last-4 match against the submitted TIN-last-4 is the same signal the platform "
+            "uses internally to derive `is_sole_prop=true`.\n\n"
+            "**Exact derivation (index.ts:604-609 — is_sole_prop logic):**\n"
+            "```typescript\n// is_sole_prop uses this same comparison:\nif (type === IDNumberType.UsSsnLast4\n"
+            "    && value === tin.slice(-4)) {\n"
+            "  return true;  // SSN last-4 matches EIN last-4 → sole prop confirmed\n"
+            "}\n"
+            "// type comes from Plaid IDV: identity_verification.meta.user.id_number.type\n"
+            "// value = last 4 digits of the owner's SSN (Plaid captures this during KYC check)\n"
+            "// tin   = businessDetails.tin (submitted EIN from onboarding form)\n```\n\n"
+            "**Data sources:**\n"
+            "- `tin_submitted[-4:]` — `rds_warehouse_public.facts` name='tin_submitted', last 4 chars\n"
+            "- `idv_last4_ssn` — `rds_integration_data.identity_verification.meta`\n"
+            "  where `meta::json->'user'->'id_number'->>'type' = 'us_ssn_last_4'`\n\n"
+            "**Important caveats:**\n"
+            "1. This is an **indicator** of a possible sole prop — not a confirmation\n"
+            "2. Sole props with no SOS registry AND SSN=EIN last-4 match = **expected and normal**\n"
+            "3. If this count is high, the portfolio contains many sole props — NOT a KYB failure\n"
+            "4. A sole prop with a high Worth Score is still perfectly valid\n\n"
+            "**Diagnostic SQL (Redshift federation to RDS):**\n"
+            "```sql\n-- Returns: no-registry businesses with SSN-last-4 matching submitted TIN-last-4\n"
+            "SELECT rbcm.business_id,\n"
+            "       RIGHT(JSON_EXTRACT_PATH_TEXT(f_tin.value,'value'), 4) AS tin_last4,\n"
+            "       iv.meta::json->'user'->'id_number'->>'value'         AS idv_ssn_last4,\n"
+            "       iv.meta::json->'user'->'id_number'->>'type'          AS id_number_type\n"
+            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "JOIN rds_warehouse_public.facts f_bool\n"
+            "  ON f_bool.business_id = rbcm.business_id AND f_bool.name = 'sos_match_boolean'\n"
+            "  AND JSON_EXTRACT_PATH_TEXT(f_bool.value,'value') = 'false'\n"
+            "LEFT JOIN rds_warehouse_public.facts f_tin\n"
+            "  ON f_tin.business_id = rbcm.business_id AND f_tin.name = 'tin_submitted'\n"
+            "LEFT JOIN rds_integration_data.identity_verification iv\n"
+            "  ON iv.business_id = rbcm.business_id\n"
+            "WHERE iv.meta::json->'user'->'id_number'->>'type' = 'us_ssn_last_4'\n"
+            "  AND RIGHT(JSON_EXTRACT_PATH_TEXT(f_tin.value,'value'), 4)\n"
+            "    = iv.meta::json->'user'->'id_number'->>'value'\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "**Source:** `integration-service/lib/facts/kyb/index.ts:552-616` (is_sole_prop) · "
+            "`integration-service/lib/plaid/plaidIdv.ts:1657` (UsSsnLast4 derivation)"
+        ),
+        "no_domestic": (
+            "**What 'No Domestic Reg Found' means:**\n"
+            "`sos_match_boolean != 'false'` (true OR null/missing — vendor did NOT return outright failure) "
+            "BUT the business has NO confirmed domestic registration "
+            "(formation_state is a tax-haven state OR formation_state is missing).\n\n"
+            "**Precise logic:**\n"
+            "```\nNot-false  = sos_match_boolean = 'true' OR sos_match_boolean IS NULL/missing\n"
+            "Domestic   = sos_match_boolean='true' AND formation_state NOT IN {DE,NV,WY,SD,MT,NM}\n"
+            "             AND formation_state IS NOT NULL\n"
+            "No Domestic = Not-false AND NOT Domestic\n```\n\n"
+            "**Two sub-cases:**\n"
+            "1. `sos_match_boolean='true'` AND formation_state IN {DE,NV,WY,SD,MT,NM} — "
+            "registry found but it is a **foreign qualification** in the operating state, "
+            "not the primary domestic incorporation in the tax-haven state\n"
+            "2. `sos_match_boolean=null/missing` — vendor not yet called, "
+            "we cannot confirm domestic registration either way\n\n"
+            "**Redshift equivalent:** `clients.verification_results.sos_domestic_verification = 0`\n"
+            "(verification_results.sql:36-39: built when key='sos_domestic' AND sublabel='Domestic Active')\n\n"
+            "**Why this matters:**\n"
+            "The domestic incorporation filing holds the authoritative formation date, registered agent, "
+            "and officer list. Tax-haven formations (DE/NV) are common and not inherently suspicious, "
+            "but the domestic filing needs separate verification via the state's SOS portal.\n\n"
+            "**Diagnostic SQL:**\n"
+            "```sql\n-- Returns: not-false businesses with no domestic registration confirmed\n"
+            "SELECT rbcm.business_id,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_bool.value,'value')  AS sos_match_boolean,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_state.value,'value') AS formation_state,\n"
+            "       vr.sos_domestic_verification, vr.sos_match_verification\n"
+            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "LEFT JOIN rds_warehouse_public.facts f_bool\n"
+            "  ON f_bool.business_id = rbcm.business_id AND f_bool.name = 'sos_match_boolean'\n"
+            "LEFT JOIN rds_warehouse_public.facts f_state\n"
+            "  ON f_state.business_id = rbcm.business_id AND f_state.name = 'formation_state'\n"
+            "LEFT JOIN clients.verification_results vr ON vr.business_id = rbcm.business_id\n"
+            "WHERE (f_bool.business_id IS NULL\n"
+            "   OR JSON_EXTRACT_PATH_TEXT(f_bool.value,'value') != 'false')\n"
+            "  AND (vr.sos_domestic_verification = 0 OR vr.sos_domestic_verification IS NULL\n"
+            "       OR JSON_EXTRACT_PATH_TEXT(f_state.value,'value')\n"
+            "            IN ('DE','NV','WY','SD','MT','NM')\n"
+            "       OR f_state.business_id IS NULL)\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "**Source:** `warehouse-service/.../verification_results.sql:36-39` · "
+            "`integration-service/lib/facts/kyb/index.ts:1371-1424`"
+        ),
+        "no_state_match": (
+            "**What 'No State Match' means:**\n"
+            "`sos_match_boolean != 'false'` (not an outright failure) BUT the registry was NOT found "
+            "in the state the business submitted as their operating address (`primary_address.state`).\n\n"
+            "**Precise logic:**\n"
+            "```\nNot-false     = sos_match_boolean = 'true' OR null/missing\n"
+            "State Match   = sos_match_boolean='true'\n"
+            "                AND UPPER(formation_state) = UPPER(primary_address.state)\n"
+            "                AND formation_state IS NOT NULL\n"
+            "No State Match = Not-false AND NOT State Match\n```\n\n"
+            "**Three sub-cases:**\n"
+            "1. `sos_match_boolean='true'` AND `formation_state != operating_state` — "
+            "registry found in a DIFFERENT state from where the business said it operates "
+            "(multi-state, HQ vs formation state, or data entry error)\n"
+            "2. `sos_match_boolean='true'` AND `formation_state` missing — "
+            "registry found but Middesk did not return the formation state\n"
+            "3. `sos_match_boolean=null/missing` — vendor not called\n\n"
+            "**Key distinction from KPI 1 (No Registry Found):**\n"
+            "| KPI | Condition | Meaning |\n|---|---|---|\n"
+            "| No Registry Found | `sos_match_boolean='false'` | Vendor returned explicit failure |\n"
+            "| No State Match | `sos_match_boolean != 'false'` but formation ≠ operating | Did not fail outright but registry not in submitted state |\n\n"
+            "**`primary_address.state` is SUBMITTED (from onboarding form — not verified)**\n"
+            "`formation_state` is from Middesk SOS data (what the SOS database says)\n\n"
+            "**Diagnostic SQL:**\n"
+            "```sql\n-- Returns: not-false businesses where formation_state != submitted operating state\n"
+            "SELECT rbcm.business_id,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_bool.value,'value')          AS sos_match_boolean,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_state.value,'value')         AS formation_state,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_addr.value,'value','state')  AS submitted_operating_state,\n"
+            "       vr.sos_match_verification, vr.sos_domestic_verification\n"
+            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "LEFT JOIN rds_warehouse_public.facts f_bool\n"
+            "  ON f_bool.business_id = rbcm.business_id AND f_bool.name = 'sos_match_boolean'\n"
+            "LEFT JOIN rds_warehouse_public.facts f_state\n"
+            "  ON f_state.business_id = rbcm.business_id AND f_state.name = 'formation_state'\n"
+            "LEFT JOIN rds_warehouse_public.facts f_addr\n"
+            "  ON f_addr.business_id = rbcm.business_id AND f_addr.name = 'primary_address'\n"
+            "LEFT JOIN clients.verification_results vr ON vr.business_id = rbcm.business_id\n"
+            "WHERE (f_bool.business_id IS NULL\n"
+            "   OR JSON_EXTRACT_PATH_TEXT(f_bool.value,'value') != 'false')\n"
+            "  AND (f_state.business_id IS NULL\n"
+            "   OR JSON_EXTRACT_PATH_TEXT(f_state.value,'value') IS NULL\n"
+            "   OR UPPER(JSON_EXTRACT_PATH_TEXT(f_state.value,'value'))\n"
+            "      != UPPER(JSON_EXTRACT_PATH_TEXT(f_addr.value,'value','state')))\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "**Source:** `integration-service/lib/facts/kyb/index.ts` (formation_state, primary_address) · "
             "`warehouse-service/.../verification_results.sql` (sos_domestic_verification)"
         ),
         # ── SECTION 2: TIN / EIN ──────────────────────────────────────────────
@@ -4710,28 +4949,32 @@ if tab=="🏠 Home":
                                _bid_csv, f"{seg_key}_business_ids.csv", "text/csv",
                                key=f"dl_{seg_key}")
 
-    # ── KPI Row 1 — clickable cards (order: Onboarded · No Registry · Registry Found · Domestic · State Match) ──
+    # ── KPI Row 1 — 5 cards with new definitions ──────────────────────────────
+    # KPI 1: No Registry Found    = sos_match_boolean = 'false' (strict)
+    # KPI 2: Possible Sole Prop   = subset of KPI1 where tin[-4] == idv_ssn_last4
+    # KPI 3: No Domestic Reg Found = sos_match_boolean != 'false' but no domestic reg
+    # KPI 4: No State Match        = sos_match_boolean != 'false' but not in submitted state
     k1,k2,k3,k4,k5 = st.columns(5)
     with k1: kpi("📋 Onboarded", f"{total_biz:,}", period_label, "#3B82F6")
     with k2: kpi(
         "❌ No Registry Found", f"{_sos_not_found:,}",
-        rate(_sos_not_found,total_biz)+" · sos_match_boolean=false/null",
+        rate(_sos_not_found,total_biz)+" · sos_match_boolean=false (strict)",
         "#ef4444" if _sos_not_found>0 else "#22c55e"
     )
     with k3: kpi(
-        "🏛️ Registry Found", f"{_sos_found:,}",
-        rate(_sos_found,total_biz)+" · sos_match_boolean=true",
-        "#22c55e" if _sos_found/max(total_biz,1)>0.8 else "#f59e0b"
+        "🧍 Possible Sole Prop", f"{_possible_sole_prop:,}",
+        f"of {_sos_not_found:,} no-reg · TIN[-4]=SSN[-4]",
+        "#8B5CF6" if _possible_sole_prop>0 else "#64748b"
     )
     with k4: kpi(
-        "🏠 Domestic Reg Found", f"{_domestic_sos_found:,}",
-        rate(_domestic_sos_found,total_biz)+" · sos_domestic_verification=1",
-        "#22c55e" if _domestic_sos_found/max(total_biz,1)>0.7 else "#f59e0b"
+        "🏠 No Domestic Reg", f"{_no_domestic_found:,}",
+        rate(_no_domestic_found,total_biz)+" · not-false, no domestic",
+        "#f59e0b" if _no_domestic_found>0 else "#22c55e"
     )
     with k5: kpi(
-        "📍 State Match", f"{_state_match:,}",
-        rate(_state_match,total_biz)+" · formation_state=primary_address.state",
-        "#22c55e" if _state_match/max(total_biz,1)>0.6 else "#f59e0b"
+        "📍 No State Match", f"{_no_state_match:,}",
+        rate(_no_state_match,total_biz)+" · not-false, formation≠operating",
+        "#f59e0b" if _no_state_match>0 else "#22c55e"
     )
 
     # ── Compute the "gap" segments — businesses in one set but not the next ──
@@ -4756,10 +4999,33 @@ if tab=="🏠 Home":
         "tin_submitted", "tin_match_status", "tin_match",
         "idv_passed", "naics_code", "watchlist_hits",
     ]
-    _drilldown_table("sos_found",         f"Registry Found — {_sos_found:,} businesses", _SOS_COLS)
-    _drilldown_table("domestic",          f"Domestic Reg Found — {_domestic_sos_found:,} businesses", _SOS_COLS)
-    _drilldown_table("state_match",       f"State Match — {_state_match:,} businesses", _SOS_COLS)
-    _drilldown_table("no_sos",            f"No Registry Found — {_sos_not_found:,} businesses (needs investigation)", _SOS_COLS)
+    _drilldown_table("sos_found",           f"Registry Found — {_sos_found:,} businesses (sos_match_boolean=true)", _SOS_COLS)
+    _drilldown_table("domestic",           f"Domestic Reg Found — {_domestic_sos_found:,} businesses", _SOS_COLS)
+    _drilldown_table("state_match",        f"State Match — {_state_match:,} businesses (formation=operating state)", _SOS_COLS)
+    # KPI 1 drilldown: strictly sos_match_boolean=false
+    _drilldown_table("no_sos",             f"No Registry Found — {_sos_not_found:,} businesses (sos_match_boolean=false)", _SOS_COLS)
+    # KPI 2 drilldown: possible sole props within the no-registry group
+    if _possible_sole_prop > 0:
+        st.markdown(f"""<div style="background:#1E293B;border-left:4px solid #8B5CF6;
+            border-radius:8px;padding:10px 14px;margin:6px 0">
+          <div style="color:#a78bfa;font-weight:700;font-size:.86rem">
+            🧍 {_possible_sole_prop:,} of the {_sos_not_found:,} No-Registry businesses may be Sole Proprietors
+          </div>
+          <div style="color:#CBD5E1;font-size:.79rem;margin-top:4px;line-height:1.5">
+            These businesses have <code>sos_match_boolean=false</code> AND the last 4 of their
+            submitted EIN (<code>tin_submitted[-4:]</code>) matches the last 4 of the SSN
+            captured during Plaid IDV (<code>identity_verification.meta.user.id_number.value</code>
+            where type=<code>us_ssn_last_4</code>). This is the same comparison used internally
+            to derive <code>is_sole_prop=true</code> (index.ts:604-609). Sole props legitimately
+            have no SOS registry — this is expected and normal behaviour for them.
+          </div>
+        </div>""", unsafe_allow_html=True)
+        _drilldown_table("possible_sole_prop",
+            f"Possible Sole Prop — {_possible_sole_prop:,} businesses (TIN[-4]=SSN[-4], no registry)", _SOS_COLS)
+    # KPI 3 drilldown: not-false but no domestic registration
+    _drilldown_table("no_domestic",        f"No Domestic Reg — {_no_domestic_found:,} businesses (not-false, tax-haven or missing formation)", _SOS_COLS)
+    # KPI 4 drilldown: not-false but formation state ≠ submitted operating state
+    _drilldown_table("no_state_match",     f"No State Match — {_no_state_match:,} businesses (not-false, formation≠operating state)", _SOS_COLS)
 
     # ── NEW: Gap drilldowns ────────────────────────────────────────────────
     if _foreign_only_bids:
