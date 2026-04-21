@@ -3262,25 +3262,30 @@ st.session_state["hub_bid"] = hub_bid
 pass  # sidebar body placeholder
 
 # ── Row 2: Filter bar ─────────────────────────────────────────────────────────
-# Compact: Date Range · Date Context · Customer · Business ID
-# No Manual Only / Apply / Reset buttons (user removed)
+# Compact: Date Range · Customer ID · Customer Name · Business ID
 DATE_RANGE_OPTIONS    = {"last_7d":"Last 7 days","last_30d":"Last 30 days",
                          "last_90d":"Last 90 days","ytd":"Year to date","custom":"Custom…"}
+# DATE_CONTEXT_OPTIONS kept for internal use but the column is removed from the UI
 DATE_CONTEXT_OPTIONS  = {"submitted_at":"Submitted At","scored_at":"Scored At",
                          "decision_at":"Decision At","activated_at":"Activation At"}
 
 with st.container():
-    _fb1, _fb2, _fb3, _fb4 = st.columns([1.4, 1.3, 2.0, 2.0])
+    _fb1, _fb2, _fb3, _fb4 = st.columns([1.4, 1.4, 2.0, 2.0])
     with _fb1:
         st.selectbox("Date Range", list(DATE_RANGE_OPTIONS.keys()),
                      format_func=lambda k: DATE_RANGE_OPTIONS[k],
                      key="fbar_date_range", label_visibility="visible")
     with _fb2:
-        st.selectbox("Date Context", list(DATE_CONTEXT_OPTIONS.keys()),
-                     format_func=lambda k: DATE_CONTEXT_OPTIONS[k],
-                     key="fbar_date_ctx", label_visibility="visible")
+        # Customer ID — free-text filter; cleared when Customer Name changes
+        st.text_input("Customer ID",
+                      key="hub_customer_id_input",
+                      placeholder="Paste customer UUID…",
+                      help="Filter by the exact customer UUID from rds_auth_public.data_customers.id · "
+                           "Leave blank to use Customer Name filter below")
+        # Resolve: if Customer ID is typed, it overrides Customer Name selection
+        _raw_cust_id = str(st.session_state.get("hub_customer_id_input","")).strip()
     with _fb3:
-        # Customer dropdown scoped to the active date window
+        # Customer Name dropdown — scoped to the active date window
         with st.spinner(""):
             cust_df, cust_err = load_customer_names(hub_date_from, hub_date_to)
         cust_opts   = ["All Customers"]
@@ -3293,10 +3298,16 @@ with st.container():
                     _lbl = f"{_nm} ({int(_cr['business_count']):,} biz)" if _has_cnt else _nm
                     cust_opts.append(_lbl)
                     cust_id_map[_lbl] = _cr["customer_id"]
-        selected_cust = st.selectbox("Customer", cust_opts, key="hub_customer",
+        selected_cust = st.selectbox("Customer Name", cust_opts, key="hub_customer",
                                      label_visibility="visible",
-                                     help="Filters Home dashboard to this customer's businesses")
-        hub_customer_id = cust_id_map.get(selected_cust)
+                                     help="Filter Home dashboard to this customer's businesses. "
+                                          "Customer ID input above takes precedence when filled.")
+        # Customer ID input overrides the Name dropdown when provided
+        if _raw_cust_id:
+            hub_customer_id = _raw_cust_id
+            selected_cust   = _raw_cust_id          # use the raw ID as the display label too
+        else:
+            hub_customer_id = cust_id_map.get(selected_cust)
     with _fb4:
         # Apply any pending bid from the Home tab "Investigate →" button
         if st.session_state.get("_pending_bid"):
@@ -3338,14 +3349,12 @@ tab = st.radio("nav", ALL_TABS, horizontal=True, key="tab_nav",
 
 # Thin active-filter summary line
 _dr_label  = DATE_RANGE_OPTIONS.get(st.session_state.get("fbar_date_range","last_30d"),"Last 30 days")
-_cust_lbl  = selected_cust if selected_cust != "All Customers" else "All customers"
+_cust_id_shown = str(st.session_state.get("hub_customer_id_input","")).strip()
+_cust_name_lbl = selected_cust if selected_cust != "All Customers" else "All customers"
+_cust_lbl = (f"ID `{_cust_id_shown[:20]}…`" if len(_cust_id_shown)>20 else f"ID `{_cust_id_shown}`") if _cust_id_shown else _cust_name_lbl
 _bid_shown = str(st.session_state.get("hub_bid","")).strip()
 _bid_lbl   = f" · Business: `{_bid_shown[:28]}…`" if len(_bid_shown)>28 else (f" · Business: `{_bid_shown}`" if _bid_shown else "")
-st.caption(
-    f"📅 **{_dr_label}** "
-    f"({DATE_CONTEXT_OPTIONS.get(st.session_state.get('fbar_date_ctx','scored_at'),'Scored At')}) "
-    f"· 👤 {_cust_lbl}{_bid_lbl}"
-)
+st.caption(f"📅 **{_dr_label}** · 👤 {_cust_lbl}{_bid_lbl}")
 st.markdown("<hr class='thin-sep'/>", unsafe_allow_html=True)
 _search_q = ""  # search bar removed from filter bar
 
