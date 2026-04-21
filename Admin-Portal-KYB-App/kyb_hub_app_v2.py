@@ -4302,12 +4302,373 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
                 _drilldown_table("rf_idv_fail",     f"IDV Failed — {len(_seg.get('rf_idv_fail',[]))} businesses", _RF_COLS)
 
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 5 — RECENTLY ONBOARDED + TOP 10 AT RISK
+    # SECTION 5 — WORTH SCORE DISTRIBUTION (CUSTOMER PORTFOLIO SLICE)
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("### 🕐 Section 5 — Recently Onboarded Businesses")
+    st.markdown("### 💰 Section 5 — Worth Score Distribution")
+    st.caption(
+        "Score distribution, decision outcomes, and model factor contributions across "
+        "the portfolio. Mirrors the per-business Score & Architecture and Waterfall & Features "
+        "views — but sliced at customer/portfolio level."
+    )
 
-    st.markdown("### 🕐 Recently Onboarded Businesses")
+    # Load Worth Scores for the authoritative business list
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _load_home_scores(bid_tuple):
+        if not bid_tuple: return None, "No business IDs"
+        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
+        return run_sql(f"""
+            SELECT cs.business_id,
+                   bs.weighted_score_850, bs.weighted_score_100,
+                   bs.risk_level, bs.score_decision, bs.created_at AS scored_at
+            FROM rds_manual_score_public.data_current_scores cs
+            JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+            WHERE cs.business_id IN ({bid_list})
+            ORDER BY bs.weighted_score_850 ASC;
+        """)
+
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _load_home_factors(bid_tuple):
+        if not bid_tuple: return None, "No business IDs"
+        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
+        return run_sql(f"""
+            SELECT cs.business_id, bsf.category_id,
+                   AVG(bsf.score_100) AS avg_score_100,
+                   AVG(bsf.weighted_score_850) AS avg_impact_pts,
+                   COUNT(DISTINCT cs.business_id) AS businesses
+            FROM rds_manual_score_public.data_current_scores cs
+            JOIN rds_manual_score_public.business_score_factors bsf ON bsf.score_id=cs.score_id
+            WHERE cs.business_id IN ({bid_list})
+            GROUP BY cs.business_id, bsf.category_id
+            ORDER BY cs.business_id, bsf.category_id;
+        """)
+
+    with st.spinner("Loading Worth Score distribution…"):
+        _home_ws, _home_ws_err = _load_home_scores(tuple(_authoritative_bids))
+        _home_factors, _home_factors_err = _load_home_factors(tuple(_authoritative_bids))
+
+    if _home_ws is not None and not _home_ws.empty:
+        _home_ws["weighted_score_850"] = pd.to_numeric(_home_ws["weighted_score_850"], errors="coerce")
+        _home_ws_clean = _home_ws.dropna(subset=["weighted_score_850"])
+        _ws_n        = len(_home_ws_clean)
+        _ws_avg      = float(_home_ws_clean["weighted_score_850"].mean())
+        _ws_med      = float(_home_ws_clean["weighted_score_850"].median())
+        _ws_approve  = int((_home_ws_clean["score_decision"]=="APPROVE").sum())
+        _ws_review   = int((_home_ws_clean["score_decision"]=="FURTHER_REVIEW_NEEDED").sum())
+        _ws_decline  = int((_home_ws_clean["score_decision"]=="DECLINE").sum())
+        _ws_not_scr  = total_biz - _ws_n
+        _ws_sc_color = "#22c55e" if _ws_avg>=700 else "#f59e0b" if _ws_avg>=550 else "#ef4444"
+
+        # ── KPI row ───────────────────────────────────────────────────────
+        _wk1,_wk2,_wk3,_wk4,_wk5,_wk6,_wk7 = st.columns(7)
+        with _wk1: kpi("Scored",       f"{_ws_n:,}",          f"of {total_biz:,} onboarded", "#3B82F6")
+        with _wk2: kpi("Not Scored",   f"{_ws_not_scr:,}",    rate(_ws_not_scr,total_biz),   "#64748b")
+        with _wk3: kpi("Avg Score",    f"{_ws_avg:.0f}",       "300–850 scale",               _ws_sc_color)
+        with _wk4: kpi("Median Score", f"{_ws_med:.0f}",       "p50",                         _ws_sc_color)
+        with _wk5: kpi("✅ APPROVE",    f"{_ws_approve:,}",    rate(_ws_approve,_ws_n),       "#22c55e")
+        with _wk6: kpi("🔄 REVIEW",    f"{_ws_review:,}",     rate(_ws_review,_ws_n),        "#f59e0b")
+        with _wk7: kpi("❌ DECLINE",   f"{_ws_decline:,}",    rate(_ws_decline,_ws_n),       "#ef4444")
+
+        _ws_sql = f"""
+-- Returns: Worth Score (300-850), risk level, and decision for each scored business
+-- in the portfolio. weighted_score_850 = probability × 550 + 300.
+SELECT cs.business_id, bs.weighted_score_850, bs.risk_level, bs.score_decision, bs.created_at
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+WHERE cs.business_id IN (
+    SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring
+    WHERE 1=1{hub_date_clause("created_at")}
+)
+ORDER BY bs.weighted_score_850 ASC;"""
+
+        detail_panel("💰 Worth Score Summary", f"Avg: {_ws_avg:.0f} · Median: {_ws_med:.0f} · {_ws_n:,} scored",
+            what_it_means=(
+                f"Worth Score distribution for {total_biz:,} businesses in {period_label}.\n\n"
+                f"**Formula:** score = probability × 550 + 300 (range 300–850).\n"
+                f"**Thresholds:** APPROVE ≥700 · FURTHER_REVIEW 550–699 · DECLINE <550.\n"
+                f"**Not scored:** {_ws_not_scr:,} businesses have no score yet — typically because "
+                f"they are too new (scoring runs on a schedule), insufficient facts, or the scoring pipeline failed.\n\n"
+                f"**Model:** 3-model ensemble — Firmographic XGBoost + Financial PyTorch + Economic model."
+            ),
+            source_table="rds_manual_score_public.data_current_scores JOIN business_scores",
+            source_file="aiscore.py",
+            json_obj={"scored":_ws_n,"not_scored":_ws_not_scr,"avg":round(_ws_avg,1),
+                      "median":round(_ws_med,1),"approve":_ws_approve,"review":_ws_review,"decline":_ws_decline},
+            sql=_ws_sql, icon="💰", color=_ws_sc_color)
+
+        st.markdown("---")
+
+        # ── Score distribution + Decision mix ─────────────────────────────
+        _wc1, _wc2 = st.columns(2)
+        with _wc1:
+            fig_ws_hist = px.histogram(
+                _home_ws_clean, x="weighted_score_850", nbins=25,
+                color="score_decision" if "score_decision" in _home_ws_clean.columns else None,
+                title="Score Distribution (300–850)",
+                color_discrete_map={"APPROVE":"#22c55e","FURTHER_REVIEW_NEEDED":"#f59e0b","DECLINE":"#ef4444"},
+                labels={"weighted_score_850":"Worth Score (300–850)"},
+            )
+            fig_ws_hist.add_vline(x=700, line_dash="dash", line_color="#22c55e",
+                                  annotation_text="APPROVE ≥700", annotation_position="top right")
+            fig_ws_hist.add_vline(x=550, line_dash="dash", line_color="#ef4444",
+                                  annotation_text="DECLINE <550", annotation_position="top left")
+            fig_ws_hist.update_layout(height=320, margin=dict(t=40,b=20,l=10,r=10), showlegend=True)
+            st.plotly_chart(dark_chart(fig_ws_hist), use_container_width=True)
+
+        with _wc2:
+            _dec_df = pd.DataFrame({
+                "Decision": ["✅ APPROVE","🔄 FURTHER REVIEW","❌ DECLINE","⚪ Not Scored"],
+                "Count":    [_ws_approve, _ws_review, _ws_decline, _ws_not_scr],
+            })
+            fig_dec = px.pie(_dec_df, names="Decision", values="Count", hole=0.45,
+                             title="Decision Outcome Distribution",
+                             color="Decision",
+                             color_discrete_map={"✅ APPROVE":"#22c55e","🔄 FURTHER REVIEW":"#f59e0b",
+                                                 "❌ DECLINE":"#ef4444","⚪ Not Scored":"#334155"})
+            fig_dec.update_layout(height=320, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_dec), use_container_width=True)
+
+        detail_panel("📊 Score Distribution & Decision Mix",
+            f"Histogram + donut · {_ws_n:,} scored businesses",
+            what_it_means=(
+                "**Histogram (left):** Each bar = number of businesses with a score in that range. "
+                "Coloured by decision outcome. A healthy portfolio clusters toward 700+ (green). "
+                "A spike near 550–600 indicates many businesses in the review band.\n\n"
+                "**Decision donut (right):** APPROVE ≥700, FURTHER_REVIEW 550–699, DECLINE <550. "
+                "Thresholds are configurable per customer in the decision matrix.\n\n"
+                "**Not Scored:** businesses without a score — check if scoring pipeline ran."
+            ),
+            source_table="rds_manual_score_public.business_scores · weighted_score_850, score_decision",
+            source_file="aiscore.py",
+            json_obj={"distribution":{"approve":_ws_approve,"review":_ws_review,
+                      "decline":_ws_decline,"not_scored":_ws_not_scr}},
+            sql=_ws_sql, icon="📊", color="#8B5CF6")
+
+        # ── Score by risk level breakdown ─────────────────────────────────
+        if "risk_level" in _home_ws_clean.columns:
+            st.markdown("---")
+            st.markdown("##### Score by Risk Level — Breakdown")
+            _rl_g = _home_ws_clean.groupby("risk_level").agg(
+                businesses=("business_id","count"),
+                avg_score=("weighted_score_850","mean"),
+                min_score=("weighted_score_850","min"),
+                max_score=("weighted_score_850","max"),
+            ).reset_index()
+            _rl_g["avg_score"]  = _rl_g["avg_score"].round(0).astype(int)
+            _rl_g["min_score"]  = _rl_g["min_score"].round(0).astype(int)
+            _rl_g["max_score"]  = _rl_g["max_score"].round(0).astype(int)
+            _rl_g["pct"]        = (_rl_g["businesses"]/_ws_n*100).round(1).astype(str)+"%"
+            _rl_g = _rl_g.rename(columns={"risk_level":"Risk Level","businesses":"Businesses",
+                                           "avg_score":"Avg Score","min_score":"Min","max_score":"Max"})
+            _rl_color_map = {"HIGH":"#ef4444","MODERATE":"#f59e0b","LOW":"#22c55e"}
+            _rl_g["Color"] = _rl_g["Risk Level"].map(_rl_color_map).fillna("#64748b")
+
+            _rl_col1, _rl_col2 = st.columns([1,1])
+            with _rl_col1:
+                st.dataframe(_rl_g[["Risk Level","Businesses","pct","Avg Score","Min","Max"]].rename(columns={"pct":"% of Total"}),
+                             use_container_width=True, hide_index=True)
+            with _rl_col2:
+                fig_rl = px.bar(_rl_g, x="Risk Level", y="Businesses",
+                                color="Risk Level",
+                                color_discrete_map=_rl_color_map,
+                                title="Businesses per Risk Level",
+                                text="Businesses")
+                fig_rl.update_traces(textposition="outside")
+                fig_rl.update_layout(height=280, showlegend=False, margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_rl), use_container_width=True)
+
+            detail_panel("📊 Risk Level Breakdown",
+                f"{len(_rl_g)} risk levels · {_ws_n:,} businesses",
+                what_it_means=(
+                    "**HIGH** = score <550 → DECLINE band. **MODERATE** = 550–699 → FURTHER_REVIEW band. "
+                    "**LOW** = ≥700 → APPROVE band.\n\n"
+                    "Risk level is derived directly from weighted_score_850 using the decision thresholds "
+                    "configured in the score_decision_matrix for each customer. "
+                    "Min/Max shows the actual score range within each risk band for this portfolio."
+                ),
+                source_table="rds_manual_score_public.business_scores · risk_level",
+                source_file="score_decision_matrix",
+                json_obj=_rl_g[["Risk Level","Businesses","Avg Score","Min","Max"]].to_dict("records"),
+                sql=f"SELECT risk_level, COUNT(*) AS businesses, AVG(weighted_score_850) AS avg_score, MIN(weighted_score_850) AS min_score, MAX(weighted_score_850) AS max_score FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE cs.business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE 1=1{hub_date_clause('created_at')}) GROUP BY 1 ORDER BY AVG(weighted_score_850);",
+                icon="📊", color="#8B5CF6")
+
+        # ── Score trend over time ─────────────────────────────────────────
+        if "scored_at" in _home_ws_clean.columns:
+            st.markdown("---")
+            st.markdown("##### Score Trend Over Time")
+            _home_ws_clean["scored_date"] = pd.to_datetime(_home_ws_clean["scored_at"], errors="coerce").dt.date.astype(str)
+            _ws_trend = _home_ws_clean.groupby("scored_date")["weighted_score_850"].mean().reset_index()
+            _ws_trend.columns = ["Date","Avg Score"]
+            if len(_ws_trend) > 1:
+                fig_ws_trend = px.line(_ws_trend, x="Date", y="Avg Score",
+                                        title="Average Worth Score by Scoring Date",
+                                        markers=True, color_discrete_sequence=["#3B82F6"])
+                fig_ws_trend.add_hline(y=700, line_dash="dash", line_color="#22c55e", annotation_text="APPROVE")
+                fig_ws_trend.add_hline(y=550, line_dash="dash", line_color="#ef4444", annotation_text="DECLINE")
+                fig_ws_trend.update_layout(height=260, margin=dict(t=40,b=20,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_ws_trend), use_container_width=True)
+                detail_panel("📈 Score Trend Over Time",
+                    f"{len(_ws_trend)} scoring dates · avg {_ws_avg:.0f}",
+                    what_it_means=(
+                        "Average Worth Score by the date scores were computed. "
+                        "A downward trend may indicate: new businesses joining the portfolio with fewer facts, "
+                        "macro-economic deterioration (GDP/CPI/VIX inputs), or new data sources revealing risk. "
+                        "An upward trend suggests improving entity verification quality (more SOS/TIN/IDV passing)."
+                    ),
+                    source_table="rds_manual_score_public.business_scores · created_at, weighted_score_850",
+                    source_file="aiscore.py",
+                    json_obj=_ws_trend.to_dict("records"),
+                    sql=f"SELECT DATE(bs.created_at) AS scored_date, AVG(bs.weighted_score_850) AS avg_score FROM rds_manual_score_public.data_current_scores cs JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id WHERE cs.business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE 1=1{hub_date_clause('created_at')}) GROUP BY 1 ORDER BY 1;",
+                    icon="📈", color="#3B82F6")
+
+        # ── Factor contributions — portfolio average ───────────────────────
+        if _home_factors is not None and not _home_factors.empty:
+            st.markdown("---")
+            st.markdown("##### 📐 Model Factor Contributions — Portfolio Average")
+            st.caption(
+                "Average contribution of each model category across the portfolio. "
+                "Mirrors the per-business Waterfall & Features view — but averaged over all scored businesses. "
+                "Negative = this category is reducing the score on average."
+            )
+            _CAT_NAMES_HOME = {
+                "public_records":       "📜 Public Records",
+                "company_profile":      "🏢 Company Profile",
+                "financial_trends":     "📈 Financial Trends",
+                "business_operations":  "💼 Business Operations",
+                "performance_measures": "📊 Performance Measures",
+            }
+            _CAT_DESC_HOME = {
+                "public_records":       "BK/judgments/liens. −40pts/BK, −20pts/judgment, −10pts/lien. Source: Equifax",
+                "company_profile":      "Age, NAICS, state, entity type, employees. NAICS=561499 = penalty. Source: ZI/EFX/Middesk",
+                "financial_trends":     "Macro indicators (GDP, CPI, VIX, rates) + Plaid financial ratios. Source: Fed/Liberty + Plaid",
+                "business_operations":  "Revenue, P&L, cash flow, balance sheet from Plaid. NULL if Plaid not connected",
+                "performance_measures": "ROA, gross margin, debt/equity, solvency flags. flag_equity_negative = high negative impact",
+            }
+            _fac_agg = (
+                _home_factors.groupby("category_id")
+                .agg(avg_score=("avg_score_100","mean"), avg_impact=("avg_impact_pts","mean"), businesses=("businesses","sum"))
+                .reset_index()
+            )
+            _fac_agg["Category"]    = _fac_agg["category_id"].map(lambda c: _CAT_NAMES_HOME.get(c, f"Category {c}"))
+            _fac_agg["Avg Score"]   = _fac_agg["avg_score"].round(1)
+            _fac_agg["Avg Impact"]  = _fac_agg["avg_impact"].round(1)
+            _fac_agg["Description"] = _fac_agg["category_id"].map(lambda c: _CAT_DESC_HOME.get(c,"see lookups.py"))
+            _fac_agg = _fac_agg.sort_values("Avg Impact", ascending=True)
+
+            _fac_col1, _fac_col2 = st.columns([1, 1])
+            with _fac_col1:
+                fig_fac = px.bar(
+                    _fac_agg, x="Avg Impact", y="Category", orientation="h",
+                    title="Avg Factor Impact (pts on 850 scale)",
+                    color="Avg Impact",
+                    color_continuous_scale=["#ef4444","#f59e0b","#22c55e"],
+                    text="Avg Impact",
+                )
+                fig_fac.update_traces(texttemplate="%{x:+.1f}", textposition="outside")
+                fig_fac.update_layout(height=320, margin=dict(t=40,b=10,l=10,r=60),
+                                      coloraxis_showscale=False)
+                st.plotly_chart(dark_chart(fig_fac), use_container_width=True)
+
+            with _fac_col2:
+                st.markdown("**Category breakdown:**")
+                for _, _fr in _fac_agg.sort_values("Avg Impact").iterrows():
+                    _fc = "#ef4444" if _fr["Avg Impact"] < 0 else "#22c55e"
+                    st.markdown(
+                        f"<div style='background:#1E293B;border-left:3px solid {_fc};"
+                        f"border-radius:6px;padding:6px 12px;margin:3px 0'>"
+                        f"<div style='display:flex;justify-content:space-between'>"
+                        f"<span style='color:#CBD5E1;font-size:.78rem'>{_fr['Category']}</span>"
+                        f"<span style='color:{_fc};font-weight:700;font-size:.78rem'>{_fr['Avg Impact']:+.1f} pts</span>"
+                        f"</div>"
+                        f"<div style='color:#64748b;font-size:.70rem;margin-top:2px'>{_fr['Description']}</div>"
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+
+            st.markdown("**Full factor table:**")
+            st.dataframe(
+                _fac_agg[["Category","Avg Score","Avg Impact","Description"]].rename(
+                    columns={"Avg Score":"Avg Score (0-100)","Avg Impact":"Avg Impact (pts)"}),
+                use_container_width=True, hide_index=True
+            )
+
+            _factors_port_sql = f"""
+-- Returns: average SHAP factor contribution per model category across the portfolio.
+-- avg_score_100: average category score (0=worst, 100=best).
+-- avg_impact_pts: average contribution to the 850-scale score. Negative = this category pulls score down.
+SELECT bsf.category_id,
+       AVG(bsf.score_100)          AS avg_score_100,
+       AVG(bsf.weighted_score_850) AS avg_impact_pts,
+       COUNT(DISTINCT cs.business_id) AS businesses
+FROM rds_manual_score_public.data_current_scores cs
+JOIN rds_manual_score_public.business_score_factors bsf ON bsf.score_id=cs.score_id
+WHERE cs.business_id IN (
+    SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring
+    WHERE 1=1{hub_date_clause("created_at")}
+)
+GROUP BY bsf.category_id
+ORDER BY avg_impact_pts ASC;"""
+
+            detail_panel("📐 Portfolio Factor Contributions",
+                f"{len(_fac_agg)} categories · portfolio average",
+                what_it_means=(
+                    "Average SHAP-equivalent contribution of each model category across all scored businesses.\n\n"
+                    "**Reading the chart:** A large negative average impact in a category means that category "
+                    "is systematically reducing scores across the portfolio — this is the primary driver of low scores.\n\n"
+                    "**Categories:**\n"
+                    "• public_records: BK/judgments/liens — each BK = −40pts on the 850 scale\n"
+                    "• company_profile: NAICS=561499 penalty, entity age, employee count\n"
+                    "• financial_trends: macro-economic model inputs (always present, small variance)\n"
+                    "• business_operations: Plaid P&L/cash flow — null for most businesses (no Plaid)\n"
+                    "• performance_measures: financial ratios — null if Plaid not connected\n\n"
+                    "Source: rds_manual_score_public.business_score_factors (one row per scored business per category)."
+                ),
+                source_table="rds_manual_score_public.business_score_factors",
+                source_file="aiscore.py",
+                json_obj=_fac_agg[["category_id","Avg Score","Avg Impact"]].to_dict("records"),
+                sql=_factors_port_sql,
+                links=[("aiscore.py","SHAP computation"),("worth_score_model.py","model pipeline"),
+                       ("lookups.py","feature definitions")],
+                icon="📐", color="#8B5CF6")
+
+        # ── Drilldowns: lowest scored businesses ──────────────────────────
+        st.markdown("---")
+        st.markdown("##### 🔍 Drilldowns by Score Band")
+        _seg["declined"]   = _home_ws_clean[_home_ws_clean["score_decision"]=="DECLINE"]["business_id"].tolist()
+        _seg["in_review"]  = _home_ws_clean[_home_ws_clean["score_decision"]=="FURTHER_REVIEW_NEEDED"]["business_id"].tolist()
+        _seg["approved"]   = _home_ws_clean[_home_ws_clean["score_decision"]=="APPROVE"]["business_id"].tolist()
+        _seg["not_scored"] = [b for b in _authoritative_bids if b not in _home_ws_clean["business_id"].tolist()]
+
+        _WS_COLS = ["sos_active","tin_match","naics_code","formation_state","watchlist_hits","num_bankruptcies"]
+        _drilldown_table("declined",   f"DECLINE ({_ws_decline:,} businesses — score <550)", _WS_COLS)
+        _drilldown_table("in_review",  f"FURTHER REVIEW ({_ws_review:,} businesses — score 550–699)", _WS_COLS)
+        _drilldown_table("approved",   f"APPROVE ({_ws_approve:,} businesses — score ≥700)", _WS_COLS)
+        _drilldown_table("not_scored", f"Not Scored ({_ws_not_scr:,} businesses)", _WS_COLS)
+
+        # Gap explanation when many businesses are not scored
+        if _ws_not_scr > total_biz * 0.10:
+            st.markdown(f"""<div style="background:#1c1917;border-left:4px solid #f59e0b;border-radius:8px;padding:12px 16px;margin:8px 0">
+              <div style="color:#fde68a;font-weight:700;font-size:.85rem">⚠️ {_ws_not_scr:,} businesses ({rate(_ws_not_scr,total_biz)}) have no Worth Score</div>
+              <div style="color:#CBD5E1;font-size:.79rem;line-height:1.6;margin-top:6px">
+                <strong>Common causes:</strong>
+                (1) Business is too new — scoring runs on a schedule (typically daily), so very recently onboarded businesses may not have a score yet;
+                (2) Insufficient facts — the scoring pipeline requires a minimum set of facts (SOS, TIN, at least some firmographic data);
+                (3) Scoring pipeline failure — check the Worth Score queue;
+                (4) Business was excluded from scoring by customer configuration.
+                <br/><strong>Action:</strong> For businesses &gt;48h old without a score, escalate to the AI-score-service team.
+              </div>
+            </div>""", unsafe_allow_html=True)
+
+    else:
+        flag(f"Worth Score data not available for this period. {_home_ws_err or 'No scored businesses found.'}", "amber")
+        st.caption("This could mean no businesses in this date range have been scored yet, "
+                   "or the rds_manual_score_public schema is not accessible from this Redshift connection.")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # SECTION 6 — RECENTLY ONBOARDED + TOP 10 AT RISK
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### 🕐 Section 6 — Recently Onboarded Businesses")
     st.markdown("*Most recently seen in the facts table — ordered by first_seen DESC.*")
 
     recent_10 = recent_df.head(10).copy()
@@ -7009,87 +7370,8 @@ FROM warehouse.latest_score WHERE business_id='{bid}';""",language="sql")
                   <div style="color:#94A3B8;font-size:.74rem">{action}</div>
                 </div>""",unsafe_allow_html=True)
 
-            # Factor contributions
-            factors_df,_=load_score_factors(bid)
-            if factors_df is not None and not factors_df.empty:
-                st.markdown("##### SHAP Factor Contributions by Category")
-                st.caption("Each row = one model category's SHAP-equivalent contribution. "
-                           "Positive Impact (pts) = adds to score. Negative = reduces score. "
-                           "Source: `rds_manual_score_public.business_score_factors`")
-
-                CAT_NAMES={
-                    "public_records":"📜 Public Records",
-                    "company_profile":"🏢 Company Profile",
-                    "financial_trends":"📈 Financial Trends",
-                    "business_operations":"💼 Business Operations",
-                    "performance_measures":"📊 Performance Measures",
-                }
-                CAT_FEATURES={
-                    "public_records":"count_bankruptcy, age_bankruptcy, count_judgment, age_judgment, count_lien, age_lien, score_reviews, count_reviews",
-                    "company_profile":"age_business, naics6, primsic, state, bus_struct, count_employees, indicator_government, indicator_education",
-                    "financial_trends":"GDP (gdp_pch), CPI (cpi), interest rates (t10y, t2y), VIX, unemployment, debt ratios, FX rates",
-                    "business_operations":"revenue, is_net_income, cf_cash_at_end_of_period, bs_total_liabilities, bs_total_assets, bs_accounts_payable",
-                    "performance_measures":"ratio_return_on_assets, ratio_gross_margin, ratio_debt_to_equity, flag_equity_negative, flag_total_liabilities_over_assets",
-                }
-                CAT_WHAT={
-                    "public_records":"Public court records including bankruptcies (−40pts each), civil judgments (−20pts), tax/mechanic liens (−10pts). Source: Equifax (pid=17). High negative impact.",
-                    "company_profile":"Business identity: age (older=lower risk), NAICS industry code (561499=penalty), state, entity type, employee count. Source: ZI/EFX/Middesk. NAICS=561499 reduces this category significantly.",
-                    "financial_trends":"Macro-economic indicators (GDP growth, CPI, interest rates, VIX, unemployment) + financial ratios from Plaid banking. Source: Liberty/Fed data + Plaid.",
-                    "business_operations":"Revenue, P&L, cash flow, balance sheet from Plaid banking statements. If Plaid not connected → all null → model uses defaults → lower accuracy.",
-                    "performance_measures":"Profitability ratios, solvency flags. flag_equity_negative / flag_total_liabilities_over_assets = highest negative impact binary features.",
-                }
-
-                factors_df["Category"]=factors_df["category_id"].map(lambda c: CAT_NAMES.get(c, f"Category {c}"))
-                factors_df["Impact (pts)"]=factors_df["weighted_score_850"].apply(lambda v: f"{v:+.1f}" if pd.notna(v) else "n/a")
-                factors_df["Score (0-100)"]=factors_df["score_100"].apply(lambda v: f"{v:.1f}" if pd.notna(v) else "n/a")
-                factors_df["Features (model inputs)"] = factors_df["category_id"].map(lambda c: CAT_FEATURES.get(c,"see lookups.py"))
-
-                st.dataframe(
-                    factors_df[["Category","Score (0-100)","Impact (pts)","Features (model inputs)"]],
-                    use_container_width=True, hide_index=True,
-                    column_config={
-                        "Category": st.column_config.TextColumn("Category", width="medium"),
-                        "Score (0-100)": st.column_config.TextColumn("Score (0-100)", width="small"),
-                        "Impact (pts)": st.column_config.TextColumn("Impact (pts on 850 scale)", width="small"),
-                        "Features (model inputs)": st.column_config.TextColumn("Model features", width="large"),
-                    }
-                )
-
-                _factors_sql = f"""SELECT category_id, score_100, weighted_score_850
-FROM rds_manual_score_public.business_score_factors
-WHERE score_id = (
-    SELECT score_id FROM rds_manual_score_public.data_current_scores
-    WHERE business_id = '{bid}' LIMIT 1
-)
-ORDER BY ABS(weighted_score_850) DESC;"""
-
-                detail_panel("SHAP Factor Contributions Table", f"{len(factors_df)} categories",
-                    what_it_means=(
-                        "Each row = one model category's SHAP-equivalent contribution to the final Worth Score.\n\n"
-                        "category_id values and their meaning:\n"
-                        "• public_records: BK/judgment/lien counts+ages. Source: Equifax pid=17. −40pts/BK, −20pts/judgment, −10pts/lien.\n"
-                        "• company_profile: age, NAICS, state, entity type, employees. Source: ZI/EFX/Middesk. NAICS=561499 = penalty.\n"
-                        "• financial_trends: macro-economic indicators + financial ratios. Source: Liberty/Fed data + Plaid.\n"
-                        "• business_operations: P&L, cash flow, balance sheet from Plaid banking. NULL if Plaid not connected.\n"
-                        "• performance_measures: profitability ratios, solvency flags. flag_equity_negative = high negative impact.\n\n"
-                        "Score (0-100): category raw score (0=worst, 100=best).\n"
-                        "Impact (pts): SHAP contribution in 850-scale points. Sum of all impacts + 300 ≈ final score.\n"
-                        "Source: rds_manual_score_public.business_score_factors (Redshift federated view)."
-                    ),
-                    source_table="rds_manual_score_public.business_score_factors",
-                    source_file="aiscore.py", source_file_line="SHAP scores × 550 → impact_pts. shap_base_points = base_prediction × 550 + 300",
-                    json_obj={
-                        "table":"rds_manual_score_public.business_score_factors",
-                        "columns":{"category_id":"model category","score_100":"0-100 score","weighted_score_850":"pts impact on 850 scale"},
-                        "categories":{k:v for k,v in CAT_WHAT.items()},
-                        "data":factors_df[["category_id","score_100","weighted_score_850"]].to_dict("records")
-                    },
-                    sql=_factors_sql,
-                    links=[("aiscore.py","SHAP computation"),("worth_score_model.py","model pipeline"),("lookups.py","feature definitions")],
-                    color="#8B5CF6", icon="📊")
-            else:
-                flag("business_score_factors not accessible from Redshift federation. "
-                     "See waterfall tab for estimated factor breakdown.", "blue")
+            # Note: SHAP Factor Contributions table removed from this view.
+            # Factor breakdown is available in the 📊 Waterfall & Features sub-tab.
         else:
             flag(f"No score found for this business. {score_err or ''} "
                  "Possible causes: (1) score not yet computed, (2) business too new, (3) insufficient features.", "amber")
