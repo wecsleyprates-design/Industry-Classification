@@ -7029,103 +7029,386 @@ ORDER BY avg_impact_pts ASC;"""
         "data consistency failures, not risk signal scores."
     )
 
+    # Shared columns for all 6.8 drilldown tables
+    _S6_COLS = [
+        "sos_match_boolean","sos_match_status","sos_active",
+        "sos_match_verif","sos_domestic_verif",
+        "formation_state","tin_submitted","tin_match_status","tin_match",
+        "idv_passed","naics_code","watchlist_hits","num_bankruptcies","num_judgements","num_liens",
+    ]
+    _ALL_AN_KEYS = list(_an_meta.keys())
+
     if not _biz_score_df.empty and _biz_score_df["anomaly_score"].max() > 0:
-        # Histogram
+
+        # ── Histogram + per-band drilldowns ──────────────────────────────────
+        st.markdown("##### 📊 Per-Business Anomaly Count Distribution")
+        st.caption("Each bar = number of businesses with that many simultaneous anomalies. "
+                   "Expand each bar's drilldown to see which businesses and which anomalies they trigger.")
+
         _hist_df = _biz_score_df.groupby("anomaly_count")["business_id"].count().reset_index()
         _hist_df.columns = ["Anomaly Count","Businesses"]
-        fig_hist = px.bar(_hist_df, x="Anomaly Count", y="Businesses",
-                          title="Per-Business Anomaly Count Distribution",
-                          color="Anomaly Count",
-                          color_continuous_scale=["#22c55e","#f59e0b","#f97316","#ef4444","#7f1d1d"],
-                          text="Businesses")
+        _band_colors = {0:"#22c55e",1:"#f59e0b",2:"#f97316",3:"#ef4444",4:"#7f1d1d"}
+        _hist_df["Color"] = _hist_df["Anomaly Count"].map(lambda x: _band_colors.get(min(x,4),"#7f1d1d"))
+        _cmap = dict(zip(_hist_df["Anomaly Count"].astype(str), _hist_df["Color"]))
+        fig_hist = px.bar(
+            _hist_df, x="Anomaly Count", y="Businesses",
+            title="Per-Business Anomaly Count Distribution",
+            color=_hist_df["Anomaly Count"].astype(str),
+            color_discrete_map=_cmap,
+            text="Businesses"
+        )
         fig_hist.update_traces(textposition="outside")
-        fig_hist.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10),
-                               showlegend=False, coloraxis_showscale=False)
+        fig_hist.update_layout(height=320, margin=dict(t=40,b=10,l=10,r=10), showlegend=False)
         st.plotly_chart(dark_chart(fig_hist), use_container_width=True)
 
-        # Top 10 most anomalous businesses
-        st.markdown("**🔴 Top 10 Highest-Anomaly Businesses (by weighted score):**")
-        _top10 = _biz_score_df[_biz_score_df["anomaly_score"]>0].head(10).copy()
+        # ── Per-band drilldown expanders ──────────────────────────────────────
+        for _band_n, _band_row in _hist_df.iterrows():
+            _cnt = int(_band_row["Anomaly Count"])
+            _n_biz = int(_band_row["Businesses"])
+            _bids_in_band = _biz_score_df[_biz_score_df["anomaly_count"]==_cnt]["business_id"].tolist()
+            _col = _band_colors.get(min(_cnt,4),"#7f1d1d")
+            _label_map = {0:"✅ Structurally Clean",1:"⚠️ 1 Anomaly — Isolated Issue",
+                          2:"🟠 2 Anomalies — Compounded Risk",3:"🔴 3 Anomalies — High Concern"}
+            _band_label = _label_map.get(_cnt,f"🔴 {_cnt} Anomalies — Systematic Failure")
 
-        # Build anomaly flag columns for the table
-        _ALL_AN_KEYS = list(_an_meta.keys())
+            with st.expander(
+                f"👁️ Show {_n_biz:,} businesses with exactly {_cnt} anomal{'y' if _cnt==1 else 'ies'} — {_band_label}",
+                expanded=False
+            ):
+                # ⚙️ How this band is calculated
+                st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_col};
+                    border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
+                  <span style="color:#a78bfa;font-weight:700">⚙️ What 'exactly {_cnt} anomal{'y' if _cnt==1 else 'ies'}' means</span>
+                </div>""", unsafe_allow_html=True)
+                st.markdown(
+                    f"These {_n_biz:,} businesses each trigger exactly **{_cnt}** of the 20 deterministic "
+                    f"cross-field rules evaluated across Groups 1–7. "
+                    f"**Weighted score per business:** each anomaly is weighted by severity "
+                    f"(CRITICAL=4 · HIGH=3 · MEDIUM=2 · NOTICE/LOW=1). "
+                    f"A business with {_cnt} anomaly/ies can have a weighted score ranging from "
+                    f"{_cnt}–{_cnt*4} points depending on severity mix.\n\n"
+                    f"**Anomaly count ≠ Red Flag score (Section 4).** "
+                    f"Red Flags measure risk signals (watchlist, BK, etc.). "
+                    f"This count measures structural KYB data consistency failures."
+                )
+                st.markdown("---")
+
+                # Table of businesses in this band + their anomaly flags + key signals
+                if _bids_in_band:
+                    _band_tbl = _biz_score_df[_biz_score_df["business_id"].isin(_bids_in_band)][
+                        ["business_id","anomaly_score","anomaly_count"]
+                    ].copy()
+                    # Add which anomalies each business triggers
+                    for _ak in _ALL_AN_KEYS:
+                        _band_tbl[_an_meta[_ak]["title"][:18]] = _band_tbl["business_id"].isin(
+                            _an.get(_ak,[])
+                        ).map({True:"✅",False:""})
+                    _band_tbl = _band_tbl.rename(columns={"anomaly_score":"Weighted Score","anomaly_count":"# Anomalies"})
+                    # Only show anomaly columns that have at least one ✅ in this band
+                    _vis_cols = ["business_id","Weighted Score","# Anomalies"] + [
+                        c for c in _band_tbl.columns
+                        if c not in ("business_id","Weighted Score","# Anomalies")
+                        and (_band_tbl[c]=="✅").any()
+                    ]
+                    st.dataframe(_band_tbl[_vis_cols], use_container_width=True, hide_index=True)
+
+                    # Key signals from stats_df for this band
+                    if stats_df is not None and not stats_df.empty:
+                        _sig_sub = stats_df[stats_df["business_id"].isin(_bids_in_band)][
+                            ["business_id"] + [c for c in _S6_COLS if c in stats_df.columns]
+                        ].copy()
+                        _sig_sub = _sig_sub.rename(columns={
+                            "sos_match_boolean":"SOS Match Bool","sos_match_status":"SOS Match Status",
+                            "sos_active":"SOS Active","sos_match_verif":"sos_match_verif(0/1)",
+                            "sos_domestic_verif":"sos_domestic_verif(0/1)",
+                            "formation_state":"Formation State","tin_submitted":"TIN Submitted",
+                            "tin_match_status":"TIN Match Status","tin_match":"TIN Match Bool",
+                            "idv_passed":"IDV Passed","naics_code":"NAICS Code",
+                            "watchlist_hits":"Watchlist Hits","num_bankruptcies":"Bankruptcies",
+                            "num_judgements":"Judgements","num_liens":"Liens",
+                        })
+                        if not _sig_sub.empty:
+                            st.markdown("**Key KYB signals for this band:**")
+                            st.dataframe(_sig_sub, use_container_width=True, hide_index=True)
+
+                    # Download
+                    _dl = pd.DataFrame({"business_id":_bids_in_band}).to_csv(index=False).encode()
+                    st.download_button(
+                        f"⬇️ Download {_n_biz} business IDs (CSV)",
+                        _dl, f"anomaly_band_{_cnt}.csv", "text/csv",
+                        key=f"dl_band_{_cnt}"
+                    )
+
+                    # Investigate buttons for this band
+                    _band_inv_cols = st.columns(min(4, len(_bids_in_band)))
+                    for _ii, _bid_b in enumerate(_bids_in_band[:4]):
+                        with _band_inv_cols[_ii]:
+                            if st.button(f"🔍 {_bid_b[:12]}…", key=f"inv_band{_cnt}_{_ii}",
+                                         help=f"Investigate {_bid_b}"):
+                                st.session_state["_pending_bid"] = _bid_b
+                                st.session_state["_bid_just_set"] = _bid_b
+                                st.rerun()
+
+                detail_panel(
+                    f"📊 Anomaly Band: {_cnt} anomal{'y' if _cnt==1 else 'ies'} — {_n_biz:,} businesses",
+                    f"{_n_biz:,} businesses · {_n_biz/max(total_biz,1)*100:.1f}% of portfolio · {_band_label}",
+                    what_it_means=(
+                        f"**Band definition:** Businesses with exactly {_cnt} simultaneous "
+                        f"cross-field KYB anomalies detected by the 20 deterministic rules.\n\n"
+                        f"**Severity interpretation:**\n"
+                        f"- 0 anomalies → structurally clean, no cross-field contradictions\n"
+                        f"- 1 anomaly → isolated issue, typically resolvable with one action\n"
+                        f"- 2–3 anomalies → compounded risk, needs investigation before decision\n"
+                        f"- 4+ anomalies → systematic KYB failure, full manual review required\n\n"
+                        f"**Weighted score range for {_cnt} anomal{'y' if _cnt==1 else 'ies'}:** "
+                        f"{_cnt}–{_cnt*4} points\n\n"
+                        f"**Rules evaluated:** 20 deterministic rules across 7 groups "
+                        f"(check_agent_v2.DETERMINISTIC_CHECKS). Zero LLM. Zero new Redshift queries."
+                    ),
+                    source_table="stats_df · funnel_df (already in memory — zero new queries)",
+                    source_file="check_agent_v2.py (DETERMINISTIC_CHECKS)",
+                    json_obj={
+                        "band_anomaly_count": _cnt,
+                        "businesses_in_band": _n_biz,
+                        "pct_of_portfolio": f"{_n_biz/max(total_biz,1)*100:.1f}%",
+                        "business_ids": _bids_in_band[:10],
+                        "severity_label": _band_label,
+                    },
+                    icon="📊", color=_col
+                )
+
+        # ── Top 10 most anomalous businesses ──────────────────────────────────
+        st.markdown("---")
+        st.markdown("##### 🔴 Top 10 Highest-Anomaly Businesses (by weighted score)")
+        st.caption("Ranked by weighted anomaly score (CRITICAL=4, HIGH=3, MEDIUM=2, LOW/NOTICE=1). "
+                   "Distinct from Section 4 Red Flag ranking — this reflects structural KYB data inconsistencies.")
+
+        _top10 = _biz_score_df[_biz_score_df["anomaly_score"]>0].head(10).copy()
         for _ak in _ALL_AN_KEYS:
             _top10[_ak] = _top10["business_id"].isin(_an.get(_ak,[])).map({True:"✅",False:""})
 
-        _display_cols = ["business_id","anomaly_score","anomaly_count"] + [k for k in _ALL_AN_KEYS if _top10[k].any()]
-        _col_rename = {k: _an_meta[k]["title"][:22]+"…" if len(_an_meta[k]["title"])>22 else _an_meta[k]["title"]
-                       for k in _ALL_AN_KEYS if k in _display_cols}
+        _display_cols = ["business_id","anomaly_score","anomaly_count"] + [
+            k for k in _ALL_AN_KEYS if _top10[k].any()
+        ]
+        _col_rename = {
+            k: _an_meta[k]["title"][:20]+"…" if len(_an_meta[k]["title"])>20 else _an_meta[k]["title"]
+            for k in _ALL_AN_KEYS if k in _display_cols
+        }
         _col_rename.update({"anomaly_score":"Weighted Score","anomaly_count":"# Anomalies"})
         _top10_disp = _top10[[c for c in _display_cols if c in _top10.columns]].rename(columns=_col_rename)
         st.dataframe(_top10_disp, use_container_width=True, hide_index=True)
 
-        # Investigate buttons — one per business in top 10, label shows truncated UUID
-        st.caption("Click 'Investigate' to set that business ID in the filter bar, then switch to any entity tab to deep-dive.")
+        # Per-business investigate rows
+        st.caption("Each row below: full UUID · weighted score · triggered anomalies · Investigate button")
         _top10_bids = _top10["business_id"].tolist()
         for _i, _bid_t in enumerate(_top10_bids):
-            _score_t = int(_biz_score.get(_bid_t, 0))
-            _flags_t = _biz_flags_s6.get(_bid_t, [])
-            _flag_names = " · ".join(_an_meta.get(k,{}).get("title","")[:25] for k in _flags_t[:3])
-            _bc1, _bc2 = st.columns([4,1])
+            _score_t   = int(_biz_score.get(_bid_t, 0))
+            _flags_t   = _biz_flags_s6.get(_bid_t, [])
+            _sev_list  = [f"{_SEV_ICON.get(_an_meta.get(k,{}).get('severity','LOW'),'⚪')} {_an_meta.get(k,{}).get('title','')[:30]}"
+                          for k in _flags_t]
+            _bc1, _bc2 = st.columns([5, 1])
             with _bc1:
                 st.markdown(
                     f"<div style='background:#0f172a;border-left:3px solid #3B82F6;border-radius:5px;"
-                    f"padding:4px 10px;font-size:.75rem;color:#CBD5E1;margin:2px 0'>"
-                    f"<code style='color:#60A5FA'>{_bid_t}</code> — "
-                    f"<span style='color:#f59e0b'>Score {_score_t}pts</span> · "
-                    f"<span style='color:#94A3B8'>{_flag_names}</span></div>",
+                    f"padding:6px 12px;font-size:.75rem;color:#CBD5E1;margin:2px 0'>"
+                    f"<code style='color:#60A5FA;font-size:.82rem'>{_bid_t}</code><br/>"
+                    f"<span style='color:#f59e0b'>⚡ {_score_t} pts</span> &nbsp;·&nbsp; "
+                    f"<span style='color:#94A3B8'>{' &nbsp;·&nbsp; '.join(_sev_list)}</span>"
+                    f"</div>",
                     unsafe_allow_html=True
                 )
             with _bc2:
                 if st.button(f"🔍 Investigate", key=f"s6_inv_{_bid_t[:12]}_{_i}",
-                             help=f"Set Business ID to {_bid_t} and switch to an entity tab"):
+                             help=f"Set Business ID to {_bid_t}"):
                     st.session_state["_pending_bid"] = _bid_t
                     st.session_state["_bid_just_set"] = _bid_t
                     st.rerun()
 
-        # Co-occurrence heatmap
-        st.markdown("**🔥 Anomaly Co-Occurrence Heatmap:**")
+        # ── Co-occurrence heatmap + per-cell drilldowns ───────────────────────
+        st.markdown("---")
+        st.markdown("##### 🔥 Anomaly Co-Occurrence Heatmap")
+        st.caption(
+            "Diagonal = individual anomaly count (businesses triggering that anomaly). "
+            "Off-diagonal = businesses triggering BOTH anomalies simultaneously. "
+            "Expand any combination below the heatmap to see which businesses and why."
+        )
+
         _active_keys = [k for k in _ALL_AN_KEYS if _an.get(k)]
         if len(_active_keys) >= 2:
-            _cooc = pd.DataFrame(index=_active_keys, columns=_active_keys, data=0)
             _biz_set = {k: set(_an.get(k,[])) for k in _active_keys}
+            _cooc_data = {}
             for _k1 in _active_keys:
                 for _k2 in _active_keys:
-                    _cooc.loc[_k1,_k2] = len(_biz_set[_k1] & _biz_set[_k2])
-            _cooc.index   = [_an_meta[k]["title"][:20] for k in _active_keys]
-            _cooc.columns = [_an_meta[k]["title"][:20] for k in _active_keys]
-            _cooc_num = _cooc.astype(float)
-            fig_cooc = px.imshow(_cooc_num,
-                                 title="Anomaly Co-Occurrence (businesses triggering both)",
-                                 color_continuous_scale=["#0f172a","#1e3a5f","#2563eb","#ef4444"],
-                                 text_auto=True, aspect="auto")
-            fig_cooc.update_layout(height=max(300, len(_active_keys)*40),
-                                   margin=dict(t=50,b=30,l=10,r=10))
-            st.plotly_chart(dark_chart(fig_cooc), use_container_width=True)
-            st.caption("Diagonal = individual anomaly count. Off-diagonal = co-occurrence count. "
-                       "High off-diagonal values indicate clustered systematic pipeline failures.")
+                    _cooc_data[(_k1,_k2)] = _biz_set[_k1] & _biz_set[_k2]
 
-        detail_panel("🔬 Portfolio Anomaly Triage",
-            f"{len(_biz_score_df[_biz_score_df['anomaly_score']>0]):,} businesses with at least 1 anomaly · "
-            f"Top scorer: {_biz_score_df.iloc[0]['anomaly_score']:.0f} pts",
+            _cooc = pd.DataFrame(
+                {_k2: [len(_cooc_data[(_k1,_k2)]) for _k1 in _active_keys] for _k2 in _active_keys},
+                index=_active_keys
+            )
+            _short_labels = {k: _an_meta[k]["title"][:22] for k in _active_keys}
+            _cooc.index   = [_short_labels[k] for k in _active_keys]
+            _cooc.columns = [_short_labels[k] for k in _active_keys]
+
+            fig_cooc = px.imshow(
+                _cooc.astype(float),
+                title="Anomaly Co-Occurrence (businesses triggering both)",
+                color_continuous_scale=["#0f172a","#1e3a5f","#2563eb","#ef4444"],
+                text_auto=True, aspect="auto"
+            )
+            fig_cooc.update_layout(
+                height=max(350, len(_active_keys)*42),
+                margin=dict(t=50,b=30,l=10,r=10)
+            )
+            st.plotly_chart(dark_chart(fig_cooc), use_container_width=True)
+
+            # ── Per-cell drilldown expanders (only non-zero off-diagonal) ─────
+            st.markdown("**🔍 Drilldown by Co-Occurrence Pair — click to see which businesses trigger both:**")
+
+            _shown_pairs = set()
+            for _k1 in _active_keys:
+                for _k2 in _active_keys:
+                    if _k1 == _k2:
+                        continue  # diagonal — already shown in the anomaly cards above
+                    _pair_key = tuple(sorted([_k1, _k2]))
+                    if _pair_key in _shown_pairs:
+                        continue
+                    _shown_pairs.add(_pair_key)
+                    _both_bids = list(_cooc_data[(_k1, _k2)])
+                    if not _both_bids:
+                        continue
+
+                    _t1 = _an_meta[_k1]["title"]
+                    _t2 = _an_meta[_k2]["title"]
+                    _s1 = _an_meta[_k1]["severity"]
+                    _s2 = _an_meta[_k2]["severity"]
+                    _sev_pair = "CRITICAL" if "CRITICAL" in (_s1,_s2) else "HIGH" if "HIGH" in (_s1,_s2) else "MEDIUM"
+                    _col_pair = _SEV_COLOR.get(_sev_pair,"#64748b")
+
+                    # Register this pair as a segment so _drilldown_table can show it
+                    _pair_seg_key = f"cooc_{_pair_key[0][:12]}_{_pair_key[1][:12]}"
+                    _seg[_pair_seg_key] = _both_bids
+                    _SEG_CALC[_pair_seg_key] = (
+                        f"**Co-occurrence: '{_t1}' AND '{_t2}'**\n\n"
+                        f"These {len(_both_bids):,} businesses simultaneously trigger BOTH anomalies:\n\n"
+                        f"**Anomaly 1 — {_SEV_ICON.get(_s1,'⚪')} {_s1}: {_t1}**\n"
+                        f"{_an_meta[_k1].get('desc','')}\n\n"
+                        f"**Anomaly 2 — {_SEV_ICON.get(_s2,'⚪')} {_s2}: {_t2}**\n"
+                        f"{_an_meta[_k2].get('desc','')}\n\n"
+                        f"**Why co-occurrence matters:** When two anomalies appear simultaneously, "
+                        f"they often share a root cause (e.g. a vendor integration failure that leaves "
+                        f"multiple fact fields empty) or represent compounded risk (e.g. dissolved entity "
+                        f"with valid EIN — the combination is more concerning than either signal alone).\n\n"
+                        f"**Source:** `{_an_meta[_k1].get('source','')}` · `{_an_meta[_k2].get('source','')}`"
+                    )
+
+                    with st.expander(
+                        f"👁️ {len(_both_bids):,} businesses with BOTH: '{_t1[:30]}' AND '{_t2[:30]}'",
+                        expanded=False
+                    ):
+                        st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_col_pair};
+                            border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
+                          <span style="color:#a78bfa;font-weight:700">⚙️ Why these two anomalies co-occur</span>
+                        </div>""", unsafe_allow_html=True)
+                        st.markdown(_SEG_CALC[_pair_seg_key])
+                        st.markdown("---")
+
+                        # Business IDs table with their anomaly flags and key signals
+                        _pair_tbl = pd.DataFrame({"business_id": _both_bids})
+                        _pair_tbl["Weighted Score"] = _pair_tbl["business_id"].map(
+                            lambda b: _biz_score.get(b, 0)
+                        )
+                        _pair_tbl["# Anomalies"] = _pair_tbl["business_id"].map(
+                            lambda b: len(_biz_flags_s6.get(b, []))
+                        )
+                        _pair_tbl["All Anomalies"] = _pair_tbl["business_id"].map(
+                            lambda b: " · ".join(
+                                _an_meta.get(k,{}).get("title","")[:20]
+                                for k in _biz_flags_s6.get(b,[])
+                            )
+                        )
+                        st.dataframe(_pair_tbl, use_container_width=True, hide_index=True)
+
+                        # Key KYB signals from stats_df
+                        if stats_df is not None and not stats_df.empty:
+                            _psig = stats_df[stats_df["business_id"].isin(_both_bids)][
+                                ["business_id"] + [c for c in _S6_COLS if c in stats_df.columns]
+                            ].rename(columns={
+                                "sos_match_boolean":"SOS Match Bool","sos_match_status":"SOS Match Status",
+                                "sos_active":"SOS Active","sos_match_verif":"sos_match_verif(0/1)",
+                                "sos_domestic_verif":"sos_domestic_verif(0/1)",
+                                "formation_state":"Formation State","tin_submitted":"TIN Submitted",
+                                "tin_match_status":"TIN Match Status","tin_match":"TIN Match Bool",
+                                "idv_passed":"IDV Passed","naics_code":"NAICS","watchlist_hits":"WL Hits",
+                                "num_bankruptcies":"BK","num_judgements":"Judgements","num_liens":"Liens",
+                            })
+                            if not _psig.empty:
+                                st.dataframe(_psig, use_container_width=True, hide_index=True)
+
+                        # Download + investigate buttons
+                        _dl_pair = pd.DataFrame({"business_id":_both_bids}).to_csv(index=False).encode()
+                        st.download_button(
+                            f"⬇️ Download {len(_both_bids)} IDs (CSV)",
+                            _dl_pair,
+                            f"cooc_{_k1[:8]}_{_k2[:8]}.csv", "text/csv",
+                            key=f"dl_cooc_{_pair_seg_key}"
+                        )
+                        _inv_cols2 = st.columns(min(4, len(_both_bids)))
+                        for _jj, _bid_p in enumerate(_both_bids[:4]):
+                            with _inv_cols2[_jj]:
+                                if st.button(f"🔍 {_bid_p[:12]}…",
+                                             key=f"inv_cooc_{_pair_seg_key}_{_jj}",
+                                             help=f"Investigate {_bid_p}"):
+                                    st.session_state["_pending_bid"] = _bid_p
+                                    st.session_state["_bid_just_set"] = _bid_p
+                                    st.rerun()
+
+                        detail_panel(
+                            f"🔥 Co-Occurrence: {_t1[:25]} × {_t2[:25]}",
+                            f"{len(_both_bids):,} businesses trigger both · Pair severity: {_sev_pair}",
+                            what_it_means=_SEG_CALC[_pair_seg_key],
+                            source_table="stats_df · funnel_df (in memory)",
+                            source_file=f"{_an_meta[_k1].get('source','')} · {_an_meta[_k2].get('source','')}",
+                            json_obj={
+                                "anomaly_1": _t1, "source_1": _an_meta[_k1].get("source",""),
+                                "anomaly_2": _t2, "source_2": _an_meta[_k2].get("source",""),
+                                "co_occurring_businesses": len(_both_bids),
+                                "business_ids_sample": _both_bids[:5],
+                                "pair_severity": _sev_pair,
+                                "action": f"{_an_meta[_k1].get('action','')} | {_an_meta[_k2].get('action','')}",
+                            },
+                            icon="🔥", color=_col_pair
+                        )
+
+        detail_panel("🔬 Portfolio Anomaly Triage — Section 6.8",
+            f"{len(_biz_score_df[_biz_score_df['anomaly_score']>0]):,} businesses with ≥1 anomaly · "
+            f"Top weighted score: {_biz_score_df.iloc[0]['anomaly_score']:.0f} pts",
             what_it_means=(
-                f"**Weighted anomaly scoring:** CRITICAL=4pts · HIGH=3pts · MEDIUM=2pts · NOTICE/LOW=1pt\n\n"
-                f"**Anomaly groups evaluated (all from check_agent_v2.DETERMINISTIC_CHECKS):**\n"
-                f"- Group 1 (Data Integrity): 3 impossible-state rules\n"
-                f"- Group 2 (SOS/Registry): 3 registry inconsistency rules\n"
-                f"- Group 3 (TIN/EIN): 1 EIN gap rule\n"
-                f"- Group 4 (Cross-Section S1×S2): 3 Registry×TIN contradiction rules\n"
-                f"- Group 5 (NAICS): 2 classification anomaly rules\n"
-                f"- Group 6 (Risk Signals): 5 risk combination rules\n"
-                f"- Group 7 (Worth Score): 3 score vs KYB consistency rules\n\n"
-                f"**Total rules evaluated:** {len(_an_meta)} deterministic rules · zero LLM calls · zero new Redshift queries\n"
-                f"**Data sources:** stats_df (_load_stats_for_bids) + funnel_df (_load_kyb_funnel_for_bids) — already in memory"
+                f"**Weighted anomaly scoring (CRITICAL=4 · HIGH=3 · MEDIUM=2 · NOTICE/LOW=1):**\n\n"
+                f"**20 rules across 7 groups (all from check_agent_v2.DETERMINISTIC_CHECKS):**\n"
+                f"- Group 1 — Data Integrity: 3 impossible-state rules\n"
+                f"- Group 2 — SOS/Registry: 3 registry inconsistency rules\n"
+                f"- Group 3 — TIN/EIN: 1 EIN gap rule\n"
+                f"- Group 4 — Cross-Section S1×S2: 3 Registry×TIN contradiction rules\n"
+                f"- Group 5 — NAICS: 2 classification anomaly rules\n"
+                f"- Group 6 — Risk Signals: 5 risk combination rules\n"
+                f"- Group 7 — Worth Score: 3 score vs KYB consistency rules\n\n"
+                f"**How to read the histogram:** Each bar = businesses with that exact anomaly count. "
+                f"Expand each bar to see which businesses and which anomalies they trigger.\n\n"
+                f"**How to read the heatmap:** "
+                f"Diagonal = individual anomaly counts. Off-diagonal = businesses triggering BOTH anomalies. "
+                f"High off-diagonal values = systematic pipeline failures that cluster together. "
+                f"Expand any combination below the heatmap for the business ID drilldown.\n\n"
+                f"**Zero LLM calls · Zero new Redshift queries — everything computed from stats_df + funnel_df already in memory.**"
             ),
-            source_table="stats_df · funnel_df · _home_ws_clean (all already loaded)",
+            source_table="stats_df (_load_stats_for_bids) · funnel_df (_load_kyb_funnel_for_bids) · _home_ws_clean",
             source_file="check_agent_v2.py (DETERMINISTIC_CHECKS) · index.ts · verification_results.sql · aiNaicsEnrichment.ts",
-            json_obj={"anomaly_groups": len(_an_meta),"rules_evaluated": len(_an_meta),
-                      "businesses_with_anomalies": int((_biz_score_df["anomaly_score"]>0).sum()),
-                      "clean_businesses": _n_clean,"critical_combos": _n_crit},
+            json_obj={
+                "total_rules": len(_an_meta),
+                "businesses_with_anomalies": int((_biz_score_df["anomaly_score"]>0).sum()),
+                "clean_businesses": _n_clean,
+                "critical_combos": _n_crit,
+                "scoring": {"CRITICAL":4,"HIGH":3,"MEDIUM":2,"NOTICE/LOW":1},
+            },
             icon="🔬", color="#8B5CF6")
     else:
         st.success("✅ No anomalies detected across the portfolio. All KYB signals are internally consistent.", icon="✅")
