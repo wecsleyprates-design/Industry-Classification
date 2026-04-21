@@ -1104,25 +1104,42 @@ def load_home_kyb_stats(date_from, date_to, customer_id=None):
         )
         SELECT
             f.business_id,
-            MAX(CASE WHEN f.name='sos_active'          THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_active,
-            MAX(CASE WHEN f.name='tin_match_boolean'   THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS tin_match,
-            MAX(CASE WHEN f.name='idv_passed_boolean'  THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS idv_passed,
-            MAX(CASE WHEN f.name='naics_code'          THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS naics_code,
-            MAX(CASE WHEN f.name='watchlist_hits'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS watchlist_hits,
-            MAX(CASE WHEN f.name='num_bankruptcies'    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_bankruptcies,
-            MAX(CASE WHEN f.name='num_judgements'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_judgements,
-            MAX(CASE WHEN f.name='num_liens'           THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_liens,
-            MAX(CASE WHEN f.name='adverse_media_hits'  THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS adverse_media,
-            MAX(CASE WHEN f.name='revenue'             THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS revenue,
-            MAX(CASE WHEN f.name='formation_date'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_date,
-            MAX(CASE WHEN f.name='formation_state'     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_state,
+            -- Registry / SOS signals (from Facts API — index.ts)
+            MAX(CASE WHEN f.name='sos_match_boolean' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_match_boolean,
+            MAX(CASE WHEN f.name='sos_match'         THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END) AS sos_match_status,
+            MAX(CASE WHEN f.name='sos_active'        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_active,
+            MAX(CASE WHEN f.name='formation_state'   THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_state,
+            MAX(CASE WHEN f.name='formation_date'    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_date,
+            -- Redshift pre-aggregated SOS flags (verification_results.sql)
+            MAX(vr.sos_match_verification)    AS sos_match_verif,
+            MAX(vr.sos_domestic_verification) AS sos_domestic_verif,
+            MAX(vr.sos_active_verification)   AS sos_active_verif,
+            -- TIN / EIN signals
+            MAX(CASE WHEN f.name='tin_submitted'     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS tin_submitted,
+            MAX(CASE WHEN f.name='tin_match'         THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END) AS tin_match_status,
+            MAX(CASE WHEN f.name='tin_match_boolean' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS tin_match,
+            -- IDV
+            MAX(CASE WHEN f.name='idv_passed_boolean' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS idv_passed,
+            -- Classification
+            MAX(CASE WHEN f.name='naics_code' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS naics_code,
+            -- Risk
+            MAX(CASE WHEN f.name='watchlist_hits'    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS watchlist_hits,
+            MAX(CASE WHEN f.name='num_bankruptcies'  THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_bankruptcies,
+            MAX(CASE WHEN f.name='num_judgements'    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_judgements,
+            MAX(CASE WHEN f.name='num_liens'         THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_liens,
+            MAX(CASE WHEN f.name='adverse_media_hits' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS adverse_media,
+            -- Firmographic
+            MAX(CASE WHEN f.name='revenue'           THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS revenue,
             MAX(f.received_at) AS last_seen,
             MIN(f.received_at) AS first_seen,
             COUNT(DISTINCT f.name) AS fact_count
         FROM rds_warehouse_public.facts f
         JOIN onboarded o ON o.business_id = f.business_id
+        LEFT JOIN clients.verification_results vr ON vr.business_id = f.business_id
         WHERE f.name IN (
-            'sos_active','tin_match_boolean','idv_passed_boolean','naics_code',
+            'sos_match_boolean','sos_match','sos_active',
+            'tin_submitted','tin_match','tin_match_boolean',
+            'idv_passed_boolean','naics_code',
             'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
             'adverse_media_hits','revenue','formation_date','formation_state'
         )
@@ -4031,11 +4048,59 @@ if tab=="🏠 Home":
                 _sub = stats_df[stats_df["business_id"].isin(bids)][
                     ["business_id"] + [c for c in cols_from_stats if c in stats_df.columns]
                 ].copy()
-                _rename = {"sos_active":"SOS Active","tin_match":"TIN Match",
-                           "idv_passed":"IDV Passed","naics_code":"NAICS",
-                           "formation_state":"Formation State","revenue":"Revenue"}
+                # Human-readable column names → source signal noted in tooltip via column config
+                _rename = {
+                    # Registry / SOS
+                    "sos_match_boolean": "SOS Match Boolean",
+                    "sos_match_status":  "SOS Match Status",
+                    "sos_active":        "SOS Active",
+                    "sos_match_verif":   "sos_match_verif (0/1)",
+                    "sos_domestic_verif":"sos_domestic_verif (0/1)",
+                    "sos_active_verif":  "sos_active_verif (0/1)",
+                    "formation_state":   "Formation State",
+                    "formation_date":    "Formation Date",
+                    # TIN / EIN
+                    "tin_submitted":     "TIN Submitted",
+                    "tin_match_status":  "TIN Match Status",
+                    "tin_match":         "TIN Match Boolean",
+                    # IDV
+                    "idv_passed":        "IDV Passed",
+                    # Classification
+                    "naics_code":        "NAICS Code",
+                    # Risk
+                    "watchlist_hits":    "Watchlist Hits",
+                    "num_bankruptcies":  "Bankruptcies",
+                    "num_judgements":    "Judgements",
+                    "num_liens":         "Liens",
+                    "adverse_media":     "Adverse Media",
+                    # Firmographic
+                    "revenue":           "Revenue",
+                }
                 _sub = _sub.rename(columns=_rename)
-                st.dataframe(_sub, use_container_width=True, hide_index=True)
+                # Column config: tooltips explain what each signal means
+                _col_cfg = {
+                    "SOS Match Boolean":       st.column_config.TextColumn("SOS Match Boolean",  help="sos_match_boolean=true → any vendor found a registry record (index.ts:1421)"),
+                    "SOS Match Status":        st.column_config.TextColumn("SOS Match Status",   help="sos_match.value: 'success'|'failure' — per vendor (Middesk/OC/Trulioo)"),
+                    "SOS Active":              st.column_config.TextColumn("SOS Active",         help="sos_active: true if any filing has active=true OR status='active' (index.ts:1426)"),
+                    "sos_match_verif (0/1)":   st.column_config.NumberColumn("sos_match_verif",  help="1 only when key='sos_match' AND sublabel='Submitted Active' (verification_results.sql:42-45)"),
+                    "sos_domestic_verif (0/1)":st.column_config.NumberColumn("sos_domestic_verif",help="1 only when key='sos_domestic' AND sublabel='Domestic Active' (verification_results.sql:36-39)"),
+                    "sos_active_verif (0/1)":  st.column_config.NumberColumn("sos_active_verif", help="1 when category='sos', key='sos_active', status='Success' (verification_results.sql:47-51)"),
+                    "Formation State":         st.column_config.TextColumn("Formation State",    help="State of incorporation from Middesk businessEntityVerification.formation_state"),
+                    "Formation Date":          st.column_config.TextColumn("Formation Date",     help="Date of incorporation from Middesk businessEntityVerification.formation_date"),
+                    "TIN Submitted":           st.column_config.TextColumn("TIN Submitted",      help="EIN/TIN provided by the business at onboarding (masked)"),
+                    "TIN Match Status":        st.column_config.TextColumn("TIN Match Status",   help="tin_match.value.status: 'success'=IRS confirmed | 'failure'=IRS mismatch (index.ts:429)"),
+                    "TIN Match Boolean":       st.column_config.TextColumn("TIN Match Boolean",  help="tin_match_boolean: true=IRS confirmed EIN matches legal name (index.ts:482)"),
+                    "IDV Passed":              st.column_config.TextColumn("IDV Passed",         help="idv_passed_boolean: Plaid biometric IDV result for business owners"),
+                    "NAICS Code":              st.column_config.TextColumn("NAICS Code",         help="NAICS 2022 6-digit code. '561499' = last resort fallback (aiNaicsEnrichment.ts:63)"),
+                    "Watchlist Hits":          st.column_config.NumberColumn("Watchlist Hits",   help="Number of consolidated watchlist hits (PEP/OFAC/sanctions) from Middesk+Trulioo"),
+                    "Bankruptcies":            st.column_config.NumberColumn("Bankruptcies",     help="num_bankruptcies fact"),
+                    "Judgements":              st.column_config.NumberColumn("Judgements",       help="num_judgements fact"),
+                    "Liens":                   st.column_config.NumberColumn("Liens",            help="num_liens fact"),
+                    "Adverse Media":           st.column_config.NumberColumn("Adverse Media",    help="adverse_media_hits (separate from watchlist — filtered out of watchlist.value)"),
+                    "Revenue":                 st.column_config.TextColumn("Revenue",            help="Annual revenue estimate from ZoomInfo/Equifax firmographic data"),
+                }
+                st.dataframe(_sub, use_container_width=True, hide_index=True,
+                             column_config={k: v for k, v in _col_cfg.items() if k in _sub.columns})
             else:
                 st.dataframe(pd.DataFrame({"business_id": bids}), use_container_width=True, hide_index=True)
 
@@ -4083,7 +4148,14 @@ if tab=="🏠 Home":
     _seg["domestic_no_state"] = _domestic_no_state
 
     # ── Drilldown expanders ────────────────────────────────────────────────
-    _SOS_COLS = ["sos_active","tin_match","idv_passed","naics_code","formation_state"]
+    # Registry drilldown columns — ordered: core Facts API signals → verification_results flags → supplementary
+    _SOS_COLS = [
+        "sos_match_boolean", "sos_match_status", "sos_active",
+        "sos_match_verif", "sos_domestic_verif", "sos_active_verif",
+        "formation_state", "formation_date",
+        "tin_submitted", "tin_match_status", "tin_match",
+        "idv_passed", "naics_code", "watchlist_hits",
+    ]
     _drilldown_table("sos_found",         f"Registry Found — {_sos_found:,} businesses", _SOS_COLS)
     _drilldown_table("domestic",          f"Domestic Reg Found — {_domestic_sos_found:,} businesses", _SOS_COLS)
     _drilldown_table("state_match",       f"State Match — {_state_match:,} businesses", _SOS_COLS)
@@ -4413,7 +4485,13 @@ WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';"""
         _seg["tin_fail"]        = _funnel[_funnel["tin_match_boolean"].apply(_sl_f2)=="false"]["business_id"].tolist()
         _seg["tin_not_checked"] = _funnel[_funnel["tin_match_boolean"].apply(_sl_f2).isin(["","none","nan"])]["business_id"].tolist()
 
-    _TIN_COLS = ["tin_match","sos_active","naics_code","formation_state"]
+    # TIN drilldown columns — ordered: TIN signals → SOS context → supplementary
+    _TIN_COLS = [
+        "tin_submitted", "tin_match_status", "tin_match",
+        "sos_match_boolean", "sos_match_status", "sos_active",
+        "sos_match_verif", "sos_domestic_verif",
+        "formation_state", "naics_code", "idv_passed",
+    ]
 
     # KPI Row 2 — TIN
     t1,t2,t3,t4,t5,t6 = st.columns(6)
@@ -4632,7 +4710,15 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
             icon="🩺", color="#22c55e")
 
         # ── Health Rate drilldowns ─────────────────────────────────────────
-        _ALL_COLS = ["sos_active","tin_match","idv_passed","naics_code","formation_state","revenue"]
+        # KYB Health drilldown — all major signals
+        _ALL_COLS = [
+            "sos_match_boolean", "sos_match_status", "sos_active",
+            "sos_match_verif", "sos_domestic_verif", "sos_active_verif",
+            "formation_state",
+            "tin_submitted", "tin_match_status", "tin_match",
+            "idv_passed", "naics_code", "watchlist_hits",
+            "num_bankruptcies", "num_liens", "revenue",
+        ]
         if stats_df is not None and not stats_df.empty:
             _sl3 = lambda v: str(v or "").lower().strip()
             _seg["sos_fail_h"]  = stats_df[stats_df["sos_active"].apply(_sl3)=="false"]["business_id"].tolist()
@@ -4788,7 +4874,15 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
                 _seg["rf_naics_fb"]     = stats_df[stats_df["naics_code"].apply(_sl4)=="561499"]["business_id"].tolist()
                 _seg["rf_idv_fail"]     = stats_df[stats_df["idv_passed"].apply(_sl4)=="false"]["business_id"].tolist()
                 st.markdown("**👁️ Click any red flag category to see the affected business IDs:**")
-                _RF_COLS = ["sos_active","tin_match","idv_passed","naics_code","watchlist_hits","num_bankruptcies"]
+                # Red Flag drilldown — risk-focused columns
+                _RF_COLS = [
+                    "sos_match_boolean", "sos_match_status", "sos_active",
+                    "sos_match_verif", "sos_domestic_verif",
+                    "formation_state",
+                    "tin_submitted", "tin_match_status", "tin_match",
+                    "idv_passed", "naics_code",
+                    "watchlist_hits", "num_bankruptcies", "num_judgements", "num_liens", "adverse_media",
+                ]
                 _drilldown_table("rf_sos_inactive", f"SOS Inactive — {len(_seg.get('rf_sos_inactive',[]))} businesses", _RF_COLS)
                 _drilldown_table("rf_no_sos",       f"No SOS Data — {len(_seg.get('rf_no_sos',[]))} businesses (unverified)", _RF_COLS)
                 _drilldown_table("rf_tin_fail",     f"TIN Failed — {len(_seg.get('rf_tin_fail',[]))} businesses", _RF_COLS)
