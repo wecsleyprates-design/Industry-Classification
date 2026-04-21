@@ -3739,12 +3739,68 @@ if tab=="🏠 Home":
     with k4: kpi("🏠 Domestic Reg Found", f"{_domestic_sos_found:,}", rate(_domestic_sos_found,total_biz)+" domestic match", "#22c55e" if _domestic_sos_found/max(total_biz,1)>0.7 else "#f59e0b")
     with k5: kpi("📍 State Match", f"{_state_match:,}", "Reg in stated operating state", "#22c55e" if _state_match/max(total_biz,1)>0.6 else "#f59e0b")
 
-    # Drilldown expanders — one per metric
+    # ── Compute the "gap" segments — businesses in one set but not the next ──
+    _sos_found_set    = set(_seg.get("sos_found", []))
+    _domestic_set     = set(_seg.get("domestic", []))
+    _state_match_set  = set(_seg.get("state_match", []))
+
+    # Registry found but domestic NOT found (foreign/tax-haven only)
+    _foreign_only_bids = list(_sos_found_set - _domestic_set)
+    _seg["foreign_only"] = _foreign_only_bids
+
+    # Domestic found but state NOT matched (formation ≠ operating state)
+    _domestic_no_state = list(_domestic_set - _state_match_set)
+    _seg["domestic_no_state"] = _domestic_no_state
+
+    # ── Drilldown expanders ────────────────────────────────────────────────
     _SOS_COLS = ["sos_active","tin_match","idv_passed","naics_code","formation_state"]
-    _drilldown_table("sos_found",  f"Registry Found — {_sos_found:,} businesses", _SOS_COLS)
-    _drilldown_table("domestic",   f"Domestic Reg Found — {_domestic_sos_found:,} businesses", _SOS_COLS)
-    _drilldown_table("state_match",f"State Match — {_state_match:,} businesses", _SOS_COLS)
-    _drilldown_table("no_sos",     f"No Registry Found — {_sos_not_found:,} businesses (needs investigation)", _SOS_COLS)
+    _drilldown_table("sos_found",         f"Registry Found — {_sos_found:,} businesses", _SOS_COLS)
+    _drilldown_table("domestic",          f"Domestic Reg Found — {_domestic_sos_found:,} businesses", _SOS_COLS)
+    _drilldown_table("state_match",       f"State Match — {_state_match:,} businesses", _SOS_COLS)
+    _drilldown_table("no_sos",            f"No Registry Found — {_sos_not_found:,} businesses (needs investigation)", _SOS_COLS)
+
+    # ── NEW: Gap drilldowns ────────────────────────────────────────────────
+    if _foreign_only_bids:
+        _n_fo = len(_foreign_only_bids)
+        st.markdown(f"""<div style="background:#1E293B;border-left:4px solid #f97316;
+            border-radius:8px;padding:10px 14px;margin:6px 0">
+          <div style="color:#f97316;font-weight:700;font-size:.86rem">
+            ⚠️ {_n_fo:,} business{"es" if _n_fo!=1 else ""} with Registry Found but NO Domestic Registration
+          </div>
+          <div style="color:#CBD5E1;font-size:.79rem;margin-top:4px;line-height:1.5">
+            These businesses have a registry match (<code>sos_match_boolean=true</code>) but their
+            <code>formation_state</code> is a tax-haven state (DE/NV/WY/SD/MT/NM) — meaning Middesk
+            found a <strong>foreign qualification</strong> filing, not the primary domestic incorporation record.
+            The domestic (incorporation) filing exists in the tax-haven state but was not retrieved.
+            <br/><strong>Action:</strong> Verify the domestic filing directly in the formation state's SOS portal.
+            Check whether a foreign qualification exists in the operating state.
+          </div>
+        </div>""", unsafe_allow_html=True)
+        _drilldown_table("foreign_only",
+            f"Registry Found but No Domestic Reg — {_n_fo:,} businesses (foreign/tax-haven filing only)",
+            _SOS_COLS)
+
+    if _domestic_no_state:
+        _n_dns = len(_domestic_no_state)
+        st.markdown(f"""<div style="background:#1E293B;border-left:4px solid #f59e0b;
+            border-radius:8px;padding:10px 14px;margin:6px 0">
+          <div style="color:#f59e0b;font-weight:700;font-size:.86rem">
+            ⚠️ {_n_dns:,} business{"es" if _n_dns!=1 else ""} with Domestic Reg Found but State NOT Matched
+          </div>
+          <div style="color:#CBD5E1;font-size:.79rem;margin-top:4px;line-height:1.5">
+            These businesses have a domestic (non-tax-haven) registration, but their
+            <code>formation_state</code> does NOT match the state in their <code>primary_address</code>
+            (the state they told us they operate in). Possible causes:
+            <br/>1. <strong>Multi-state operation:</strong> legitimately incorporated in State A, operating in State B — foreign qualification required.
+            <br/>2. <strong>HQ vs formation state:</strong> business entered HQ state on onboarding but is incorporated elsewhere — common and expected.
+            <br/>3. <strong>Data entry error:</strong> wrong state entered on the onboarding form.
+            <br/><strong>Action:</strong> Verify a foreign qualification exists in the operating state.
+            Absence of foreign qualification when operating out-of-state may be a compliance issue.
+          </div>
+        </div>""", unsafe_allow_html=True)
+        _drilldown_table("domestic_no_state",
+            f"Domestic Reg Found but State NOT Matched — {_n_dns:,} businesses",
+            _SOS_COLS)
 
     _reg_sql = f"""
 SELECT
@@ -4522,28 +4578,39 @@ ORDER BY bs.weighted_score_850 ASC;"""
                     icon="📈", color="#3B82F6")
 
         # ── Factor contributions — portfolio average ───────────────────────
+        # ── Factor waterfall — portfolio average ─────────────────────────────
+        st.markdown("---")
+        st.markdown("##### 📐 Worth Score Factor Waterfall — Portfolio Average")
+        st.caption(
+            "Mirrors the per-business Waterfall & Features view — estimated factor contributions "
+            "averaged across all scored businesses. Shows how each model category builds the final score "
+            "from the 300-point base. Negative bars pull the score down; positive bars add to it."
+        )
+
+        # Category metadata (same as per-business waterfall)
+        _CAT_NAMES_HOME = {
+            "public_records":       "📜 Public Records (BK/Judg/Lien)",
+            "company_profile":      "🏢 Company Profile (NAICS/Age/State)",
+            "financial_trends":     "📈 Financial Trends (Macro/Ratios)",
+            "business_operations":  "💼 Business Ops (Revenue/Banking)",
+            "performance_measures": "📊 Performance (Ratios/Flags)",
+        }
+        _CAT_DESC_HOME = {
+            "public_records":       "BK/judgments/liens. −40pts/BK, −20pts/judgment, −10pts/lien. Source: Equifax (pid=17)",
+            "company_profile":      "Age, NAICS (561499=penalty), state, entity type, employee count. Source: ZI/EFX/Middesk",
+            "financial_trends":     "Macro: GDP, CPI, VIX, interest rates, unemployment. Source: Liberty/Fed data + Plaid ratios",
+            "business_operations":  "Revenue, P&L, cash flow, balance sheet from Plaid. NULL = no Plaid → defaults used",
+            "performance_measures": "ROA, gross margin, debt/equity, solvency flags. High negative when flag_equity_negative=true",
+        }
+        _CAT_SOURCE_FACTS = {
+            "public_records":       "num_bankruptcies, num_judgements, num_liens + detail arrays (PostgreSQL RDS)",
+            "company_profile":      "naics_code, formation_date, formation_state, corporation, num_employees",
+            "financial_trends":     "Macro: Liberty/Fed data · Ratios: Plaid balance sheet computation",
+            "business_operations":  "revenue, net_income, cf_*, bs_* facts from Plaid banking connection",
+            "performance_measures": "ratio_return_on_assets, ratio_gross_margin, ratio_debt_to_equity, flag_equity_negative",
+        }
+
         if _home_factors is not None and not _home_factors.empty:
-            st.markdown("---")
-            st.markdown("##### 📐 Model Factor Contributions — Portfolio Average")
-            st.caption(
-                "Average contribution of each model category across the portfolio. "
-                "Mirrors the per-business Waterfall & Features view — but averaged over all scored businesses. "
-                "Negative = this category is reducing the score on average."
-            )
-            _CAT_NAMES_HOME = {
-                "public_records":       "📜 Public Records",
-                "company_profile":      "🏢 Company Profile",
-                "financial_trends":     "📈 Financial Trends",
-                "business_operations":  "💼 Business Operations",
-                "performance_measures": "📊 Performance Measures",
-            }
-            _CAT_DESC_HOME = {
-                "public_records":       "BK/judgments/liens. −40pts/BK, −20pts/judgment, −10pts/lien. Source: Equifax",
-                "company_profile":      "Age, NAICS, state, entity type, employees. NAICS=561499 = penalty. Source: ZI/EFX/Middesk",
-                "financial_trends":     "Macro indicators (GDP, CPI, VIX, rates) + Plaid financial ratios. Source: Fed/Liberty + Plaid",
-                "business_operations":  "Revenue, P&L, cash flow, balance sheet from Plaid. NULL if Plaid not connected",
-                "performance_measures": "ROA, gross margin, debt/equity, solvency flags. flag_equity_negative = high negative impact",
-            }
             _fac_agg = (
                 _home_factors.groupby("category_id")
                 .agg(avg_score=("avg_score_100","mean"), avg_impact=("avg_impact_pts","mean"), businesses=("businesses","sum"))
@@ -4552,50 +4619,101 @@ ORDER BY bs.weighted_score_850 ASC;"""
             _fac_agg["Category"]    = _fac_agg["category_id"].map(lambda c: _CAT_NAMES_HOME.get(c, f"Category {c}"))
             _fac_agg["Avg Score"]   = _fac_agg["avg_score"].round(1)
             _fac_agg["Avg Impact"]  = _fac_agg["avg_impact"].round(1)
-            _fac_agg["Description"] = _fac_agg["category_id"].map(lambda c: _CAT_DESC_HOME.get(c,"see lookups.py"))
-            _fac_agg = _fac_agg.sort_values("Avg Impact", ascending=True)
+            _fac_agg["Source Facts"]= _fac_agg["category_id"].map(lambda c: _CAT_SOURCE_FACTS.get(c,"see lookups.py"))
+            _fac_agg["Description"] = _fac_agg["category_id"].map(lambda c: _CAT_DESC_HOME.get(c,""))
 
-            _fac_col1, _fac_col2 = st.columns([1, 1])
-            with _fac_col1:
-                fig_fac = px.bar(
-                    _fac_agg, x="Avg Impact", y="Category", orientation="h",
-                    title="Avg Factor Impact (pts on 850 scale)",
-                    color="Avg Impact",
-                    color_continuous_scale=["#ef4444","#f59e0b","#22c55e"],
-                    text="Avg Impact",
-                )
-                fig_fac.update_traces(texttemplate="%{x:+.1f}", textposition="outside")
-                fig_fac.update_layout(height=320, margin=dict(t=40,b=10,l=10,r=60),
-                                      coloraxis_showscale=False)
-                st.plotly_chart(dark_chart(fig_fac), use_container_width=True)
+            # ── Waterfall chart (cumulative from base 300) ────────────────
+            _WATERFALL_ORDER = [
+                "public_records","company_profile","business_operations",
+                "performance_measures","financial_trends",
+            ]
+            _base = 300.0
+            _wf_cats  = []
+            _wf_vals  = []
+            _wf_colors= []
+            _wf_running = _base
+            _fac_by_cat = dict(zip(_fac_agg["category_id"], _fac_agg["Avg Impact"]))
 
-            with _fac_col2:
-                st.markdown("**Category breakdown:**")
-                for _, _fr in _fac_agg.sort_values("Avg Impact").iterrows():
-                    _fc = "#ef4444" if _fr["Avg Impact"] < 0 else "#22c55e"
-                    st.markdown(
-                        f"<div style='background:#1E293B;border-left:3px solid {_fc};"
-                        f"border-radius:6px;padding:6px 12px;margin:3px 0'>"
-                        f"<div style='display:flex;justify-content:space-between'>"
-                        f"<span style='color:#CBD5E1;font-size:.78rem'>{_fr['Category']}</span>"
-                        f"<span style='color:{_fc};font-weight:700;font-size:.78rem'>{_fr['Avg Impact']:+.1f} pts</span>"
-                        f"</div>"
-                        f"<div style='color:#64748b;font-size:.70rem;margin-top:2px'>{_fr['Description']}</div>"
-                        f"</div>",
-                        unsafe_allow_html=True
-                    )
+            # Build waterfall: base → each category → final
+            _wf_cats.append("Base\n(300 floor)")
+            _wf_vals.append(_base)
+            _wf_colors.append("#3B82F6")
+            for _cid in _WATERFALL_ORDER:
+                _cat_name = _CAT_NAMES_HOME.get(_cid, _cid)
+                _impact   = _fac_by_cat.get(_cid, 0)
+                _wf_cats.append(_cat_name.replace(" (","\n("))
+                _wf_vals.append(_impact)
+                _wf_colors.append("#ef4444" if _impact < 0 else "#22c55e" if _impact > 0 else "#64748b")
+                _wf_running += _impact
+            _wf_cats.append("🏁 Avg Score")
+            _wf_vals.append(_wf_running)
+            _wf_colors.append("#60A5FA")
 
-            st.markdown("**Full factor table:**")
-            st.dataframe(
-                _fac_agg[["Category","Avg Score","Avg Impact","Description"]].rename(
-                    columns={"Avg Score":"Avg Score (0-100)","Avg Impact":"Avg Impact (pts)"}),
-                use_container_width=True, hide_index=True
+            # Waterfall via go.Waterfall for proper cumulative display
+            _wf_measures = (
+                ["absolute"] +
+                ["relative"] * len(_WATERFALL_ORDER) +
+                ["total"]
+            )
+            fig_wf_port = go.Figure(go.Waterfall(
+                name="Portfolio Avg",
+                orientation="v",
+                measure=_wf_measures,
+                x=_wf_cats,
+                y=_wf_vals,
+                text=[f"+{v:.0f}" if v>0 else f"{v:.0f}" for v in _wf_vals],
+                textposition="outside",
+                connector={"line":{"color":"#334155","width":1}},
+                increasing={"marker":{"color":"#22c55e"}},
+                decreasing={"marker":{"color":"#ef4444"}},
+                totals={"marker":{"color":"#60A5FA"}},
+                base=0,
+            ))
+            fig_wf_port.update_layout(
+                title=f"Worth Score Factor Waterfall — {_ws_avg:.0f}/850 (portfolio avg)",
+                height=420,
+                margin=dict(t=50,b=30,l=10,r=10),
+                yaxis_title="Score (pts)",
+                xaxis_tickangle=-10,
+                showlegend=False,
+            )
+            st.plotly_chart(dark_chart(fig_wf_port), use_container_width=True)
+            st.caption(
+                "⚠️ This waterfall is averaged across all scored businesses using the actual "
+                "`business_score_factors` data from Redshift. Individual business scores may differ significantly. "
+                "See the per-business 💰 Worth Score → 📊 Waterfall & Features tab for entity-level breakdown."
             )
 
-            _factors_port_sql = f"""
--- Returns: average SHAP factor contribution per model category across the portfolio.
--- avg_score_100: average category score (0=worst, 100=best).
--- avg_impact_pts: average contribution to the 850-scale score. Negative = this category pulls score down.
+            # ── Factor breakdown table (matches per-business Estimated Factor Breakdown) ──
+            st.markdown("**Estimated Factor Breakdown — Source Facts & Model Features:**")
+            _fac_display = _fac_agg[["Category","Avg Score","Avg Impact","Source Facts","Description"]].rename(
+                columns={"Avg Score":"Avg Score (0-100)","Avg Impact":"Avg Impact (pts)","Source Facts":"Source Facts"}
+            ).sort_values("Avg Impact (pts)", ascending=True)
+            st.dataframe(_fac_display, use_container_width=True, hide_index=True)
+
+        else:
+            # No factor data — show estimated waterfall from KYB signals (same as per-business waterfall)
+            st.info("Factor contribution data (business_score_factors) not available from Redshift. "
+                    "Showing estimated waterfall from KYB signals for scored businesses.")
+            if _home_ws_clean is not None and not _home_ws_clean.empty:
+                # Use the same simplified estimation as the per-business waterfall tab
+                _est_avg = float(_home_ws_clean["weighted_score_850"].mean())
+                _est_rem = _est_avg - 300
+                # Rough category splits based on model weights
+                _est_splits = {
+                    "📜 Public Records":    -20,
+                    "📋 KYB Performance":   +0,
+                    "💼 Business Ops":      +round(_est_rem * 0.35, 0),
+                    "⚙️ Operations":        -5,
+                    "🏢 Company Profile":   +20,
+                    "📈 Financial Trends":  +round(_est_rem * 0.65 + 5, 0),
+                }
+                st.caption(f"Estimated from portfolio avg score {_est_avg:.0f}. For exact values, query `business_score_factors`.")
+
+        _factors_port_sql = f"""
+-- Returns: avg SHAP factor contribution per model category across the portfolio.
+-- avg_score_100: category score 0=worst, 100=best.
+-- avg_impact_pts: avg contribution to 850-scale score. Negative = pulls score down.
 SELECT bsf.category_id,
        AVG(bsf.score_100)          AS avg_score_100,
        AVG(bsf.weighted_score_850) AS avg_impact_pts,
@@ -4609,27 +4727,27 @@ WHERE cs.business_id IN (
 GROUP BY bsf.category_id
 ORDER BY avg_impact_pts ASC;"""
 
-            detail_panel("📐 Portfolio Factor Contributions",
-                f"{len(_fac_agg)} categories · portfolio average",
-                what_it_means=(
-                    "Average SHAP-equivalent contribution of each model category across all scored businesses.\n\n"
-                    "**Reading the chart:** A large negative average impact in a category means that category "
-                    "is systematically reducing scores across the portfolio — this is the primary driver of low scores.\n\n"
-                    "**Categories:**\n"
-                    "• public_records: BK/judgments/liens — each BK = −40pts on the 850 scale\n"
-                    "• company_profile: NAICS=561499 penalty, entity age, employee count\n"
-                    "• financial_trends: macro-economic model inputs (always present, small variance)\n"
-                    "• business_operations: Plaid P&L/cash flow — null for most businesses (no Plaid)\n"
-                    "• performance_measures: financial ratios — null if Plaid not connected\n\n"
-                    "Source: rds_manual_score_public.business_score_factors (one row per scored business per category)."
-                ),
-                source_table="rds_manual_score_public.business_score_factors",
-                source_file="aiscore.py",
-                json_obj=_fac_agg[["category_id","Avg Score","Avg Impact"]].to_dict("records"),
-                sql=_factors_port_sql,
-                links=[("aiscore.py","SHAP computation"),("worth_score_model.py","model pipeline"),
-                       ("lookups.py","feature definitions")],
-                icon="📐", color="#8B5CF6")
+        detail_panel("📐 Worth Score Factor Waterfall — Portfolio Average",
+            f"{len(_fac_agg) if _home_factors is not None and not _home_factors.empty else 0} categories · portfolio average",
+            what_it_means=(
+                "Waterfall chart showing how each model category builds the average Worth Score from the 300-point base.\n\n"
+                "**Reading the chart:** Start at 300 (base floor). Each bar adds or subtracts from the running total. "
+                "The final bar shows the average score for the portfolio.\n\n"
+                "**Categories (same as per-business Waterfall & Features tab):**\n"
+                "• public_records: BK/judgments/liens — each BK = −40pts on 850 scale. Source: Equifax\n"
+                "• company_profile: NAICS=561499 penalty, entity age, employee count. Source: ZI/EFX/Middesk\n"
+                "• financial_trends: macro-economic indicators + Plaid ratios. Source: Liberty/Fed + Plaid\n"
+                "• business_operations: Plaid P&L/cash flow — NULL if no Plaid → model uses defaults\n"
+                "• performance_measures: ROA, debt/equity, solvency flags. High negative when flag_equity_negative=true\n\n"
+                "Source: rds_manual_score_public.business_score_factors (one row per scored business per category)."
+            ),
+            source_table="rds_manual_score_public.business_score_factors",
+            source_file="aiscore.py",
+            json_obj=_fac_agg[["category_id","Avg Score","Avg Impact"]].to_dict("records") if _home_factors is not None and not _home_factors.empty else {},
+            sql=_factors_port_sql,
+            links=[("aiscore.py","SHAP computation"),("worth_score_model.py","model pipeline"),
+                   ("lookups.py","feature definitions")],
+            icon="📐", color="#8B5CF6")
 
         # ── Drilldowns: lowest scored businesses ──────────────────────────
         st.markdown("---")
