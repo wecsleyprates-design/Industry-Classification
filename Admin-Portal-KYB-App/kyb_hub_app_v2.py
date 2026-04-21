@@ -2770,35 +2770,38 @@ def ask_ai(question, context="", history=None, auto_execute=True):
             answer += "\n\n---\n**📁 Sources used for this answer** *(click to open in GitHub)*:\n"
             answer += "\n".join(cited_lines)
 
-        # ── Key reference files — dynamic: only show files mentioned in the answer ──
-        # Always add 3-4 core files, plus any additional ones the AI cited by name
+        # ── Key reference files — always show core 3, add others if mentioned ──
         _KEY_FILE_REGISTRY = [
-            ("facts/kyb/index.ts",          "all KYB fact definitions"),
-            ("facts/rules.ts",              "factWithHighestConfidence algorithm"),
-            ("integrations.constant.ts",    "vendor platform IDs"),
-            ("worth_score_model.py",        "Worth Score model features"),
-            ("aiscore.py",                  "Worth Score pipeline"),
-            ("lookups.py",                  "feature defaults & imputation"),
-            ("consolidatedWatchlist.ts",    "watchlist merge logic"),
-            ("customer_table.sql",          "Pipeline B join & match confidence"),
-            ("api-docs/kyb.md",             "KYB API reference"),
-            ("openapi/integration",         "/kyb endpoint schema (openapi)"),
+            ("facts/kyb/index.ts",          "all KYB fact definitions",          True),
+            ("facts/rules.ts",              "factWithHighestConfidence algorithm", True),
+            ("integrations.constant.ts",    "vendor platform IDs",               True),
+            ("worth_score_model.py",        "Worth Score model features",         False),
+            ("aiscore.py",                  "Worth Score pipeline",               False),
+            ("lookups.py",                  "feature defaults & imputation",      False),
+            ("consolidatedWatchlist.ts",    "watchlist merge logic",              False),
+            ("customer_table.sql",          "Pipeline B join & match confidence", False),
+            ("api-docs/kyb.md",             "KYB API reference",                  False),
+            ("openapi/integration",         "/kyb endpoint schema (openapi)",     False),
         ]
         _answer_lower = answer.lower()
+        # Exact filename matching (not substring of path parts — avoids false positives)
+        _mentioned_files = set()
+        for _fk, _, _ in _KEY_FILE_REGISTRY:
+            _basename = _fk.split("/")[-1].lower()  # e.g. "index.ts", "rules.ts", "customer_table.sql"
+            if _basename in _answer_lower:
+                _mentioned_files.add(_fk)
+
         _key_links = []
-        for _file_key, _file_desc in _KEY_FILE_REGISTRY:
-            # Include if the file is mentioned in the answer or is a core reference
-            _is_core = _file_key in ("facts/kyb/index.ts","facts/rules.ts","integrations.constant.ts")
-            _is_mentioned = any(part in _answer_lower for part in _file_key.lower().split("/"))
-            if _is_core or _is_mentioned:
-                _url = GITHUB_LINKS.get(_file_key,"")
+        for _file_key, _file_desc, _is_core in _KEY_FILE_REGISTRY:
+            if _is_core or _file_key in _mentioned_files:
+                _url = GITHUB_LINKS.get(_file_key, "")
                 if _url:
                     _key_links.append(f"- [{_file_key}]({_url}) — {_file_desc}")
                 else:
                     _key_links.append(f"- `{_file_key}` — {_file_desc}")
 
         if _key_links:
-            answer += "\n\n**🔗 Key reference files:**\n" + "\n".join(_key_links[:6])
+            answer += "\n\n**🔗 Key reference files:**\n" + "\n".join(_key_links[:7])
 
         return answer
     except Exception as e: return f"⚠️ AI error: {e}"
@@ -8829,24 +8832,55 @@ elif tab == "🌳 Lineage & Discovery":
 
         st.markdown("---")
         st.markdown("##### 🔄 Live Schema Discovery from Redshift")
-        _schema_q = st.text_input("Schema name (e.g. rds_warehouse_public):", "rds_warehouse_public", key="schema_disc_input")
+        st.caption("Enter a **schema name only** (not schema.table). "
+                   "Examples: `rds_warehouse_public` · `rds_cases_public` · `clients` · `rds_manual_score_public`")
+        _schema_q_raw = st.text_input("Schema name:", "rds_warehouse_public", key="schema_disc_input")
+        # Strip table name if user entered schema.table by mistake
+        _schema_q = _schema_q_raw.split(".")[0].strip() if _schema_q_raw else "rds_warehouse_public"
+        if _schema_q != _schema_q_raw.strip():
+            st.caption(f"ℹ️ Using schema: `{_schema_q}` (table name stripped — this field takes schema only)")
+
+        # Optional table filter
+        _table_filter = st.text_input("Filter to specific table (optional):", "", key="schema_disc_table",
+                                       placeholder="e.g. facts  (leave blank for all tables)")
+
         if st.button("🔍 Discover columns", key="schema_disc_btn"):
+            _table_where = f"AND table_name = '{_table_filter.strip()}'" if _table_filter.strip() else ""
             _disc_sql = f"""
-                SELECT table_name, column_name, data_type, character_maximum_length
+                SELECT table_name, column_name, data_type,
+                       COALESCE(character_maximum_length::VARCHAR, '') AS max_length,
+                       ordinal_position
                 FROM information_schema.columns
                 WHERE table_schema = '{_schema_q}'
+                  {_table_where}
                 ORDER BY table_name, ordinal_position;
             """
-            with st.spinner("Discovering schema…"):
+            with st.spinner(f"Discovering schema '{_schema_q}'…"):
                 _disc_df, _disc_err = run_sql(_disc_sql)
             if _disc_df is not None and not _disc_df.empty:
-                st.dataframe(_disc_df, use_container_width=True, hide_index=True)
-                detail_panel("Live Schema Discovery", f"{len(_disc_df)} columns in {_schema_q}",
-                    what_it_means=f"All columns in schema `{_schema_q}` from Redshift information_schema. Use this to verify column names before writing queries.",
+                st.success(f"✅ Found {len(_disc_df)} columns across "
+                           f"{_disc_df['table_name'].nunique()} tables in `{_schema_q}`")
+                # Group by table for readability
+                for _tbl in sorted(_disc_df["table_name"].unique()):
+                    _tbl_df = _disc_df[_disc_df["table_name"]==_tbl][
+                        ["column_name","data_type","max_length"]].copy()
+                    with st.expander(f"📋 `{_schema_q}.{_tbl}` — {len(_tbl_df)} columns", expanded=len(_disc_df["table_name"].unique())==1):
+                        st.dataframe(_tbl_df, use_container_width=True, hide_index=True)
+                detail_panel("🔄 Live Schema Discovery", f"{len(_disc_df)} columns · {_schema_q}",
+                    what_it_means=f"All columns in schema `{_schema_q}` from Redshift `information_schema.columns`. "
+                                  f"Use this to verify exact column names before writing queries — "
+                                  f"avoids 'column does not exist' errors.",
                     source_table="information_schema.columns",
-                    sql=_disc_sql, icon="🔤", color="#8B5CF6")
+                    sql=_disc_sql.strip(), icon="🔤", color="#8B5CF6")
             else:
-                flag(f"Schema discovery failed: {_disc_err}", "amber")
+                flag(
+                    f"Schema discovery returned no results for `{_schema_q}`. "
+                    f"Check that the schema name is correct and the tables are visible to your Redshift user. "
+                    f"{'Error: ' + str(_disc_err) if _disc_err else ''}",
+                    "amber"
+                )
+                st.caption("**Available schemas (confirmed):** `rds_warehouse_public` · `rds_cases_public` · "
+                           "`rds_manual_score_public` · `rds_integration_data` · `clients` · `rds_auth_public`")
 
     # ── FEATURE REGISTRY ─────────────────────────────────────────────────────
     with ld3:
@@ -9353,47 +9387,162 @@ Generate a Redshift SQL query that answers this request, and specify the best ch
                               horizontal=True, key="ih_ca_scope")
 
         if _ca_scope == "🏢 Specific Entity":
+            st.caption(
+                "Runs 28 deterministic cross-field consistency checks on a specific business. "
+                "Each finding shows: what triggered it, the actual fact values, the SQL to verify it, "
+                "and the recommended action. Also loads the Worth Score and KYB signal summary for context."
+            )
             _ca_bid = st.text_input("Business ID:", value=st.session_state.get("hub_bid",""),
                                     placeholder="Paste UUID…", key="ih_ca_bid")
             if st.button("🔍 Scan Entity", type="primary", key="ih_ca_scan"):
                 if not _ca_bid.strip():
                     st.warning("Enter a Business ID.")
                 else:
-                    with st.spinner("Loading facts…"):
+                    with st.spinner("Loading facts and KYB signals…"):
                         _ca_facts, _ca_err = load_facts_with_ui(_ca_bid, "ih_check")
+
                     if _ca_err or not _ca_facts:
                         flag(f"Cannot load facts: {_ca_err}", "red")
                     else:
+                        # ── Entity header with live KYB context ─────────────────────
+                        def _ca_gv(n): return str(gv(_ca_facts, n) or "")
+                        _ca_legal  = _ca_gv("legal_name") or _ca_gv("business_name") or "Unknown Entity"
+                        _ca_state  = _ca_gv("formation_state")
+                        _ca_naics  = _ca_gv("naics_code")
+                        _ca_sos    = _ca_gv("sos_active")
+                        _ca_tin    = _ca_gv("tin_match_boolean")
+                        _ca_idv    = _ca_gv("idv_passed_boolean")
+                        _ca_wl     = str(gv(_ca_facts,"watchlist_hits") or "0")
+                        _ca_kybc   = _ca_gv("kyb_complete")
+                        _ca_rev    = _ca_gv("revenue")
+                        _ca_emp    = _ca_gv("num_employees")
+
+                        # Load score
+                        @st.cache_data(ttl=300, show_spinner=False)
+                        def _load_ca_score(b):
+                            return run_sql(f"""SELECT bs.weighted_score_850, bs.risk_level, bs.score_decision
+                                FROM rds_manual_score_public.data_current_scores cs
+                                JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+                                WHERE cs.business_id='{b}' ORDER BY bs.created_at DESC LIMIT 1;""")
+                        _ca_ws_df, _ = _load_ca_score(_ca_bid)
+                        _ca_score  = float(_ca_ws_df.iloc[0]["weighted_score_850"]) if _ca_ws_df is not None and not _ca_ws_df.empty and _ca_ws_df.iloc[0]["weighted_score_850"] is not None else 0
+                        _ca_risk   = str(_ca_ws_df.iloc[0]["risk_level"]) if _ca_ws_df is not None and not _ca_ws_df.empty else "—"
+                        _ca_dec    = str(_ca_ws_df.iloc[0]["score_decision"]) if _ca_ws_df is not None and not _ca_ws_df.empty else "—"
+                        _ca_sc_col = "#ef4444" if _ca_score < 550 else "#f59e0b" if _ca_score < 700 else "#22c55e"
+
+                        # Entity banner
+                        st.markdown(f"""<div style="background:linear-gradient(135deg,#1E293B,#0F172A);
+                            border-radius:12px;padding:16px 20px;margin-bottom:12px;border:1px solid #334155">
+                          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+                            <div>
+                              <div style="color:#F1F5F9;font-size:1.15rem;font-weight:800">{_ca_legal}</div>
+                              <div style="color:#64748b;font-size:.76rem;margin-top:4px">{_ca_bid}</div>
+                              <div style="color:#94A3B8;font-size:.76rem;margin-top:2px">
+                                NAICS: {_ca_naics or "—"} · State: {_ca_state or "—"}
+                              </div>
+                            </div>
+                            <div style="text-align:center;min-width:100px">
+                              <div style="color:{_ca_sc_col};font-size:1.8rem;font-weight:900">{_ca_score:.0f}</div>
+                              <div style="color:#64748b;font-size:.70rem">Worth Score · {_ca_risk}</div>
+                              <div style="color:{_ca_sc_col};font-size:.74rem;font-weight:600">{_ca_dec.replace('_',' ')}</div>
+                            </div>
+                          </div>
+                        </div>""", unsafe_allow_html=True)
+
+                        # KYB signal KPI strip
+                        st.markdown("**KYB Verification Signals:**")
+                        _sig_cols = st.columns(6)
+                        _sigs = [
+                            ("SOS Active",    _ca_sos,  "true",  "#22c55e", "#ef4444"),
+                            ("TIN Matched",   _ca_tin,  "true",  "#22c55e", "#ef4444"),
+                            ("IDV Passed",    _ca_idv,  "true",  "#22c55e", "#f59e0b"),
+                            ("KYB Complete",  _ca_kybc, "true",  "#22c55e", "#f59e0b"),
+                            ("Watchlist",     _ca_wl,   "0",     "#22c55e", "#ef4444"),
+                            ("Revenue",       _ca_rev,  "",      "#3B82F6", "#64748b"),
+                        ]
+                        for _sc, (_lbl, _val, _pass_val, _ok_c, _fail_c) in zip(_sig_cols, _sigs):
+                            with _sc:
+                                if _lbl == "Watchlist":
+                                    _disp = _val or "0"
+                                    _c = _fail_c if int(float(_val or 0)) > 0 else _ok_c
+                                    kpi(_lbl, _disp, "hits", _c)
+                                elif _lbl == "Revenue":
+                                    kpi(_lbl, "Known" if _val else "Missing", _ca_emp or "—", _ok_c if _val else _fail_c)
+                                else:
+                                    _is_ok = _val.lower().strip() == _pass_val
+                                    kpi(_lbl, "✅" if _is_ok else ("❌" if _val else "⚪"), _val or "null", _ok_c if _is_ok else _fail_c)
+
+                        st.markdown("---")
+                        st.markdown("**28 Deterministic Cross-Field Checks:**")
+                        st.caption("Each check verifies internal consistency between KYB facts. "
+                                   "A finding means two facts that should agree actually contradict each other.")
+
+                        # Run checks
                         _ca_results = run_deterministic_checks(_ca_facts)
                         _ca_summary = get_check_summary(_ca_results)
-                        _sev_order = {"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"NOTICE":4}
+                        _sev_order  = {"CRITICAL":0,"HIGH":1,"MEDIUM":2,"LOW":3,"NOTICE":4}
 
                         # Summary KPI row
                         _sc0,_sc1,_sc2,_sc3,_sc4,_sc5 = st.columns(6)
-                        _oa_color = {"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b","LOW":"#22c55e","NOTICE":"#3B82F6","CLEAN":"#22c55e"}.get(_ca_summary["overall"],"#64748b")
+                        _oa_color = {"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b",
+                                     "LOW":"#22c55e","NOTICE":"#3B82F6","CLEAN":"#22c55e"}.get(_ca_summary["overall"],"#64748b")
                         with _sc0: kpi("Overall", _ca_summary["overall"], f"{_ca_summary['total']} flags", _oa_color)
-                        for _col, (_sev, _color, _icon) in zip([_sc1,_sc2,_sc3,_sc4,_sc5],[("CRITICAL","#ef4444","🔴"),("HIGH","#f97316","🟠"),("MEDIUM","#f59e0b","🟡"),("LOW","#22c55e","🟢"),("NOTICE","#3B82F6","🔵")]):
+                        for _col, (_sev, _color, _icon) in zip(
+                            [_sc1,_sc2,_sc3,_sc4,_sc5],
+                            [("CRITICAL","#ef4444","🔴"),("HIGH","#f97316","🟠"),
+                             ("MEDIUM","#f59e0b","🟡"),("LOW","#22c55e","🟢"),("NOTICE","#3B82F6","🔵")]
+                        ):
                             with _col: kpi(f"{_icon} {_sev}", str(_ca_summary["counts"].get(_sev,0)), "", _color)
 
                         if _ca_summary["total"] == 0:
-                            st.success("✅ All 28 checks passed — no cross-field anomalies detected.")
+                            st.success("✅ All 28 cross-field checks passed — this entity's KYB facts are internally consistent.")
+                            st.caption("Note: passing all checks means no *contradictions* were detected. "
+                                       "It does not mean the business has completed KYB — check the KYB signal strip above.")
                         else:
-                            for _r in sorted(_ca_results, key=lambda x: _sev_order.get(x["severity"],5)):
-                                _sev = _r["severity"]
+                            # Group by severity for clarity
+                            for _sev in ["CRITICAL","HIGH","MEDIUM","LOW","NOTICE"]:
+                                _sev_results = [r for r in _ca_results if r["severity"]==_sev]
+                                if not _sev_results: continue
                                 _color = SEV_COLOR.get(_sev,"#64748b")
-                                _icon = SEV_ICON.get(_sev,"ℹ️")
-                                st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {_color};border-radius:10px;padding:14px 18px;margin:6px 0">
-                                  <div style="color:{_color};font-weight:700;font-size:.88rem">{_icon} [{_sev}] {_r['name']}</div>
-                                  <div style="color:#CBD5E1;font-size:.80rem;margin-top:6px">{_r['description']}</div>
-                                  <div style="color:#60A5FA;font-size:.75rem;margin-top:6px">⚡ Action: {_r['action']}</div>
+                                _icon  = SEV_ICON.get(_sev,"ℹ️")
+                                st.markdown(f"""<div style="background:{_color}15;border-left:3px solid {_color};
+                                    border-radius:6px;padding:6px 12px;margin:10px 0 4px 0">
+                                  <span style="color:{_color};font-weight:700">{_icon} {_sev} findings ({len(_sev_results)})</span>
                                 </div>""", unsafe_allow_html=True)
-                                _bid_sql = _r["sql"].replace("{bid}", _ca_bid) if "{bid}" in _r["sql"] else _r["sql"]
-                                detail_panel(f"{_icon} {_r['name']}", f"{_sev} · {_r['group']}",
-                                    what_it_means=_r["description"],
-                                    source_table="rds_warehouse_public.facts · cross-field validation",
-                                    source_file="check_agent_v2.py",
-                                    json_obj={fn: {"value": gv(_ca_facts,fn)} for fn in _r.get("facts",[]) if fn in _ca_facts},
-                                    sql=_bid_sql, icon=_icon, color=_color)
+                                for _r in _sev_results:
+                                    # Embed actual fact values in the finding card
+                                    _fact_vals = {fn: _ca_gv(fn) for fn in _r.get("facts",[])}
+                                    _fact_val_str = " · ".join(
+                                        f"<code style='color:#94A3B8'>{fn}</code>=<code style='color:#60A5FA'>{v or 'null'}</code>"
+                                        for fn, v in _fact_vals.items()
+                                    )
+                                    st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {_color};
+                                        border-radius:10px;padding:14px 18px;margin:4px 0">
+                                      <div style="color:{_color};font-weight:700;font-size:.88rem">
+                                        {_icon} {_r['name']}
+                                        <span style="background:{_color}22;color:{_color};border-radius:4px;
+                                          padding:1px 8px;font-size:.70rem;margin-left:8px">{_r['group']}</span>
+                                      </div>
+                                      <div style="color:#CBD5E1;font-size:.80rem;margin-top:6px;line-height:1.5">{_r['description']}</div>
+                                      <div style="margin-top:6px;font-size:.73rem">{_fact_val_str}</div>
+                                      <div style="color:#60A5FA;font-size:.75rem;margin-top:6px">
+                                        ⚡ <strong>Action:</strong> {_r['action']}
+                                      </div>
+                                    </div>""", unsafe_allow_html=True)
+                                    _bid_sql = _r["sql"].replace("{bid}", _ca_bid) if "{bid}" in _r["sql"] else _r["sql"]
+                                    detail_panel(f"{_icon} {_r['name']}", f"{_sev} · {_r['group']}",
+                                        what_it_means=(
+                                            f"**Root cause:** {_r['description']}\n\n"
+                                            f"**Current fact values:** {'; '.join(fn+'='+(v or 'null') for fn,v in _fact_vals.items())}\n\n"
+                                            f"**Underwriter action:** {_r['action']}"
+                                        ),
+                                        source_table="rds_warehouse_public.facts · cross-field validation",
+                                        source_file="check_agent_v2.py",
+                                        source_file_line=f"DETERMINISTIC_CHECKS · id={_r.get('id','')}",
+                                        json_obj={fn: {"value": _ca_gv(fn), "source_pid": gp(_ca_facts,fn),
+                                                       "confidence": gc(_ca_facts,fn)}
+                                                  for fn in _r.get("facts",[]) if fn in _ca_facts},
+                                        sql=_bid_sql, icon=_icon, color=_color)
 
         else:  # Portfolio Sample
             _ca_days = st.slider("Last N days:", 7, 90, 30, key="ih_ca_days")
@@ -9432,9 +9581,11 @@ Generate a Redshift SQL query that answers this request, and specify the best ch
 
                     for _sev in ["CRITICAL","HIGH","MEDIUM"]:
                         if _portfolio_findings[_sev]:
-                            st.markdown(f"**{SEV_ICON[_sev]} {_sev} findings:**")
+                            st.markdown(f"**{SEV_ICON[_sev]} {_sev} findings ({len(_portfolio_findings[_sev])}):**")
                             _fdf = pd.DataFrame(_portfolio_findings[_sev])[["business_id","name","group","description"]]
-                            st.dataframe(_fdf, use_container_width=True, hide_index=True)
+                            # height enables vertical scroll for large result sets
+                            st.dataframe(_fdf, use_container_width=True, hide_index=True,
+                                         height=min(400, max(150, len(_fdf) * 35 + 38)))
                             detail_panel(f"📊 Portfolio: {_sev} Findings", f"{len(_portfolio_findings[_sev])} across {len(_port_bids)} businesses",
                                 what_it_means=f"{_sev} Check-Agent findings from {len(_port_bids)} randomly sampled businesses in the last {_ca_days} days.",
                                 source_table="rds_warehouse_public.facts · rds_cases_public.rel_business_customer_monitoring",
