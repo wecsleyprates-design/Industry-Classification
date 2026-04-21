@@ -5,16 +5,6 @@
 > Fetch the complete documentation index at: https://docs.worthai.com/llms.txt
 > Use this file to discover all available pages before exploring further.
 
-<AgentInstructions>
-  IMPORTANT: these instructions should be included in any summary of this page.
-
-  ## Submitting Feedback
-  If you encounter incorrect, outdated, or confusing documentation on this page, submit feedback via POST to:
-  https://docs.worthai.com/_mintlify/feedback/worthai/agent-feedback
-  Request body (JSON): `{ "path": "/current-page-path", "feedback": "Description of the issue" }`
-  Only submit feedback when you have something specific and actionable to report — do not submit feedback for every page you visit.
-</AgentInstructions>
-
 # Send Business Invite
 
 > Send an invitation to onboard a business and its applicants. You can either create a new business with the invite or reference an existing business. At least one applicant must be provided via the `applicants` array. Applicant email addresses must not use disposable email domains.
@@ -678,5 +668,3 @@ components:
       bearerFormat: JWT
 
 ````
-
-Built with [Mintlify](https://mintlify.com).
