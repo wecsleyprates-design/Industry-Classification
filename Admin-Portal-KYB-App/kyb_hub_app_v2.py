@@ -4983,7 +4983,8 @@ if tab=="🏠 Home":
                                _bid_csv, f"{seg_key}_business_ids.csv", "text/csv",
                                key=f"dl_{seg_key}")
 
-    # ── KPI Row 1 — original positive counts (Registry Found, Domestic Reg Found, State Match) ──
+    # ── KPI Row — 5 cards: Onboarded · No Registry Found · Registry Found · Domestic Reg Found · State Match
+    #             + Row 2: Possible Sole Prop · No Domestic Reg Found · No State Match
     k1,k2,k3,k4,k5 = st.columns(5)
     with k1: kpi("📋 Onboarded", f"{total_biz:,}", period_label, "#3B82F6")
     with k2: kpi(
@@ -5007,14 +5008,8 @@ if tab=="🏠 Home":
         "#22c55e" if _state_match/max(total_biz,1)>0.6 else "#f59e0b"
     )
 
-    # ── KPI Row 2 — gap/negative analysis cards (new requested metrics) ────────
-    # 1: No Registry Found strictly false · 2: Possible Sole Prop · 3: No Domestic · 4: No State Match
-    _g1,_g2,_g3,_g4 = st.columns(4)
-    with _g1: kpi(
-        "❌ No Registry (strict=false)", f"{_sos_not_found:,}",
-        "sos_match_boolean='false' only (vendor returned failure)",
-        "#ef4444" if _sos_not_found>0 else "#22c55e"
-    )
+    # ── KPI Row 2 — gap analysis: Possible Sole Prop · No Domestic · No State Match ──
+    _g2,_g3,_g4 = st.columns(3)
     with _g2: kpi(
         "🧍 Possible Sole Prop", f"{_possible_sole_prop:,}",
         f"of {_sos_not_found:,} no-reg · TIN[-4]=SSN[-4] (index.ts:606)",
@@ -6453,8 +6448,32 @@ ORDER BY avg_impact_pts ASC;"""
     _an = {}   # anomaly_key → list of business_ids
     _an_meta = {}  # anomaly_key → {severity, title, desc, source}
 
+    # Build _sdf: stats_df enriched with funnel_df's sos_match_boolean and tin_match_boolean.
+    # stats_df is from an INNER JOIN on facts — businesses with no facts may be absent,
+    # and sos_match_boolean in stats_df may be NULL for businesses where the vendor was never called.
+    # funnel_df has the authoritative per-business sos_match_boolean from the facts table.
+    # We merge both so cross-field checks use the correct signals.
     _sdf = stats_df.copy() if stats_df is not None and not stats_df.empty else pd.DataFrame()
     _fdf = _funnel.copy() if not _funnel.empty else pd.DataFrame()
+
+    # Enrich _sdf with funnel columns where stats_df has nulls/missing
+    if not _sdf.empty and not _fdf.empty:
+        _funnel_cols = ["business_id","sos_match_boolean","sos_active","formation_state","operating_state","tin_match_boolean","tin_status"]
+        _funnel_for_merge = _fdf[[c for c in _funnel_cols if c in _fdf.columns]].copy()
+        # Rename funnel columns to avoid collision with stats_df columns
+        _funnel_rename = {c: f"_f_{c}" for c in _funnel_cols if c != "business_id"}
+        _funnel_for_merge = _funnel_for_merge.rename(columns=_funnel_rename)
+        _sdf = _sdf.merge(_funnel_for_merge, on="business_id", how="left")
+        # Fill stats_df sos_match_boolean with funnel value where stats_df has blank
+        for _fc in ["sos_match_boolean","sos_active","tin_match_boolean"]:
+            _fc_col = f"_f_{_fc}"
+            if _fc_col in _sdf.columns and _fc in _sdf.columns:
+                _null_mask = _sdf[_fc].isna() | (_sdf[_fc].astype(str).str.strip().isin(["","None","nan"]))
+                _sdf.loc[_null_mask, _fc] = _sdf.loc[_null_mask, _fc_col]
+            elif _fc_col in _sdf.columns:
+                _sdf[_fc] = _sdf[_fc_col]
+        # Drop the temporary merge columns
+        _sdf = _sdf.drop(columns=[c for c in _sdf.columns if c.startswith("_f_")], errors="ignore")
 
     def _s(col): return _sdf[col].astype(str).str.lower().str.strip() if col in _sdf.columns else pd.Series([""] * len(_sdf))
     def _f(col): return _fdf[col].astype(str).str.lower().str.strip() if col in _fdf.columns else pd.Series([""] * len(_fdf))
@@ -6609,17 +6628,22 @@ ORDER BY avg_impact_pts ASC;"""
             "action":"Block approval until SOS good standing reinstated. Check revival/reinstatement filings.",
         }
 
-        # G4-C: No SOS Data + TIN Pass — identity unverifiable but EIN ok
-        _mask = (_s("sos_match_boolean").isin(["","none","nan","null","false"])) & (_s("tin_match")=="true")
+        # G4-C: No Registry (strictly false) + TIN Pass
+        # Only sos_match_boolean='false' (vendor actively returned failure), NOT null/missing.
+        # null = vendor not called yet — a different and less certain state.
+        _mask = (_s("sos_match_boolean")=="false") & (_s("tin_match")=="true")
         _an["g4_no_sos_tin_ok"] = _sdf[_mask]["business_id"].tolist()
         _an_meta["g4_no_sos_tin_ok"] = {
             "severity":"HIGH","group":"Cross-Section Contradictions",
-            "title":"No Registry + TIN Pass",
-            "desc":"EIN confirmed by IRS (tin_match_boolean=true) but sos_match_boolean is false/null — "
-                   "entity existence is unverifiable despite having a valid EIN. Most common: entity too new "
-                   "(<2 weeks, SOS propagation lag), DBA name mismatch, or vendor integration failure.",
-            "source":"index.ts:1421 (sos_match_boolean) and 482 (tin_match_boolean)",
-            "action":"Check entity age. If >2 weeks old, manually verify SOS on the state portal.",
+            "title":"No Registry (vendor returned failure) + TIN Pass",
+            "desc":"IRS confirmed the EIN (tin_match_boolean=true) but sos_match_boolean='false' — "
+                   "the vendor actively returned a failure result, meaning NO SOS filing was found. "
+                   "Entity existence is unverifiable despite having a valid IRS-confirmed EIN. "
+                   "Most common causes: entity too new (<2 weeks, SOS propagation lag), "
+                   "DBA name used on onboarding form doesn't match SOS records, "
+                   "or sole prop using SSN as EIN (no SOS registration expected).",
+            "source":"index.ts:1421 (sos_match_boolean='false' = vendor returned failure) and 482 (tin_match_boolean)",
+            "action":"Check is_sole_prop fact. If not sole prop and >2 weeks old, manually verify SOS on state portal.",
         }
 
     # ── GROUP 5: NAICS & CLASSIFICATION ANOMALIES ────────────────────────────
@@ -6828,6 +6852,26 @@ ORDER BY avg_impact_pts ASC;"""
 
     _SOS_AN_COLS = ["sos_match_boolean","sos_match_status","sos_active","sos_match_verif","sos_domestic_verif","formation_state","tin_submitted","tin_match_status","tin_match","idv_passed","naics_code","watchlist_hits","num_bankruptcies"]
 
+    # Helper: build summary bar chart for a group's anomalies
+    def _group_summary_chart(group_keys, group_title):
+        """Horizontal bar chart of anomaly counts across all rules in a group."""
+        _rows = [{"Rule": _an_meta[k]["title"][:38],
+                  "Count": len(_an.get(k,[])),
+                  "Severity": _an_meta[k]["severity"],
+                  "Color": _SEV_COLOR.get(_an_meta[k]["severity"],"#64748b")}
+                 for k in group_keys if k in _an_meta]
+        if not _rows or all(r["Count"]==0 for r in _rows):
+            return None
+        _gdf = pd.DataFrame(_rows).sort_values("Count", ascending=True)
+        _cmap = dict(zip(_gdf["Rule"], _gdf["Color"]))
+        _fig = px.bar(_gdf, x="Count", y="Rule", orientation="h",
+                      color="Rule", color_discrete_map=_cmap,
+                      text="Count", title=group_title)
+        _fig.update_traces(textposition="outside")
+        _fig.update_layout(height=max(160, len(_rows)*52), showlegend=False,
+                           margin=dict(t=40,b=10,l=10,r=60))
+        return _fig
+
     # ════════════════════════════════════════════════════════════════════════
     # 6.1  GROUP 1: DATA INTEGRITY CONTRADICTIONS
     # ════════════════════════════════════════════════════════════════════════
@@ -6836,18 +6880,19 @@ ORDER BY avg_impact_pts ASC;"""
     st.caption("Signal combinations that should NEVER exist if the pipeline is working correctly. "
                "These are bugs, data freshness gaps, or pipeline ordering issues — not risk signals.")
 
-    for _akey in ["g1_tin_status_bool_mismatch","g1_sos_active_match_false","g1_verif_active_false"]:
+    _G1_KEYS = ["g1_tin_status_bool_mismatch","g1_sos_active_match_false","g1_verif_active_false"]
+    _fig_g1 = _group_summary_chart(_G1_KEYS, "Data Integrity — Contradictions by Rule")
+    if _fig_g1:
+        st.plotly_chart(dark_chart(_fig_g1), use_container_width=True)
+
+    for _akey in _G1_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
         _seg[_akey] = _bids
-        _SEG_CALC[_akey] = (
-            f"**{_m['title']}**\n\n{_m['desc']}\n\n"
-            f"**Action:** {_m['action']}\n\n"
-            f"**Source:** `{_m['source']}`"
-        )
+        _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _SOS_AN_COLS, meta=_m)
 
-    if not any(_an.get(k) for k in ["g1_tin_status_bool_mismatch","g1_sos_active_match_false","g1_verif_active_false"]):
+    if not any(_an.get(k) for k in _G1_KEYS):
         st.success("✅ No data integrity contradictions detected in this portfolio.", icon="✅")
 
     # ════════════════════════════════════════════════════════════════════════
@@ -6858,17 +6903,42 @@ ORDER BY avg_impact_pts ASC;"""
     st.caption("Signal combinations where registry verification signals are internally inconsistent "
                "or represent the worst possible registry states.")
 
-    for _akey in ["g2_found_but_inactive","g2_domestic_no_submitted","g2_verif_match_false"]:
+    _G2_KEYS = ["g2_found_but_inactive","g2_domestic_no_submitted","g2_verif_match_false"]
+    _fig_g2 = _group_summary_chart(_G2_KEYS, "SOS/Registry — Anomalies by Rule")
+    if _fig_g2:
+        _gc1, _gc2 = st.columns([2, 1])
+        with _gc1:
+            st.plotly_chart(dark_chart(_fig_g2), use_container_width=True)
+        with _gc2:
+            # Mini donut: registry state distribution
+            if not _sdf.empty:
+                _reg_dist = pd.DataFrame({
+                    "State": ["Registry Active","Registry Inactive","No Registry"],
+                    "Count": [
+                        int((_s("sos_match_boolean")=="true") & (_s("sos_active")=="true")).sum() if not _sdf.empty else 0,
+                        int((_s("sos_match_boolean")=="true") & (_s("sos_active")=="false")).sum() if not _sdf.empty else 0,
+                        int((_s("sos_match_boolean")=="false")).sum() if not _sdf.empty else 0,
+                    ]
+                })
+                _reg_dist = _reg_dist[_reg_dist["Count"]>0]
+                if not _reg_dist.empty:
+                    fig_reg_donut = px.pie(_reg_dist, names="State", values="Count", hole=0.5,
+                                          title="Registry State Distribution",
+                                          color="State",
+                                          color_discrete_map={"Registry Active":"#22c55e",
+                                                              "Registry Inactive":"#ef4444",
+                                                              "No Registry":"#f97316"})
+                    fig_reg_donut.update_layout(height=240, margin=dict(t=40,b=10,l=10,r=10))
+                    st.plotly_chart(dark_chart(fig_reg_donut), use_container_width=True)
+
+    for _akey in _G2_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
         _seg[_akey] = _bids
-        _SEG_CALC[_akey] = (
-            f"**{_m['title']}**\n\n{_m['desc']}\n\n"
-            f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
-        )
+        _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _SOS_AN_COLS, meta=_m)
 
-    if not any(_an.get(k) for k in ["g2_found_but_inactive","g2_domestic_no_submitted","g2_verif_match_false"]):
+    if not any(_an.get(k) for k in _G2_KEYS):
         st.success("✅ No SOS/registry anomalies detected.", icon="✅")
 
     # ════════════════════════════════════════════════════════════════════════
@@ -6879,20 +6949,53 @@ ORDER BY avg_impact_pts ASC;"""
     st.caption("EIN verification gaps — submitted but never checked, or contradicting signal derivations.")
 
     _TIN_AN_COLS = ["tin_submitted","tin_match_status","tin_match","sos_match_boolean","sos_active","formation_state","naics_code"]
-    for _akey in ["g3_tin_submitted_not_checked"]:
+
+    # TIN outcome distribution chart
+    if not _sdf.empty:
+        _tin_dist_data = {
+            "TIN Pass (tin_match_boolean=true)":  int((_s("tin_match")=="true").sum()),
+            "TIN Fail (tin_match_boolean=false)": int((_s("tin_match")=="false").sum()),
+            "TIN Not Checked (null)":             int((_s("tin_match").isin(["","none","nan"])).sum()),
+        }
+        _tin_dist_df = pd.DataFrame(list(_tin_dist_data.items()), columns=["Outcome","Count"])
+        _tin_dist_df = _tin_dist_df[_tin_dist_df["Count"]>0]
+        if not _tin_dist_df.empty:
+            _tc1, _tc2 = st.columns([1.5, 1])
+            with _tc1:
+                fig_tin_bar = px.bar(_tin_dist_df, x="Count", y="Outcome", orientation="h",
+                                     color="Outcome",
+                                     color_discrete_map={
+                                         "TIN Pass (tin_match_boolean=true)":"#22c55e",
+                                         "TIN Fail (tin_match_boolean=false)":"#ef4444",
+                                         "TIN Not Checked (null)":"#64748b",
+                                     },
+                                     text="Count", title="TIN/EIN Outcome Distribution (portfolio)")
+                fig_tin_bar.update_traces(textposition="outside")
+                fig_tin_bar.update_layout(height=220, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
+                st.plotly_chart(dark_chart(fig_tin_bar), use_container_width=True)
+            with _tc2:
+                fig_tin_pie = px.pie(_tin_dist_df, names="Outcome", values="Count", hole=0.5,
+                                     title="TIN Outcome Mix",
+                                     color="Outcome",
+                                     color_discrete_map={
+                                         "TIN Pass (tin_match_boolean=true)":"#22c55e",
+                                         "TIN Fail (tin_match_boolean=false)":"#ef4444",
+                                         "TIN Not Checked (null)":"#64748b",
+                                     })
+                fig_tin_pie.update_layout(height=220, margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_tin_pie), use_container_width=True)
+
+    _G3_KEYS = ["g3_tin_submitted_not_checked"]
+    for _akey in _G3_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
         _seg[_akey] = _bids
-        _SEG_CALC[_akey] = (
-            f"**{_m['title']}**\n\n{_m['desc']}\n\n"
-            f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
-        )
+        _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _TIN_AN_COLS, meta=_m)
 
-    # G1-C (tin status/bool mismatch) is the other TIN anomaly — shown in Group 1
     if _an.get("g1_tin_status_bool_mismatch"):
-        st.info(f"ℹ️ {len(_an['g1_tin_status_bool_mismatch']):,} businesses with tin_match_status=success but tin_match_boolean=false "
-                "are shown in **6.1 Data Integrity Contradictions** above (CRITICAL severity).")
+        st.info(f"ℹ️ {len(_an['g1_tin_status_bool_mismatch']):,} businesses with tin_match_status=success but "
+                "tin_match_boolean=false are shown in **6.1 Data Integrity Contradictions** above (CRITICAL).")
     if not _an.get("g3_tin_submitted_not_checked") and not _an.get("g1_tin_status_bool_mismatch"):
         st.success("✅ No TIN/EIN anomalies detected.", icon="✅")
 
@@ -6904,41 +7007,62 @@ ORDER BY avg_impact_pts ASC;"""
     st.caption("Where SOS verification (Section 1) and TIN verification (Section 2) signals diverge — "
                "the two independent KYB verification paths producing inconsistent results.")
 
-    _CROSS_COLS = ["sos_match_boolean","sos_match_status","sos_active","sos_match_verif","sos_domestic_verif","tin_submitted","tin_match_status","tin_match","formation_state","naics_code","watchlist_hits"]
-    _cross_total = sum(len(_an.get(k,[])) for k in ["g4_sos_ok_tin_fail","g4_sos_inactive_tin_ok","g4_no_sos_tin_ok"])
+    _CROSS_COLS = ["sos_match_boolean","sos_match_status","sos_active","sos_match_verif","sos_domestic_verif",
+                   "tin_submitted","tin_match_status","tin_match","formation_state","naics_code","watchlist_hits"]
+    _G4_KEYS = ["g4_sos_ok_tin_fail","g4_sos_inactive_tin_ok","g4_no_sos_tin_ok"]
+    _cross_total = sum(len(_an.get(k,[])) for k in _G4_KEYS)
 
-    # Mini 3-cell matrix visual
+    # Full Registry × TIN cross-tabulation chart
     if not _sdf.empty:
-        _mx_data = {
-            "SOS Active":   {"TIN Pass": len([b for b in _an.get("g4_sos_ok_tin_fail",[]) if False]),    # placeholder
-                             "TIN Fail": len(_an.get("g4_sos_ok_tin_fail",[])),
-                             "TIN N/A":  0},
-            "SOS Inactive": {"TIN Pass": len(_an.get("g4_sos_inactive_tin_ok",[])),
-                             "TIN Fail": 0,
-                             "TIN N/A":  0},
-            "No Registry":  {"TIN Pass": len(_an.get("g4_no_sos_tin_ok",[])),
-                             "TIN Fail": 0,
-                             "TIN N/A":  0},
-        }
-        _mx_rows = []
-        for _rs, _cols in _mx_data.items():
-            _mx_rows.append({"Registry Status": _rs, **_cols})
-        _mx_df = pd.DataFrame(_mx_rows)
-        _cross_cols_show = ["Registry Status","TIN Pass","TIN Fail","TIN N/A"]
-        _mx_df = _mx_df[[c for c in _cross_cols_show if c in _mx_df.columns]]
-        st.dataframe(_mx_df, use_container_width=True, hide_index=True,
-                     column_config={"Registry Status": st.column_config.TextColumn(width="medium"),
-                                    "TIN Pass": st.column_config.NumberColumn(help="Businesses with this registry state + TIN Pass"),
-                                    "TIN Fail": st.column_config.NumberColumn(help="Businesses with this registry state + TIN Fail")})
+        _sos_act   = _s("sos_active")
+        _sos_bool  = _s("sos_match_boolean")
+        _tin_bool  = _s("tin_match")
+        # Derive registry state
+        def _reg_state(row_idx):
+            s_bool = _sos_bool.iloc[row_idx]
+            s_act  = _sos_act.iloc[row_idx]
+            if s_bool == "true" and s_act == "true":   return "Active"
+            if s_bool == "true" and s_act == "false":  return "Inactive"
+            if s_bool == "false":                       return "No Registry (false)"
+            return "Unknown/Null"
+        def _tin_state(row_idx):
+            t = _tin_bool.iloc[row_idx]
+            if t == "true":  return "TIN Pass"
+            if t == "false": return "TIN Fail"
+            return "Not Checked"
+        _cross_rows = [{"Registry State": _reg_state(i), "TIN State": _tin_state(i)}
+                       for i in range(len(_sdf))]
+        _cross_df = pd.DataFrame(_cross_rows)
+        if not _cross_df.empty:
+            _ct = _cross_df.groupby(["Registry State","TIN State"]).size().reset_index(name="Businesses")
+            _ct_pivot = _ct.pivot(index="Registry State", columns="TIN State", values="Businesses").fillna(0).astype(int)
+            _xc1, _xc2 = st.columns([1.5, 1])
+            with _xc1:
+                fig_cross_heat = px.imshow(
+                    _ct_pivot.values,
+                    x=list(_ct_pivot.columns), y=list(_ct_pivot.index),
+                    color_continuous_scale=["#0f172a","#1e3a5f","#22c55e"],
+                    text_auto=True, aspect="auto",
+                    title="Registry State × TIN State (all businesses)"
+                )
+                fig_cross_heat.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_cross_heat), use_container_width=True)
+            with _xc2:
+                fig_cross_bar = px.bar(
+                    _ct, x="TIN State", y="Businesses", color="Registry State",
+                    barmode="group",
+                    color_discrete_map={"Active":"#22c55e","Inactive":"#ef4444",
+                                        "No Registry (false)":"#f97316","Unknown/Null":"#64748b"},
+                    title="Registry × TIN Distribution"
+                )
+                fig_cross_bar.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_cross_bar), use_container_width=True)
 
-    for _akey in ["g4_sos_ok_tin_fail","g4_sos_inactive_tin_ok","g4_no_sos_tin_ok"]:
+    for _akey in _G4_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
         _seg[_akey] = _bids
-        _SEG_CALC[_akey] = (
-            f"**{_m['title']}**\n\n{_m['desc']}\n\n"
-            f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
-        )
+        _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _CROSS_COLS, meta=_m)
 
     if _cross_total == 0:
@@ -6953,29 +7077,62 @@ ORDER BY avg_impact_pts ASC;"""
                "NAICS=561499 is the hardcoded NAICS_OF_LAST_RESORT (aiNaicsEnrichment.ts:63).")
 
     _NAICS_AN_COLS = ["naics_code","sos_match_boolean","sos_active","tin_match","formation_state","revenue","watchlist_hits"]
-    for _akey in ["g5_naics_fallback","g5_naics_fb_sos_found"]:
+    _G5_KEYS = ["g5_naics_fallback","g5_naics_fb_sos_found"]
+
+    # NAICS distribution chart
+    if not _sdf.empty and "naics_code" in _sdf.columns:
+        _naics_col = _s("naics_code")
+        _n_fallback = int((_naics_col == "561499").sum())
+        _n_missing  = int(_naics_col.isin(["","none","nan"]).sum())
+        _n_real     = len(_sdf) - _n_fallback - _n_missing
+        _naics_dist = pd.DataFrame({
+            "NAICS Status": ["Real NAICS Code","Fallback 561499","Missing"],
+            "Count": [_n_real, _n_fallback, _n_missing],
+        })
+        _naics_dist = _naics_dist[_naics_dist["Count"]>0]
+        if not _naics_dist.empty:
+            _nc1, _nc2 = st.columns([1, 1])
+            with _nc1:
+                fig_naics_pie = px.pie(_naics_dist, names="NAICS Status", values="Count", hole=0.5,
+                                       title="NAICS Classification Coverage",
+                                       color="NAICS Status",
+                                       color_discrete_map={"Real NAICS Code":"#22c55e",
+                                                           "Fallback 561499":"#ef4444",
+                                                           "Missing":"#64748b"})
+                fig_naics_pie.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_naics_pie), use_container_width=True)
+            with _nc2:
+                # NAICS gap type breakdown
+                _g2_n = len(_an.get("g5_naics_fb_sos_found",[]))
+                _g_all = len(_an.get("g5_naics_fallback",[]))
+                _gap_df = pd.DataFrame({
+                    "Gap Type": ["G2: Registry Found\n+ NAICS=561499\n(most fixable)",
+                                 "G1/G3: No Registry\nor No Website"],
+                    "Count": [_g2_n, max(0, _g_all - _g2_n)],
+                })
+                _gap_df = _gap_df[_gap_df["Count"]>0]
+                if not _gap_df.empty:
+                    fig_gap = px.bar(_gap_df, x="Count", y="Gap Type", orientation="h",
+                                     color="Gap Type",
+                                     color_discrete_map={
+                                         "G2: Registry Found\n+ NAICS=561499\n(most fixable)":"#f59e0b",
+                                         "G1/G3: No Registry\nor No Website":"#ef4444"
+                                     },
+                                     text="Count",
+                                     title=f"NAICS Fallback Gap Types ({_g_all:,} total)")
+                    fig_gap.update_traces(textposition="outside")
+                    fig_gap.update_layout(height=260, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
+                    st.plotly_chart(dark_chart(fig_gap), use_container_width=True)
+
+    for _akey in _G5_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
         _seg[_akey] = _bids
-        _SEG_CALC[_akey] = (
-            f"**{_m['title']}**\n\n{_m['desc']}\n\n"
-            f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
-        )
+        _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _NAICS_AN_COLS, meta=_m)
 
-    # NAICS gap type analysis (G1/G2/G3)
-    if _an.get("g5_naics_fallback"):
-        _naics_fb_bids = set(_an["g5_naics_fallback"])
-        # G3: no website (website col not in stats_df — use sos_match as proxy)
-        _g_all = len(_naics_fb_bids)
-        # G2: registered + fallback = most fixable
-        _g2 = len(_an.get("g5_naics_fb_sos_found",[]))
-        st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid #8B5CF6;border-radius:6px;padding:8px 14px;margin:6px 0;font-size:.78rem">
-          <span style="color:#a78bfa;font-weight:700">📊 Classification Gap Analysis ({_g_all:,} with NAICS=561499)</span><br/>
-          <span style="color:#CBD5E1">G2 — Registry Found + 561499 (most fixable, re-run with website URL): <strong>{_g2:,}</strong><br/>
-          G1/G3 — No registry or website: <strong>{_g_all - _g2:,}</strong><br/>
-          Worth Score impact: Company Profile category penalized for all {_g_all:,}. MCC fallback (5614) used.</span>
-        </div>""", unsafe_allow_html=True)
+    if not any(_an.get(k) for k in _G5_KEYS):
+        st.success("✅ No NAICS classification anomalies detected.", icon="✅")
 
     # ════════════════════════════════════════════════════════════════════════
     # 6.6  GROUP 6: RISK SIGNAL COMBINATIONS
@@ -6985,18 +7142,45 @@ ORDER BY avg_impact_pts ASC;"""
     st.caption("Cross-signal risk combinations where two or more adverse signals co-occur — "
                "the severity of each signal amplifies the other.")
 
-    _RISK_AN_COLS = ["sos_match_boolean","sos_active","watchlist_hits","num_bankruptcies","num_judgements","num_liens","adverse_media","tin_match","tin_match_status","naics_code","formation_state"]
-    for _akey in ["g6_watchlist_inactive","g6_watchlist_no_reg","g6_bk_tin_fail","g6_multi_public_records","g6_adverse_no_wl"]:
+    _RISK_AN_COLS = ["sos_match_boolean","sos_active","watchlist_hits","num_bankruptcies",
+                     "num_judgements","num_liens","adverse_media","tin_match","tin_match_status",
+                     "naics_code","formation_state"]
+    _G6_KEYS = ["g6_watchlist_inactive","g6_watchlist_no_reg","g6_bk_tin_fail","g6_multi_public_records","g6_adverse_no_wl"]
+
+    _fig_g6 = _group_summary_chart(_G6_KEYS, "Risk Signal Combinations — Business Count by Rule")
+    if _fig_g6:
+        _rc1, _rc2 = st.columns([2, 1])
+        with _rc1:
+            st.plotly_chart(dark_chart(_fig_g6), use_container_width=True)
+        with _rc2:
+            # Risk signal summary radar-style table
+            if not _sdf.empty:
+                _risk_summary = {
+                    "Watchlist Hits>0": int((_si("watchlist_hits")>0).sum()),
+                    "Bankruptcies>0":   int((_si("num_bankruptcies")>0).sum()),
+                    "Judgements>0":     int((_si("num_judgements")>0).sum()),
+                    "Liens>0":          int((_si("num_liens")>0).sum()),
+                    "Adverse Media>0":  int((_si("adverse_media")>0).sum()),
+                }
+                _risk_df = pd.DataFrame(list(_risk_summary.items()), columns=["Signal","Businesses"])
+                _risk_df = _risk_df[_risk_df["Businesses"]>0]
+                if not _risk_df.empty:
+                    fig_risk_bar = px.bar(_risk_df, x="Businesses", y="Signal", orientation="h",
+                                          color="Signal",
+                                          color_discrete_sequence=["#ef4444","#f97316","#f59e0b","#f59e0b","#3B82F6"],
+                                          text="Businesses", title="Risk Signals Present")
+                    fig_risk_bar.update_traces(textposition="outside")
+                    fig_risk_bar.update_layout(height=240, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
+                    st.plotly_chart(dark_chart(fig_risk_bar), use_container_width=True)
+
+    for _akey in _G6_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
         _seg[_akey] = _bids
-        _SEG_CALC[_akey] = (
-            f"**{_m['title']}**\n\n{_m['desc']}\n\n"
-            f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
-        )
+        _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _RISK_AN_COLS, meta=_m)
 
-    if not any(_an.get(k) for k in ["g6_watchlist_inactive","g6_watchlist_no_reg","g6_bk_tin_fail","g6_multi_public_records"]):
+    if not any(_an.get(k) for k in _G6_KEYS):
         st.success("✅ No high-severity risk signal combinations detected.", icon="✅")
 
     # ════════════════════════════════════════════════════════════════════════
@@ -7007,15 +7191,61 @@ ORDER BY avg_impact_pts ASC;"""
     st.caption("Where the ML model decision (APPROVE/DECLINE) is inconsistent with the KYB signal picture. "
                "The score is not wrong — but these businesses need an additional human review layer.")
 
-    _WS_AN_COLS = ["sos_match_boolean","sos_active","tin_match","tin_match_status","naics_code","watchlist_hits","num_bankruptcies","revenue","formation_state"]
-    for _akey in ["g7_approve_sos_inactive","g7_decline_kyb_clean","g7_not_scored"]:
+    _WS_AN_COLS = ["sos_match_boolean","sos_active","tin_match","tin_match_status",
+                   "naics_code","watchlist_hits","num_bankruptcies","revenue","formation_state"]
+    _G7_KEYS = ["g7_approve_sos_inactive","g7_decline_kyb_clean","g7_not_scored"]
+
+    # Score vs KYB purity chart
+    if _home_ws is not None and not _home_ws.empty and not _sdf.empty:
+        _ws_dec = _home_ws_clean[["business_id","score_decision","weighted_score_850"]].copy() if not _home_ws_clean.empty else pd.DataFrame()
+        if not _ws_dec.empty:
+            _scored_bids_set = set(_ws_dec["business_id"].tolist())
+            # KYB purity per business
+            def _kyb_purity(bid):
+                _r = _sdf[_sdf["business_id"]==bid]
+                if _r.empty: return "Unknown"
+                _sos = str(_r["sos_active"].iloc[0] if "sos_active" in _r.columns else "").lower()
+                _tin = str(_r["tin_match"].iloc[0] if "tin_match" in _r.columns else "").lower()
+                _wl  = pd.to_numeric(_r["watchlist_hits"].iloc[0] if "watchlist_hits" in _r.columns else 0, errors="coerce") or 0
+                _bk  = pd.to_numeric(_r["num_bankruptcies"].iloc[0] if "num_bankruptcies" in _r.columns else 0, errors="coerce") or 0
+                if _wl > 0 or _bk > 0: return "KYB Critical"
+                if _sos=="false" or _tin=="false": return "KYB Issues"
+                if _sos=="true" and _tin=="true": return "KYB Clean"
+                return "KYB Partial"
+            _ws_dec["KYB Purity"] = _ws_dec["business_id"].map(_kyb_purity)
+            _ws_purity_ct = _ws_dec.groupby(["score_decision","KYB Purity"]).size().reset_index(name="Businesses")
+            _wsc1, _wsc2 = st.columns([1.5, 1])
+            with _wsc1:
+                fig_ws_purity = px.bar(
+                    _ws_purity_ct, x="score_decision", y="Businesses",
+                    color="KYB Purity", barmode="stack",
+                    color_discrete_map={"KYB Clean":"#22c55e","KYB Partial":"#f59e0b",
+                                        "KYB Issues":"#f97316","KYB Critical":"#ef4444","Unknown":"#64748b"},
+                    title="Score Decision × KYB Purity",
+                    category_orders={"score_decision":["APPROVE","FURTHER_REVIEW_NEEDED","DECLINE"]},
+                )
+                fig_ws_purity.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_ws_purity), use_container_width=True)
+            with _wsc2:
+                # Score distribution for APPROVE + KYB Critical
+                _crit_approve = _ws_dec[(_ws_dec["score_decision"]=="APPROVE") & (_ws_dec["KYB Purity"]=="KYB Critical")]
+                if not _crit_approve.empty:
+                    st.markdown(f"""<div style="background:#1E293B;border-left:4px solid #ef4444;border-radius:8px;padding:10px 14px;margin:4px 0">
+                      <div style="color:#ef4444;font-weight:700;font-size:.84rem">🔴 CRITICAL: {len(_crit_approve):,} APPROVE + KYB Critical</div>
+                      <div style="color:#CBD5E1;font-size:.76rem;margin-top:4px">These businesses scored APPROVE (≥700) but have watchlist hits or bankruptcies. Compliance review required regardless of score.</div>
+                    </div>""", unsafe_allow_html=True)
+                _decline_clean = _ws_dec[(_ws_dec["score_decision"]=="DECLINE") & (_ws_dec["KYB Purity"]=="KYB Clean")]
+                if not _decline_clean.empty:
+                    st.markdown(f"""<div style="background:#1E293B;border-left:4px solid #f97316;border-radius:8px;padding:10px 14px;margin:4px 0">
+                      <div style="color:#f97316;font-weight:700;font-size:.84rem">🟠 {len(_decline_clean):,} DECLINE + KYB Clean</div>
+                      <div style="color:#CBD5E1;font-size:.76rem;margin-top:4px">Score declined but all KYB checks pass. Decline is driven by missing financial data (no Plaid). Manual review candidate.</div>
+                    </div>""", unsafe_allow_html=True)
+
+    for _akey in _G7_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
         _seg[_akey] = _bids
-        _SEG_CALC[_akey] = (
-            f"**{_m['title']}**\n\n{_m['desc']}\n\n"
-            f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
-        )
+        _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _WS_AN_COLS, meta=_m)
 
     # ════════════════════════════════════════════════════════════════════════
