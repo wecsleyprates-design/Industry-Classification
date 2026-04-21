@@ -3292,39 +3292,65 @@ with st.container():
         st.selectbox("Date Range", list(DATE_RANGE_OPTIONS.keys()),
                      format_func=lambda k: DATE_RANGE_OPTIONS[k],
                      key="fbar_date_range", label_visibility="visible")
+
+    # ── Load customer data once — shared by both Customer ID and Customer Name dropdowns ──
+    with st.spinner(""):
+        cust_df, cust_err = load_customer_names(hub_date_from, hub_date_to)
+
+    # Build lookup maps: label → id (for Name dropdown) and id_label → id (for ID dropdown)
+    _cust_name_opts = ["All Customers"]   # display labels for Customer Name dropdown
+    _cust_id_opts   = ["All"]             # display labels for Customer ID dropdown
+    _name_to_id_map = {"All Customers": None}
+    _id_label_to_id = {"All": None}
+    _id_to_name_map = {}                  # customer_id → customer_name (for cross-sync display)
+
+    if cust_df is not None and not cust_df.empty and "customer_name" in cust_df.columns:
+        _has_cnt = "business_count" in cust_df.columns
+        _sorted  = cust_df.sort_values("business_count", ascending=False) if _has_cnt else cust_df
+        for _, _cr in _sorted.iterrows():
+            _nm  = str(_cr.get("customer_name","")).strip()
+            _cid = str(_cr.get("customer_id","")).strip()
+            if not _nm or not _cid:
+                continue
+            # Customer Name dropdown label
+            _name_lbl = f"{_nm} ({int(_cr['business_count']):,} biz)" if _has_cnt else _nm
+            _cust_name_opts.append(_name_lbl)
+            _name_to_id_map[_name_lbl] = _cid
+            # Customer ID dropdown label — show truncated ID + name hint
+            _id_lbl = f"{_cid[:18]}… ({_nm})" if len(_cid) > 18 else f"{_cid} ({_nm})"
+            _cust_id_opts.append(_id_lbl)
+            _id_label_to_id[_id_lbl] = _cid
+            _id_to_name_map[_cid] = _nm
+
     with _fb2:
-        # Customer ID — free-text filter; cleared when Customer Name changes
-        st.text_input("Customer ID",
-                      key="hub_customer_id_input",
-                      placeholder="Paste customer UUID…",
-                      help="Filter by the exact customer UUID from rds_auth_public.data_customers.id · "
-                           "Leave blank to use Customer Name filter below")
-        # Resolve: if Customer ID is typed, it overrides Customer Name selection
-        _raw_cust_id = str(st.session_state.get("hub_customer_id_input","")).strip()
+        # Customer ID dropdown — scoped to the same date window as Customer Name
+        selected_cid_lbl = st.selectbox(
+            "Customer ID", _cust_id_opts, key="hub_customer_id_sel",
+            label_visibility="visible",
+            help="Select by customer UUID (scoped to date range). "
+                 "Source: rds_auth_public.data_customers.id · "
+                 "Selecting here also updates Customer Name automatically."
+        )
+        _resolved_cust_id_from_id_drop = _id_label_to_id.get(selected_cid_lbl)
+
     with _fb3:
-        # Customer Name dropdown — scoped to the active date window
-        with st.spinner(""):
-            cust_df, cust_err = load_customer_names(hub_date_from, hub_date_to)
-        cust_opts   = ["All Customers"]
-        cust_id_map = {"All Customers": None}
-        if cust_df is not None and not cust_df.empty and "customer_name" in cust_df.columns:
-            _has_cnt = "business_count" in cust_df.columns
-            for _, _cr in cust_df.sort_values("business_count", ascending=False).iterrows():
-                _nm = str(_cr.get("customer_name","")).strip()
-                if _nm:
-                    _lbl = f"{_nm} ({int(_cr['business_count']):,} biz)" if _has_cnt else _nm
-                    cust_opts.append(_lbl)
-                    cust_id_map[_lbl] = _cr["customer_id"]
-        selected_cust = st.selectbox("Customer Name", cust_opts, key="hub_customer",
-                                     label_visibility="visible",
-                                     help="Filter Home dashboard to this customer's businesses. "
-                                          "Customer ID input above takes precedence when filled.")
-        # Customer ID input overrides the Name dropdown when provided
-        if _raw_cust_id:
-            hub_customer_id = _raw_cust_id
-            selected_cust   = _raw_cust_id          # use the raw ID as the display label too
-        else:
-            hub_customer_id = cust_id_map.get(selected_cust)
+        # Customer Name dropdown — scoped to the same date window
+        selected_cust = st.selectbox(
+            "Customer Name", _cust_name_opts, key="hub_customer",
+            label_visibility="visible",
+            help="Select by customer name (scoped to date range). "
+                 "Customer ID dropdown takes precedence when a specific ID is selected."
+        )
+        _resolved_cust_id_from_name_drop = _name_to_id_map.get(selected_cust)
+
+    # Precedence: Customer ID dropdown wins over Customer Name when a specific ID is chosen
+    if _resolved_cust_id_from_id_drop is not None:
+        hub_customer_id = _resolved_cust_id_from_id_drop
+        # Show the name that corresponds to the chosen ID in the summary line
+        selected_cust   = _id_to_name_map.get(hub_customer_id, hub_customer_id)
+    else:
+        hub_customer_id = _resolved_cust_id_from_name_drop
+
     with _fb4:
         # Apply any pending bid from the Home tab "Investigate →" button
         if st.session_state.get("_pending_bid"):
@@ -3366,12 +3392,11 @@ tab = st.radio("nav", ALL_TABS, horizontal=True, key="tab_nav",
 
 # Thin active-filter summary line
 _dr_label  = DATE_RANGE_OPTIONS.get(st.session_state.get("fbar_date_range","last_30d"),"Last 30 days")
-_cust_id_shown = str(st.session_state.get("hub_customer_id_input","")).strip()
-_cust_name_lbl = selected_cust if selected_cust != "All Customers" else "All customers"
-_cust_lbl = (f"ID `{_cust_id_shown[:20]}…`" if len(_cust_id_shown)>20 else f"ID `{_cust_id_shown}`") if _cust_id_shown else _cust_name_lbl
+_cust_name_lbl = selected_cust if selected_cust not in ("All Customers", "All") else "All customers"
+_cust_id_lbl   = f" · ID `{hub_customer_id[:16]}…`" if hub_customer_id and len(hub_customer_id)>16 else (f" · ID `{hub_customer_id}`" if hub_customer_id else "")
 _bid_shown = str(st.session_state.get("hub_bid","")).strip()
 _bid_lbl   = f" · Business: `{_bid_shown[:28]}…`" if len(_bid_shown)>28 else (f" · Business: `{_bid_shown}`" if _bid_shown else "")
-st.caption(f"📅 **{_dr_label}** · 👤 {_cust_lbl}{_bid_lbl}")
+st.caption(f"📅 **{_dr_label}** · 👤 {_cust_name_lbl}{_cust_id_lbl}{_bid_lbl}")
 st.markdown("<hr class='thin-sep'/>", unsafe_allow_html=True)
 _search_q = ""  # search bar removed from filter bar
 
