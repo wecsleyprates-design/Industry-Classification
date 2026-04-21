@@ -3529,12 +3529,16 @@ if tab=="🏠 Home":
     def _load_kyb_funnel_for_bids(bid_tuple):
         """Load granular SOS and TIN facts needed for funnel analysis.
         Returns one row per business with:
-          - tin_submitted, tin_match_status (from tin_match.value.status)
+          - tin_submitted, tin_status (from tin_match.value.status), tin_match_boolean
           - sos_match_boolean, sos_active, formation_state, operating_state
-          - idv_last4_ssn: last 4 of SSN from Plaid IDV identity_verification.meta
-            (used for the Possible Sole Prop detection: tin_submitted[-4] == idv_last4_ssn)
-            Source: integration-service/lib/facts/kyb/index.ts:606
-              type === IDNumberType.UsSsnLast4 && value === tin.slice(-4) → is_sole_prop=true
+          - middesk_confidence
+
+        NOTE: idv_last4_ssn (Plaid IDV SSN last-4) is loaded separately in
+        _load_sole_prop_signal() using JSON_EXTRACT_PATH_TEXT (Redshift-safe).
+        The identity_verification.meta join is NOT done here because Redshift
+        does NOT support the PostgreSQL ::json-> operator — that caused this
+        entire query to fail and return an empty DataFrame, making all Section 1
+        counts 0 and all drilldown tables empty.
         """
         if not bid_tuple:
             return None, "No business IDs"
@@ -3557,20 +3561,36 @@ if tab=="🏠 Home":
                 MAX(CASE WHEN f.name='primary_address'
                     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','state') END)       AS operating_state,
                 MAX(CASE WHEN f.name='middesk_confidence'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS middesk_confidence,
-                -- Plaid IDV SSN last-4: from integration_data.identity_verification.meta
-                -- index.ts:606: type===UsSsnLast4 && value===tin.slice(-4) → is_sole_prop=true
-                -- meta->>'user'->>'id_number'->>'value' where type='us_ssn_last_4'
-                MAX(CASE WHEN iv.meta IS NOT NULL
-                    THEN iv.meta::json->'user'->'id_number'->>'value' END)          AS idv_last4_ssn
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS middesk_confidence
             FROM rds_warehouse_public.facts f
-            LEFT JOIN rds_integration_data.identity_verification iv
-                ON iv.business_id = f.business_id
             WHERE f.business_id IN ({bid_list})
               AND f.name IN ('tin_submitted','tin_match','tin_match_boolean',
                              'sos_match_boolean','sos_active','formation_state',
                              'primary_address','middesk_confidence')
             GROUP BY f.business_id
+        """)
+
+    @st.cache_data(ttl=600, show_spinner=False)
+    def _load_sole_prop_signal(bid_tuple):
+        """Load Plaid IDV SSN last-4 for Possible Sole Prop detection.
+        Source: integration-service/lib/facts/kyb/index.ts:606
+          type === IDNumberType.UsSsnLast4 && value === tin.slice(-4) → is_sole_prop=true
+
+        Uses JSON_EXTRACT_PATH_TEXT (Redshift-compatible) on the
+        rds_integration_data.identity_verification table (federated from PostgreSQL RDS).
+        Returns: business_id, idv_last4_ssn (the SSN last-4 from Plaid IDV meta)
+        """
+        if not bid_tuple:
+            return None, "No business IDs"
+        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
+        return run_sql(f"""
+            SELECT
+                business_id,
+                MAX(JSON_EXTRACT_PATH_TEXT(meta, 'user', 'id_number', 'value')) AS idv_last4_ssn
+            FROM rds_integration_data.identity_verification
+            WHERE business_id IN ({bid_list})
+              AND JSON_EXTRACT_PATH_TEXT(meta, 'user', 'id_number', 'type') = 'us_ssn_last_4'
+            GROUP BY business_id
         """)
 
     # ── Load enriched KYB stats using the same authoritative business ID list ──
@@ -3653,6 +3673,20 @@ if tab=="🏠 Home":
 
     with st.spinner("Loading SOS/TIN funnel data…"):
         funnel_df, funnel_err = _load_kyb_funnel_for_bids(tuple(_authoritative_bids))
+
+    # Load Plaid IDV SSN last-4 separately (Redshift-safe — no ::json-> operator)
+    # Used only for Possible Sole Prop detection (index.ts:606 comparison)
+    with st.spinner(""):
+        _sole_prop_df, _sole_prop_err = _load_sole_prop_signal(tuple(_authoritative_bids))
+    # Merge idv_last4_ssn into funnel_df so the sole-prop mask can use it
+    if funnel_df is not None and not funnel_df.empty:
+        if _sole_prop_df is not None and not _sole_prop_df.empty and "idv_last4_ssn" in _sole_prop_df.columns:
+            funnel_df = funnel_df.merge(
+                _sole_prop_df[["business_id","idv_last4_ssn"]],
+                on="business_id", how="left"
+            )
+        else:
+            funnel_df["idv_last4_ssn"] = None
 
     # Build per-business flag map from the pivoted stats_df (faster than flag_df loop)
     biz_flags = {}
