@@ -3566,32 +3566,72 @@ if tab=="🏠 Home":
     # ── Load enriched KYB stats using the same authoritative business ID list ──
     @st.cache_data(ttl=600, show_spinner=False)
     def _load_stats_for_bids(bid_tuple):
-        """Load KYB stats for a specific list of business IDs."""
+        """Load KYB stats for a specific list of business IDs.
+
+        Includes all columns shown in drilldown tables:
+          - Facts API registry signals: sos_match_boolean, sos_match_status, sos_active
+          - clients.verification_results flags: sos_match_verif, sos_domestic_verif, sos_active_verif
+          - TIN signals: tin_submitted, tin_match_status, tin_match (boolean)
+          - IDV, NAICS, risk, firmographic columns
+        """
         if not bid_tuple:
             return None, "No business IDs"
         bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
         return run_sql(f"""
             SELECT
                 f.business_id,
-                MAX(CASE WHEN f.name='sos_active'          THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_active,
-                MAX(CASE WHEN f.name='tin_match_boolean'   THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS tin_match,
-                MAX(CASE WHEN f.name='idv_passed_boolean'  THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS idv_passed,
-                MAX(CASE WHEN f.name='naics_code'          THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS naics_code,
-                MAX(CASE WHEN f.name='watchlist_hits'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS watchlist_hits,
-                MAX(CASE WHEN f.name='num_bankruptcies'    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_bankruptcies,
-                MAX(CASE WHEN f.name='num_judgements'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_judgements,
-                MAX(CASE WHEN f.name='num_liens'           THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS num_liens,
-                MAX(CASE WHEN f.name='adverse_media_hits'  THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS adverse_media,
-                MAX(CASE WHEN f.name='revenue'             THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS revenue,
-                MAX(CASE WHEN f.name='formation_date'      THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_date,
-                MAX(CASE WHEN f.name='formation_state'     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_state,
+                -- Registry / SOS — Facts API (integration-service/lib/facts/kyb/index.ts)
+                MAX(CASE WHEN f.name='sos_match_boolean'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_match_boolean,
+                MAX(CASE WHEN f.name='sos_match'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS sos_match_status,
+                MAX(CASE WHEN f.name='sos_active'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_active,
+                MAX(CASE WHEN f.name='formation_state'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_state,
+                MAX(CASE WHEN f.name='formation_date'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_date,
+                -- Registry flags — clients.verification_results (verification_results.sql)
+                MAX(vr.sos_match_verification)                                      AS sos_match_verif,
+                MAX(vr.sos_domestic_verification)                                   AS sos_domestic_verif,
+                MAX(vr.sos_active_verification)                                     AS sos_active_verif,
+                -- TIN / EIN (index.ts lines 399-491)
+                MAX(CASE WHEN f.name='tin_submitted'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_submitted,
+                MAX(CASE WHEN f.name='tin_match'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS tin_match_status,
+                MAX(CASE WHEN f.name='tin_match_boolean'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_match,
+                -- IDV
+                MAX(CASE WHEN f.name='idv_passed_boolean'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS idv_passed,
+                -- Classification
+                MAX(CASE WHEN f.name='naics_code'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS naics_code,
+                -- Risk
+                MAX(CASE WHEN f.name='watchlist_hits'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS watchlist_hits,
+                MAX(CASE WHEN f.name='num_bankruptcies'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_bankruptcies,
+                MAX(CASE WHEN f.name='num_judgements'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_judgements,
+                MAX(CASE WHEN f.name='num_liens'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_liens,
+                MAX(CASE WHEN f.name='adverse_media_hits'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS adverse_media,
+                -- Firmographic
+                MAX(CASE WHEN f.name='revenue'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS revenue,
                 MAX(f.received_at) AS last_seen,
                 MIN(f.received_at) AS first_seen,
                 COUNT(DISTINCT f.name) AS fact_count
             FROM rds_warehouse_public.facts f
+            LEFT JOIN clients.verification_results vr ON vr.business_id = f.business_id
             WHERE f.business_id IN ({bid_list})
               AND f.name IN (
-                  'sos_active','tin_match_boolean','idv_passed_boolean','naics_code',
+                  'sos_match_boolean','sos_match','sos_active',
+                  'tin_submitted','tin_match','tin_match_boolean',
+                  'idv_passed_boolean','naics_code',
                   'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
                   'adverse_media_hits','revenue','formation_date','formation_state'
               )
