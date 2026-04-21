@@ -4949,29 +4949,49 @@ if tab=="🏠 Home":
                                _bid_csv, f"{seg_key}_business_ids.csv", "text/csv",
                                key=f"dl_{seg_key}")
 
-    # ── KPI Row 1 — 5 cards with new definitions ──────────────────────────────
-    # KPI 1: No Registry Found    = sos_match_boolean = 'false' (strict)
-    # KPI 2: Possible Sole Prop   = subset of KPI1 where tin[-4] == idv_ssn_last4
-    # KPI 3: No Domestic Reg Found = sos_match_boolean != 'false' but no domestic reg
-    # KPI 4: No State Match        = sos_match_boolean != 'false' but not in submitted state
+    # ── KPI Row 1 — original positive counts (Registry Found, Domestic Reg Found, State Match) ──
     k1,k2,k3,k4,k5 = st.columns(5)
     with k1: kpi("📋 Onboarded", f"{total_biz:,}", period_label, "#3B82F6")
     with k2: kpi(
         "❌ No Registry Found", f"{_sos_not_found:,}",
-        rate(_sos_not_found,total_biz)+" · sos_match_boolean=false (strict)",
+        rate(_sos_not_found,total_biz)+" · sos_match_boolean=false",
         "#ef4444" if _sos_not_found>0 else "#22c55e"
     )
     with k3: kpi(
-        "🧍 Possible Sole Prop", f"{_possible_sole_prop:,}",
-        f"of {_sos_not_found:,} no-reg · TIN[-4]=SSN[-4]",
-        "#8B5CF6" if _possible_sole_prop>0 else "#64748b"
+        "🏛️ Registry Found", f"{_sos_found:,}",
+        rate(_sos_found,total_biz)+" · sos_match_boolean=true",
+        "#22c55e" if _sos_found/max(total_biz,1)>0.8 else "#f59e0b"
     )
     with k4: kpi(
-        "🏠 No Domestic Reg", f"{_no_domestic_found:,}",
-        rate(_no_domestic_found,total_biz)+" · not-false, no domestic",
-        "#f59e0b" if _no_domestic_found>0 else "#22c55e"
+        "🏠 Domestic Reg Found", f"{_domestic_sos_found:,}",
+        rate(_domestic_sos_found,total_biz)+" · sos_domestic_verification=1",
+        "#22c55e" if _domestic_sos_found/max(total_biz,1)>0.7 else "#f59e0b"
     )
     with k5: kpi(
+        "📍 State Match", f"{_state_match:,}",
+        rate(_state_match,total_biz)+" · formation_state=primary_address.state",
+        "#22c55e" if _state_match/max(total_biz,1)>0.6 else "#f59e0b"
+    )
+
+    # ── KPI Row 2 — gap/negative analysis cards (new requested metrics) ────────
+    # 1: No Registry Found strictly false · 2: Possible Sole Prop · 3: No Domestic · 4: No State Match
+    _g1,_g2,_g3,_g4 = st.columns(4)
+    with _g1: kpi(
+        "❌ No Registry (strict=false)", f"{_sos_not_found:,}",
+        "sos_match_boolean='false' only (vendor returned failure)",
+        "#ef4444" if _sos_not_found>0 else "#22c55e"
+    )
+    with _g2: kpi(
+        "🧍 Possible Sole Prop", f"{_possible_sole_prop:,}",
+        f"of {_sos_not_found:,} no-reg · TIN[-4]=SSN[-4] (index.ts:606)",
+        "#8B5CF6" if _possible_sole_prop>0 else "#64748b"
+    )
+    with _g3: kpi(
+        "🏠 No Domestic Reg Found", f"{_no_domestic_found:,}",
+        rate(_no_domestic_found,total_biz)+" · not-false but no domestic reg",
+        "#f59e0b" if _no_domestic_found>0 else "#22c55e"
+    )
+    with _g4: kpi(
         "📍 No State Match", f"{_no_state_match:,}",
         rate(_no_state_match,total_biz)+" · not-false, formation≠operating",
         "#f59e0b" if _no_state_match>0 else "#22c55e"
@@ -6322,8 +6342,8 @@ ORDER BY avg_impact_pts ASC;"""
     _SEV_ICON  = {"CRITICAL":"🔴","HIGH":"🟠","MEDIUM":"🟡","LOW":"🟢","NOTICE":"🔵"}
     _SEV_PTS   = {"CRITICAL":4,"HIGH":3,"MEDIUM":2,"LOW":1,"NOTICE":1}
 
-    def _anomaly_card(title, count, total, severity, short_desc, seg_key, cols_for_table=None):
-        """Render one anomaly finding: severity badge + KPI + drilldown."""
+    def _anomaly_card(title, count, total, severity, short_desc, seg_key, cols_for_table=None, meta=None):
+        """Render one anomaly finding: severity badge + business ID drilldown + detail_panel."""
         if count == 0:
             return
         sc = _SEV_COLOR.get(severity,"#64748b")
@@ -6340,8 +6360,59 @@ ORDER BY avg_impact_pts ASC;"""
           </div>
           <div style="color:#94A3B8;font-size:.76rem;margin-top:4px;padding-left:30px">{short_desc}</div>
         </div>""", unsafe_allow_html=True)
+        # Business ID drilldown table (same format as Sections 1-5)
         if seg_key and cols_for_table:
             _drilldown_table(seg_key, f"{si} {title} — {count:,} businesses", cols_for_table)
+        # detail_panel with full explanation, source SQL, and action
+        if meta:
+            _action  = meta.get("action","")
+            _source  = meta.get("source","")
+            _diag_sql = (
+                f"-- Diagnostic: {title}\n"
+                f"-- Returns: businesses with this anomaly and their key signals\n"
+                f"SELECT s.business_id,\n"
+                f"       JSON_EXTRACT_PATH_TEXT(f_sos.value,'value')  AS sos_match_boolean,\n"
+                f"       JSON_EXTRACT_PATH_TEXT(f_act.value,'value')  AS sos_active,\n"
+                f"       JSON_EXTRACT_PATH_TEXT(f_tin.value,'value')  AS tin_match_boolean,\n"
+                f"       JSON_EXTRACT_PATH_TEXT(f_tin_s.value,'value','status') AS tin_match_status,\n"
+                f"       vr.sos_match_verification, vr.sos_domestic_verification\n"
+                f"FROM rds_manual_score_public.data_current_scores s\n"
+                f"LEFT JOIN rds_warehouse_public.facts f_sos\n"
+                f"  ON f_sos.business_id = s.business_id AND f_sos.name='sos_match_boolean'\n"
+                f"LEFT JOIN rds_warehouse_public.facts f_act\n"
+                f"  ON f_act.business_id = s.business_id AND f_act.name='sos_active'\n"
+                f"LEFT JOIN rds_warehouse_public.facts f_tin\n"
+                f"  ON f_tin.business_id = s.business_id AND f_tin.name='tin_match_boolean'\n"
+                f"LEFT JOIN rds_warehouse_public.facts f_tin_s\n"
+                f"  ON f_tin_s.business_id = s.business_id AND f_tin_s.name='tin_match'\n"
+                f"LEFT JOIN clients.verification_results vr ON vr.business_id = s.business_id\n"
+                f"WHERE s.business_id IN ({','.join(repr(b) for b in (_an.get(seg_key,[])[:10]))});"
+                if seg_key and _an.get(seg_key) else ""
+            )
+            detail_panel(
+                f"{si} {severity}: {title}",
+                f"{count:,} businesses ({pct}) — {severity}",
+                what_it_means=(
+                    f"{short_desc}\n\n"
+                    f"**Why this matters for KYB underwriting:**\n{meta.get('desc','')}\n\n"
+                    f"**Recommended action:** {_action}\n\n"
+                    f"**Severity:** {severity} (check_agent_v2 severity scale: "
+                    f"CRITICAL=4pts · HIGH=3pts · MEDIUM=2pts · LOW/NOTICE=1pt)"
+                ),
+                source_table="rds_warehouse_public.facts · stats_df (_load_stats_for_bids) · funnel_df",
+                source_file=_source,
+                json_obj={
+                    "anomaly_key": seg_key,
+                    "severity": severity,
+                    "count": count,
+                    "pct_of_portfolio": pct,
+                    "business_ids_sample": (_an.get(seg_key,[]))[:5],
+                    "rule_source": _source,
+                    "action": _action,
+                },
+                sql=_diag_sql,
+                icon=si, color=sc
+            )
 
     # ── Pre-compute all anomaly segments from stats_df + funnel_df ──────────
     # All signals already in memory — zero new Redshift calls
@@ -6740,7 +6811,7 @@ ORDER BY avg_impact_pts ASC;"""
             f"**Action:** {_m['action']}\n\n"
             f"**Source:** `{_m['source']}`"
         )
-        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _SOS_AN_COLS)
+        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _SOS_AN_COLS, meta=_m)
 
     if not any(_an.get(k) for k in ["g1_tin_status_bool_mismatch","g1_sos_active_match_false","g1_verif_active_false"]):
         st.success("✅ No data integrity contradictions detected in this portfolio.", icon="✅")
@@ -6761,7 +6832,7 @@ ORDER BY avg_impact_pts ASC;"""
             f"**{_m['title']}**\n\n{_m['desc']}\n\n"
             f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         )
-        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _SOS_AN_COLS)
+        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _SOS_AN_COLS, meta=_m)
 
     if not any(_an.get(k) for k in ["g2_found_but_inactive","g2_domestic_no_submitted","g2_verif_match_false"]):
         st.success("✅ No SOS/registry anomalies detected.", icon="✅")
@@ -6782,7 +6853,7 @@ ORDER BY avg_impact_pts ASC;"""
             f"**{_m['title']}**\n\n{_m['desc']}\n\n"
             f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         )
-        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _TIN_AN_COLS)
+        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _TIN_AN_COLS, meta=_m)
 
     # G1-C (tin status/bool mismatch) is the other TIN anomaly — shown in Group 1
     if _an.get("g1_tin_status_bool_mismatch"):
@@ -6834,7 +6905,7 @@ ORDER BY avg_impact_pts ASC;"""
             f"**{_m['title']}**\n\n{_m['desc']}\n\n"
             f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         )
-        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _CROSS_COLS)
+        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _CROSS_COLS, meta=_m)
 
     if _cross_total == 0:
         st.success("✅ No Registry × TIN contradictions detected.", icon="✅")
@@ -6856,7 +6927,7 @@ ORDER BY avg_impact_pts ASC;"""
             f"**{_m['title']}**\n\n{_m['desc']}\n\n"
             f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         )
-        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _NAICS_AN_COLS)
+        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _NAICS_AN_COLS, meta=_m)
 
     # NAICS gap type analysis (G1/G2/G3)
     if _an.get("g5_naics_fallback"):
@@ -6889,7 +6960,7 @@ ORDER BY avg_impact_pts ASC;"""
             f"**{_m['title']}**\n\n{_m['desc']}\n\n"
             f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         )
-        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _RISK_AN_COLS)
+        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _RISK_AN_COLS, meta=_m)
 
     if not any(_an.get(k) for k in ["g6_watchlist_inactive","g6_watchlist_no_reg","g6_bk_tin_fail","g6_multi_public_records"]):
         st.success("✅ No high-severity risk signal combinations detected.", icon="✅")
@@ -6911,7 +6982,7 @@ ORDER BY avg_impact_pts ASC;"""
             f"**{_m['title']}**\n\n{_m['desc']}\n\n"
             f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         )
-        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _WS_AN_COLS)
+        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _WS_AN_COLS, meta=_m)
 
     # ════════════════════════════════════════════════════════════════════════
     # 6.8  ANOMALY ACCUMULATION TRIAGE
@@ -6954,12 +7025,26 @@ ORDER BY avg_impact_pts ASC;"""
         _top10_disp = _top10[[c for c in _display_cols if c in _top10.columns]].rename(columns=_col_rename)
         st.dataframe(_top10_disp, use_container_width=True, hide_index=True)
 
-        # Investigate buttons for top 10
+        # Investigate buttons — one per business in top 10, label shows truncated UUID
+        st.caption("Click 'Investigate' to set that business ID in the filter bar, then switch to any entity tab to deep-dive.")
         _top10_bids = _top10["business_id"].tolist()
-        _bt_cols = st.columns(min(5, len(_top10_bids)))
-        for _i, _bid_t in enumerate(_top10_bids[:5]):
-            with _bt_cols[_i]:
-                if st.button(f"Investigate", key=f"s6_inv_{_bid_t[:8]}", help=_bid_t):
+        for _i, _bid_t in enumerate(_top10_bids):
+            _score_t = int(_biz_score.get(_bid_t, 0))
+            _flags_t = _biz_flags_s6.get(_bid_t, [])
+            _flag_names = " · ".join(_an_meta.get(k,{}).get("title","")[:25] for k in _flags_t[:3])
+            _bc1, _bc2 = st.columns([4,1])
+            with _bc1:
+                st.markdown(
+                    f"<div style='background:#0f172a;border-left:3px solid #3B82F6;border-radius:5px;"
+                    f"padding:4px 10px;font-size:.75rem;color:#CBD5E1;margin:2px 0'>"
+                    f"<code style='color:#60A5FA'>{_bid_t}</code> — "
+                    f"<span style='color:#f59e0b'>Score {_score_t}pts</span> · "
+                    f"<span style='color:#94A3B8'>{_flag_names}</span></div>",
+                    unsafe_allow_html=True
+                )
+            with _bc2:
+                if st.button(f"🔍 Investigate", key=f"s6_inv_{_bid_t[:12]}_{_i}",
+                             help=f"Set Business ID to {_bid_t} and switch to an entity tab"):
                     st.session_state["_pending_bid"] = _bid_t
                     st.session_state["_bid_just_set"] = _bid_t
                     st.rerun()
