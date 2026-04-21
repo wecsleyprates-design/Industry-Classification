@@ -6306,10 +6306,716 @@ ORDER BY avg_impact_pts ASC;"""
                    "or the rds_manual_score_public schema is not accessible from this Redshift connection.")
 
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 6 — RECENTLY ONBOARDED + TOP 10 AT RISK
+    # SECTION 6 — PORTFOLIO ANOMALY & CONTRADICTION SCANNER
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("### 🕐 Section 6 — Recently Onboarded Businesses")
+    st.markdown("### 🔬 Section 6 — Portfolio Anomaly & Contradiction Scanner")
+    st.caption(
+        "Applies the same deterministic cross-field rules from the Check-Agent (check_agent_v2.py) "
+        "across the ENTIRE portfolio at once — no per-business fact loading, no LLM calls, no new "
+        "Redshift queries. Every rule maps 1:1 to check_agent_v2.DETERMINISTIC_CHECKS, index.ts, "
+        "or verification_results.sql. Zero guessing."
+    )
+
+    # ── Severity helpers ────────────────────────────────────────────────────
+    _SEV_COLOR = {"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b","LOW":"#22c55e","NOTICE":"#3B82F6"}
+    _SEV_ICON  = {"CRITICAL":"🔴","HIGH":"🟠","MEDIUM":"🟡","LOW":"🟢","NOTICE":"🔵"}
+    _SEV_PTS   = {"CRITICAL":4,"HIGH":3,"MEDIUM":2,"LOW":1,"NOTICE":1}
+
+    def _anomaly_card(title, count, total, severity, short_desc, seg_key, cols_for_table=None):
+        """Render one anomaly finding: severity badge + KPI + drilldown."""
+        if count == 0:
+            return
+        sc = _SEV_COLOR.get(severity,"#64748b")
+        si = _SEV_ICON.get(severity,"⚪")
+        pct = f"{count/max(total,1)*100:.1f}%"
+        st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {sc};
+            border-radius:8px;padding:10px 14px;margin:5px 0">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="font-size:1.1rem">{si}</span>
+            <span style="color:{sc};font-weight:700;font-size:.88rem">{severity}</span>
+            <span style="color:#CBD5E1;font-weight:600;font-size:.88rem">{title}</span>
+            <span style="margin-left:auto;color:#60A5FA;font-weight:700;font-size:1rem">{count:,}</span>
+            <span style="color:#94A3B8;font-size:.78rem">({pct} of portfolio)</span>
+          </div>
+          <div style="color:#94A3B8;font-size:.76rem;margin-top:4px;padding-left:30px">{short_desc}</div>
+        </div>""", unsafe_allow_html=True)
+        if seg_key and cols_for_table:
+            _drilldown_table(seg_key, f"{si} {title} — {count:,} businesses", cols_for_table)
+
+    # ── Pre-compute all anomaly segments from stats_df + funnel_df ──────────
+    # All signals already in memory — zero new Redshift calls
+    _an = {}   # anomaly_key → list of business_ids
+    _an_meta = {}  # anomaly_key → {severity, title, desc, source}
+
+    _sdf = stats_df.copy() if stats_df is not None and not stats_df.empty else pd.DataFrame()
+    _fdf = _funnel.copy() if not _funnel.empty else pd.DataFrame()
+
+    def _s(col): return _sdf[col].astype(str).str.lower().str.strip() if col in _sdf.columns else pd.Series([""] * len(_sdf))
+    def _f(col): return _fdf[col].astype(str).str.lower().str.strip() if col in _fdf.columns else pd.Series([""] * len(_fdf))
+    def _si(col): return pd.to_numeric(_sdf.get(col, 0), errors="coerce").fillna(0) if not _sdf.empty else pd.Series([0]*len(_sdf))
+
+    # ── GROUP 1: DATA INTEGRITY CONTRADICTIONS ───────────────────────────────
+    # These are logically impossible states from the same fact-write cycle
+
+    if not _sdf.empty:
+        # G1-A: sos_active=true AND sos_match_boolean=false
+        # index.ts:1426 (sos_active) derives from sos_filings — if sos_match=false, no filings exist
+        _mask = (_s("sos_active")=="true") & (_s("sos_match_boolean")=="false")
+        _an["g1_sos_active_match_false"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g1_sos_active_match_false"] = {
+            "severity":"HIGH","group":"Data Integrity",
+            "title":"SOS Active=True but SOS Match=False",
+            "desc":"sos_active=true (derived from sos_filings[].active) but sos_match_boolean=false "
+                   "(vendor returned 'failure'). Logically impossible from the same fact cycle — "
+                   "sos_active is a DEPENDENT fact that can only be true when sos_filings is non-empty, "
+                   "which requires sos_match='success'. Indicates stale cached filing or pipeline race condition.",
+            "source":"index.ts:1421 (sos_match_boolean) vs 1426-1434 (sos_active DEPENDENT fact)",
+            "action":"Inspect sos_filings directly from PostgreSQL RDS. File bug against integration-service.",
+        }
+
+        # G1-B: sos_match_verif=1 AND sos_active=false
+        # verification_results.sql:42-45 vs index.ts:1434 — temporal mismatch
+        _mask = (pd.to_numeric(_sdf.get("sos_match_verif",pd.Series([0]*len(_sdf))),errors="coerce").fillna(0)==1) & (_s("sos_active")=="false")
+        _an["g1_verif_active_false"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g1_verif_active_false"] = {
+            "severity":"MEDIUM","group":"Data Integrity",
+            "title":"sos_match_verif=1 but SOS Active=False",
+            "desc":"clients.verification_results.sos_match_verification=1 (sublabel='Submitted Active' at verification time) "
+                   "but sos_active='false' in facts (all current filings are inactive). "
+                   "Most likely: entity was active when verified but has since been revoked or dissolved. "
+                   "Not a bug — a legitimate state change — but requires investigation.",
+            "source":"verification_results.sql:42-45 vs index.ts:1434 — computed at different times",
+            "action":"Check dissolution/revocation date vs verification date. If recent, SOS reinstatement may be needed.",
+        }
+
+        # G1-C: tin_match_status=success AND tin_match_boolean=false
+        # index.ts:482-490 contradiction — the dependent fact derivation must produce true if status=success
+        _mask = (_s("tin_match_status")=="success") & (_s("tin_match")=="false")
+        _an["g1_tin_status_bool_mismatch"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g1_tin_status_bool_mismatch"] = {
+            "severity":"CRITICAL","group":"Data Integrity",
+            "title":"tin_match_status=success but tin_match_boolean=false",
+            "desc":"Raw tin_match.value.status='success' but the DEPENDENT fact tin_match_boolean='false'. "
+                   "This is impossible per index.ts:482-490: "
+                   "tin_match_boolean = (value==='success' || value?.status==='success'). "
+                   "If status=success, boolean MUST be true. Count>0 = backend bug in integration-service.",
+            "source":"index.ts:482-490 (tin_match_boolean DEPENDENT fact exact derivation)",
+            "action":"FILE BUG against integration-service lib/facts/kyb/index.ts lines 488-490. Count>0 is a data integrity failure.",
+        }
+
+    # ── GROUP 2: SOS/REGISTRY ANOMALIES ─────────────────────────────────────
+
+    if not _sdf.empty:
+        # G2-A: Registry Found BUT SOS Inactive — worst registry state
+        _mask = (_s("sos_match_boolean")=="true") & (_s("sos_active")=="false")
+        _an["g2_found_but_inactive"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g2_found_but_inactive"] = {
+            "severity":"HIGH","group":"SOS/Registry Anomalies",
+            "title":"Registry Found but SOS Inactive",
+            "desc":"sos_match_boolean=true (vendor found a filing) but sos_active=false (all filings inactive — "
+                   "dissolved, suspended, or revoked). The entity has a registry record but is NOT in good standing. "
+                   "check_agent_v2: sos_inactive_tin_ok analogue.",
+            "source":"index.ts:1421 (sos_match_boolean) and 1426-1434 (sos_active)",
+            "action":"Block approval until SOS good standing is reinstated. Check if entity has filed a revival.",
+        }
+
+        # G2-B: sos_domestic_verif=1 but sos_match_verif=0
+        _dv = pd.to_numeric(_sdf.get("sos_domestic_verif",pd.Series([0]*len(_sdf))),errors="coerce").fillna(0)
+        _mv = pd.to_numeric(_sdf.get("sos_match_verif",pd.Series([0]*len(_sdf))),errors="coerce").fillna(0)
+        _mask = (_dv==1) & (_mv==0)
+        _an["g2_domestic_no_submitted"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g2_domestic_no_submitted"] = {
+            "severity":"MEDIUM","group":"SOS/Registry Anomalies",
+            "title":"sos_domestic_verif=1 but sos_match_verif=0",
+            "desc":"Domestic Active confirmed (key='sos_domestic', sublabel='Domestic Active') but Submitted Active "
+                   "not recorded (key='sos_match', sublabel='Submitted Active'). Logically the domestic active "
+                   "should also produce a submitted active result. Suggests a data quality issue in the "
+                   "verification_results stored procedure or tasks from different verification runs.",
+            "source":"verification_results.sql:36-45 (both derivations in the same stored procedure)",
+            "action":"Query raw business_entity_review_task for both keys. Check if from different verification IDs.",
+        }
+
+        # G2-C: sos_match_verif=1 but sos_match_boolean=false — Redshift says active, Facts API says no match
+        _mask = (_mv==1) & (_s("sos_match_boolean")=="false")
+        _an["g2_verif_match_false"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g2_verif_match_false"] = {
+            "severity":"MEDIUM","group":"SOS/Registry Anomalies",
+            "title":"sos_match_verif=1 but sos_match_boolean=false",
+            "desc":"clients.verification_results says Submitted Active (sos_match_verif=1) but the Facts API "
+                   "sos_match_boolean=false. These are computed from different data sources at different times. "
+                   "Indicates data freshness gap — verification_results may be stale vs the current fact write.",
+            "source":"verification_results.sql:42-45 vs index.ts:1421",
+            "action":"Check dates of last verification vs last fact write. Re-run Middesk verification if stale.",
+        }
+
+    # ── GROUP 3: TIN/EIN ANOMALIES ───────────────────────────────────────────
+
+    if not _sdf.empty:
+        # G3-A: TIN Submitted but no TIN result at all (EIN given, IRS check never ran)
+        _tin_sub = _sdf["tin_submitted"].astype(str).str.strip() if "tin_submitted" in _sdf.columns else pd.Series([""] * len(_sdf))
+        _tin_bool= _s("tin_match")
+        _mask = (
+            _tin_sub.notna() & ~_tin_sub.isin(["","None","nan","null"]) &
+            (_tin_bool.isin(["","none","nan"]))
+        )
+        _an["g3_tin_submitted_not_checked"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g3_tin_submitted_not_checked"] = {
+            "severity":"MEDIUM","group":"TIN/EIN Anomalies",
+            "title":"TIN Submitted but IRS Check Never Ran",
+            "desc":"tin_submitted fact has a value (EIN was given at onboarding) but tin_match_boolean is "
+                   "null/missing — Middesk's IRS TIN review task never completed. "
+                   "Source: index.ts:482 — tin_match_boolean is only written when tin_match has a value.",
+            "source":"index.ts:399 (tin_submitted) and 482 (tin_match_boolean)",
+            "action":"Check Middesk review task status for key='tin'. Task may be stuck or failed silently.",
+        }
+
+        # G3-B: tin_match_status=success AND tin_match=false — already in G1-C but listed here too
+        # (cross-reference only — same businesses)
+
+    # ── GROUP 4: CROSS-SECTION CONTRADICTIONS (S1 × S2) ─────────────────────
+
+    if not _sdf.empty:
+        # G4-A: SOS Active=True + TIN Failed — most common KYB tension
+        _mask = (_s("sos_active")=="true") & (_s("tin_match_status")=="failure")
+        _an["g4_sos_ok_tin_fail"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g4_sos_ok_tin_fail"] = {
+            "severity":"MEDIUM","group":"Cross-Section Contradictions",
+            "title":"SOS Active + TIN Failed",
+            "desc":"Entity IS legally registered (sos_active=true) but IRS EIN check failed "
+                   "(tin_match.value.status='failure'). Most common cause: applicant submitted DBA/trade name "
+                   "instead of the legal name on the EIN certificate (IRS Form CP-575 or 147C). "
+                   "check_agent_v2: sos_active_tin_failed (MEDIUM).",
+            "source":"index.ts:1426 (sos_active) and 429 (tin_match) and 482 (tin_match_boolean)",
+            "action":"Request IRS EIN confirmation letter (CP-575 or 147C). Compare legal name to submitted name.",
+        }
+
+        # G4-B: SOS Inactive + TIN Verified — dissolved entity with valid EIN
+        _mask = (_s("sos_active")=="false") & (_s("tin_match")=="true")
+        _an["g4_sos_inactive_tin_ok"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g4_sos_inactive_tin_ok"] = {
+            "severity":"HIGH","group":"Cross-Section Contradictions",
+            "title":"SOS Inactive + TIN Verified",
+            "desc":"EIN is valid (IRS confirmed, tin_match_boolean=true) but entity is NOT in good standing "
+                   "(sos_active=false — dissolved, revoked, or suspended). An EIN is never cancelled when "
+                   "a company dissolves. Entity may be operating under a dead legal entity. "
+                   "check_agent_v2: sos_inactive_tin_ok (HIGH).",
+            "source":"index.ts:1426 (sos_active=false path) and 482 (tin_match_boolean=true)",
+            "action":"Block approval until SOS good standing reinstated. Check revival/reinstatement filings.",
+        }
+
+        # G4-C: No SOS Data + TIN Pass — identity unverifiable but EIN ok
+        _mask = (_s("sos_match_boolean").isin(["","none","nan","null","false"])) & (_s("tin_match")=="true")
+        _an["g4_no_sos_tin_ok"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g4_no_sos_tin_ok"] = {
+            "severity":"HIGH","group":"Cross-Section Contradictions",
+            "title":"No Registry + TIN Pass",
+            "desc":"EIN confirmed by IRS (tin_match_boolean=true) but sos_match_boolean is false/null — "
+                   "entity existence is unverifiable despite having a valid EIN. Most common: entity too new "
+                   "(<2 weeks, SOS propagation lag), DBA name mismatch, or vendor integration failure.",
+            "source":"index.ts:1421 (sos_match_boolean) and 482 (tin_match_boolean)",
+            "action":"Check entity age. If >2 weeks old, manually verify SOS on the state portal.",
+        }
+
+    # ── GROUP 5: NAICS & CLASSIFICATION ANOMALIES ────────────────────────────
+
+    if not _sdf.empty:
+        # G5-A: NAICS=561499 (fallback) — hardcoded NAICS_OF_LAST_RESORT
+        _mask = _s("naics_code")=="561499"
+        _an["g5_naics_fallback"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g5_naics_fallback"] = {
+            "severity":"LOW","group":"NAICS & Classification",
+            "title":"NAICS Fallback 561499 — Industry Unknown",
+            "desc":"naics_code='561499' — the hardcoded NAICS_OF_LAST_RESORT (aiNaicsEnrichment.ts:63). "
+                   "All vendors (ZI/EFX/OC/Middesk/SERP) and the AI enrichment (GPT-5-mini) failed "
+                   "to classify the industry. Worth Score Company Profile category is penalized. "
+                   "check_agent_v2: naics_fallback (LOW).",
+            "source":"aiNaicsEnrichment.ts:63 (NAICS_OF_LAST_RESORT hardcoded)",
+            "action":"Diagnose gap type: G1=no website, G2=website present but AI timed out, G3=name too generic.",
+        }
+
+        # G5-B: NAICS=561499 AND Registry Found — registered but unclassified
+        _mask = (_s("naics_code")=="561499") & (_s("sos_match_boolean")=="true")
+        _an["g5_naics_fb_sos_found"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g5_naics_fb_sos_found"] = {
+            "severity":"MEDIUM","group":"NAICS & Classification",
+            "title":"Registry Found but NAICS Still 561499",
+            "desc":"Entity IS registered (sos_match_boolean=true) but NAICS=561499. "
+                   "This is a data completeness gap — the entity exists but cannot be classified. "
+                   "Worth Score is penalized and MCC code is the generic fallback (5614). "
+                   "check_agent_v2: website_no_naics (MEDIUM) if website exists.",
+            "source":"aiNaicsEnrichment.ts:63 and index.ts:1421",
+            "action":"Check if website is present. If yes, re-run NAICS classification with website URL.",
+        }
+
+    # ── GROUP 6: RISK SIGNAL COMBINATIONS ────────────────────────────────────
+
+    if not _sdf.empty:
+        # G6-A: Watchlist Hits > 0 AND SOS Inactive
+        _mask = (_si("watchlist_hits")>0) & (_s("sos_active")=="false")
+        _an["g6_watchlist_inactive"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g6_watchlist_inactive"] = {
+            "severity":"HIGH","group":"Risk Signal Combinations",
+            "title":"Watchlist Hit + SOS Inactive",
+            "desc":"Entity has watchlist hits (PEP/OFAC/sanctions from Middesk+Trulioo) AND is not in "
+                   "good standing (dissolved/revoked). Highest-severity combination — entity may have "
+                   "dissolved to evade sanctions listing, or dissolution is coincidental.",
+            "source":"index.ts:1503-1541 (watchlist fact) and 1426 (sos_active)",
+            "action":"Same-day escalation to compliance. Document dissolution date vs watchlist listing date.",
+        }
+
+        # G6-B: Watchlist Hits > 0 AND No Registry
+        _mask = (_si("watchlist_hits")>0) & (_s("sos_match_boolean").isin(["false","","none","nan"]))
+        _an["g6_watchlist_no_reg"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g6_watchlist_no_reg"] = {
+            "severity":"HIGH","group":"Risk Signal Combinations",
+            "title":"Watchlist Hit + No Registry",
+            "desc":"Watchlist hit exists but entity existence is unverifiable (sos_match_boolean=false/null). "
+                   "Cannot safely attribute OR rule out the hit — acting without entity verification risks "
+                   "misattribution. check_agent_v2: watchlist_low_sos_confidence (HIGH).",
+            "source":"index.ts:1503 (watchlist) and 1421 (sos_match_boolean)",
+            "action":"Verify entity identity first (formation documents, EIN letter) before acting on watchlist.",
+        }
+
+        # G6-C: Bankruptcies > 0 AND TIN Failed — financial distress + identity gap
+        _mask = (_si("num_bankruptcies")>0) & (_s("tin_match")=="false")
+        _an["g6_bk_tin_fail"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g6_bk_tin_fail"] = {
+            "severity":"HIGH","group":"Risk Signal Combinations",
+            "title":"Bankruptcy + TIN Failed",
+            "desc":"Entity has ≥1 bankruptcy filing AND the IRS EIN check failed. "
+                   "Financial distress (bankruptcy) combined with identity gap (TIN failure) is a compounded risk. "
+                   "The TIN failure may indicate the EIN belongs to a different entity than the bankruptcy filing.",
+            "source":"index.ts: num_bankruptcies (Equifax pid=17) and 429 (tin_match)",
+            "action":"Full public records review. Verify the EIN matches the entity in the bankruptcy filing.",
+        }
+
+        # G6-D: Multiple public records simultaneously (BK + judgements or liens)
+        _mask = (_si("num_bankruptcies")>0) & ((_si("num_judgements")>0) | (_si("num_liens")>0))
+        _an["g6_multi_public_records"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g6_multi_public_records"] = {
+            "severity":"HIGH","group":"Risk Signal Combinations",
+            "title":"Multiple Public Record Categories Simultaneously",
+            "desc":"Entity has bankruptcies AND judgements or liens at the same time. "
+                   "Multiple public record categories active simultaneously = systemic financial distress, "
+                   "not an isolated event. check_agent_v2: multiple_public_records (HIGH).",
+            "source":"index.ts: num_bankruptcies, num_judgements, num_liens facts (all from Equifax pid=17)",
+            "action":"Full public records review required. Aggregate total exposure across all categories.",
+        }
+
+        # G6-E: Adverse Media + No Watchlist (subtle risk)
+        _mask = (_si("adverse_media")>0) & (_si("watchlist_hits")==0)
+        _an["g6_adverse_no_wl"] = _sdf[_mask]["business_id"].tolist()
+        _an_meta["g6_adverse_no_wl"] = {
+            "severity":"NOTICE","group":"Risk Signal Combinations",
+            "title":"Adverse Media Present, No Formal Watchlist Hit",
+            "desc":"Negative news/media coverage exists but no formal PEP or sanctions listing. "
+                   "Adverse media is intentionally EXCLUDED from watchlist.value "
+                   "(rules.ts:294 — filteredMetadata filters WATCHLIST_HIT_TYPE.ADVERSE_MEDIA) "
+                   "because it is not a regulatory requirement, but it represents reputational risk.",
+            "source":"rules.ts:294 (adverse media exclusion from watchlist.value)",
+            "action":"Review adverse media content. Assess whether it relates to this entity or a name-similar one.",
+        }
+
+    # ── GROUP 7: WORTH SCORE ANOMALIES ───────────────────────────────────────
+
+    if not _sdf.empty and _home_ws is not None and not _home_ws.empty:
+        _ws_map = dict(zip(_home_ws_clean["business_id"], _home_ws_clean["score_decision"])) if not _home_ws_clean.empty else {}
+        _ws_score_map = dict(zip(_home_ws_clean["business_id"], _home_ws_clean["weighted_score_850"])) if not _home_ws_clean.empty else {}
+
+        # G7-A: APPROVE but SOS Inactive — score ≥700 but entity not in good standing
+        _bids_inactive = set(_sdf[_s("sos_active")=="false"]["business_id"].tolist())
+        _bids_approve  = {b for b,d in _ws_map.items() if d=="APPROVE"}
+        _an["g7_approve_sos_inactive"] = list(_bids_approve & _bids_inactive)
+        _an_meta["g7_approve_sos_inactive"] = {
+            "severity":"CRITICAL","group":"Worth Score Anomalies",
+            "title":"APPROVE Decision + SOS Inactive",
+            "desc":"Score ≥700 (APPROVE) but entity is NOT in good standing (sos_active=false). "
+                   "The ML model approved based on strong financial signals despite the registry risk. "
+                   "Compliance review is required regardless of the score.",
+            "source":"aiscore.py (score formula) and index.ts:1426 (sos_active)",
+            "action":"Flag for compliance team review before disbursement. Score is not wrong — compliance layer is missing.",
+        }
+
+        # G7-B: DECLINE but SOS Active + TIN Pass — score <550 but all KYB checks pass
+        _bids_sos_ok   = set(_sdf[(_s("sos_active")=="true") & (_s("tin_match")=="true")]["business_id"].tolist())
+        _bids_decline  = {b for b,d in _ws_map.items() if d=="DECLINE"}
+        _an["g7_decline_kyb_clean"] = list(_bids_decline & _bids_sos_ok)
+        _an_meta["g7_decline_kyb_clean"] = {
+            "severity":"HIGH","group":"Worth Score Anomalies",
+            "title":"DECLINE Decision + KYB Clean (SOS Active + TIN Pass)",
+            "desc":"Score <550 (DECLINE) but SOS is active and TIN is verified — all primary KYB checks pass. "
+                   "This means the decline is driven entirely by financial model inputs: "
+                   "no Plaid banking, no revenue, missing formation_date → age_business=0. "
+                   "The business may be legitimate but the model lacks data.",
+            "source":"aiscore.py (score formula) and index.ts (sos_active, tin_match_boolean)",
+            "action":"Identify missing model inputs (revenue, Plaid). Consider manual underwriting review.",
+        }
+
+        # G7-C: Not Scored (in authoritative bids but not in _home_ws)
+        _scored_bids  = set(_home_ws_clean["business_id"].tolist())
+        _not_scored_bids = [b for b in _authoritative_bids if b not in _scored_bids]
+        _an["g7_not_scored"] = _not_scored_bids
+        _an_meta["g7_not_scored"] = {
+            "severity":"MEDIUM","group":"Worth Score Anomalies",
+            "title":"Not Scored — No Worth Score in rds_manual_score_public",
+            "desc":"Business is in the portfolio (rel_business_customer_monitoring) but has no entry "
+                   "in data_current_scores. Scoring runs on a schedule (typically daily). "
+                   "Common causes: too new, insufficient facts, pipeline failure, or excluded by config.",
+            "source":"rds_manual_score_public.data_current_scores — no matching record",
+            "action":"If >48h old, escalate to ai-score-service team. Check worth_score_input_audit.",
+        }
+
+    # ── COMPUTE PER-BUSINESS ANOMALY SCORE ───────────────────────────────────
+    _all_biz = list(set(_authoritative_bids))
+    _biz_score = {b: 0 for b in _all_biz}
+    _biz_flags_s6 = {b: [] for b in _all_biz}
+    for _akey, _bids_list in _an.items():
+        meta = _an_meta.get(_akey, {})
+        pts  = _SEV_PTS.get(meta.get("severity","LOW"), 1)
+        for b in _bids_list:
+            if b in _biz_score:
+                _biz_score[b] += pts
+                _biz_flags_s6[b].append(_akey)
+
+    _biz_score_df = pd.DataFrame([
+        {"business_id": b, "anomaly_score": s, "anomaly_count": len(_biz_flags_s6[b])}
+        for b, s in _biz_score.items()
+    ]).sort_values("anomaly_score", ascending=False)
+
+    _n_clean  = int((_biz_score_df["anomaly_count"]==0).sum())
+    _n_1      = int((_biz_score_df["anomaly_count"]==1).sum())
+    _n_2_3    = int((_biz_score_df["anomaly_count"].between(2,3)).sum())
+    _n_4plus  = int((_biz_score_df["anomaly_count"]>=4).sum())
+    _n_crit   = len(_an.get("g1_tin_status_bool_mismatch",[])) + len(_an.get("g7_approve_sos_inactive",[]))
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 6.0  PORTFOLIO HEALTH SCORECARD
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("#### 6.0  Portfolio Health Scorecard")
+    _h1,_h2,_h3,_h4,_h5 = st.columns(5)
+    with _h1: kpi("✅ 0 Anomalies",   f"{_n_clean:,}",  f"{_n_clean/max(total_biz,1)*100:.0f}% structurally clean", "#22c55e")
+    with _h2: kpi("⚠️ 1 Anomaly",    f"{_n_1:,}",      f"{_n_1/max(total_biz,1)*100:.0f}% isolated issue",         "#f59e0b")
+    with _h3: kpi("🔴 2–3 Anomalies",f"{_n_2_3:,}",    f"{_n_2_3/max(total_biz,1)*100:.0f}% compounded risk",      "#f97316")
+    with _h4: kpi("🔴 4+ Anomalies", f"{_n_4plus:,}",  f"{_n_4plus/max(total_biz,1)*100:.0f}% systematic failure", "#ef4444")
+    with _h5: kpi("⚡ CRITICAL",      f"{_n_crit:,}",   "highest-severity combos",                                  "#8B5CF6")
+
+    # Severity distribution bar
+    if total_biz > 0:
+        _pct_clean = _n_clean/total_biz*100
+        _pct_1     = _n_1/total_biz*100
+        _pct_23    = _n_2_3/total_biz*100
+        _pct_4p    = _n_4plus/total_biz*100
+        st.markdown(f"""<div style="margin:8px 0 16px 0">
+          <div style="display:flex;gap:0;border-radius:6px;overflow:hidden;height:18px">
+            <div style="width:{_pct_clean:.1f}%;background:#22c55e;title='Clean'" title="Clean: {_n_clean:,}"></div>
+            <div style="width:{_pct_1:.1f}%;background:#f59e0b" title="1 anomaly: {_n_1:,}"></div>
+            <div style="width:{_pct_23:.1f}%;background:#f97316" title="2-3 anomalies: {_n_2_3:,}"></div>
+            <div style="width:{_pct_4p:.1f}%;background:#ef4444" title="4+ anomalies: {_n_4plus:,}"></div>
+          </div>
+          <div style="display:flex;gap:16px;margin-top:4px;font-size:.72rem;color:#94A3B8">
+            <span>🟢 Clean: {_n_clean:,} ({_pct_clean:.0f}%)</span>
+            <span>🟡 1: {_n_1:,} ({_pct_1:.0f}%)</span>
+            <span>🟠 2-3: {_n_2_3:,} ({_pct_23:.0f}%)</span>
+            <span>🔴 4+: {_n_4plus:,} ({_pct_4p:.0f}%)</span>
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+    _SOS_AN_COLS = ["sos_match_boolean","sos_match_status","sos_active","sos_match_verif","sos_domestic_verif","formation_state","tin_submitted","tin_match_status","tin_match","idv_passed","naics_code","watchlist_hits","num_bankruptcies"]
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 6.1  GROUP 1: DATA INTEGRITY CONTRADICTIONS
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("#### 6.1  Data Integrity Contradictions — Impossible States")
+    st.caption("Signal combinations that should NEVER exist if the pipeline is working correctly. "
+               "These are bugs, data freshness gaps, or pipeline ordering issues — not risk signals.")
+
+    for _akey in ["g1_tin_status_bool_mismatch","g1_sos_active_match_false","g1_verif_active_false"]:
+        _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
+        if not _bids: continue
+        _seg[_akey] = _bids
+        _SEG_CALC[_akey] = (
+            f"**{_m['title']}**\n\n{_m['desc']}\n\n"
+            f"**Action:** {_m['action']}\n\n"
+            f"**Source:** `{_m['source']}`"
+        )
+        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _SOS_AN_COLS)
+
+    if not any(_an.get(k) for k in ["g1_tin_status_bool_mismatch","g1_sos_active_match_false","g1_verif_active_false"]):
+        st.success("✅ No data integrity contradictions detected in this portfolio.", icon="✅")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 6.2  GROUP 2: SOS/REGISTRY ANOMALIES
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("#### 6.2  SOS/Registry Anomalies")
+    st.caption("Signal combinations where registry verification signals are internally inconsistent "
+               "or represent the worst possible registry states.")
+
+    for _akey in ["g2_found_but_inactive","g2_domestic_no_submitted","g2_verif_match_false"]:
+        _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
+        if not _bids: continue
+        _seg[_akey] = _bids
+        _SEG_CALC[_akey] = (
+            f"**{_m['title']}**\n\n{_m['desc']}\n\n"
+            f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
+        )
+        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _SOS_AN_COLS)
+
+    if not any(_an.get(k) for k in ["g2_found_but_inactive","g2_domestic_no_submitted","g2_verif_match_false"]):
+        st.success("✅ No SOS/registry anomalies detected.", icon="✅")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 6.3  GROUP 3: TIN/EIN ANOMALIES
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("#### 6.3  TIN/EIN Anomalies")
+    st.caption("EIN verification gaps — submitted but never checked, or contradicting signal derivations.")
+
+    _TIN_AN_COLS = ["tin_submitted","tin_match_status","tin_match","sos_match_boolean","sos_active","formation_state","naics_code"]
+    for _akey in ["g3_tin_submitted_not_checked"]:
+        _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
+        if not _bids: continue
+        _seg[_akey] = _bids
+        _SEG_CALC[_akey] = (
+            f"**{_m['title']}**\n\n{_m['desc']}\n\n"
+            f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
+        )
+        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _TIN_AN_COLS)
+
+    # G1-C (tin status/bool mismatch) is the other TIN anomaly — shown in Group 1
+    if _an.get("g1_tin_status_bool_mismatch"):
+        st.info(f"ℹ️ {len(_an['g1_tin_status_bool_mismatch']):,} businesses with tin_match_status=success but tin_match_boolean=false "
+                "are shown in **6.1 Data Integrity Contradictions** above (CRITICAL severity).")
+    if not _an.get("g3_tin_submitted_not_checked") and not _an.get("g1_tin_status_bool_mismatch"):
+        st.success("✅ No TIN/EIN anomalies detected.", icon="✅")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 6.4  GROUP 4: CROSS-SECTION CONTRADICTIONS (S1 × S2)
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("#### 6.4  Cross-Section Contradictions — Registry × TIN")
+    st.caption("Where SOS verification (Section 1) and TIN verification (Section 2) signals diverge — "
+               "the two independent KYB verification paths producing inconsistent results.")
+
+    _CROSS_COLS = ["sos_match_boolean","sos_match_status","sos_active","sos_match_verif","sos_domestic_verif","tin_submitted","tin_match_status","tin_match","formation_state","naics_code","watchlist_hits"]
+    _cross_total = sum(len(_an.get(k,[])) for k in ["g4_sos_ok_tin_fail","g4_sos_inactive_tin_ok","g4_no_sos_tin_ok"])
+
+    # Mini 3-cell matrix visual
+    if not _sdf.empty:
+        _mx_data = {
+            "SOS Active":   {"TIN Pass": len([b for b in _an.get("g4_sos_ok_tin_fail",[]) if False]),    # placeholder
+                             "TIN Fail": len(_an.get("g4_sos_ok_tin_fail",[])),
+                             "TIN N/A":  0},
+            "SOS Inactive": {"TIN Pass": len(_an.get("g4_sos_inactive_tin_ok",[])),
+                             "TIN Fail": 0,
+                             "TIN N/A":  0},
+            "No Registry":  {"TIN Pass": len(_an.get("g4_no_sos_tin_ok",[])),
+                             "TIN Fail": 0,
+                             "TIN N/A":  0},
+        }
+        _mx_rows = []
+        for _rs, _cols in _mx_data.items():
+            _mx_rows.append({"Registry Status": _rs, **_cols})
+        _mx_df = pd.DataFrame(_mx_rows)
+        _cross_cols_show = ["Registry Status","TIN Pass","TIN Fail","TIN N/A"]
+        _mx_df = _mx_df[[c for c in _cross_cols_show if c in _mx_df.columns]]
+        st.dataframe(_mx_df, use_container_width=True, hide_index=True,
+                     column_config={"Registry Status": st.column_config.TextColumn(width="medium"),
+                                    "TIN Pass": st.column_config.NumberColumn(help="Businesses with this registry state + TIN Pass"),
+                                    "TIN Fail": st.column_config.NumberColumn(help="Businesses with this registry state + TIN Fail")})
+
+    for _akey in ["g4_sos_ok_tin_fail","g4_sos_inactive_tin_ok","g4_no_sos_tin_ok"]:
+        _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
+        if not _bids: continue
+        _seg[_akey] = _bids
+        _SEG_CALC[_akey] = (
+            f"**{_m['title']}**\n\n{_m['desc']}\n\n"
+            f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
+        )
+        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _CROSS_COLS)
+
+    if _cross_total == 0:
+        st.success("✅ No Registry × TIN contradictions detected.", icon="✅")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 6.5  GROUP 5: NAICS & CLASSIFICATION ANOMALIES
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("#### 6.5  NAICS Classification Anomalies")
+    st.caption("Industry classification gaps that affect Worth Score accuracy and MCC code validity. "
+               "NAICS=561499 is the hardcoded NAICS_OF_LAST_RESORT (aiNaicsEnrichment.ts:63).")
+
+    _NAICS_AN_COLS = ["naics_code","sos_match_boolean","sos_active","tin_match","formation_state","revenue","watchlist_hits"]
+    for _akey in ["g5_naics_fallback","g5_naics_fb_sos_found"]:
+        _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
+        if not _bids: continue
+        _seg[_akey] = _bids
+        _SEG_CALC[_akey] = (
+            f"**{_m['title']}**\n\n{_m['desc']}\n\n"
+            f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
+        )
+        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _NAICS_AN_COLS)
+
+    # NAICS gap type analysis (G1/G2/G3)
+    if _an.get("g5_naics_fallback"):
+        _naics_fb_bids = set(_an["g5_naics_fallback"])
+        # G3: no website (website col not in stats_df — use sos_match as proxy)
+        _g_all = len(_naics_fb_bids)
+        # G2: registered + fallback = most fixable
+        _g2 = len(_an.get("g5_naics_fb_sos_found",[]))
+        st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid #8B5CF6;border-radius:6px;padding:8px 14px;margin:6px 0;font-size:.78rem">
+          <span style="color:#a78bfa;font-weight:700">📊 Classification Gap Analysis ({_g_all:,} with NAICS=561499)</span><br/>
+          <span style="color:#CBD5E1">G2 — Registry Found + 561499 (most fixable, re-run with website URL): <strong>{_g2:,}</strong><br/>
+          G1/G3 — No registry or website: <strong>{_g_all - _g2:,}</strong><br/>
+          Worth Score impact: Company Profile category penalized for all {_g_all:,}. MCC fallback (5614) used.</span>
+        </div>""", unsafe_allow_html=True)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 6.6  GROUP 6: RISK SIGNAL COMBINATIONS
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("#### 6.6  Risk Signal Combinations")
+    st.caption("Cross-signal risk combinations where two or more adverse signals co-occur — "
+               "the severity of each signal amplifies the other.")
+
+    _RISK_AN_COLS = ["sos_match_boolean","sos_active","watchlist_hits","num_bankruptcies","num_judgements","num_liens","adverse_media","tin_match","tin_match_status","naics_code","formation_state"]
+    for _akey in ["g6_watchlist_inactive","g6_watchlist_no_reg","g6_bk_tin_fail","g6_multi_public_records","g6_adverse_no_wl"]:
+        _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
+        if not _bids: continue
+        _seg[_akey] = _bids
+        _SEG_CALC[_akey] = (
+            f"**{_m['title']}**\n\n{_m['desc']}\n\n"
+            f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
+        )
+        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _RISK_AN_COLS)
+
+    if not any(_an.get(k) for k in ["g6_watchlist_inactive","g6_watchlist_no_reg","g6_bk_tin_fail","g6_multi_public_records"]):
+        st.success("✅ No high-severity risk signal combinations detected.", icon="✅")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 6.7  GROUP 7: WORTH SCORE ANOMALIES (S5 × KYB signals)
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("#### 6.7  Worth Score Anomalies — Score vs KYB Signal Consistency")
+    st.caption("Where the ML model decision (APPROVE/DECLINE) is inconsistent with the KYB signal picture. "
+               "The score is not wrong — but these businesses need an additional human review layer.")
+
+    _WS_AN_COLS = ["sos_match_boolean","sos_active","tin_match","tin_match_status","naics_code","watchlist_hits","num_bankruptcies","revenue","formation_state"]
+    for _akey in ["g7_approve_sos_inactive","g7_decline_kyb_clean","g7_not_scored"]:
+        _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
+        if not _bids: continue
+        _seg[_akey] = _bids
+        _SEG_CALC[_akey] = (
+            f"**{_m['title']}**\n\n{_m['desc']}\n\n"
+            f"**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
+        )
+        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _WS_AN_COLS)
+
+    # ════════════════════════════════════════════════════════════════════════
+    # 6.8  ANOMALY ACCUMULATION TRIAGE
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("#### 6.8  Anomaly Accumulation Triage — Portfolio Synthesis")
+    st.caption(
+        "Per-business anomaly count (weighted by severity: CRITICAL=4, HIGH=3, MEDIUM=2, NOTICE/LOW=1). "
+        "Distinct from Section 4 Red Flag score — this ranking is based on structural KYB "
+        "data consistency failures, not risk signal scores."
+    )
+
+    if not _biz_score_df.empty and _biz_score_df["anomaly_score"].max() > 0:
+        # Histogram
+        _hist_df = _biz_score_df.groupby("anomaly_count")["business_id"].count().reset_index()
+        _hist_df.columns = ["Anomaly Count","Businesses"]
+        fig_hist = px.bar(_hist_df, x="Anomaly Count", y="Businesses",
+                          title="Per-Business Anomaly Count Distribution",
+                          color="Anomaly Count",
+                          color_continuous_scale=["#22c55e","#f59e0b","#f97316","#ef4444","#7f1d1d"],
+                          text="Businesses")
+        fig_hist.update_traces(textposition="outside")
+        fig_hist.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10),
+                               showlegend=False, coloraxis_showscale=False)
+        st.plotly_chart(dark_chart(fig_hist), use_container_width=True)
+
+        # Top 10 most anomalous businesses
+        st.markdown("**🔴 Top 10 Highest-Anomaly Businesses (by weighted score):**")
+        _top10 = _biz_score_df[_biz_score_df["anomaly_score"]>0].head(10).copy()
+
+        # Build anomaly flag columns for the table
+        _ALL_AN_KEYS = list(_an_meta.keys())
+        for _ak in _ALL_AN_KEYS:
+            _top10[_ak] = _top10["business_id"].isin(_an.get(_ak,[])).map({True:"✅",False:""})
+
+        _display_cols = ["business_id","anomaly_score","anomaly_count"] + [k for k in _ALL_AN_KEYS if _top10[k].any()]
+        _col_rename = {k: _an_meta[k]["title"][:22]+"…" if len(_an_meta[k]["title"])>22 else _an_meta[k]["title"]
+                       for k in _ALL_AN_KEYS if k in _display_cols}
+        _col_rename.update({"anomaly_score":"Weighted Score","anomaly_count":"# Anomalies"})
+        _top10_disp = _top10[[c for c in _display_cols if c in _top10.columns]].rename(columns=_col_rename)
+        st.dataframe(_top10_disp, use_container_width=True, hide_index=True)
+
+        # Investigate buttons for top 10
+        _top10_bids = _top10["business_id"].tolist()
+        _bt_cols = st.columns(min(5, len(_top10_bids)))
+        for _i, _bid_t in enumerate(_top10_bids[:5]):
+            with _bt_cols[_i]:
+                if st.button(f"Investigate", key=f"s6_inv_{_bid_t[:8]}", help=_bid_t):
+                    st.session_state["_pending_bid"] = _bid_t
+                    st.session_state["_bid_just_set"] = _bid_t
+                    st.rerun()
+
+        # Co-occurrence heatmap
+        st.markdown("**🔥 Anomaly Co-Occurrence Heatmap:**")
+        _active_keys = [k for k in _ALL_AN_KEYS if _an.get(k)]
+        if len(_active_keys) >= 2:
+            _cooc = pd.DataFrame(index=_active_keys, columns=_active_keys, data=0)
+            _biz_set = {k: set(_an.get(k,[])) for k in _active_keys}
+            for _k1 in _active_keys:
+                for _k2 in _active_keys:
+                    _cooc.loc[_k1,_k2] = len(_biz_set[_k1] & _biz_set[_k2])
+            _cooc.index   = [_an_meta[k]["title"][:20] for k in _active_keys]
+            _cooc.columns = [_an_meta[k]["title"][:20] for k in _active_keys]
+            _cooc_num = _cooc.astype(float)
+            fig_cooc = px.imshow(_cooc_num,
+                                 title="Anomaly Co-Occurrence (businesses triggering both)",
+                                 color_continuous_scale=["#0f172a","#1e3a5f","#2563eb","#ef4444"],
+                                 text_auto=True, aspect="auto")
+            fig_cooc.update_layout(height=max(300, len(_active_keys)*40),
+                                   margin=dict(t=50,b=30,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_cooc), use_container_width=True)
+            st.caption("Diagonal = individual anomaly count. Off-diagonal = co-occurrence count. "
+                       "High off-diagonal values indicate clustered systematic pipeline failures.")
+
+        detail_panel("🔬 Portfolio Anomaly Triage",
+            f"{len(_biz_score_df[_biz_score_df['anomaly_score']>0]):,} businesses with at least 1 anomaly · "
+            f"Top scorer: {_biz_score_df.iloc[0]['anomaly_score']:.0f} pts",
+            what_it_means=(
+                f"**Weighted anomaly scoring:** CRITICAL=4pts · HIGH=3pts · MEDIUM=2pts · NOTICE/LOW=1pt\n\n"
+                f"**Anomaly groups evaluated (all from check_agent_v2.DETERMINISTIC_CHECKS):**\n"
+                f"- Group 1 (Data Integrity): 3 impossible-state rules\n"
+                f"- Group 2 (SOS/Registry): 3 registry inconsistency rules\n"
+                f"- Group 3 (TIN/EIN): 1 EIN gap rule\n"
+                f"- Group 4 (Cross-Section S1×S2): 3 Registry×TIN contradiction rules\n"
+                f"- Group 5 (NAICS): 2 classification anomaly rules\n"
+                f"- Group 6 (Risk Signals): 5 risk combination rules\n"
+                f"- Group 7 (Worth Score): 3 score vs KYB consistency rules\n\n"
+                f"**Total rules evaluated:** {len(_an_meta)} deterministic rules · zero LLM calls · zero new Redshift queries\n"
+                f"**Data sources:** stats_df (_load_stats_for_bids) + funnel_df (_load_kyb_funnel_for_bids) — already in memory"
+            ),
+            source_table="stats_df · funnel_df · _home_ws_clean (all already loaded)",
+            source_file="check_agent_v2.py (DETERMINISTIC_CHECKS) · index.ts · verification_results.sql · aiNaicsEnrichment.ts",
+            json_obj={"anomaly_groups": len(_an_meta),"rules_evaluated": len(_an_meta),
+                      "businesses_with_anomalies": int((_biz_score_df["anomaly_score"]>0).sum()),
+                      "clean_businesses": _n_clean,"critical_combos": _n_crit},
+            icon="🔬", color="#8B5CF6")
+    else:
+        st.success("✅ No anomalies detected across the portfolio. All KYB signals are internally consistent.", icon="✅")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # SECTION 7 — RECENTLY ONBOARDED + TOP 10 AT RISK
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### 🕐 Section 7 — Recently Onboarded Businesses")
     st.markdown("*Most recently seen in the facts table — ordered by first_seen DESC.*")
 
     recent_10 = recent_df.head(10).copy()
