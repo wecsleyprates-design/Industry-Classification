@@ -3231,8 +3231,13 @@ if tab=="🏠 Home":
     with col_go:
         if st.button("Investigate ▶", type="primary", use_container_width=True):
             if bid_input.strip():
-                st.session_state["hub_bid"] = bid_input.strip()
-                st.success(f"UUID set → navigate to any section in the sidebar.")
+                # Use _pending_bid staging key — direct assignment to "hub_bid" is forbidden
+                # after the widget with that key has already rendered in the filter bar.
+                # The pre-render block at the top of the script reads _pending_bid and safely
+                # writes hub_bid BEFORE the widget is instantiated on the next rerun.
+                st.session_state["_pending_bid"] = bid_input.strip()
+                st.session_state["_bid_just_set"] = bid_input.strip()
+                st.rerun()
 
     if not is_live:
         st.error("🔴 Not connected to Redshift. Connect VPN and click Retry in the sidebar.")
