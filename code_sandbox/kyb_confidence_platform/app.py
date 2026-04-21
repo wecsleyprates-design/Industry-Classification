@@ -16,7 +16,6 @@ from config.settings import SETTINGS
 from core.state import ensure_session_state, restore_state_from_query_params, sync_state_to_query_params
 from core.filters import render_filter_bar
 from ui.theme import inject_theme
-from ui.components.trust_layer import TrustLayerContext
 
 # Page modules
 from pages import (
@@ -117,6 +116,11 @@ def main() -> None:
         layout="wide",
         initial_sidebar_state="collapsed",
     )
+    # Overlay st.secrets AFTER set_page_config — calling st.secrets before
+    # set_page_config raises StreamlitSetPageConfigMustBeFirstCommandError.
+    from config.settings import SETTINGS
+    SETTINGS.refresh()
+
     inject_theme()
     ensure_session_state()
     restore_state_from_query_params()
@@ -126,10 +130,6 @@ def main() -> None:
 
     # Global filters
     render_filter_bar()
-
-    # Trust-layer context for this render cycle
-    ctx = TrustLayerContext.current()
-    st.session_state["_trust_ctx"] = ctx
 
     # Modals
     _render_share_modal()

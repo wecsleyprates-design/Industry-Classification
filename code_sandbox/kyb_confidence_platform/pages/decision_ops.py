@@ -1,11 +1,12 @@
 """Tab 4 — Decision Impact & Operations."""
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 from analytics import portfolio as ana
 from ui.components import charts as ch, tables as tb
-from ui.components.kpi_card import kpi
+from ui.components.kpi_card import kpi, panel_header, panel_close
 
 
 def render() -> None:
@@ -21,34 +22,51 @@ def render() -> None:
 
 
 def _decision() -> None:
+    panel_header("Confidence vs. Decision Outcome", "fa-scale-balanced", object_key="chart.decision_mix")
     d = ana.get_decisions_by_band()
-    st.plotly_chart(ch.bar(d, x="band", y="n", color="decision", barmode="stack"), use_container_width=True, key="decision_ops_bar")
+    if "n" not in d.columns and "count" in d.columns:
+        d = d.rename(columns={"count": "n"})
+    if "n" in d.columns:
+        st.plotly_chart(
+            ch.bar(d, x="band", y="n",
+                   color="decision" if "decision" in d.columns else None,
+                   barmode="stack"),
+            use_container_width=True, key="decision_ops_bar",
+        )
+    panel_close()
 
 
 def _tat() -> None:
+    panel_header("Turnaround Time by Confidence Band", "fa-stopwatch", object_key="chart.tat")
     t = ana.get_tat_by_band()
     st.dataframe(t, use_container_width=True, hide_index=True)
-    long = t.melt(id_vars=["band"], value_vars=["p50_hours", "p90_hours"], var_name="percentile", value_name="hours")
-    st.plotly_chart(ch.bar(long, x="band", y="hours", color="percentile", barmode="group"), use_container_width=True, key="decision_ops_tat")
+    long = t.melt(id_vars=["band"], value_vars=["p50_hours","p90_hours"], var_name="percentile", value_name="hours")
+    st.plotly_chart(
+        ch.bar(long, x="band", y="hours", color="percentile", barmode="group"),
+        use_container_width=True, key="decision_ops_tat",
+    )
+    panel_close()
 
 
 def _manual() -> None:
     c1, c2, c3 = st.columns(3)
     with c1: kpi("Manual Reviews (period)", "3,652", sub="14.8% of cases", color="amber", object_key="manual.total")
-    with c2: kpi("Open Queue",               "214",   sub="analyst workload", object_key="manual.queue")
-    with c3: kpi("SLA Breaches",             "28",    sub=">24h in review", color="red", object_key="manual.sla")
+    with c2: kpi("Open Queue",              "214",   sub="analyst workload",              object_key="manual.queue")
+    with c3: kpi("SLA Breaches",            "28",    sub=">24h in review",  color="red",  object_key="manual.sla")
 
-    st.subheader("Top reasons routed to manual")
-    st.dataframe([
-        {"reason":"UBO partial verification",        "share":"28%"},
-        {"reason":"Address/SOS mismatch",             "share":"22%"},
-        {"reason":"Watchlist hit / adverse media",    "share":"17%"},
-        {"reason":"Score in review band (0.4–0.6)",   "share":"19%"},
-        {"reason":"Pipeline/Source failure",          "share":"8%"},
-        {"reason":"Other",                            "share":"6%"},
-    ], use_container_width=True, hide_index=True)
+    panel_header("Top Reasons Routed to Manual", "fa-user-gear", object_key="manual.reasons")
+    st.dataframe(pd.DataFrame([
+        {"reason":"UBO partial verification",         "share":"28%"},
+        {"reason":"Address/SOS mismatch",              "share":"22%"},
+        {"reason":"Watchlist hit / adverse media",     "share":"17%"},
+        {"reason":"Score in review band (0.4–0.6)",    "share":"19%"},
+        {"reason":"Pipeline/Source failure",           "share":"8%"},
+        {"reason":"Other",                             "share":"6%"},
+    ]), use_container_width=True, hide_index=True)
+    panel_close()
 
 
 def _ops() -> None:
-    st.subheader("Operational exceptions")
+    st.markdown(panel("Operational Exceptions (detailed)", "fa-triangle-exclamation", object_key="ops.table"), unsafe_allow_html=True)
     tb.render_dataframe(ana.get_ops_exceptions())
+    panel_close()

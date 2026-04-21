@@ -25,6 +25,8 @@ _URL_KEYS = [
 
 
 def ensure_session_state() -> None:
+    from datetime import date, timedelta
+    _today = date.today()
     defaults: dict[str, Any] = {
         "_active_tab": "executive_overview",
         "_active_sub_tab": "portfolio_summary",
@@ -35,11 +37,17 @@ def ensure_session_state() -> None:
         "flt_entity_type": "ALL",
         "flt_confidence_band": "ALL",
         "flt_manual_only": False,
+        # Custom date range — sensible defaults so the window is never zero-length
+        "flt_custom_start": _today - timedelta(days=30),
+        "flt_custom_end": _today,
         "selected_entity_id": "",
         "_trust_ctx": None,
         "_lineage_modal_key": None,
         "_ask_ai_open_for": None,
         "_check_agent_open_for": None,
+        # Available filter options (populated by render_filter_bar)
+        "_available_customers": ["ALL"],
+        "_available_business_ids": [],
     }
     for k, v in defaults.items():
         st.session_state.setdefault(k, v)

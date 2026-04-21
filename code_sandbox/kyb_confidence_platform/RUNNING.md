@@ -17,7 +17,17 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 2. Configure secrets
+## 2. Create your local secrets file (stops the "No secrets found" banner)
+
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+# then edit .streamlit/secrets.toml with your values (leave blank for demo mode)
+```
+
+The app works with **all fields left blank** — it runs on fixture data (`DEMO_MODE=true`).  
+The banner disappears as soon as the file exists, even with empty values.
+
+## 3. Configure secrets (optional — for live Redshift / OpenAI)
 
 Two equivalent options — the app reads from **`st.secrets` first**, then falls back to **environment variables**.
 

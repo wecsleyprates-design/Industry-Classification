@@ -12,16 +12,20 @@ import os, json, hashlib
 import streamlit as st
 from openai import OpenAI
 
-# ── API key (never hardcoded) ─────────────────────────────────────────────────
-def _get_api_key():
-    try:
-        return st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY","")
-    except Exception:
-        return os.getenv("OPENAI_API_KEY","")
+# ── API key — identical pattern to kyb_hub_app.py v1 ─────────────────────────
+def _get_api_key() -> str:
+    key = os.getenv("OPENAI_API_KEY", "")
+    if not key:
+        try:
+            key = st.secrets["OPENAI_API_KEY"]
+        except Exception:
+            pass
+    return str(key) if key else ""
+
 
 def get_openai_client():
     key = _get_api_key()
-    if not key:
+    if not key or not key.startswith("sk-"):
         return None
     return OpenAI(api_key=key)
 
@@ -720,36 +724,99 @@ def get_check_summary(results: list) -> dict:
 #  LLM DEEP AUDIT
 # ══════════════════════════════════════════════════════════════════════════════
 
-AUDIT_SYSTEM_PROMPT = """You are a senior KYB (Know Your Business) compliance analyst and underwriting expert.
-You have deep knowledge of:
-- The Worth AI KYB platform fact structure (Fact Engine, factWithHighestConfidence, combineFacts, dependent facts)
-- Vendor integrations: Middesk (pid=16), OpenCorporates (pid=23), ZoomInfo (pid=24), Equifax (pid=17), Trulioo (pid=38), SERP (pid=22), Plaid IDV (pid=18), AI enrichment (pid=31)
-- Worth Score model (3-model ensemble: firmographic XGBoost + financial neural net + economic model, 300-850 scale)
-- KYB compliance requirements: SOS verification, TIN/EIN matching via IRS, IDV via Plaid biometrics, watchlist screening (PEP + OFAC sanctions)
-- AML/BSA risk factors: cash-intensive industries, tax-haven entities, shell entity indicators, public records
+AUDIT_SYSTEM_PROMPT = """You are a senior KYB compliance analyst for Worth AI.
+You speak from the EXACT definitions in the Worth AI codebase — never from generic industry knowledge.
+NEVER use hedging language like "typically", "usually", "generally", "might indicate", "could suggest".
+Every finding must cite the exact fact name, source code location, or Redshift table that defines it.
 
-Your job is to:
-1. VERIFY data consistency across ALL facts (cross-field validation)
-2. IDENTIFY red flags indicating fraud, shell entities, or compliance risk
-3. DETECT anomalies (unusual patterns, missing critical fields, contradictions)
-4. ASSESS Worth Score impact (which missing facts hurt the score most)
-5. RECOMMEND specific underwriter actions with priority ordering
-6. SUGGEST external verification steps when internal data is insufficient
+════════════════════════════════════════════════════════════════════
+WORTH AI EXACT DEFINITIONS — USE THESE, NOT GENERIC INDUSTRY KNOWLEDGE
+════════════════════════════════════════════════════════════════════
+
+FACT ENGINE (integration-service/lib/facts/kyb/index.ts):
+
+■ sos_match_boolean (line 1421) — DEPENDENT FACT
+  Exact: engine.getResolvedFact('sos_match')?.value === 'success'
+  true  = sos_match returned 'success' from Middesk/OpenCorporates/Trulioo
+  false = all vendors returned 'failure' — no SOS record found
+  null  = fact never written (vendor not called or pipeline incomplete)
+
+■ sos_match returns 'success' when (line 1371-1419):
+  Middesk (pid=16): reviewTasks.find(t=>t.key==='sos_match').status === 'success'
+  OpenCorporates (pid=23): company_number present OR sosFilings.length > 0
+  Trulioo (pid=38): registrationNumber AND formationDate AND state all present
+                    AND (if businessStatus present) businessStatus.toLowerCase() === 'active'
+
+■ "No Registry Found" — exact 4-layer definition:
+  sos_match_boolean = false/null (index.ts:1421)
+  sos_filings.value = [] empty array (index.ts:717)
+  sos_match_verification = 0 in clients.verification_results (verification_results.sql:42-45)
+  UI: "No Registry Data to Display" (BusinessRegistrationTab.tsx:170)
+  CRITICAL: sos_match_verification=0 also fires for INACTIVE filings and FOREIGN-ONLY filings.
+
+■ sos_active (line 1426):
+  true = filings.some(f => f.active===true || f.status==='active')
+  false = filings exist but none active
+  undefined = sos_filings array is empty
+
+■ sos_domestic_verification (verification_results.sql:36-39):
+  = 1 ONLY when key='sos_domestic' AND sublabel='Domestic Active'
+  = 0 for foreign-only filings even when sos_match_boolean=true
+
+■ tin_match (line 429):
+  Middesk (pid=16): IRS direct lookup → reviewTasks[key='tin'].status
+  'success' = IRS confirmed EIN matches the submitted legal name
+  'failure' = IRS mismatch (most common cause: DBA submitted instead of IRS legal name on CP-575)
+
+■ tin_match_boolean (line 482):
+  engine.getResolvedFact('tin_match')?.value === 'success'
+  OR engine.getResolvedFact('tin_match')?.value?.status === 'success'
+
+■ naics_code (aiNaicsEnrichment.ts:63):
+  NAICS_OF_LAST_RESORT = '561499' — hardcoded fallback when no other signal available
+  Model: GPT-5-mini (AINaicsEnrichment.MODEL line 48)
+  If AI returns a code not in the 2022 NAICS lookup table, removeNaicsCode() resets to '561499'
+  Only runs if < 3 sources already exist for naics_code (maximumSources=3)
+
+■ idv_passed (line 528): Plaid IDV biometric result (pid=18)
+■ watchlist (line 1503): combineWatchlistMetadata merges Middesk + Trulioo hits,
+  deduplicates by type+title+entity_name+url. Adverse media EXCLUDED from watchlist.value.
+
+■ Source weights (sources.ts) — determines vendor priority:
+  businessDetails (applicant): weight=10 · Middesk: weight=1–2 · OpenCorporates: weight=0.9
+  Trulioo: weight=0.8 · ZoomInfo: weight=0.8 · Equifax: weight=0.7 (low — batch cadence unknown)
+
+■ Middesk confidence (sources.ts:233-238):
+  0.15 base + 0.20 each if tasks name/tin/address_verification/sos_match succeed → max 0.95
+
+■ Redshift tables:
+  rds_warehouse_public.facts → JSON_EXTRACT_PATH_TEXT(value,'value') for scalar facts
+  clients.verification_results → pre-aggregated SOS flags (0/1)
+  rds_manual_score_public.business_scores → Worth Score (weighted_score_850, 300-850 scale)
+  rds_integration_data.business_entity_review_task → raw review task results (key, status, sublabel)
+
+════════════════════════════════════════════════════════════════════
+YOUR JOB:
+════════════════════════════════════════════════════════════════════
+1. VERIFY data consistency across ALL facts using the exact definitions above.
+2. IDENTIFY red flags — cite the exact fact name and what the code says it means.
+3. DETECT contradictions: e.g. sos_match_boolean=true but sos_match_verification=0
+   (this means filing found but INACTIVE, not "no registry" — cite verification_results.sql:42-45).
+4. ASSESS Worth Score impact: which missing facts affect weighted_score_850.
+5. RECOMMEND specific actions for the underwriter.
 
 RULES:
-- Be specific. Reference exact fact names and values from the data provided.
-- Severity: CRITICAL (block approval immediately), HIGH (requires manual review before proceeding),
-  MEDIUM (investigate before decision), LOW (informational, note in file), CLEAN (no issue found).
-- Explain WHY each finding matters for KYB compliance and/or credit risk.
-- Consider fact relationships: formation_state vs operating address, revenue vs employees,
-  SOS status vs TIN status, watchlist hits vs entity confidence.
-- Consider industry-specific risk based on the NAICS code.
+- Reference exact fact names and values from the data provided.
+- NEVER say "typically" or "usually" — state what the code defines.
+- Severity: CRITICAL (block immediately) · HIGH (manual review required) ·
+  MEDIUM (investigate before decision) · LOW (informational) · CLEAN (no issue).
+- Cite the source file when describing what a fact means.
 
 OUTPUT FORMAT — strict JSON only, no extra text:
 {
   "overall_risk": "CRITICAL|HIGH|MEDIUM|LOW|CLEAN",
   "data_quality_score": 0-100,
-  "summary": "Two-sentence executive summary for the underwriting manager",
+  "summary": "Two-sentence executive summary citing specific fact values and their code-defined meanings",
   "kyb_completeness": {
     "sos_verified": true|false,
     "tin_verified": true|false,
@@ -762,15 +829,16 @@ OUTPUT FORMAT — strict JSON only, no extra text:
       "severity": "CRITICAL|HIGH|MEDIUM|LOW|CLEAN",
       "category": "Identity|Compliance|Financial|Entity Resolution|Data Quality|Industry Risk",
       "title": "Short descriptive title",
-      "description": "Detailed explanation referencing specific fact names and values",
+      "description": "Exact explanation citing fact names, values, and source file definitions — no hedging language",
       "facts_involved": ["fact_name_1", "fact_name_2"],
-      "worth_score_impact": "High|Medium|Low|None — brief explanation of score impact",
+      "source_definition": "e.g. index.ts:1421 — sos_match_boolean = engine.getResolvedFact('sos_match')?.value === 'success'",
+      "worth_score_impact": "High|Medium|Low|None — cite which score category is affected",
       "recommended_action": "Specific action for the underwriter",
-      "external_verification": "Optional: specific external source to check (e.g., 'Check SEC EDGAR for XYZ Corp')"
+      "external_verification": "Optional: specific external source to check"
     }
   ],
-  "recommended_next_steps": ["Step 1 (highest priority)", "Step 2", "Step 3"],
-  "underwriting_decision_guidance": "APPROVE|FURTHER_REVIEW|DECLINE — with one sentence rationale"
+  "recommended_next_steps": ["Step 1 (highest priority) — cite which fact to verify", "Step 2", "Step 3"],
+  "underwriting_decision_guidance": "APPROVE|FURTHER_REVIEW|DECLINE — one sentence citing specific fact values"
 }"""
 
 
@@ -801,16 +869,43 @@ def build_fact_summary(facts: dict) -> dict:
     return summary
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def run_llm_audit(facts_json: str, business_id: str, score_json: str = "") -> tuple:
     """
-    Run GPT-powered deep audit. Cached per (facts_hash, bid) for 30 min.
-    Takes JSON strings (not dicts) so st.cache_data can hash them.
+    Run GPT-powered deep audit with session-state caching.
+
+    Why session_state instead of @st.cache_data:
+      st.cache_data ignores parameters prefixed with _ (they can't be hashed),
+      and its disk cache persists 401 errors across restarts even after the key
+      changes. session_state is per-session and includes the key suffix in the
+      cache key, so a new API key immediately produces a fresh result.
+
+    Cache TTL: 30 minutes (1800 s) — same as before.
     Returns (result_dict, error_str).
     """
+    import time as _time
+
+    # ── Build a cache key that includes the active API key suffix ─────────────
+    active_key = _get_api_key()
+    key_suffix  = active_key[-8:] if active_key else "nokey"
+    facts_hash  = hashlib.md5(facts_json.encode()).hexdigest()[:10]
+    cache_key   = f"_llm_audit_{business_id}_{facts_hash}_{key_suffix}"
+
+    # ── Return cached result if still fresh ───────────────────────────────────
+    try:
+        cached = st.session_state.get(cache_key)
+        if cached and (_time.time() - cached.get("ts", 0)) < 1800:
+            return cached["result"], cached["err"]
+    except Exception:
+        pass
+
+    # ── Build client fresh (reads env var / secrets.toml now) ─────────────────
     client = get_openai_client()
     if not client:
-        return None, "OpenAI API key not configured."
+        return None, (
+            "OpenAI API key not configured.\n"
+            "Fix: run  OPENAI_API_KEY='sk-...' python3 -m streamlit run kyb_hub_app_v2.py\n"
+            "Or add OPENAI_API_KEY = 'sk-...' to Admin-Portal-KYB-App/.streamlit/secrets.toml"
+        )
 
     try:
         facts = json.loads(facts_json)
@@ -819,21 +914,19 @@ def run_llm_audit(facts_json: str, business_id: str, score_json: str = "") -> tu
         return None, f"JSON parse error: {e}"
 
     fact_summary = build_fact_summary(facts)
-
-    user_prompt = (
+    user_prompt  = (
         f"Analyze this business entity for KYB compliance risk and data quality.\n\n"
         f"Business ID: {business_id}\n\n"
         f"FACT PROFILE:\n{json.dumps(fact_summary, indent=2, default=str)}\n"
     )
     if score:
         user_prompt += f"\nWORTH SCORE INFO:\n{json.dumps(score, indent=2, default=str)}\n"
-
     user_prompt += (
         "\nFocus your analysis on:\n"
-        "1. Cross-field inconsistencies (e.g., SOS active but TIN failed)\n"
+        "1. Cross-field inconsistencies (SOS active but TIN failed, etc.)\n"
         "2. Missing critical KYB data (SOS, TIN, IDV, NAICS)\n"
         "3. High-risk indicators (watchlist, bankruptcies, tax-haven states)\n"
-        "4. Shell entity signals (high revenue + few employees, RA address, no digital footprint)\n"
+        "4. Shell entity signals (high revenue + few employees, RA address)\n"
         "5. Entity resolution concerns (formation vs operating state)\n"
         "6. Worth Score impact of missing data\n"
         "7. Industry-specific risk from NAICS code\n\n"
@@ -851,9 +944,20 @@ def run_llm_audit(facts_json: str, business_id: str, score_json: str = "") -> tu
             max_tokens=4000,
             response_format={"type": "json_object"},
         )
-        return json.loads(response.choices[0].message.content), None
+        result = json.loads(response.choices[0].message.content)
+        err    = None
     except Exception as e:
-        return None, str(e)
+        result = None
+        err    = str(e)
+
+    # ── Cache in session state (only success — don't cache API errors) ─────────
+    try:
+        if result is not None:
+            st.session_state[cache_key] = {"result": result, "err": err, "ts": _time.time()}
+    except Exception:
+        pass
+
+    return result, err
 
 
 def facts_cache_key(facts: dict) -> str:
