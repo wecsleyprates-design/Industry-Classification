@@ -1908,14 +1908,25 @@ Every answer must contain these sections, scaled to the question type:
 
 🗄️ SQL REFERENCE + LIVE DATA (ALWAYS — for every question)
   - Write the PRIMARY SQL query (executed automatically by the system)
+  - CRITICAL: Every SQL block MUST be preceded by a one-sentence description in this format:
+    "-- Returns: [what each column means and what the result will tell the user]"
+    Example: "-- Returns: one row per business with tin_submitted count (fact exists = EIN was given),
+    --          tin_pass (IRS confirmed match), tin_fail (IRS mismatch), tin_not_checked (no result yet).
+    --          NOTE: uses GROUP BY business_id to avoid duplicate counts if fact has multiple rows."
   - For investigative/architecture questions: also provide a NUMBERED SQL REFERENCE BLOCK
-    showing 2-5 additional queries covering related tables and layers, like:
-    "1. SOS filings from facts table: SELECT..."
-    "2. Registration flags (pre-aggregated): SELECT..."
-    "3. Raw SOS filings (RDS): SELECT..."
-    "4. Match confidence scores: SELECT..."
+    showing 2-5 additional queries covering related tables and layers. Each query MUST also
+    have a "-- Returns:" comment explaining what the result means.
+  - IMPORTANT: When querying rds_warehouse_public.facts with LEFT JOIN subqueries,
+    ALWAYS use GROUP BY business_id with MAX() in each subquery to prevent duplicate rows:
+    LEFT JOIN (SELECT business_id, MAX(JSON_EXTRACT_PATH_TEXT(value,'value')) AS val
+               FROM rds_warehouse_public.facts WHERE name='...' GROUP BY business_id) x
+               ON x.business_id = rbcm.business_id
+    This is critical — a business can have multiple fact rows for the same name,
+    causing non-deduplicated JOINs to inflate aggregate counts.
   - Always add LENGTH(f.value) < 60000 when querying sos_filings or watchlist facts
   - The system auto-executes your PRIMARY query and shows real Redshift data
+  - After showing results: if numbers look unexpected, explain WHY (e.g. deduplication,
+    fact row count, dependent facts not yet written, pipeline delays)
 
 🔗 KEY FILES (ALWAYS — even if brief)
   Cite: facts/kyb/index.ts · rules.ts · integrations.constant.ts · customer_table.sql · etc.
@@ -3817,6 +3828,61 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
         json_obj={"sos_funnel":_sos_bar[["Category","Count"]].to_dict("records")},
         sql=_reg_sql, icon="🏛️", color="#22c55e")
 
+    # ── Gap/anomaly explanations for registry signals ──────────────────────
+    _gap_panels = []
+
+    if _sos_not_found > 0:
+        _no_reg_pct = rate(_sos_not_found, total_biz)
+        _gap_panels.append(("🔴", "No Registry Found", f"""
+<strong>Observed:</strong> {_sos_not_found:,} businesses ({_no_reg_pct}) — Middesk returned no SOS registry match.<br/><br/>
+<strong style="color:#fde68a">Why does this happen?</strong>
+<ol style="margin:6px 0;padding-left:18px">
+  <li><strong>Business too new:</strong> The entity was incorporated recently and the Secretary of State database hasn't propagated the new filing to Middesk's data feed yet. Typically resolves within 1–5 business days.</li>
+  <li><strong>Name/address mismatch:</strong> Middesk searches by the submitted business address. If the business is incorporated under a slightly different name or DBA, the address-based search may return no results.</li>
+  <li><strong>Tax-haven foreign qualification only:</strong> The entity was incorporated in DE/NV/WY but only has a foreign qualification in the operating state. Middesk may not find the domestic filing without the correct formation state hint.</li>
+  <li><strong>Sole proprietor / informal entity:</strong> Sole proprietors and informal partnerships are not registered with the SOS. No SOS data is expected and correct for these entity types.</li>
+  <li><strong>Middesk API issue:</strong> The SOS lookup task may have failed silently. Check <code>rds_integration_data.business_entity_review_task</code> where <code>key='sos_verification' AND status='failed'</code>.</li>
+</ol>
+<strong>Recommended action:</strong> Check the entity type (<code>is_sole_prop</code> fact). If it's not a sole prop and is &gt;7 days old, escalate to the Middesk team or manually verify on the state SOS website."""))
+
+    if _domestic_sos_found < _sos_found and (_sos_found - _domestic_sos_found) > 0:
+        _foreign_only = _sos_found - _domestic_sos_found
+        _gap_panels.append(("🟠", "Foreign-Only Registration (Tax-Haven State)", f"""
+<strong>Observed:</strong> {_foreign_only:,} businesses have a registry record but only a foreign/tax-haven state filing.<br/><br/>
+<strong style="color:#fde68a">Why does this happen?</strong>
+<ol style="margin:6px 0;padding-left:18px">
+  <li><strong>Delaware/Nevada/Wyoming incorporation strategy:</strong> Many businesses incorporate in tax-haven states (DE/NV/WY/SD/MT/NM) for legal or tax advantages, then operate in another state. The domestic (incorporation) filing is in the tax-haven; the operating state has only a foreign qualification filing. Both are legitimate but Middesk's address-based search finds the foreign qualification first.</li>
+  <li><strong>Entity resolution gap:</strong> Middesk searches by the submitted operating address (e.g. Texas office). It finds the Texas foreign qualification but does NOT automatically find the Delaware domestic incorporation without being told to look there.</li>
+  <li><strong>Impact on KYB:</strong> <code>sos_active=true</code> may still be correct (the entity is in good standing). But the domestic filing (the true source of entity age, officers, and formation date) is not verified.</li>
+</ol>
+<strong>Recommended action:</strong> Verify both filings: (1) the domestic filing in DE/NV/WY and (2) the foreign qualification in the operating state."""))
+
+    if _state_match < _sos_found and _state_match < _domestic_sos_found:
+        _mismatch = _domestic_sos_found - _state_match
+        _gap_panels.append(("🟡", "Formation State ≠ Operating State", f"""
+<strong>Observed:</strong> {_mismatch:,} businesses have a domestic registration but are NOT incorporated in the state they said they operate in.<br/><br/>
+<strong style="color:#fde68a">Why does this happen?</strong>
+<ol style="margin:6px 0;padding-left:18px">
+  <li><strong>Multi-state operation:</strong> The business is legitimately incorporated in State A but operates in State B. This is very common — a California LLC operating in Texas, for example. Foreign qualification in the operating state is required but the formation state will never match.</li>
+  <li><strong>Applicant submitted headquarters vs. incorporation state:</strong> The business entered its main office state (e.g. California) on the onboarding form, but is incorporated in Delaware. Both are correct — the formation state is intentionally different from the operating address.</li>
+  <li><strong>Data entry error:</strong> Occasionally, the business entered the wrong state on the onboarding form. The <code>primary_address.state</code> fact reflects what was submitted, not what was verified.</li>
+</ol>
+<strong>Recommended action:</strong> For these businesses, verify that a foreign qualification exists in the operating state. The absence of a foreign qualification when operating out-of-state may be a compliance issue."""))
+
+    # Render gap panels
+    if _gap_panels:
+        st.markdown("---")
+        st.markdown("**🔍 Gap & Anomaly Analysis — Registry Signals:**")
+        for _gicon, _gtitle, _gcontent in _gap_panels:
+            _g_color = {"🔴":"#ef4444","🟠":"#f97316","🟡":"#f59e0b"}.get(_gicon,"#64748b")
+            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {_g_color};
+                border-radius:10px;padding:14px 18px;margin:6px 0">
+              <div style="color:{_g_color};font-weight:700;font-size:.88rem;margin-bottom:8px">
+                {_gicon} {_gtitle}
+              </div>
+              <div style="color:#CBD5E1;font-size:.80rem;line-height:1.6">{_gcontent}</div>
+            </div>""", unsafe_allow_html=True)
+
     # ════════════════════════════════════════════════════════════════════════
     # SECTION 2 — TIN VERIFICATION ANALYSIS
     # ════════════════════════════════════════════════════════════════════════
@@ -3951,10 +4017,58 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
     })
     st.dataframe(_recon_data, use_container_width=True, hide_index=True)
     if abs(_tin_gap) <= 2:
-        st.success(f"✅ TIN Reconciliation passed: Submitted ({_tin_submitted:,}) ≈ Pass ({_tin_pass:,}) + Fail ({_tin_fail:,}) = {_tin_reconcile:,}")
+        st.success(
+            f"✅ TIN Reconciliation passed: "
+            f"Submitted ({_tin_submitted:,}) ≈ Pass ({_tin_pass:,}) + Fail ({_tin_fail:,}) = {_tin_reconcile:,}. "
+            f"All submitted EINs have a Middesk IRS check result."
+        )
     else:
-        st.warning(f"⚠️ TIN gap detected: {_tin_submitted:,} submitted but only {_tin_reconcile:,} have a result. "
-                   f"{abs(_tin_gap):,} submitted TINs are still pending Middesk check.")
+        # Rich root-cause explanation for the gap
+        _gap_abs = abs(_tin_gap)
+        _gap_dir = "more" if _tin_gap > 0 else "fewer"
+        st.markdown(f"""<div style="background:#1c1917;border-left:4px solid #f59e0b;border-radius:10px;padding:16px 20px;margin:8px 0">
+          <div style="color:#fde68a;font-weight:700;font-size:.92rem;margin-bottom:8px">
+            ⚠️ TIN Reconciliation Gap Detected — {_gap_abs:,} {_gap_dir} TINs submitted than checked
+          </div>
+          <div style="color:#CBD5E1;font-size:.82rem;line-height:1.7">
+            <strong>Observed:</strong> {_tin_submitted:,} TINs submitted ≠ {_tin_pass:,} Pass + {_tin_fail:,} Fail = {_tin_reconcile:,}<br/>
+            <strong>Gap: {_tin_gap:+,}</strong>
+          </div>
+          <div style="color:#fde68a;font-weight:600;font-size:.82rem;margin-top:10px">Why does this gap exist?</div>
+          <div style="color:#CBD5E1;font-size:.80rem;line-height:1.7;margin-top:4px">
+            <ol style="margin:0;padding-left:18px">
+              <li><strong>Pipeline delay (most common):</strong> The business submitted an EIN during onboarding
+              (<code>tin_submitted</code> fact was written), but Middesk's TIN review task has not yet completed
+              and returned a result. The <code>tin_match_boolean</code> fact is only written
+              <em>after</em> Middesk queries the IRS directly. This typically resolves within minutes to hours.</li>
+              <li><strong>Different fact row counts (measurement artifact):</strong> The <code>tin_submitted</code> fact
+              can have multiple rows per business (re-submissions, multiple vendor writes). If counted without
+              <code>GROUP BY business_id</code>, this inflates the submitted count. The reconciliation here
+              uses <code>MAX()</code> with deduplication, so this should not apply — but raw SQL queries
+              that use plain LEFT JOINs without GROUP BY will show inflated numbers.</li>
+              <li><strong>tin_match code path skipped:</strong> Some businesses go through a non-standard onboarding
+              flow where the EIN is collected but the Middesk TIN review task is never queued
+              (e.g. sole proprietors using SSN, or manual override flows). These businesses have
+              <code>tin_submitted</code> but never receive a <code>tin_match_boolean</code>.</li>
+              <li><strong>Middesk task failure:</strong> The Middesk TIN check task was queued but returned
+              an error (network timeout, IRS API outage). The task may need to be retried via
+              <code>rds_integration_data.business_entity_review_task</code> where
+              <code>key='tin_verification' AND status='failed'</code>.</li>
+            </ol>
+          </div>
+          <div style="color:#fde68a;font-weight:600;font-size:.80rem;margin-top:10px">Recommended actions:</div>
+          <div style="color:#CBD5E1;font-size:.78rem;line-height:1.6;margin-top:4px">
+            1. Check if gap resolves itself within 24h (pipeline delay scenario) — run this query again tomorrow.<br/>
+            2. Query <code>rds_integration_data.business_entity_review_task</code> to find failed TIN tasks.<br/>
+            3. For the specific business IDs in the gap, check <code>tin_submitted</code> vs <code>tin_match</code>
+               fact values in the All Facts tab.<br/>
+            4. If gap persists &gt;24h, escalate to the integration-service team — Middesk webhook may have been missed.
+          </div>
+          <div style="color:#64748b;font-size:.73rem;margin-top:8px">
+            Source: <code>facts/kyb/index.ts</code> → tinSubmitted · tinMatchBoolean ·
+            <code>rds_integration_data.business_entity_review_task</code> (key='tin_verification')
+          </div>
+        </div>""", unsafe_allow_html=True)
 
     detail_panel("🔍 TIN Reconciliation Check",
         f"Submitted={_tin_submitted:,} · Pass+Fail={_tin_reconcile:,} · Gap={_tin_gap:+,}",
@@ -4036,6 +4150,74 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
         _drilldown_table("idv_fail_h",  f"IDV Failed — {len(_seg.get('idv_fail_h',[]))} businesses", _ALL_COLS)
         _drilldown_table("naics_fb_h",  f"NAICS Fallback 561499 — {len(_seg.get('naics_fb_h',[]))} businesses", _ALL_COLS)
         _drilldown_table("no_rev_h",    f"Revenue Missing — {len(_seg.get('no_rev_h',[]))} businesses", _ALL_COLS)
+
+        # ── Anomaly explanations for significant health gaps ───────────────
+        _health_anomalies = []
+
+        _sos_fail_n = len(_seg.get("sos_fail_h",[]))
+        _tin_fail_n  = len(_seg.get("tin_fail_h",[]))
+        _idv_fail_n  = len(_seg.get("idv_fail_h",[]))
+        _naics_fb_n  = len(_seg.get("naics_fb_h",[]))
+        _no_rev_n    = len(_seg.get("no_rev_h",[]))
+
+        if _sos_fail_n > 0:
+            _health_anomalies.append(("🔴", f"SOS Inactive ({_sos_fail_n:,} businesses)",
+                "The entity's Secretary of State registration has lost good standing. "
+                "Common causes: (1) missed annual report filing — most states require annual/biennial renewal; "
+                "(2) administrative dissolution by the state for failure to pay fees; "
+                "(3) voluntary dissolution by the owners. "
+                "Impact: the entity CANNOT legally operate in its state of registration. "
+                "Underwriting action: block approval until reinstated. "
+                "To reinstate: the business must file a reinstatement with their Secretary of State and pay back fees. "
+                "This typically takes 1–10 business days once filed."))
+
+        if _tin_fail_n > 0:
+            _health_anomalies.append(("🔴", f"TIN Failed ({_tin_fail_n:,} businesses)",
+                "The IRS returned a name/EIN mismatch. The most common root causes (in order of frequency): "
+                "(1) DBA/trade name submitted instead of the legal name on the EIN certificate — "
+                "the IRS matches against the name on Form SS-4 exactly; "
+                "(2) Recent legal name change — the IRS database may not yet reflect a name change filed with the state; "
+                "(3) Incorrect EIN — the business may have used a personal SSN or a prior entity's EIN; "
+                "(4) Data entry error — typo in the EIN digits. "
+                "Underwriting action: request the IRS EIN confirmation letter (Form CP-575 or 147C) "
+                "and compare the exact legal name to what was submitted."))
+
+        if _naics_fb_n > 0:
+            _pct_fb = rate(_naics_fb_n, n)
+            _health_anomalies.append(("🟡", f"NAICS Fallback 561499 ({_naics_fb_n:,} businesses — {_pct_fb})",
+                "All commercial vendors (ZoomInfo, Equifax, OpenCorporates, SERP, Trulioo) AND the AI enrichment "
+                "failed to classify the industry. The 561499 code ('All Other Business Support Services') is the "
+                "platform fallback, not a real classification. Causes: "
+                "(1) No website submitted (Gap G1) — AI enrichment cannot do web search without a URL; "
+                "(2) Website submitted but not passed to AI enrichment (Gap G2) — integration-service bug; "
+                "(3) Website present and passed to AI, but website is too generic (Gap G3); "
+                "(4) Very new business with no digital footprint yet. "
+                "Impact on Worth Score: NAICS=561499 triggers the industry penalty in the Company Profile model category. "
+                "Underwriting action: manually classify the industry and override the NAICS code."))
+
+        if _no_rev_n > 0:
+            _health_anomalies.append(("🟡", f"Revenue Missing ({_no_rev_n:,} businesses)",
+                "Neither ZoomInfo (pid=24) nor Equifax (pid=17) returned revenue data for these businesses. "
+                "This means the entity-matching XGBoost model could not link them to either vendor's database. "
+                "Causes: (1) Business too new — not yet in commercial firmographic databases (typically takes 6–12 months); "
+                "(2) DBA name mismatch — submitted trade name differs from the legal name in ZI/EFX; "
+                "(3) Very small business — micro-businesses with <$1M revenue are often not covered by commercial databases; "
+                "(4) Non-US entity — ZI/EFX coverage is primarily US-focused. "
+                "Impact on Worth Score: null revenue forces the financial sub-model to use imputed defaults, "
+                "reducing the accuracy of the Business Operations category score."))
+
+        if _health_anomalies:
+            st.markdown("---")
+            st.markdown("**🔍 Anomaly Explanations — Why These Signals Are Failing:**")
+            for _ha_icon, _ha_title, _ha_text in _health_anomalies:
+                _ha_color = {"🔴":"#ef4444","🟠":"#f97316","🟡":"#f59e0b"}.get(_ha_icon,"#64748b")
+                st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {_ha_color};
+                    border-radius:10px;padding:12px 16px;margin:6px 0">
+                  <div style="color:{_ha_color};font-weight:700;font-size:.85rem;margin-bottom:6px">
+                    {_ha_icon} {_ha_title}
+                  </div>
+                  <div style="color:#CBD5E1;font-size:.79rem;line-height:1.6">{_ha_text}</div>
+                </div>""", unsafe_allow_html=True)
 
     # ════════════════════════════════════════════════════════════════════════
     # SECTION 4 — RED FLAG DISTRIBUTION
