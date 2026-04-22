@@ -3663,6 +3663,45 @@ if tab=="🏠 Home":
         """)
 
     @st.cache_data(ttl=600, show_spinner=False)
+    def _load_sos_review_tasks_for_bids(bid_tuple):
+        """Load SOS review task sublabels from rds_integration_data.business_entity_review_task.
+        Returns one row per business with:
+          - sos_match_sublabel   : 'Submitted Active' | other | null  (key='sos_match')
+          - sos_domestic_sublabel: 'Domestic Active' | 'Domestic Inactive' | null (key='sos_domestic')
+          - sos_state_sublabel   : 'State Match' | 'No State Match' | null (key='sos_state')
+          - sos_match_status     : 'success' | 'warning' | 'failure' (key='sos_match')
+          - sos_domestic_status  : 'success' | 'warning' | 'failure' (key='sos_domestic')
+        Source: rds_integration_data.business_entity_review_task
+          via rds_integration_data.business_entity_verification (business_id link)
+        Authoritative labels from customer-admin-webapp/src/constants/SOSBadges.ts.
+        """
+        if not bid_tuple:
+            return None, "No business IDs"
+        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
+        return run_sql(f"""
+            SELECT
+                bev.business_id,
+                MAX(CASE WHEN bert.key='sos_match'
+                    THEN bert.sublabel END)    AS sos_match_sublabel,
+                MAX(CASE WHEN bert.key='sos_match'
+                    THEN bert.status END)      AS sos_match_status,
+                MAX(CASE WHEN bert.key='sos_domestic'
+                    THEN bert.sublabel END)    AS sos_domestic_sublabel,
+                MAX(CASE WHEN bert.key='sos_domestic'
+                    THEN bert.status END)      AS sos_domestic_status,
+                MAX(CASE WHEN bert.key='sos_state'
+                    THEN bert.sublabel END)    AS sos_state_sublabel,
+                MAX(CASE WHEN bert.key='sos_state'
+                    THEN bert.status END)      AS sos_state_status
+            FROM rds_integration_data.business_entity_review_task bert
+            JOIN rds_integration_data.business_entity_verification bev
+                ON bev.id = bert.business_entity_verification_id
+            WHERE bev.business_id IN ({bid_list})
+              AND bert.key IN ('sos_match','sos_domestic','sos_state')
+            GROUP BY bev.business_id
+        """)
+
+    @st.cache_data(ttl=600, show_spinner=False)
     def _load_sole_prop_signal(bid_tuple):
         """Load Plaid IDV SSN last-4 for Possible Sole Prop detection.
         Source: integration-service/lib/facts/kyb/index.ts:606
@@ -3727,6 +3766,10 @@ if tab=="🏠 Home":
                 -- IDV
                 MAX(CASE WHEN f.name='idv_passed_boolean'
                     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS idv_passed,
+                -- Sole Prop (index.ts:552-616 — true|false|null)
+                -- null = not enough data; true = confirmed; false = multiple owners or SSN mismatch
+                MAX(CASE WHEN f.name='is_sole_prop'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS is_sole_prop,
                 -- Classification
                 MAX(CASE WHEN f.name='naics_code'
                     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS naics_code,
@@ -3753,7 +3796,7 @@ if tab=="🏠 Home":
               AND f.name IN (
                   'sos_match_boolean','sos_match','sos_active',
                   'tin_submitted','tin_match','tin_match_boolean',
-                  'idv_passed_boolean','naics_code',
+                  'idv_passed_boolean','is_sole_prop','naics_code',
                   'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
                   'adverse_media_hits','revenue','formation_date','formation_state'
               )
@@ -3779,6 +3822,18 @@ if tab=="🏠 Home":
             )
         else:
             funnel_df["idv_last4_ssn"] = None
+
+    # Load SOS review task sublabels (sos_match/sos_domestic/sos_state)
+    # Source: rds_integration_data.business_entity_review_task
+    with st.spinner(""):
+        _sos_tasks_df, _sos_tasks_err = _load_sos_review_tasks_for_bids(tuple(_authoritative_bids))
+    # Merge review task columns into funnel_df
+    if funnel_df is not None and not funnel_df.empty and _sos_tasks_df is not None and not _sos_tasks_df.empty:
+        funnel_df = funnel_df.merge(_sos_tasks_df, on="business_id", how="left")
+    elif funnel_df is not None and not funnel_df.empty:
+        for _col in ["sos_match_sublabel","sos_match_status","sos_domestic_sublabel",
+                     "sos_domestic_status","sos_state_sublabel","sos_state_status"]:
+            funnel_df[_col] = None
 
     # Build per-business flag map from the pivoted stats_df (faster than flag_df loop)
     biz_flags = {}
@@ -3940,104 +3995,181 @@ if tab=="🏠 Home":
     # Pull funnel data for SOS detail
     _funnel = funnel_df if funnel_df is not None and not funnel_df.empty else pd.DataFrame()
 
-    # Compute SOS-level signals from funnel_df
+    def _sv(col, df=None):
+        """Safely get a column as lower-stripped string Series."""
+        _d = df if df is not None else _funnel
+        if col in _d.columns:
+            return _d[col].astype(str).str.lower().str.strip()
+        return pd.Series([""] * len(_d), index=_d.index)
+
+    # Compute all Section 1 signals from funnel_df + review task data
     if not _funnel.empty:
-        TAX_HAVENS = {"DE","NV","WY","SD","MT","NM"}
-        def _sl(v): return str(v or "").lower().strip()
+        _smb = _sv("sos_match_boolean")
+        _sa  = _sv("sos_active")        # undefined=null → sos_filings was empty
 
-        _smb = _funnel["sos_match_boolean"].astype(str).str.lower().str.strip()
+        # ════════════════════════════════════════════════════════════════
+        # DECISION TREE signals (index.ts:1421-1434 + verification_results.sql)
+        # ════════════════════════════════════════════════════════════════
 
-        # ── KPI 1: No Registry Found — strictly sos_match_boolean = 'false' ──
-        # index.ts:1421: sos_match_boolean = engine.getResolvedFact('sos_match')?.value === 'success'
-        # 'false' means the vendor actively returned 'failure' (not missing/null)
-        _no_reg_mask   = (_smb == "false")
-        _sos_not_found = int(_no_reg_mask.sum())
+        # ── sos_filings EMPTY vs NOT EMPTY ───────────────────────────────────
+        # Derivation: sos_active = undefined when sos_filings=[] (index.ts:1431)
+        # sos_active missing/null in facts  → filings array was empty
+        # sos_active present ('true'/'false') → filings array was NOT empty
+        _filings_empty_mask = _sa.isin(["","none","nan","null"])
+        _filings_notempty_mask = ~_filings_empty_mask
+
+        # ── sos_match_boolean breakdown ───────────────────────────────────────
+        _no_reg_mask   = (_smb == "false")          # vendor returned failure
         _sos_found     = int((_smb == "true").sum())
+        _sos_not_found = int(_no_reg_mask.sum())
 
-        # ── KPI 2: No Registry but Possible Sole Prop ────────────────────────
-        # Of the sos_match_boolean=false group, how many have last 4 of tin_submitted
-        # matching last 4 of SSN from Plaid IDV (idv_last4_ssn)?
-        # Source: index.ts:606 — type===UsSsnLast4 && value===tin.slice(-4) → is_sole_prop=true
+        # Among filings NOT empty: match=false vs match=true
+        _filings_ne_match_false_mask = _filings_notempty_mask & _no_reg_mask
+        _filings_ne_match_true_mask  = _filings_notempty_mask & (_smb == "true")
+
+        # ── sos_active_verif (from stats_df via verification_results.sql:47-51) ─
+        _av_col = stats_df.set_index("business_id")["sos_active_verif"] if (
+            stats_df is not None and not stats_df.empty and "sos_active_verif" in stats_df.columns
+        ) else pd.Series(dtype=float)
+        def _av(bid): return int(_av_col.get(bid, 0) or 0)
+
+        # Among match=true: sos_active_verif=0 (inactive) vs =1 (active)
+        _filings_ne_true_inactive_mask = _filings_ne_match_true_mask & _funnel["business_id"].apply(
+            lambda b: _av(b) == 0)
+        _filings_ne_true_active_mask   = _filings_ne_match_true_mask & _funnel["business_id"].apply(
+            lambda b: _av(b) == 1)
+
+        # ── Registry Found (verified sos_match_verification=1) ───────────────
+        # Source: verification_results.sql:42-45
+        # sublabel='Submitted Active', key='sos_match', status='success'
+        _sos_found_verified = int(stats_df["sos_match_verif"].fillna(0).astype(int).sum()) if (
+            stats_df is not None and not stats_df.empty and "sos_match_verif" in stats_df.columns
+        ) else 0
+
+        # ── Domestic Registration (sos_domestic sublabel) ─────────────────────
+        # Source: verification_results.sql:36-39 + sos_domestic review task
+        _dom_sub = _sv("sos_domestic_sublabel")   # from _sos_tasks_df merged into funnel_df
+        _dom_active_mask   = _dom_sub == "domestic active"
+        _dom_inactive_mask = _dom_sub.isin(["domestic inactive","foreign active","foreign inactive"])
+        _dom_missing_mask  = _dom_sub.isin(["","none","nan","null"])
+
+        _domestic_active_n   = int(_dom_active_mask.sum())
+        _domestic_inactive_n = int(_dom_inactive_mask.sum())
+        _domestic_missing_n  = int(_dom_missing_mask.sum())
+
+        # Backward-compat: domestic found = sos_domestic_verification=1
+        _dv = stats_df.set_index("business_id")["sos_domestic_verif"] if (
+            stats_df is not None and not stats_df.empty and "sos_domestic_verif" in stats_df.columns
+        ) else pd.Series(dtype=float)
+        _domestic_sos_found = int(_dv.fillna(0).astype(int).sum())
+        _only_domestic_reg  = _domestic_sos_found
+
+        # ── State Match (sos_state review task — NOT formation_state comparison) ──
+        # Source: rds_integration_data.business_entity_review_task key='sos_state'
+        # UI badge from customer-admin-webapp/src/constants/SOSBadges.ts
+        _state_sub = _sv("sos_state_sublabel")
+        _state_match_mask    = _state_sub == "state match"
+        _no_state_match_mask = _state_sub.isin(["no state match","state mismatch"])
+        _state_match         = int(_state_match_mask.sum())
+        _no_state_match      = int(_no_state_match_mask.sum())
+        # Fallback: if review tasks not available, use formation_state == operating_state
+        if _state_match == 0 and _no_state_match == 0:
+            _op_state    = _funnel.get("operating_state", pd.Series([""] * len(_funnel)))
+            _form_state  = _funnel["formation_state"].astype(str).str.upper().str.strip().fillna("") if "formation_state" in _funnel.columns else pd.Series([""] * len(_funnel))
+            _op_state_up = _op_state.astype(str).str.upper().str.strip().fillna("")
+            _state_match_mask    = ((_smb=="true") & (_form_state != "") & (_form_state == _op_state_up))
+            _no_state_match_mask = (_smb != "false") & ~_state_match_mask
+            _state_match         = int(_state_match_mask.sum())
+            _no_state_match      = int(_no_state_match_mask.sum())
+
+        # ── Possible Sole Prop (is_sole_prop fact + IDV SSN match) ───────────
+        # Source: index.ts:552-616
+        # true  = single owner + TIN matches IDV SSN (confirmed)
+        # null  = not enough data (no TIN / no owners / no IDV) — also "possible"
+        # false = multiple owners OR IDV SSN doesn't match TIN
+        _sp_col = stats_df.set_index("business_id")["is_sole_prop"] if (
+            stats_df is not None and not stats_df.empty and "is_sole_prop" in stats_df.columns
+        ) else pd.Series(dtype=str)
+        _sp_true_mask  = _funnel["business_id"].apply(
+            lambda b: str(_sp_col.get(b,"")).lower().strip() == "true")
+        _sp_null_mask  = _funnel["business_id"].apply(
+            lambda b: str(_sp_col.get(b,"")).lower().strip() in ("","none","nan","null"))
+        _sp_false_mask = _funnel["business_id"].apply(
+            lambda b: str(_sp_col.get(b,"")).lower().strip() == "false")
+        # "Possible" = true OR null (not enough data)
+        _sole_prop_possible_mask = _sp_true_mask | _sp_null_mask
+        _possible_sole_prop = int(_sole_prop_possible_mask.sum())
+
+        # Backward-compat: SSN-last-4 match (for no-registry businesses)
         _has_idv_last4 = "idv_last4_ssn" in _funnel.columns
         if _has_idv_last4:
-            _tin_last4 = _funnel["tin_submitted"].astype(str).str.strip().str[-4:]
+            _tin_last4 = _funnel["tin_submitted"].astype(str).str.strip().str[-4:] if "tin_submitted" in _funnel.columns else pd.Series([""] * len(_funnel))
             _ssn_last4 = _funnel["idv_last4_ssn"].astype(str).str.strip()
             _sole_prop_mask = (
                 _no_reg_mask &
-                _tin_last4.notna() & (_tin_last4 != "") & (_tin_last4 != "nan") &
-                _ssn_last4.notna() & (_ssn_last4 != "") & (_ssn_last4 != "nan") &
+                _tin_last4.notna() & ~_tin_last4.isin(["","nan"]) &
+                _ssn_last4.notna() & ~_ssn_last4.isin(["","nan"]) &
                 (_tin_last4 == _ssn_last4)
             )
         else:
-            _sole_prop_mask = pd.Series([False] * len(_funnel), index=_funnel.index)
-        _possible_sole_prop = int(_sole_prop_mask.sum())
+            _sole_prop_mask = _sp_true_mask & _no_reg_mask
 
-        # ── KPI 3: No Domestic Reg Found ─────────────────────────────────────
-        # sos_match_boolean != 'false' (true OR null/missing) BUT no domestic registration
-        # "Domestic" = formation_state NOT in tax-haven set AND sos_match_boolean=true
-        # So "No Domestic Reg Found" = sos_match_boolean != 'false' AND NOT domestic
-        _not_false_mask = (_smb != "false")    # true OR null/missing
-        _is_domestic = (
-            (_smb == "true") &
-            _funnel["formation_state"].notna() &
-            _funnel["formation_state"].str.strip().ne("") &
-            _funnel["formation_state"].str.upper().str.strip().apply(
-                lambda s: s not in TAX_HAVENS and s != "")
-        )
+        _not_false_mask  = _smb != "false"
+        _is_domestic = _dom_active_mask
         _no_domestic_mask = _not_false_mask & ~_is_domestic
         _no_domestic_found = int(_no_domestic_mask.sum())
 
-        # Keep _domestic_sos_found for existing bar chart / detail panels
-        _domestic_sos_found = int(_is_domestic.sum())
-        _only_domestic_reg  = _domestic_sos_found
-
-        # ── KPI 4: No State Match ─────────────────────────────────────────────
-        # sos_match_boolean != 'false' BUT no registry found in the state they submitted
-        # i.e. formation_state != operating_state (or formation_state missing entirely)
-        _op_state     = _funnel.get("operating_state", pd.Series([""] * len(_funnel)))
-        _form_state   = _funnel["formation_state"].astype(str).str.upper().str.strip().fillna("")
-        _op_state_up  = _op_state.astype(str).str.upper().str.strip().fillna("")
-        _state_match_mask = (
-            (_smb == "true") &
-            (_form_state != "") &
-            (_form_state == _op_state_up)
-        )
-        _state_match  = int(_state_match_mask.sum())
-        # No state match = sos_match_boolean != 'false' but formation_state != operating_state
-        _no_state_match_mask = _not_false_mask & ~_state_match_mask
-        _no_state_match = int(_no_state_match_mask.sum())
-
     else:
         _sos_found = sos_ok; _sos_not_found = total_biz - sos_ok
-        _possible_sole_prop = 0
-        _domestic_sos_found = sos_ok; _only_domestic_reg = sos_ok
-        _no_domestic_found  = 0
-        _state_match = 0; _no_state_match = 0
-        _no_reg_mask = pd.Series(dtype=bool)
+        _possible_sole_prop = 0; _domestic_sos_found = sos_ok; _only_domestic_reg = sos_ok
+        _no_domestic_found = 0; _state_match = 0; _no_state_match = 0
+        _sos_found_verified = 0
+        _domestic_active_n = 0; _domestic_inactive_n = 0; _domestic_missing_n = 0
+        for _nm in ["_no_reg_mask","_sole_prop_mask","_no_domestic_mask","_no_state_match_mask",
+                    "_state_match_mask","_is_domestic","_filings_empty_mask","_filings_notempty_mask",
+                    "_filings_ne_match_false_mask","_filings_ne_match_true_mask",
+                    "_filings_ne_true_inactive_mask","_filings_ne_true_active_mask",
+                    "_dom_active_mask","_dom_inactive_mask","_dom_missing_mask",
+                    "_sp_true_mask","_sp_null_mask","_sp_false_mask","_sole_prop_possible_mask",
+                    "_not_false_mask"]:
+            locals()[_nm] = pd.Series(dtype=bool)
         _sole_prop_mask = pd.Series(dtype=bool)
-        _no_domestic_mask = pd.Series(dtype=bool)
-        _no_state_match_mask = pd.Series(dtype=bool)
-        _state_match_mask = pd.Series(dtype=bool)
-        _is_domestic = pd.Series(dtype=bool)
 
     # ── Build business-ID segment maps from funnel_df for drilldowns ─────────
-    _seg = {}  # segment_key → list of business_ids
+    _seg = {}
     if not _funnel.empty:
         _sl_f = lambda v: str(v or "").lower().strip()
-        _seg["sos_found"]        = _funnel[_funnel["sos_match_boolean"].apply(_sl_f)=="true"]["business_id"].tolist()
-        # KPI 1: strictly false
-        _seg["no_sos"]           = _funnel[_no_reg_mask]["business_id"].tolist()
-        # KPI 2: possible sole props (subset of no_sos)
-        _seg["possible_sole_prop"] = _funnel[_sole_prop_mask]["business_id"].tolist()
-        _seg["domestic"]         = _funnel[_is_domestic]["business_id"].tolist()
-        _seg["state_match"]      = _funnel[_state_match_mask]["business_id"].tolist()
-        # KPI 3: not-false but no domestic
-        _seg["no_domestic"]      = _funnel[_no_domestic_mask]["business_id"].tolist()
-        # KPI 4: not-false but no state match
-        _seg["no_state_match"]   = _funnel[_no_state_match_mask]["business_id"].tolist()
+        # Row 1 standard segments
+        _seg["sos_found"]         = _funnel[_smb=="true"]["business_id"].tolist()
+        _seg["no_sos"]            = _funnel[_no_reg_mask]["business_id"].tolist()
+        _seg["domestic"]          = _funnel[_dom_active_mask]["business_id"].tolist()
+        _seg["state_match"]       = _funnel[_state_match_mask]["business_id"].tolist()
+        _seg["no_domestic"]       = _funnel[_no_domestic_mask]["business_id"].tolist()
+        _seg["no_state_match"]    = _funnel[_no_state_match_mask]["business_id"].tolist()
+        # Decision tree segments for No Registry Found
+        _seg["dt_filings_empty"]  = _funnel[_filings_empty_mask]["business_id"].tolist()
+        _seg["dt_filings_ne"]     = _funnel[_filings_notempty_mask]["business_id"].tolist()
+        _seg["dt_ne_false"]       = _funnel[_filings_ne_match_false_mask]["business_id"].tolist()
+        _seg["dt_ne_true"]        = _funnel[_filings_ne_match_true_mask]["business_id"].tolist()
+        _seg["dt_ne_true_inactive"]= _funnel[_filings_ne_true_inactive_mask]["business_id"].tolist()
+        _seg["dt_ne_true_active"] = _funnel[_filings_ne_true_active_mask]["business_id"].tolist()
+        # Domestic detail
+        _seg["domestic_active"]   = _funnel[_dom_active_mask]["business_id"].tolist()
+        _seg["domestic_inactive"] = _funnel[_dom_inactive_mask]["business_id"].tolist()
+        _seg["domestic_missing"]  = _funnel[_dom_missing_mask]["business_id"].tolist()
+        # Sole prop detail
+        _seg["sole_prop_true"]    = _funnel[_sp_true_mask]["business_id"].tolist()
+        _seg["sole_prop_null"]    = _funnel[_sp_null_mask]["business_id"].tolist()
+        _seg["sole_prop_false"]   = _funnel[_sp_false_mask]["business_id"].tolist()
+        _seg["possible_sole_prop"]= _funnel[_sole_prop_possible_mask]["business_id"].tolist()
     else:
-        _seg = {"sos_found":[],"no_sos":[],"possible_sole_prop":[],
-                "domestic":[],"state_match":[],"no_domestic":[],"no_state_match":[]}
+        _seg = {k: [] for k in [
+            "sos_found","no_sos","domestic","state_match","no_domestic","no_state_match",
+            "dt_filings_empty","dt_filings_ne","dt_ne_false","dt_ne_true",
+            "dt_ne_true_inactive","dt_ne_true_active",
+            "domestic_active","domestic_inactive","domestic_missing",
+            "sole_prop_true","sole_prop_null","sole_prop_false","possible_sole_prop",
+        ]}
 
     # ── How-calculated explanations for each segment ─────────────────────────
     # Source files read: integration-service-main/lib/facts/kyb/index.ts (lines 1371-1435)
@@ -4420,6 +4552,353 @@ if tab=="🏠 Home":
             "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
             "**Source:** `integration-service/lib/facts/kyb/index.ts` (formation_state, primary_address) · "
             "`warehouse-service/.../verification_results.sql` (sos_domestic_verification)"
+        ),
+        # ── DECISION TREE — No Registry Found (index.ts:1371-1434) ─────────────
+        "dt_filings_empty": (
+            "**What 'sos_filings array EMPTY' means:**\n"
+            "The `sos_filings` fact value is an empty array `[]` — no vendor returned any SOS filing object.\n\n"
+            "**Exact derivation (index.ts:1426-1434):**\n"
+            "```typescript\n// sos_active DEPENDENT fact:\nconst filings = engine.getResolvedFact('sos_filings')?.value;\n"
+            "if (!filings || !Array.isArray(filings) || filings.length === 0) {\n"
+            "  return undefined;  // sos_active is NOT written to facts\n}\n```\n"
+            "**Signal in Redshift:** `sos_active` fact is **missing/null** in `rds_warehouse_public.facts`.\n"
+            "When `sos_active` is null/missing, it means `sos_filings.length === 0`.\n\n"
+            "**Decision Tree Position:**\n"
+            "```\nIs sos_filings array empty?\n  YES → This segment ← Definitive 'No Registry Found'\n  NO  → See other segments\n```\n\n"
+            "**Why this is definitive:** An empty `sos_filings` array means NO vendor returned even one filing record. "
+            "There is nothing to check — entity existence is completely unverifiable.\n\n"
+            "**Source:** `integration-service/lib/facts/kyb/index.ts` lines 1426-1431\n\n"
+            "**Diagnostic SQL:**\n"
+            "```sql\n-- Returns: businesses with sos_active missing (= sos_filings was empty)\n"
+            "SELECT rbcm.business_id,\n"
+            "       vr.sos_match_verification, vr.sos_active_verification, vr.sos_domestic_verification,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_match.value,'value') AS sos_match_boolean\n"
+            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "LEFT JOIN rds_warehouse_public.facts f_act\n"
+            "  ON f_act.business_id = rbcm.business_id AND f_act.name = 'sos_active'\n"
+            "LEFT JOIN rds_warehouse_public.facts f_match\n"
+            "  ON f_match.business_id = rbcm.business_id AND f_match.name = 'sos_match_boolean'\n"
+            "LEFT JOIN clients.verification_results vr ON vr.business_id = rbcm.business_id\n"
+            "WHERE f_act.business_id IS NULL\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
+        ),
+        "dt_filings_ne": (
+            "**What 'sos_filings array NOT EMPTY' means:**\n"
+            "The `sos_filings` fact array has at least one filing object — at least one vendor returned a record.\n\n"
+            "**Signal in Redshift:** `sos_active` fact IS present in `rds_warehouse_public.facts` (either 'true' or 'false').\n\n"
+            "**Decision Tree Position:**\n"
+            "```\nIs sos_filings array empty?\n  NO → This segment ← Filings exist, check sos_match_boolean:\n"
+            "         false → Vendor returned 'failure' despite having filings\n"
+            "         true  → Registry confirmed, check active status\n```\n\n"
+            "**Source:** `index.ts:1426-1434` — `sos_active` is only written when `filings.length > 0`\n\n"
+            "**Diagnostic SQL:**\n"
+            "```sql\n-- Returns: businesses where sos_filings was NOT empty (sos_active present)\n"
+            "SELECT rbcm.business_id,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_act.value,'value')   AS sos_active,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_bool.value,'value')  AS sos_match_boolean,\n"
+            "       vr.sos_match_verification, vr.sos_active_verification\n"
+            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "JOIN rds_warehouse_public.facts f_act\n"
+            "  ON f_act.business_id = rbcm.business_id AND f_act.name = 'sos_active'\n"
+            "LEFT JOIN rds_warehouse_public.facts f_bool\n"
+            "  ON f_bool.business_id = rbcm.business_id AND f_bool.name = 'sos_match_boolean'\n"
+            "LEFT JOIN clients.verification_results vr ON vr.business_id = rbcm.business_id\n"
+            "WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
+        ),
+        "dt_ne_false": (
+            "**What 'sos_filings NOT empty + sos_match_boolean=false' means:**\n"
+            "Filings exist in the array but `sos_match_boolean=false` — the vendor had filing data "
+            "but still returned a 'failure' status for the overall match.\n\n"
+            "**Decision Tree Position:**\n"
+            "```\nsos_filings NOT empty → Check sos_match_boolean:\n"
+            "  false → This segment ← Vendor returned 'failure' despite having data\n```\n\n"
+            "**Why this occurs:** Middesk's `reviewTasks.find(key==='sos_match').status='failure'` can happen "
+            "even when filings exist if the filing data is incomplete (missing EIN, name mismatch, wrong jurisdiction).\n\n"
+            "**Source:** `index.ts:1371-1386` — `sos_match` per-vendor logic; `index.ts:1421` — `sos_match_boolean`\n\n"
+            "**Diagnostic SQL:**\n"
+            "```sql\n-- Returns: filings exist but match returned failure\n"
+            "SELECT rbcm.business_id,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_act.value,'value')   AS sos_active,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_bool.value,'value')  AS sos_match_boolean,\n"
+            "       bert.sublabel AS sos_match_sublabel, bert.status AS sos_match_status\n"
+            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "JOIN rds_warehouse_public.facts f_act\n"
+            "  ON f_act.business_id = rbcm.business_id AND f_act.name = 'sos_active'\n"
+            "JOIN rds_warehouse_public.facts f_bool\n"
+            "  ON f_bool.business_id = rbcm.business_id AND f_bool.name = 'sos_match_boolean'\n"
+            "  AND JSON_EXTRACT_PATH_TEXT(f_bool.value,'value') = 'false'\n"
+            "LEFT JOIN rds_integration_data.business_entity_verification bev\n"
+            "  ON bev.business_id = rbcm.business_id\n"
+            "LEFT JOIN rds_integration_data.business_entity_review_task bert\n"
+            "  ON bert.business_entity_verification_id = bev.id AND bert.key = 'sos_match'\n"
+            "WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
+        ),
+        "dt_ne_true": (
+            "**What 'sos_filings NOT empty + sos_match_boolean=true' means:**\n"
+            "Filings exist AND the vendor confirmed a match (`sos_match='success'`). "
+            "The entity's SOS record was found. Check `sos_active_verification` to determine if it's currently active.\n\n"
+            "**Decision Tree Position:**\n"
+            "```\nsos_filings NOT empty → sos_match_boolean=true → Registry confirmed\n"
+            "  → Check sos_active_verification:\n"
+            "      = 0 → Found but INACTIVE\n"
+            "      = 1 → Found and ACTIVE ✅\n```\n\n"
+            "**Source:** `index.ts:1421` (sos_match_boolean) · `verification_results.sql:47-51` (sos_active_verification)\n\n"
+            "**Diagnostic SQL:**\n"
+            "```sql\n-- Returns: registry found, split by active status\n"
+            "SELECT rbcm.business_id,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_act.value,'value')   AS sos_active,\n"
+            "       vr.sos_active_verification, vr.sos_match_verification,\n"
+            "       bert.sublabel AS sos_match_sublabel\n"
+            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "JOIN rds_warehouse_public.facts f_bool\n"
+            "  ON f_bool.business_id = rbcm.business_id AND f_bool.name = 'sos_match_boolean'\n"
+            "  AND JSON_EXTRACT_PATH_TEXT(f_bool.value,'value') = 'true'\n"
+            "LEFT JOIN rds_warehouse_public.facts f_act\n"
+            "  ON f_act.business_id = rbcm.business_id AND f_act.name = 'sos_active'\n"
+            "LEFT JOIN clients.verification_results vr ON vr.business_id = rbcm.business_id\n"
+            "LEFT JOIN rds_integration_data.business_entity_verification bev ON bev.business_id = rbcm.business_id\n"
+            "LEFT JOIN rds_integration_data.business_entity_review_task bert\n"
+            "  ON bert.business_entity_verification_id = bev.id AND bert.key = 'sos_match'\n"
+            "WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
+        ),
+        "dt_ne_true_inactive": (
+            "**What 'Registry Found but INACTIVE' means:**\n"
+            "`sos_match_boolean=true` (registry found) AND `sos_active_verification=0` "
+            "(no active filing confirmed by `verification_results.sql`).\n\n"
+            "**Decision Tree Position:**\n"
+            "```\nRegistry found (sos_match_boolean=true)\n"
+            "  → sos_active_verification = 0 → Found but INACTIVE ← This segment\n"
+            "  → sos_active_verification = 1 → Found and ACTIVE ✅\n```\n\n"
+            "**How `sos_active_verification` is computed (verification_results.sql:47-51):**\n"
+            "```sql\nMAX(CASE WHEN bert.category='sos' AND bert.key='sos_active'\n"
+            "         AND bert.status='Success' THEN 1 ELSE 0 END) AS sos_active_verification\n```\n"
+            "0 = no `sos_active` task with `status='Success'` — entity is dissolved, suspended, or revoked.\n\n"
+            "**Action:** Block approval until SOS good standing is reinstated. "
+            "Check if entity has filed a revival/reinstatement.\n\n"
+            "**Source:** `verification_results.sql:47-51` · `index.ts:1426-1434`\n\n"
+            "**Diagnostic SQL:**\n"
+            "```sql\n-- Returns: businesses with registry found but filing inactive\n"
+            "SELECT rbcm.business_id,\n"
+            "       vr.sos_match_verification, vr.sos_active_verification,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_act.value,'value') AS sos_active,\n"
+            "       bert_m.sublabel AS sos_match_sublabel, bert_a.status AS sos_active_status\n"
+            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "JOIN clients.verification_results vr ON vr.business_id = rbcm.business_id\n"
+            "  AND vr.sos_active_verification = 0 AND vr.sos_match_verification = 1\n"
+            "LEFT JOIN rds_warehouse_public.facts f_act\n"
+            "  ON f_act.business_id = rbcm.business_id AND f_act.name = 'sos_active'\n"
+            "LEFT JOIN rds_integration_data.business_entity_verification bev ON bev.business_id = rbcm.business_id\n"
+            "LEFT JOIN rds_integration_data.business_entity_review_task bert_m\n"
+            "  ON bert_m.business_entity_verification_id = bev.id AND bert_m.key = 'sos_match'\n"
+            "LEFT JOIN rds_integration_data.business_entity_review_task bert_a\n"
+            "  ON bert_a.business_entity_verification_id = bev.id AND bert_a.key = 'sos_active'\n"
+            "WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
+        ),
+        "dt_ne_true_active": (
+            "**What 'Registry Found and ACTIVE ✅' means:**\n"
+            "`sos_match_boolean=true` AND `sos_active_verification=1` — the entity has a registry record "
+            "AND at least one filing is currently active and in good standing.\n\n"
+            "**Decision Tree Position:**\n"
+            "```\nRegistry found (sos_match_boolean=true)\n"
+            "  → sos_active_verification = 1 → Found and ACTIVE ✅ ← This segment\n```\n\n"
+            "**How `sos_active_verification` is computed (verification_results.sql:47-51):**\n"
+            "```sql\nMAX(CASE WHEN bert.category='sos' AND bert.key='sos_active'\n"
+            "         AND bert.status='Success' THEN 1 ELSE 0 END) AS sos_active_verification\n```\n"
+            "1 = at least one `sos_active` review task returned `status='Success'`.\n\n"
+            "**This is the strongest registry verification signal.** "
+            "Entity exists, registry was found, and entity is currently in good standing.\n\n"
+            "**Source:** `verification_results.sql:47-51` · `index.ts:1426-1434`\n\n"
+            "**Diagnostic SQL:**\n"
+            "```sql\n-- Returns: businesses with active registry confirmed\n"
+            "SELECT rbcm.business_id,\n"
+            "       vr.sos_match_verification, vr.sos_active_verification,\n"
+            "       vr.sos_domestic_verification,\n"
+            "       bert.sublabel AS sos_match_sublabel\n"
+            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "JOIN clients.verification_results vr ON vr.business_id = rbcm.business_id\n"
+            "  AND vr.sos_active_verification = 1\n"
+            "LEFT JOIN rds_integration_data.business_entity_verification bev ON bev.business_id = rbcm.business_id\n"
+            "LEFT JOIN rds_integration_data.business_entity_review_task bert\n"
+            "  ON bert.business_entity_verification_id = bev.id AND bert.key = 'sos_match'\n"
+            "WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
+        ),
+        # ── DOMESTIC REGISTRATION detail segments ─────────────────────────────
+        "domestic_active": (
+            "**What 'Domestic Registration Active ✅' means:**\n"
+            "Review task `key='sos_domestic'` has `sublabel='Domestic Active'` — "
+            "the business has an active SOS filing in the state where it was originally incorporated.\n\n"
+            "**Source definition (rds_integration_data.business_entity_review_task):**\n"
+            "| Column | Value |\n|---|---|\n"
+            "| `key` | `sos_domestic` |\n"
+            "| `sublabel` | `'Domestic Active'` |\n"
+            "| `status` | `'success'` |\n"
+            "| `message` | `'Active domestic filing found'` |\n\n"
+            "**Redshift flag:** `clients.verification_results.sos_domestic_verification = 1`\n"
+            "(built when `key='sos_domestic' AND sublabel='Domestic Active'` — verification_results.sql:36-39)\n\n"
+            "**Source:** `warehouse-service/.../verification_results.sql:36-39` · "
+            "`customer-admin-webapp/src/constants/SOSBadges.ts`\n\n"
+            "**Diagnostic SQL:**\n"
+            "```sql\nSELECT vr.business_id, vr.sos_domestic_verification,\n"
+            "       bert.sublabel AS sos_domestic_sublabel, bert.status\n"
+            "FROM clients.verification_results vr\n"
+            "JOIN rds_cases_public.rel_business_customer_monitoring rbcm ON rbcm.business_id = vr.business_id\n"
+            "LEFT JOIN rds_integration_data.business_entity_verification bev ON bev.business_id = vr.business_id\n"
+            "LEFT JOIN rds_integration_data.business_entity_review_task bert\n"
+            "  ON bert.business_entity_verification_id = bev.id AND bert.key = 'sos_domestic'\n"
+            "WHERE vr.sos_domestic_verification = 1\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
+        ),
+        "domestic_inactive": (
+            "**What 'Domestic Registration INACTIVE' means:**\n"
+            "Review task `key='sos_domestic'` exists but `sublabel='Domestic Inactive'` or `sublabel='Foreign Active'` — "
+            "no active domestic filing. Business may only have foreign registrations.\n\n"
+            "**Example (DE+FL+GA structure):** FL and GA would be *foreign* registrations. "
+            "The domestic filing is in DE, but it's inactive → `sublabel='Domestic Inactive'`.\n\n"
+            "**Source definition:**\n"
+            "| Column | Value |\n|---|---|\n"
+            "| `key` | `sos_domestic` |\n"
+            "| `sublabel` | `'Domestic Inactive'` |\n"
+            "| `status` | `'warning'` |\n\n"
+            "**Redshift flag:** `sos_domestic_verification = 0` despite having filing data\n\n"
+            "**Source:** `customer-admin-webapp/src/constants/SOSBadges.ts` · `verification_results.sql:36-39`\n\n"
+            "**Diagnostic SQL:**\n"
+            "```sql\nSELECT rbcm.business_id, bert.sublabel, bert.status\n"
+            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "JOIN rds_integration_data.business_entity_verification bev ON bev.business_id = rbcm.business_id\n"
+            "JOIN rds_integration_data.business_entity_review_task bert\n"
+            "  ON bert.business_entity_verification_id = bev.id AND bert.key = 'sos_domestic'\n"
+            "  AND bert.sublabel NOT IN ('Domestic Active')\n"
+            "WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
+        ),
+        "domestic_missing": (
+            "**What 'No Domestic Registration data' means:**\n"
+            "No `sos_domestic` review task row exists for this business. "
+            "Either the vendor was not called, the integration did not run, or the business has no domestic filing at all.\n\n"
+            "**Redshift flag:** `sos_domestic_verification = 0` AND no `sos_domestic` review task row\n\n"
+            "**Source:** `rds_integration_data.business_entity_review_task` (no row for key='sos_domestic')\n\n"
+            "**Diagnostic SQL:**\n"
+            "```sql\nSELECT rbcm.business_id\n"
+            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "LEFT JOIN rds_integration_data.business_entity_verification bev ON bev.business_id = rbcm.business_id\n"
+            "LEFT JOIN rds_integration_data.business_entity_review_task bert\n"
+            "  ON bert.business_entity_verification_id = bev.id AND bert.key = 'sos_domestic'\n"
+            "WHERE bert.id IS NULL\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
+        ),
+        # ── STATE MATCH (sos_state review task — NOT formation_state comparison) ─
+        "state_match": (
+            "**What 'State Match' means (corrected definition):**\n"
+            "Review task `key='sos_state'` has `sublabel='State Match'` — "
+            "the submitted operating state matches the state found in the SOS filing.\n\n"
+            "**⚠️ Important:** This is the `sos_state` review task from `rds_integration_data.business_entity_review_task`, "
+            "NOT a comparison of `formation_state` vs `primary_address.state` (those are different concepts).\n\n"
+            "**Source definition:**\n"
+            "| Column | Value |\n|---|---|\n"
+            "| `key` | `sos_state` |\n"
+            "| `sublabel` | `'State Match'` |\n"
+            "| `status` | `'success'` |\n\n"
+            "**Also tracked in:** `datascience.smb_zoominfo_standardized_joined` as `state_match=5` "
+            "(ZoomInfo entity matching scoring component — contributes to `match_confidence`).\n\n"
+            "**Source:** `customer-admin-webapp/src/constants/SOSBadges.ts` · "
+            "`warehouse-service/.../smb_zoominfo_standardized_joined.sql`\n\n"
+            "**Diagnostic SQL:**\n"
+            "```sql\nSELECT rbcm.business_id, bert.sublabel, bert.status\n"
+            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "JOIN rds_integration_data.business_entity_verification bev ON bev.business_id = rbcm.business_id\n"
+            "JOIN rds_integration_data.business_entity_review_task bert\n"
+            "  ON bert.business_entity_verification_id = bev.id AND bert.key = 'sos_state'\n"
+            "  AND bert.sublabel = 'State Match'\n"
+            "WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
+        ),
+        "no_state_match": (
+            "**What 'No State Match' means (corrected definition):**\n"
+            "Review task `key='sos_state'` has `sublabel='No State Match'` — "
+            "the submitted operating state does NOT match the state in the SOS filing.\n\n"
+            "**⚠️ Important:** This is the `sos_state` review task — NOT a formation_state vs primary_address comparison.\n\n"
+            "| Column | Value |\n|---|---|\n"
+            "| `key` | `sos_state` |\n"
+            "| `sublabel` | `'No State Match'` |\n"
+            "| `status` | `'warning'` |\n\n"
+            "**Diagnostic SQL:**\n"
+            "```sql\nSELECT rbcm.business_id, bert.sublabel, bert.status\n"
+            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "JOIN rds_integration_data.business_entity_verification bev ON bev.business_id = rbcm.business_id\n"
+            "JOIN rds_integration_data.business_entity_review_task bert\n"
+            "  ON bert.business_entity_verification_id = bev.id AND bert.key = 'sos_state'\n"
+            "  AND bert.sublabel = 'No State Match'\n"
+            "WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
+        ),
+        # ── SOLE PROP (is_sole_prop fact from index.ts:552-616) ───────────────
+        "possible_sole_prop": (
+            "**What 'Possible Sole Proprietor' means:**\n"
+            "`is_sole_prop` fact is `true` OR `null` — either confirmed or not enough data to determine.\n\n"
+            "**Exact `is_sole_prop` logic (index.ts:552-616):**\n"
+            "| Value | Meaning |\n|---|---|\n"
+            "| `true` | Single owner AND TIN matches owner's IDV SSN → confirmed sole prop |\n"
+            "| `null` | Not enough data: no TIN, no owners, OR no IDV completed |\n"
+            "| `false` | Multiple owners OR IDV SSN doesn't match submitted TIN |\n\n"
+            "**'Possible' = true OR null** — null means we can't determine, not that it's false.\n\n"
+            "**Also inferred by AI:** `aiSanitization.ts` sets `is_sole_proprietor=true` when "
+            "business name looks like a person's name at a residential address.\n\n"
+            "**Redshift:** `rds_warehouse_public.facts` where `name='is_sole_prop'` — stored as `'true'`/`'false'`/`null`.\n\n"
+            "**Source:** `integration-service/lib/facts/kyb/index.ts:552-616` · "
+            "`integration-service/lib/aiEnrichment/aiSanitization.ts`\n\n"
+            "**Master SQL (all 5 signals per business):**\n"
+            "```sql\n-- Returns: all SOS verification signals + is_sole_prop for a business\n"
+            "SELECT\n"
+            "  bert_match.sublabel   AS sos_match_sublabel,\n"
+            "  bert_dom.sublabel     AS sos_domestic_sublabel,\n"
+            "  vr.sos_match_verification,\n"
+            "  vr.sos_domestic_verification,\n"
+            "  vr.sos_active_verification,\n"
+            "  f.value               AS is_sole_prop_value\n"
+            "FROM clients.verification_results vr\n"
+            "LEFT JOIN rds_integration_data.business_entity_review_task bert_match\n"
+            "  ON bert_match.business_entity_verification_id =\n"
+            "     (SELECT id FROM rds_integration_data.business_entity_verification\n"
+            "      WHERE business_id = vr.business_id ORDER BY created_at DESC LIMIT 1)\n"
+            "  AND bert_match.key = 'sos_match'\n"
+            "LEFT JOIN rds_integration_data.business_entity_review_task bert_dom\n"
+            "  ON bert_dom.business_entity_verification_id =\n"
+            "     (SELECT id FROM rds_integration_data.business_entity_verification\n"
+            "      WHERE business_id = vr.business_id ORDER BY created_at DESC LIMIT 1)\n"
+            "  AND bert_dom.key = 'sos_domestic'\n"
+            "LEFT JOIN rds_warehouse_public.facts f\n"
+            "  ON f.business_id = vr.business_id AND f.name = 'is_sole_prop'\n"
+            "  AND LENGTH(f.value) < 60000\n"
+            "WHERE vr.business_id = '{business_id}';\n```\n\n"
+            "**Source:** `integration-service/lib/facts/kyb/index.ts:552-616`"
+        ),
+        "sole_prop_true": (
+            "**Confirmed Sole Proprietor (`is_sole_prop=true`):**\n"
+            "Single owner AND the submitted TIN (EIN) matches the owner's SSN captured during Plaid IDV.\n\n"
+            "**Logic (index.ts:604-609):**\n"
+            "```typescript\nif (type === IDNumberType.UsSsnLast4 && value === tin.slice(-4)) {\n"
+            "  return true;  // SSN last-4 matches submitted TIN last-4\n}\n```\n\n"
+            "**Note:** For confirmed sole props, the IRS TIN check via Middesk is not the right path "
+            "(it checks employer EINs, not SSNs). `is_sole_prop=true` with no SOS registry is expected and normal.\n\n"
+            "**Source:** `index.ts:552-616` · `index.ts:604-609` (UsSsnLast4 comparison)"
+        ),
+        "sole_prop_null": (
+            "**Possible Sole Proprietor (`is_sole_prop=null`):**\n"
+            "`is_sole_prop` was not written to the facts table — not enough data to determine.\n\n"
+            "**When this occurs (index.ts:564-583):**\n"
+            "- No TIN submitted: `if (!tin) return null`\n"
+            "- No owners defined: `if (!owners || owners.length === 0) return null`\n"
+            "- No IDV rows (Plaid IDV not connected): `if (!idvStatus) return null`\n\n"
+            "**Interpretation:** null means *we don't know* — it is NOT the same as false. "
+            "If the business has only one known owner and no formal entity registration, "
+            "it is likely a sole prop.\n\n"
+            "**Source:** `index.ts:552-583`"
+        ),
+        "sole_prop_false": (
+            "**Not a Sole Proprietor (`is_sole_prop=false`):**\n"
+            "Multiple owners OR the owner's IDV SSN does NOT match the submitted TIN.\n\n"
+            "**Logic (index.ts:572-614):**\n"
+            "- Multiple unique owners → return `false`\n"
+            "- IDV `idvStatus.SUCCESS === 0` → return `false`\n"
+            "- All successful IDV records compared, none matched TIN → return `false`\n\n"
+            "**Source:** `index.ts:552-614`"
         ),
         # ── SECTION 2: TIN / EIN ──────────────────────────────────────────────
         # Source: integration-service/lib/facts/kyb/index.ts lines 399-491
@@ -5210,8 +5689,29 @@ if tab=="🏠 Home":
                         st.session_state["_bid_just_set"] = _irow_bid
                         st.rerun()
 
-    # ── KPI Row — 5 cards: Onboarded · No Registry Found · Registry Found · Domestic Reg Found · State Match
-    #             + Row 2: Possible Sole Prop · No Domestic Reg Found · No State Match
+    # ── Column list for all Section 1 drilldown tables ────────────────────────
+    _SOS_COLS = [
+        "sos_match_boolean","sos_match_status","sos_active",
+        "sos_match_verif","sos_domestic_verif","sos_active_verif",
+        "formation_state","formation_date",
+        "tin_submitted","tin_match_status","tin_match",
+        "idv_passed","naics_code","watchlist_hits","is_sole_prop",
+    ]
+
+    # ── Where They Live reference table ───────────────────────────────────────
+    _WHERE_THEY_LIVE = (
+        "\n\n**📍 Where They Live — Source Reference:**\n\n"
+        "| Label | key | Sublabel | Redshift flag | Source file |\n|---|---|---|---|---|\n"
+        "| Registry Found | `sos_match` | `'Submitted Active'` | `sos_match_verification=1` | `verification_results.sql:42` |\n"
+        "| Domestic Active | `sos_domestic` | `'Domestic Active'` | `sos_domestic_verification=1` | `verification_results.sql:36` |\n"
+        "| Domestic Inactive | `sos_domestic` | `'Domestic Inactive'` | `sos_domestic_verification=0` | `verification_results.sql:36` |\n"
+        "| State Match | `sos_state` | `'State Match'` | `sos_state` review task | `SOSBadges.ts` |\n"
+        "| Possible Sole Prop | `is_sole_prop` | `true\\|null` | `rds_warehouse_public.facts` | `index.ts:552` |\n\n"
+        "**Source tables:** `rds_integration_data.business_entity_review_task` · "
+        "`clients.verification_results` · `rds_warehouse_public.facts`"
+    )
+
+    # ── KPI Row 1 — Main totals ────────────────────────────────────────────────
     k1,k2,k3,k4,k5 = st.columns(5)
     with k1: kpi("📋 Onboarded", f"{total_biz:,}", period_label, "#3B82F6")
     with k2: kpi(
@@ -5221,7 +5721,7 @@ if tab=="🏠 Home":
     )
     with k3: kpi(
         "🏛️ Registry Found", f"{_sos_found:,}",
-        rate(_sos_found,total_biz)+" · sos_match_boolean=true",
+        rate(_sos_found,total_biz)+" · sos_match_verification=1",
         "#22c55e" if _sos_found/max(total_biz,1)>0.8 else "#f59e0b"
     )
     with k4: kpi(
@@ -5231,77 +5731,91 @@ if tab=="🏠 Home":
     )
     with k5: kpi(
         "📍 State Match", f"{_state_match:,}",
-        rate(_state_match,total_biz)+" · formation_state=primary_address.state",
+        rate(_state_match,total_biz)+" · key='sos_state' sublabel='State Match'",
         "#22c55e" if _state_match/max(total_biz,1)>0.6 else "#f59e0b"
     )
 
-    # ── KPI Row 2 — gap analysis: Possible Sole Prop · No Domestic · No State Match ──
-    _g2,_g3,_g4 = st.columns(3)
-    with _g2: kpi(
-        "🧍 Possible Sole Prop", f"{_possible_sole_prop:,}",
-        f"of {_sos_not_found:,} no-reg · TIN[-4]=SSN[-4] (index.ts:606)",
-        "#8B5CF6" if _possible_sole_prop>0 else "#64748b"
-    )
-    with _g3: kpi(
-        "🏠 No Domestic Reg Found", f"{_no_domestic_found:,}",
-        rate(_no_domestic_found,total_biz)+" · not-false but no domestic reg",
-        "#f59e0b" if _no_domestic_found>0 else "#22c55e"
-    )
-    with _g4: kpi(
-        "📍 No State Match", f"{_no_state_match:,}",
-        rate(_no_state_match,total_biz)+" · not-false, formation≠operating",
-        "#f59e0b" if _no_state_match>0 else "#22c55e"
-    )
+    # ── KPI Row 2 — Domestic detail + State + Sole Prop ───────────────────────
+    _r2a,_r2b,_r2c,_r2d,_r2e = st.columns(5)
+    with _r2a: kpi("✅ Domestic Active",   f"{_domestic_active_n:,}",
+                   "sublabel='Domestic Active'","#22c55e" if _domestic_active_n>0 else "#64748b")
+    with _r2b: kpi("⚠️ Domestic Inactive",f"{_domestic_inactive_n:,}",
+                   "sublabel='Domestic Inactive'","#f59e0b" if _domestic_inactive_n>0 else "#64748b")
+    with _r2c: kpi("❌ No Domestic Data", f"{_domestic_missing_n:,}",
+                   "no sos_domestic task","#f97316" if _domestic_missing_n>0 else "#64748b")
+    with _r2d: kpi("📍 No State Match",   f"{_no_state_match:,}",
+                   "key='sos_state' sublabel='No State Match'","#f59e0b" if _no_state_match>0 else "#22c55e")
+    with _r2e: kpi("🧍 Possible Sole Prop",f"{_possible_sole_prop:,}",
+                   "is_sole_prop=true OR null (index.ts:552)","#8B5CF6" if _possible_sole_prop>0 else "#64748b")
 
-    # ── Compute the "gap" segments — businesses in one set but not the next ──
+    # ── Standard drilldowns ────────────────────────────────────────────────────
+    _drilldown_table("sos_found",   f"Registry Found — {_sos_found:,} businesses (sos_match_boolean=true)", _SOS_COLS)
+    _drilldown_table("domestic",   f"Domestic Reg Found — {_domestic_sos_found:,} businesses (sos_domestic_verification=1)", _SOS_COLS)
+    _drilldown_table("state_match",f"State Match — {_state_match:,} businesses (sos_state sublabel='State Match')", _SOS_COLS)
+    _drilldown_table("no_sos",     f"No Registry Found — {_sos_not_found:,} businesses (sos_match_boolean=false)", _SOS_COLS)
+
+    # ── Decision Tree — No Registry Found ─────────────────────────────────────
+    st.markdown("""<div style="background:#0c1a2e;border-left:4px solid #ef4444;
+        border-radius:8px;padding:12px 16px;margin:8px 0">
+      <div style="color:#ef4444;font-weight:700;font-size:.90rem;margin-bottom:6px">
+        🌳 Decision Tree — No Registry Found
+      </div>
+      <div style="color:#CBD5E1;font-size:.79rem;font-family:monospace;line-height:1.8">
+        Is sos_filings array empty?<br/>
+        &nbsp;&nbsp;YES → Definitive "No Registry Found" (sos_active=undefined in facts)<br/>
+        &nbsp;&nbsp;NO  → Check sos_match_boolean<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;false → sos_match returned "failure" (vendor found nothing)<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;true  → Registry found, check active status:<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sos_active_verification=0 → Found but INACTIVE<br/>
+        &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;sos_active_verification=1 → Found and ACTIVE ✅
+      </div>
+      <div style="color:#94A3B8;font-size:.73rem;margin-top:8px">
+        Source: integration-service/lib/facts/kyb/index.ts lines 1371-1434 · verification_results.sql:42-51
+      </div>
+    </div>""", unsafe_allow_html=True)
+
+    # Decision tree node KPIs
+    _dt1,_dt2,_dt3,_dt4,_dt5 = st.columns(5)
+    _n_fe  = len(_seg.get("dt_filings_empty",[]))
+    _n_fne = len(_seg.get("dt_filings_ne",[]))
+    _n_nef = len(_seg.get("dt_ne_false",[]))
+    _n_net = len(_seg.get("dt_ne_true",[]))
+    _n_neti= len(_seg.get("dt_ne_true_inactive",[]))
+    _n_neta= len(_seg.get("dt_ne_true_active",[]))
+    with _dt1: kpi("📭 Filings Empty",     f"{_n_fe:,}",  rate(_n_fe,total_biz)+" · sos_active=null",       "#ef4444" if _n_fe>0 else "#64748b")
+    with _dt2: kpi("📋 Filings NOT Empty", f"{_n_fne:,}", rate(_n_fne,total_biz)+" · sos_active present",   "#3B82F6")
+    with _dt3: kpi("❌ Match=False",       f"{_n_nef:,}", rate(_n_nef,total_biz)+" · vendor returned fail", "#f97316" if _n_nef>0 else "#64748b")
+    with _dt4: kpi("⚠️ Found, Inactive",  f"{_n_neti:,}",rate(_n_neti,total_biz)+" · sos_active_verif=0",  "#f59e0b" if _n_neti>0 else "#64748b")
+    with _dt5: kpi("✅ Found, Active",     f"{_n_neta:,}",rate(_n_neta,total_biz)+" · sos_active_verif=1",  "#22c55e")
+
+    # Decision tree drilldowns
+    _drilldown_table("dt_filings_empty",     f"Filings Empty (YES) — {_n_fe:,} businesses (sos_active=null)", _SOS_COLS)
+    _drilldown_table("dt_filings_ne",        f"Filings NOT Empty (NO) — {_n_fne:,} businesses (sos_active present)", _SOS_COLS)
+    _drilldown_table("dt_ne_false",          f"NOT Empty + sos_match=false — {_n_nef:,} businesses (vendor failure despite filings)", _SOS_COLS)
+    _drilldown_table("dt_ne_true",           f"NOT Empty + sos_match=true — {_n_net:,} businesses (registry confirmed)", _SOS_COLS)
+    _drilldown_table("dt_ne_true_inactive",  f"Registry Found but INACTIVE — {_n_neti:,} businesses (sos_active_verif=0)", _SOS_COLS)
+    _drilldown_table("dt_ne_true_active",    f"Registry Found and ACTIVE ✅ — {_n_neta:,} businesses (sos_active_verif=1)", _SOS_COLS)
+
+    # Domestic detail drilldowns
+    _drilldown_table("domestic_active",  f"Domestic Active — {_domestic_active_n:,} businesses (sublabel='Domestic Active')", _SOS_COLS)
+    _drilldown_table("domestic_inactive",f"Domestic Inactive — {_domestic_inactive_n:,} businesses (sublabel='Domestic Inactive')", _SOS_COLS)
+    _drilldown_table("domestic_missing", f"No Domestic Data — {_domestic_missing_n:,} businesses (no sos_domestic review task)", _SOS_COLS)
+    _drilldown_table("no_state_match",   f"No State Match — {_no_state_match:,} businesses (sos_state sublabel='No State Match')", _SOS_COLS)
+
+    # Sole Prop drilldowns
+    _drilldown_table("sole_prop_true",   f"Confirmed Sole Prop — {len(_seg.get('sole_prop_true',[]))} businesses (is_sole_prop=true)", _SOS_COLS)
+    _drilldown_table("sole_prop_null",   f"Possible Sole Prop (no data) — {len(_seg.get('sole_prop_null',[]))} businesses (is_sole_prop=null)", _SOS_COLS)
+    _drilldown_table("sole_prop_false",  f"Not Sole Prop — {len(_seg.get('sole_prop_false',[]))} businesses (is_sole_prop=false)", _SOS_COLS)
+
+    # Legacy gap segments
     _sos_found_set    = set(_seg.get("sos_found", []))
     _domestic_set     = set(_seg.get("domestic", []))
     _state_match_set  = set(_seg.get("state_match", []))
-
-    # Registry found but domestic NOT found (foreign/tax-haven only)
-    _foreign_only_bids = list(_sos_found_set - _domestic_set)
-    _seg["foreign_only"] = _foreign_only_bids
-
-    # Domestic found but state NOT matched (formation ≠ operating state)
-    _domestic_no_state = list(_domestic_set - _state_match_set)
-    _seg["domestic_no_state"] = _domestic_no_state
-
-    # ── Drilldown expanders ────────────────────────────────────────────────
-    # Registry drilldown columns — ordered: core Facts API signals → verification_results flags → supplementary
-    _SOS_COLS = [
-        "sos_match_boolean", "sos_match_status", "sos_active",
-        "sos_match_verif", "sos_domestic_verif", "sos_active_verif",
-        "formation_state", "formation_date",
-        "tin_submitted", "tin_match_status", "tin_match",
-        "idv_passed", "naics_code", "watchlist_hits",
-    ]
-    _drilldown_table("sos_found",           f"Registry Found — {_sos_found:,} businesses (sos_match_boolean=true)", _SOS_COLS)
-    _drilldown_table("domestic",           f"Domestic Reg Found — {_domestic_sos_found:,} businesses", _SOS_COLS)
-    _drilldown_table("state_match",        f"State Match — {_state_match:,} businesses (formation=operating state)", _SOS_COLS)
-    # KPI 1 drilldown: strictly sos_match_boolean=false
-    _drilldown_table("no_sos",             f"No Registry Found — {_sos_not_found:,} businesses (sos_match_boolean=false)", _SOS_COLS)
-    # KPI 2 drilldown: possible sole props within the no-registry group
-    if _possible_sole_prop > 0:
-        st.markdown(f"""<div style="background:#1E293B;border-left:4px solid #8B5CF6;
-            border-radius:8px;padding:10px 14px;margin:6px 0">
-          <div style="color:#a78bfa;font-weight:700;font-size:.86rem">
-            🧍 {_possible_sole_prop:,} of the {_sos_not_found:,} No-Registry businesses may be Sole Proprietors
-          </div>
-          <div style="color:#CBD5E1;font-size:.79rem;margin-top:4px;line-height:1.5">
-            These businesses have <code>sos_match_boolean=false</code> AND the last 4 of their
-            submitted EIN (<code>tin_submitted[-4:]</code>) matches the last 4 of the SSN
-            captured during Plaid IDV (<code>identity_verification.meta.user.id_number.value</code>
-            where type=<code>us_ssn_last_4</code>). This is the same comparison used internally
-            to derive <code>is_sole_prop=true</code> (index.ts:604-609). Sole props legitimately
-            have no SOS registry — this is expected and normal behaviour for them.
-          </div>
-        </div>""", unsafe_allow_html=True)
-        _drilldown_table("possible_sole_prop",
-            f"Possible Sole Prop — {_possible_sole_prop:,} businesses (TIN[-4]=SSN[-4], no registry)", _SOS_COLS)
-    # KPI 3 drilldown: not-false but no domestic registration
-    _drilldown_table("no_domestic",        f"No Domestic Reg — {_no_domestic_found:,} businesses (not-false, tax-haven or missing formation)", _SOS_COLS)
-    # KPI 4 drilldown: not-false but formation state ≠ submitted operating state
-    _drilldown_table("no_state_match",     f"No State Match — {_no_state_match:,} businesses (not-false, formation≠operating state)", _SOS_COLS)
+    _seg["foreign_only"]     = list(_sos_found_set - _domestic_set)
+    _seg["domestic_no_state"]= list(_domestic_set  - _state_match_set)
+    # Possible sole prop drilldown (already shown per-type above, add combined here)
+    _drilldown_table("possible_sole_prop", f"Possible Sole Prop — {_possible_sole_prop:,} businesses (is_sole_prop=true OR null)", _SOS_COLS)
+    _drilldown_table("no_domestic",        f"No Domestic Reg — {_no_domestic_found:,} businesses (sos_domestic missing or inactive)", _SOS_COLS)
 
     # ── NEW: Gap drilldowns ────────────────────────────────────────────────
     if _foreign_only_bids:
