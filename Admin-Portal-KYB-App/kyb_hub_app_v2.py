@@ -2393,19 +2393,28 @@ def detail_panel(
             _ta_key  = f"dp_ta_{_dp_uid}"
             _res_key = f"dp_res_{_dp_uid}"
 
-            # Auto-substitute known placeholders from active filter context
+            # Auto-substitute all known placeholders from active filter context
+            # This ensures the SQL is scoped to the same customer/date as the drilldown card.
             _sql_init = sql
             try:
-                _df_from = str(st.session_state.get("hub_dfrom_date") or
-                               st.session_state.get("fbar_custom_from","") or "")
-                _df_to   = str(st.session_state.get("hub_dto_date") or
-                               st.session_state.get("fbar_custom_to","") or "")
+                _df_from = str(hub_date_from or st.session_state.get("hub_dfrom_date","") or "")
+                _df_to   = str(hub_date_to   or st.session_state.get("hub_dto_date","")   or "")
                 _df_bid  = str(st.session_state.get("hub_bid","") or "")
-                for _ph, _vl in [("date_from",_df_from),("date_to",_df_to),
-                                  ("business_id",_df_bid),("bid",_df_bid)]:
+                _df_cid  = str(hub_customer_id or "")
+                for _ph, _vl in [
+                    ("date_from",    _df_from),
+                    ("date_to",      _df_to),
+                    ("business_id",  _df_bid),
+                    ("bid",          _df_bid),
+                    ("customer_id",  _df_cid),
+                ]:
                     if _vl:
                         _sql_init = _sql_init.replace(f"'{{{_ph}}}'", f"'{_vl}'")
                         _sql_init = _sql_init.replace(f"{{{_ph}}}", _vl)
+                # Substitute the customer clause placeholder if present
+                if "{customer_clause}" in _sql_init:
+                    _cust_frag = f" AND rbcm.customer_id = '{_df_cid}'" if _df_cid else ""
+                    _sql_init  = _sql_init.replace("{customer_clause}", _cust_frag)
             except Exception:
                 pass
 
@@ -3346,6 +3355,11 @@ def hub_date_clause(col="received_at"):
     if hub_date_to:   parts.append(f"{col} <= '{hub_date_to} 23:59:59'")
     return (" AND " + " AND ".join(parts)) if parts else ""
 
+def hub_cust_clause(alias="rbcm"):
+    """Returns ' AND alias.customer_id = '...' ' when a customer is selected, else ''."""
+    cid = hub_customer_id
+    return f" AND {alias}.customer_id = '{cid}'" if cid else ""
+
 # Scope: always Single Business (customer-level analysis only on Home tab)
 hub_scope = "🏢 Single Business"
 hub_scope_customer_id = None
@@ -4101,7 +4115,7 @@ if tab=="🏠 Home":
             "LEFT JOIN clients.verification_results vr ON vr.business_id = rbcm.business_id\n"
             "WHERE (f_bool.business_id IS NULL\n"
             "   OR JSON_EXTRACT_PATH_TEXT(f_bool.value,'value') != 'true')\n"
-            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
             "**Source:** `integration-service/lib/facts/kyb/index.ts` lines 1371-1435 · "
             "`warehouse-service/.../verification_results.sql` lines 40-51 · "
             "`microsites/.../BusinessRegistrationTab.tsx` line 167"
@@ -4133,7 +4147,7 @@ if tab=="🏠 Home":
             "LEFT JOIN rds_warehouse_public.facts f_state\n"
             "  ON f_state.business_id = vr.business_id AND f_state.name = 'formation_state'\n"
             "WHERE vr.sos_domestic_verification = 1\n"
-            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
             "**Source:** `warehouse-service/.../verification_results.sql` lines 36-39 · "
             "`integration-service/lib/facts/kyb/index.ts`"
         ),
@@ -4311,7 +4325,7 @@ if tab=="🏠 Home":
             "WHERE iv.meta::json->'user'->'id_number'->>'type' = 'us_ssn_last_4'\n"
             "  AND RIGHT(JSON_EXTRACT_PATH_TEXT(f_tin.value,'value'), 4)\n"
             "    = iv.meta::json->'user'->'id_number'->>'value'\n"
-            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
             "**Source:** `integration-service/lib/facts/kyb/index.ts:552-616` (is_sole_prop) · "
             "`integration-service/lib/plaid/plaidIdv.ts:1657` (UsSsnLast4 derivation)"
         ),
@@ -4355,7 +4369,7 @@ if tab=="🏠 Home":
             "       OR JSON_EXTRACT_PATH_TEXT(f_state.value,'value')\n"
             "            IN ('DE','NV','WY','SD','MT','NM')\n"
             "       OR f_state.business_id IS NULL)\n"
-            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
             "**Source:** `warehouse-service/.../verification_results.sql:36-39` · "
             "`integration-service/lib/facts/kyb/index.ts:1371-1424`"
         ),
@@ -4403,7 +4417,7 @@ if tab=="🏠 Home":
             "   OR JSON_EXTRACT_PATH_TEXT(f_state.value,'value') IS NULL\n"
             "   OR UPPER(JSON_EXTRACT_PATH_TEXT(f_state.value,'value'))\n"
             "      != UPPER(JSON_EXTRACT_PATH_TEXT(f_addr.value,'value','state')))\n"
-            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
             "**Source:** `integration-service/lib/facts/kyb/index.ts` (formation_state, primary_address) · "
             "`warehouse-service/.../verification_results.sql` (sos_domestic_verification)"
         ),
@@ -4431,7 +4445,7 @@ if tab=="🏠 Home":
             "  AND f.name = 'tin_submitted'\n"
             "WHERE JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NOT NULL\n"
             "  AND JSON_EXTRACT_PATH_TEXT(f.value,'value') != ''\n"
-            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
             "**Source:** `integration-service/lib/facts/kyb/index.ts` lines 399-427"
         ),
         "tin_pass": (
@@ -4540,7 +4554,7 @@ if tab=="🏠 Home":
             "WHERE (f_bool.business_id IS NULL\n"
             "   OR JSON_EXTRACT_PATH_TEXT(f_bool.value,'value') IS NULL\n"
             "   OR JSON_EXTRACT_PATH_TEXT(f_bool.value,'value') = '')\n"
-            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
             "**Source:** `integration-service/lib/facts/kyb/index.ts` lines 399-491"
         ),
 
@@ -4737,7 +4751,7 @@ if tab=="🏠 Home":
             "LEFT JOIN rds_warehouse_public.facts f_sos\n"
             "  ON f_sos.business_id = rbcm.business_id AND f_sos.name = 'sos_match_boolean'\n"
             "WHERE f_rev.business_id IS NULL\n"
-            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
             "**Source:** `integration-service/lib/facts/sources.ts` (ZoomInfo weight=0.8, "
             "Equifax weight=0.7) · `lib/facts/rules.ts` (factWithHighestConfidence)"
         ),
@@ -4817,7 +4831,7 @@ if tab=="🏠 Home":
             "  ON f_n.business_id = rbcm.business_id AND f_n.name = 'naics_code'\n"
             "LEFT JOIN clients.verification_results vr ON vr.business_id = rbcm.business_id\n"
             "WHERE f_act.business_id IS NULL\n"
-            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
             "**Source:** `integration-service/lib/facts/kyb/index.ts` lines 1426-1435 · "
             "`microsites/.../BusinessRegistrationTab.tsx` line 167 (UI null state)"
         ),
@@ -4893,7 +4907,7 @@ if tab=="🏠 Home":
             "WHERE (f_bool.business_id IS NULL\n"
             "   OR JSON_EXTRACT_PATH_TEXT(f_bool.value,'value') IS NULL\n"
             "   OR JSON_EXTRACT_PATH_TEXT(f_bool.value,'value') = '')\n"
-            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
             "**Source:** `integration-service/lib/facts/kyb/index.ts` lines 399-491"
         ),
         "rf_watchlist": (
@@ -4937,7 +4951,7 @@ if tab=="🏠 Home":
             "  ON f_wraw.business_id = rbcm.business_id AND f_wraw.name = 'watchlist_raw'\n"
             "  AND LENGTH(f_wraw.value) < 60000\n"
             "WHERE CAST(JSON_EXTRACT_PATH_TEXT(f_wl.value,'value') AS INT) > 0\n"
-            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';\n```\n\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
             "**Source:** `integration-service/lib/facts/kyb/index.ts` lines 1438-1541 · "
             "`integration-service/lib/facts/rules.ts` lines 253-308 (combineWatchlistMetadata)"
         ),
@@ -4990,19 +5004,26 @@ if tab=="🏠 Home":
         if not sql_str or not sql_str.strip():
             return
 
-        # ── Auto-substitute known placeholders from active filter context ───
+        # ── Auto-substitute all active filter context placeholders ───────────
+        # Includes customer_id so the SQL is always scoped to the selected customer.
         _sql_filled = sql_str
         try:
+            _cid_val = str(hub_customer_id or "")
             _ctx_subs = {
-                "date_from":    str(hub_date_from or ""),
-                "date_to":      str(hub_date_to   or ""),
-                "bid":          str(st.session_state.get("hub_bid","") or ""),
-                "business_id":  str(st.session_state.get("hub_bid","") or ""),
+                "date_from":   str(hub_date_from or ""),
+                "date_to":     str(hub_date_to   or ""),
+                "bid":         str(st.session_state.get("hub_bid","") or ""),
+                "business_id": str(st.session_state.get("hub_bid","") or ""),
+                "customer_id": _cid_val,
             }
             for _ph, _val in _ctx_subs.items():
                 if _val:
                     _sql_filled = _sql_filled.replace(f"'{{{_ph}}}'", f"'{_val}'")
                     _sql_filled = _sql_filled.replace(f"{{{_ph}}}", _val)
+            # Substitute {customer_clause} → AND rbcm.customer_id='...' or ''
+            if "{customer_clause}" in _sql_filled:
+                _cc = f" AND rbcm.customer_id = '{_cid_val}'" if _cid_val else ""
+                _sql_filled = _sql_filled.replace("{customer_clause}", _cc)
         except Exception:
             pass  # substitution is best-effort
 
