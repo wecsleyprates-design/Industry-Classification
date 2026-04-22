@@ -2385,72 +2385,80 @@ def detail_panel(
             st.code(_py, language="python")
 
         # ── Inline SQL Runner ─────────────────────────────────────────────────
-        # Runs the diagnostic SQL directly here so the user doesn't need to
-        # copy-paste to the AI Agent tab. Only shown when sql is provided and
-        # inline_runner=True. Uses the same run_sql() function as the rest of the app.
+        # ── Inline SQL Runner (same UX as AI Agent tab) ──────────────────────
+        # Editable text_area pre-filled with SQL, placeholders auto-substituted
+        # from session_state (hub_date_from, hub_date_to, hub_bid).
         if sql and inline_runner:
-            _dp_sql_clean = _clean_sql(sql)
-            # Unique key: combine hash of sql content + hash of label to avoid collisions
-            # when multiple detail_panels share similar SQL strings on the same page.
-            _dp_uid = abs(hash(sql + label)) % 9999999
-            _run_key = f"dp_run_{_dp_uid}"
+            _dp_uid  = abs(hash(sql + label)) % 9999999
+            _ta_key  = f"dp_ta_{_dp_uid}"
             _res_key = f"dp_res_{_dp_uid}"
-            _has_placeholders = (
-                "'{" in sql or "{date_from}" in sql or "{date_to}" in sql
-                or "{business_id}" in sql or "'{business_id}" in sql
-                or "'{date" in sql
+
+            # Auto-substitute known placeholders from active filter context
+            _sql_init = sql
+            try:
+                _df_from = str(st.session_state.get("hub_dfrom_date") or
+                               st.session_state.get("fbar_custom_from","") or "")
+                _df_to   = str(st.session_state.get("hub_dto_date") or
+                               st.session_state.get("fbar_custom_to","") or "")
+                _df_bid  = str(st.session_state.get("hub_bid","") or "")
+                for _ph, _vl in [("date_from",_df_from),("date_to",_df_to),
+                                  ("business_id",_df_bid),("bid",_df_bid)]:
+                    if _vl:
+                        _sql_init = _sql_init.replace(f"'{{{_ph}}}'", f"'{_vl}'")
+                        _sql_init = _sql_init.replace(f"{{{_ph}}}", _vl)
+            except Exception:
+                pass
+
+            if _ta_key not in st.session_state:
+                st.session_state[_ta_key] = _sql_init
+
+            st.markdown("**▶ Inline SQL Runner:**")
+            _sql_typed = st.text_area(
+                "SQL Query:",
+                value=st.session_state[_ta_key],
+                height=160,
+                key=f"{_ta_key}_w",
+                help="Edit SQL, substitute any remaining placeholders, then click ▶ Run SQL"
             )
+            st.session_state[_ta_key] = _sql_typed
 
-            if _has_placeholders:
-                st.markdown(
-                    "<div style='background:#1e293b;border-left:3px solid #f59e0b;"
-                    "border-radius:5px;padding:6px 12px;margin:6px 0;font-size:.76rem;color:#fde68a'>"
-                    "⚠️ This SQL contains placeholders like <code>{date_from}</code> or "
-                    "<code>{business_id}</code>. Fill them in above before running, or "
-                    "copy to the 🤖 AI Agent tab to run with auto-filled context."
-                    "</div>",
-                    unsafe_allow_html=True
-                )
-            else:
-                st.markdown("**▶ Inline SQL Runner:**")
-                _run_btn, _clear_btn = st.columns([1, 4])
-                with _run_btn:
-                    _do_run = st.button("▶ Run SQL", key=_run_key,
-                                        help="Execute this SQL against live Redshift and show results here")
-                with _clear_btn:
-                    if st.button("✕ Clear results", key=f"{_run_key}_clr",
-                                 help="Clear cached results for this query"):
-                        if _res_key in st.session_state:
-                            del st.session_state[_res_key]
+            _rb1, _rb2, _rb3 = st.columns([1, 1, 5])
+            with _rb1:
+                _do_run = st.button("▶ Run SQL", type="primary",
+                                    key=f"dp_run_{_dp_uid}",
+                                    help="Execute against live Redshift and show results here")
+            with _rb2:
+                if st.button("Clear", key=f"dp_clr_{_dp_uid}", help="Clear results"):
+                    st.session_state.pop(_res_key, None)
+                    st.session_state[_ta_key] = _sql_init
+                    st.rerun()
 
-                if _do_run:
-                    with st.spinner("Running SQL against Redshift…"):
-                        try:
-                            _dp_result, _dp_err = run_sql(_dp_sql_clean)
-                            if _dp_result is not None and not _dp_result.empty:
-                                st.session_state[_res_key] = ("ok", _dp_result)
-                            elif _dp_err:
-                                st.session_state[_res_key] = ("err", _dp_err)
-                            else:
-                                st.session_state[_res_key] = ("empty", None)
-                        except Exception as _dp_ex:
-                            st.session_state[_res_key] = ("err", str(_dp_ex))
+            if _do_run:
+                with st.spinner("Running query against Redshift…"):
+                    try:
+                        _r_df, _r_err = run_sql(_clean_sql(_sql_typed))
+                        if _r_df is not None and not _r_df.empty:
+                            st.session_state[_res_key] = ("ok", _r_df)
+                        elif _r_err:
+                            st.session_state[_res_key] = ("err", _r_err)
+                        else:
+                            st.session_state[_res_key] = ("empty", None)
+                    except Exception as _ex:
+                        st.session_state[_res_key] = ("err", str(_ex))
 
-                if _res_key in st.session_state:
-                    _status, _data = st.session_state[_res_key]
-                    if _status == "ok":
-                        st.markdown(f"<div style='color:#22c55e;font-size:.76rem;margin:4px 0'>"
-                                    f"✅ {len(_data):,} rows returned</div>", unsafe_allow_html=True)
-                        st.dataframe(_data, use_container_width=True, hide_index=True)
-                        # Download results
-                        _dp_csv = _data.to_csv(index=False).encode()
-                        st.download_button("⬇️ Download results (CSV)", _dp_csv,
-                                           f"sql_result_{_run_key}.csv", "text/csv",
-                                           key=f"{_run_key}_dl")
-                    elif _status == "empty":
-                        st.info("Query executed — 0 rows returned. The condition was not met for any business in the current dataset.", icon="ℹ️")
-                    else:
-                        st.error(f"SQL error: {_data}", icon="❌")
+            if _res_key in st.session_state:
+                _st2, _dt2 = st.session_state[_res_key]
+                if _st2 == "ok":
+                    st.success(f"✅ {len(_dt2):,} rows · {len(_dt2.columns)} columns")
+                    st.dataframe(_dt2, use_container_width=True, hide_index=True)
+                    st.download_button("⬇️ Download CSV",
+                                       _dt2.to_csv(index=False).encode(),
+                                       f"result_{_dp_uid}.csv", "text/csv",
+                                       key=f"dp_dl_{_dp_uid}")
+                elif _st2 == "empty":
+                    st.info("0 rows returned — condition not met for current data.", icon="ℹ️")
+                else:
+                    st.error(f"❌ SQL error: {_dt2}")
 
 
 def _clean_sql(sql: str) -> str:
@@ -4972,59 +4980,91 @@ if tab=="🏠 Home":
     }
 
     def _inline_sql_runner(sql_str: str, runner_key: str):
-        """Render an inline ▶ Run SQL button + results for any SQL string.
-        runner_key must be unique across the page."""
+        """Inline SQL runner matching the AI Agent tab UX exactly:
+          - Editable st.text_area pre-filled with the SQL
+          - Placeholders auto-substituted from the active filter context
+          - ▶ Run SQL (primary) + Clear button
+          - Results shown inline as a dataframe with CSV download
+        runner_key must be unique across the page.
+        """
         if not sql_str or not sql_str.strip():
             return
-        _clean = _clean_sql(sql_str)
-        _has_ph = (
-            "{date_from}" in sql_str or "{date_to}" in sql_str
-            or "{business_id}" in sql_str or "'{business_id}" in sql_str
-            or "'{date" in sql_str or "'{bid}" in sql_str
+
+        # ── Auto-substitute known placeholders from active filter context ───
+        _sql_filled = sql_str
+        try:
+            _ctx_subs = {
+                "date_from":    str(hub_date_from or ""),
+                "date_to":      str(hub_date_to   or ""),
+                "bid":          str(st.session_state.get("hub_bid","") or ""),
+                "business_id":  str(st.session_state.get("hub_bid","") or ""),
+            }
+            for _ph, _val in _ctx_subs.items():
+                if _val:
+                    _sql_filled = _sql_filled.replace(f"'{{{_ph}}}'", f"'{_val}'")
+                    _sql_filled = _sql_filled.replace(f"{{{_ph}}}", _val)
+        except Exception:
+            pass  # substitution is best-effort
+
+        # ── State keys (unique per runner_key) ───────────────────────────────
+        _ta_key  = f"inl_ta_{runner_key}"    # text_area content
+        _res_key = f"inl_res_{runner_key}"   # cached result
+
+        # Pre-fill text_area with substituted SQL on first render
+        if _ta_key not in st.session_state:
+            st.session_state[_ta_key] = _sql_filled
+
+        # ── Editable SQL text area (same as AI Agent tab) ────────────────────
+        _sql_input = st.text_area(
+            "SQL Query:",
+            value=st.session_state[_ta_key],
+            height=160,
+            key=f"{_ta_key}_widget",
+            help="Edit the SQL, substitute any remaining placeholders, then click ▶ Run SQL"
         )
-        _rk  = f"inl_{runner_key}"
-        _res  = f"inl_res_{runner_key}"
-        _clrk = f"inl_clr_{runner_key}"
+        st.session_state[_ta_key] = _sql_input  # keep in sync
 
-        if _has_ph:
-            st.markdown(
-                "<div style='background:#1e293b;border-left:3px solid #f59e0b;"
-                "border-radius:5px;padding:5px 10px;margin:4px 0;font-size:.74rem;color:#fde68a'>"
-                "⚠️ SQL has unfilled placeholders — copy to 🤖 AI Agent tab to run with context."
-                "</div>",
-                unsafe_allow_html=True
-            )
-            return
+        _btn_c1, _btn_c2, _btn_c3 = st.columns([1, 1, 5])
+        with _btn_c1:
+            _do_run = st.button("▶ Run SQL", type="primary",
+                                key=f"inl_run_{runner_key}",
+                                help="Execute against live Redshift")
+        with _btn_c2:
+            if st.button("Clear", key=f"inl_clr_{runner_key}",
+                         help="Clear results and reset SQL"):
+                st.session_state.pop(_res_key, None)
+                st.session_state[_ta_key] = _sql_filled  # reset to original
+                st.rerun()
 
-        _rb, _cb = st.columns([1, 5])
-        with _rb:
-            _do = st.button("▶ Run SQL", key=_rk,
-                            help="Execute against live Redshift and show results here")
-        with _cb:
-            if st.button("✕ Clear", key=_clrk, help="Clear cached result"):
-                st.session_state.pop(_res, None)
-
-        if _do:
-            with st.spinner("Running…"):
+        if _do_run:
+            _exec_sql = _clean_sql(_sql_input)
+            with st.spinner("Running query against Redshift…"):
                 try:
-                    _df, _err = run_sql(_clean)
-                    st.session_state[_res] = ("ok", _df) if (_df is not None and not _df.empty) \
-                        else ("err", _err) if _err else ("empty", None)
+                    _df, _err = run_sql(_exec_sql)
+                    if _df is not None and not _df.empty:
+                        st.session_state[_res_key] = ("ok", _df)
+                    elif _err:
+                        st.session_state[_res_key] = ("err", _err)
+                    else:
+                        st.session_state[_res_key] = ("empty", None)
                 except Exception as _ex:
-                    st.session_state[_res] = ("err", str(_ex))
+                    st.session_state[_res_key] = ("err", str(_ex))
 
-        if _res in st.session_state:
-            _st, _dt = st.session_state[_res]
+        if _res_key in st.session_state:
+            _st, _dt = st.session_state[_res_key]
             if _st == "ok":
-                st.success(f"✅ {len(_dt):,} rows", icon="✅")
+                st.success(f"✅ {len(_dt):,} rows · {len(_dt.columns)} columns")
                 st.dataframe(_dt, use_container_width=True, hide_index=True)
-                st.download_button("⬇️ Download CSV", _dt.to_csv(index=False).encode(),
-                                   f"{runner_key}.csv", "text/csv",
-                                   key=f"{_rk}_dl")
+                _dl1, _dl2 = st.columns([1, 5])
+                with _dl1:
+                    st.download_button("⬇️ Download CSV",
+                                       _dt.to_csv(index=False).encode(),
+                                       f"{runner_key}_result.csv", "text/csv",
+                                       key=f"inl_dl_{runner_key}")
             elif _st == "empty":
-                st.info("Query returned 0 rows — condition not met in current dataset.", icon="ℹ️")
+                st.info("0 rows returned — condition not met for current data.", icon="ℹ️")
             else:
-                st.error(f"SQL error: {_dt}", icon="❌")
+                st.error(f"❌ SQL error: {_dt}")
 
     def _drilldown_table(seg_key, label, cols_from_stats=None):
         """Show an expander with business IDs + key signals + how-calculated explanation + SQL runner."""
