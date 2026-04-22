@@ -5778,8 +5778,9 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
                 fig_rf = px.bar(_rf_df, x="Businesses", y="Issue", orientation="h",
                                 color="Issue",
                                 color_discrete_map={k:FLAG_COLORS.get(k,"#64748b") for k in _rf_df["Issue"]},
+                                text="Businesses",   # pass per-row → no multi-trace label mismatch
                                 title="Red Flag Distribution — Businesses Affected per Issue Type")
-                fig_rf.update_traces(text=_rf_df["Businesses"], textposition="outside")
+                fig_rf.update_traces(textposition="outside", texttemplate="%{x:,}")
                 fig_rf.update_layout(height=max(280,len(flag_type_counts)*40),
                                       showlegend=False, margin=dict(t=40,b=10,l=10,r=40))
                 st.plotly_chart(dark_chart(fig_rf), use_container_width=True)
@@ -7427,7 +7428,112 @@ ORDER BY avg_impact_pts ASC;"""
             fig_cross_bar.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
             st.plotly_chart(dark_chart(fig_cross_bar), use_container_width=True)
 
-    # Per-rule drilldowns for 6.4 (chart bars → expanders with business IDs + signals)
+    # ── Drilldown expanders for ALL cross-tab cells (including non-contradiction cells) ──
+    # Build business ID lists per cell using _cross_base + merged TIN
+    if not _cross_base.empty:
+        _cross_cell_bids = {}   # (registry_state, tin_state) → [business_ids]
+        _cross_bids_col = _cross_base["business_id"].tolist()
+        for _ci, _row in enumerate(_cross_rows):
+            _key_ct = (_row["Registry State"], _row["TIN State"])
+            _cross_cell_bids.setdefault(_key_ct, []).append(_cross_bids_col[_ci])
+
+        # Cell metadata — description + severity + color per cell
+        _CELL_META = {
+            ("SOS Active","TIN Pass"):     ("#22c55e","✅ Baseline Clean","CLEAN",
+                "Registry is active (sos_match_boolean=true, sos_active=true) AND EIN confirmed by IRS. "
+                "Both verification paths pass. These are the strongest KYB signals in the portfolio."),
+            ("SOS Active","TIN Fail"):     ("#f59e0b","⚠️ Anomaly","MEDIUM",
+                "Entity is registered (SOS active) but EIN-to-name IRS check failed. "
+                "Most common cause: DBA/trade name submitted instead of legal name on EIN cert. "
+                "Not necessarily fraud — usually a name discrepancy. "
+                "check_agent_v2: sos_active_tin_failed (MEDIUM). Action: request IRS CP-575 or 147C."),
+            ("SOS Active","Not Checked"):  ("#f59e0b","❓ Incomplete","MEDIUM",
+                "Entity is registered (SOS active) but no IRS EIN check result exists. "
+                "Either no EIN was submitted, or the Middesk TIN task has not yet completed."),
+            ("SOS Inactive","TIN Pass"):   ("#ef4444","🔴 Anomaly","HIGH",
+                "EIN confirmed by IRS but entity is NOT in good standing (dissolved/revoked). "
+                "An EIN is never cancelled when a company dissolves. Entity may be operating under a dead legal entity. "
+                "check_agent_v2: sos_inactive_tin_ok (HIGH). Action: block approval until SOS reinstated."),
+            ("SOS Inactive","TIN Fail"):   ("#ef4444","🔴 Compounded","HIGH",
+                "Entity is dissolved/revoked AND EIN-to-name IRS check failed. Both KYB paths show issues."),
+            ("SOS Inactive","Not Checked"):("#ef4444","🔴 Incomplete","HIGH",
+                "Entity is dissolved/revoked AND no TIN check result. Critical gap — entity status unverified on both dimensions."),
+            ("No Registry","TIN Pass"):    ("#f97316","🟠 Anomaly","HIGH",
+                "IRS confirmed the EIN but sos_match_boolean=false — vendor returned failure, no SOS filing found. "
+                "Entity existence is unverifiable despite having a valid IRS-confirmed EIN. "
+                "Common causes: too new, DBA name mismatch, or sole prop using SSN as EIN. "
+                "check_agent_v2: g4_no_sos_tin_ok (HIGH)."),
+            ("No Registry","TIN Fail"):    ("#ef4444","🔴 Double Failure","HIGH",
+                "Both SOS (vendor returned failure) AND TIN (IRS mismatch) have failed. "
+                "Entity existence unverifiable AND EIN cannot be confirmed. Highest-risk combination."),
+            ("No Registry","Not Checked"): ("#ef4444","🔴 Unverified","HIGH",
+                "No SOS record found AND no TIN check. Completely unverified business on both dimensions."),
+            ("Unknown/Null","TIN Pass"):   ("#64748b","❓ Partial","NOTICE",
+                "sos_match_boolean is null/missing (vendor not called or pipeline incomplete) but TIN passed."),
+            ("Unknown/Null","TIN Fail"):   ("#64748b","❓ Partial","NOTICE",
+                "sos_match_boolean is null/missing and TIN failed."),
+            ("Unknown/Null","Not Checked"):("#64748b","❓ Unknown","NOTICE",
+                "Both SOS and TIN results are missing/null. Pipeline may not have run."),
+        }
+
+        st.markdown("**📋 Cross-Tab Drilldowns — all cells including non-contradiction ones:**")
+        st.caption("The contradiction rules above flag specific anomalous combinations. These expanders cover ALL cells so you can see the business IDs behind every number in the heatmap.")
+
+        for (_rs, _ts), _cbids in sorted(_cross_cell_bids.items(), key=lambda x: -len(x[1])):
+            if not _cbids: continue
+            _cm_color, _cm_status, _cm_sev, _cm_desc = _CELL_META.get(
+                (_rs, _ts), ("#64748b","⚪ Unknown","NOTICE","No specific definition for this cell."))
+            _is_contradiction = (_rs, _ts) in [
+                ("SOS Active","TIN Fail"),
+                ("SOS Inactive","TIN Pass"),
+                ("No Registry","TIN Pass"),
+            ]
+            _contradiction_badge = " 🔴 Contradiction" if _is_contradiction else ""
+            with st.expander(
+                f"👁️ {len(_cbids):,} businesses — {_rs} × {_ts}{_contradiction_badge} — {_cm_status}",
+                expanded=False
+            ):
+                st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_cm_color};
+                    border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
+                  <span style="color:#a78bfa;font-weight:700">⚙️ What this cell means</span>
+                </div>""", unsafe_allow_html=True)
+                st.markdown(_cm_desc)
+                st.markdown("---")
+                # KYB signals table
+                if stats_df is not None and not stats_df.empty:
+                    _csig = stats_df[stats_df["business_id"].isin(_cbids)][
+                        ["business_id"] + [c for c in _CROSS_COLS if c in stats_df.columns]
+                    ].rename(columns={
+                        "sos_match_boolean":"SOS Match Bool","sos_match_status":"SOS Match Status",
+                        "sos_active":"SOS Active","sos_match_verif":"sos_match_verif(0/1)",
+                        "tin_submitted":"TIN Submitted","tin_match_status":"TIN Match Status",
+                        "tin_match":"TIN Match Bool","formation_state":"Formation State",
+                        "naics_code":"NAICS","watchlist_hits":"WL Hits",
+                    })
+                    st.dataframe(_csig, use_container_width=True, hide_index=True)
+                else:
+                    st.dataframe(pd.DataFrame({"business_id":_cbids}), use_container_width=True, hide_index=True)
+                # Download + investigate
+                _cdl = pd.DataFrame({"business_id":_cbids}).to_csv(index=False).encode()
+                _safe_key = f"{_rs[:6]}_{_ts[:6]}".replace(" ","_").replace("/","_")
+                st.download_button(f"⬇️ Download {len(_cbids)} IDs (CSV)", _cdl,
+                                   f"cross_{_safe_key}.csv","text/csv", key=f"dl_cross_{_safe_key}")
+                st.caption("Click 🔍 Investigate to set a business ID, then navigate to any entity tab.")
+                _investigate_rows(_cbids, None, None,
+                                  context_label=f"{_rs} × {_ts}", key_prefix=f"cross_{_safe_key}")
+            # detail_panel outside expander
+            detail_panel(
+                f"📊 {_rs} × {_ts}{_contradiction_badge}",
+                f"{len(_cbids):,} businesses · {len(_cbids)/max(total_biz,1)*100:.1f}% · {_cm_status}",
+                what_it_means=_cm_desc + f"\n\n**Cell:** Registry={_rs} · TIN={_ts}\n**Severity:** {_cm_sev}",
+                source_table="funnel_df (sos_match_boolean, sos_active) · stats_df (tin_match)",
+                source_file="index.ts:1421 (sos_match_boolean) · 1426 (sos_active) · 482 (tin_match_boolean)",
+                json_obj={"registry_state": _rs, "tin_state": _ts, "count": len(_cbids),
+                          "is_contradiction": _is_contradiction, "business_ids_sample": _cbids[:5]},
+                icon="📊", color=_cm_color
+            )
+
+    # Contradiction-specific anomaly cards (severity badges + full detail_panel)
     _group_chart_and_drilldowns(_G4_KEYS, "Registry × TIN — Contradictions by Rule", _CROSS_COLS, "g4")
     for _akey in _G4_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
