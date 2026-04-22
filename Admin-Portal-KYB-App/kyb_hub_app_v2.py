@@ -1110,10 +1110,15 @@ def load_home_kyb_stats(date_from, date_to, customer_id=None):
             MAX(CASE WHEN f.name='sos_active'        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_active,
             MAX(CASE WHEN f.name='formation_state'   THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_state,
             MAX(CASE WHEN f.name='formation_date'    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_date,
-            -- Redshift pre-aggregated SOS flags (verification_results.sql)
-            MAX(vr.sos_match_verification)    AS sos_match_verif,
-            MAX(vr.sos_domestic_verification) AS sos_domestic_verif,
-            MAX(vr.sos_active_verification)   AS sos_active_verif,
+            -- SOS verification flags derived from rds_integration_data.business_entity_review_task
+            -- Using ONLY rds_ tables (linked to production — not materialized clients.* tables)
+            -- Derivation matches verification_results.sql logic exactly:
+            --   sos_match_verif   = 1 when key='sos_match'   AND sublabel='Submitted Active'
+            --   sos_domestic_verif= 1 when key='sos_domestic' AND sublabel='Domestic Active'
+            --   sos_active_verif  = 1 when key='sos_active'  AND status='Success'
+            MAX(CASE WHEN bert.key='sos_match'    AND bert.sublabel='Submitted Active' THEN 1 ELSE 0 END) AS sos_match_verif,
+            MAX(CASE WHEN bert.key='sos_domestic' AND bert.sublabel='Domestic Active'  THEN 1 ELSE 0 END) AS sos_domestic_verif,
+            MAX(CASE WHEN bert.key='sos_active'   AND bert.status='Success'             THEN 1 ELSE 0 END) AS sos_active_verif,
             -- TIN / EIN signals
             MAX(CASE WHEN f.name='tin_submitted'     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS tin_submitted,
             MAX(CASE WHEN f.name='tin_match'         THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END) AS tin_match_status,
@@ -1135,7 +1140,11 @@ def load_home_kyb_stats(date_from, date_to, customer_id=None):
             COUNT(DISTINCT f.name) AS fact_count
         FROM rds_warehouse_public.facts f
         JOIN onboarded o ON o.business_id = f.business_id
-        LEFT JOIN clients.verification_results vr ON vr.business_id = f.business_id
+        LEFT JOIN rds_integration_data.business_entity_verification bev
+            ON bev.business_id = f.business_id
+        LEFT JOIN rds_integration_data.business_entity_review_task bert
+            ON bert.business_entity_verification_id = bev.id
+            AND bert.key IN ('sos_match','sos_domestic','sos_active')
         WHERE f.name IN (
             'sos_match_boolean','sos_match','sos_active',
             'tin_submitted','tin_match','tin_match_boolean',
@@ -3791,7 +3800,11 @@ if tab=="🏠 Home":
                 MIN(f.received_at) AS first_seen,
                 COUNT(DISTINCT f.name) AS fact_count
             FROM rds_warehouse_public.facts f
-            LEFT JOIN clients.verification_results vr ON vr.business_id = f.business_id
+            LEFT JOIN rds_integration_data.business_entity_verification bev
+                ON bev.business_id = f.business_id
+            LEFT JOIN rds_integration_data.business_entity_review_task bert
+                ON bert.business_entity_verification_id = bev.id
+                AND bert.key IN ('sos_match','sos_domestic','sos_active')
             WHERE f.business_id IN ({bid_list})
               AND f.name IN (
                   'sos_match_boolean','sos_match','sos_active',
@@ -5942,72 +5955,139 @@ WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';"""
         },
         sql=_reg_sql, icon="🏛️", color="#3B82F6")
 
-    # ── Onboarding timeline ────────────────────────────────────────────────
+    # ── 6-Signal Summary — all signals from rds_ tables only ──────────────────
+    # Replaces the old Onboarding Timeline and Registry Validation Funnel bar.
+    # All signals derived exclusively from rds_warehouse_public.facts and
+    # rds_integration_data.business_entity_review_task — no materialized tables.
     st.markdown("---")
-    if not timeline.empty:
-        st.markdown("#### 📈 Onboarding Volume Timeline")
-        fig_tl = px.area(timeline, x="Date", y="New Businesses",
-                         title="Daily Onboarding Volume",
-                         color_discrete_sequence=["#3B82F6"])
-        fig_tl.update_layout(height=240, margin=dict(t=40,b=10,l=10,r=10))
-        st.plotly_chart(dark_chart(fig_tl), use_container_width=True)
-        detail_panel("📈 Onboarding Timeline", f"{len(timeline)} days · {total_biz:,} businesses",
-            what_it_means="Daily count of businesses onboarded. Source: rds_cases_public.rel_business_customer_monitoring.created_at — the authoritative onboarding date (NOT facts.received_at which is the fact write timestamp).",
-            source_table="rds_cases_public.rel_business_customer_monitoring · created_at",
-            sql=f"SELECT DATE(created_at) AS date, COUNT(DISTINCT business_id) AS new_businesses FROM rds_cases_public.rel_business_customer_monitoring WHERE 1=1{hub_date_clause('created_at')} GROUP BY 1 ORDER BY 1;",
-            icon="📈", color="#3B82F6")
+    st.markdown("#### 📊 KYB Signal Summary — All 6 Signals (rds_ tables only)")
+    st.caption(
+        "All values derived exclusively from `rds_warehouse_public.facts` and "
+        "`rds_integration_data.business_entity_review_task` — production-linked tables. "
+        "No materialized `clients.*` or `datascience.*` tables used."
+    )
 
-    # ── SOS funnel bar ─────────────────────────────────────────────────────
-    st.markdown("#### 🏛️ Registry Validation Breakdown")
-    _sos_bar = pd.DataFrame({
-        "Category": ["Total Onboarded","Registry Found","Domestic Reg Found","In Stated Oper. State","No Registry Found"],
-        "Count":    [total_biz, _sos_found, _domestic_sos_found, _state_match, _sos_not_found],
-        "Color":    ["#3B82F6","#22c55e","#22c55e","#10b981","#ef4444"],
-    })
-    # Use color_discrete_map (not color="Category" + sequence) to avoid multi-trace label mismatch
-    _sos_color_map = dict(zip(_sos_bar["Category"], _sos_bar["Color"]))
-    fig_sos_bar = px.bar(_sos_bar, x="Count", y="Category", orientation="h",
-                         color="Category",
-                         color_discrete_map=_sos_color_map,
-                         text="Count",   # correct: text from the column, not from update_traces
-                         title="Registry Validation — Funnel View")
-    fig_sos_bar.update_traces(textposition="outside", texttemplate="%{x:,}")
-    fig_sos_bar.update_layout(height=300, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
-    st.plotly_chart(dark_chart(fig_sos_bar), use_container_width=True)
+    # Build signal summary from facts-only data
+    _sig_rows = [
+        # signal, count, pct, source_fact, source_table, color, icon
+        ("No Registry Found",         _sos_not_found,       rate(_sos_not_found,total_biz),
+         "sos_match_boolean=false · sos_active=null",  "rds_warehouse_public.facts name='sos_match_boolean'", "#ef4444","❌"),
+        ("Filings Empty (def. no reg)",len(_seg.get("dt_filings_empty",[])),
+         rate(len(_seg.get("dt_filings_empty",[])),total_biz),
+         "sos_active=null → sos_filings=[]", "rds_warehouse_public.facts name='sos_active' (absent)", "#f97316","📭"),
+        ("Registry Found (Active)",   len(_seg.get("dt_ne_true_active",[])),
+         rate(len(_seg.get("dt_ne_true_active",[])),total_biz),
+         "key='sos_match' sublabel='Submitted Active' status='success'",
+         "rds_integration_data.business_entity_review_task", "#22c55e","✅"),
+        ("Registry Found (Inactive)", len(_seg.get("dt_ne_true_inactive",[])),
+         rate(len(_seg.get("dt_ne_true_inactive",[])),total_biz),
+         "key='sos_active' status≠'Success'",
+         "rds_integration_data.business_entity_review_task", "#f59e0b","⚠️"),
+        ("Domestic Reg Active",       _domestic_active_n,   rate(_domestic_active_n,total_biz),
+         "key='sos_domestic' sublabel='Domestic Active'",
+         "rds_integration_data.business_entity_review_task", "#22c55e","🏠"),
+        ("Domestic Reg Inactive",     _domestic_inactive_n, rate(_domestic_inactive_n,total_biz),
+         "key='sos_domestic' sublabel='Domestic Inactive'",
+         "rds_integration_data.business_entity_review_task", "#f59e0b","⚠️"),
+        ("No Domestic Data",          _domestic_missing_n,  rate(_domestic_missing_n,total_biz),
+         "no sos_domestic review task row",
+         "rds_integration_data.business_entity_review_task (absent)", "#f97316","❌"),
+        ("State Match",               _state_match,         rate(_state_match,total_biz),
+         "key='sos_state' sublabel='State Match'",
+         "rds_integration_data.business_entity_review_task", "#22c55e","📍"),
+        ("No State Match",            _no_state_match,      rate(_no_state_match,total_biz),
+         "key='sos_state' sublabel='No State Match'",
+         "rds_integration_data.business_entity_review_task", "#f59e0b","📍"),
+        ("Possible Sole Prop",        _possible_sole_prop,  rate(_possible_sole_prop,total_biz),
+         "is_sole_prop=true OR null (index.ts:552-616)",
+         "rds_warehouse_public.facts name='is_sole_prop'", "#8B5CF6","🧍"),
+    ]
+    _sig_df = pd.DataFrame(_sig_rows,
+        columns=["Signal","Count","Rate","Source Signal","Source Table","Color","Icon"])
+    _sig_df = _sig_df[_sig_df["Count"]>0].sort_values("Count",ascending=True)
 
-    detail_panel("🏛️ Registry Validation Breakdown",
-        f"Registry Found: {_sos_found:,} · Domestic: {_domestic_sos_found:,} · State Match: {_state_match:,} · No Registry: {_sos_not_found:,}",
+    if not _sig_df.empty:
+        _sig_col1, _sig_col2 = st.columns([2,1])
+        with _sig_col1:
+            _sig_cmap = dict(zip(_sig_df["Signal"], _sig_df["Color"]))
+            fig_sig = px.bar(
+                _sig_df, x="Count", y="Signal", orientation="h",
+                color="Signal", color_discrete_map=_sig_cmap,
+                text="Count",
+                title=f"KYB Signal Coverage — {total_biz:,} businesses"
+            )
+            fig_sig.update_traces(textposition="outside", texttemplate="%{x:,}")
+            fig_sig.update_layout(height=max(300,len(_sig_df)*44),
+                                  showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
+            st.plotly_chart(dark_chart(fig_sig), use_container_width=True)
+        with _sig_col2:
+            _sig_tbl = _sig_df[["Signal","Count","Rate"]].copy()
+            _sig_tbl["Icon"] = _sig_df["Icon"]
+            _sig_tbl["Signal"] = _sig_df["Icon"] + " " + _sig_df["Signal"]
+            st.dataframe(_sig_tbl[["Signal","Count","Rate"]].rename(columns={"Rate":"% of Portfolio"}),
+                         use_container_width=True, hide_index=True)
+
+    detail_panel("📊 KYB Signal Summary — rds_ tables only",
+        f"{len(_sig_df)} signals · {total_biz:,} businesses · {period_label}",
         what_it_means=(
-            "**How each bar is calculated (source: integration-service/lib/facts/kyb/index.ts lines 1371-1435):**\n\n"
-            "| Bar | Source Signal | Definition |\n|---|---|---|\n"
-            "| Registry Found | `sos_match_boolean = 'true'` | Any vendor found an SOS record (domestic OR foreign) |\n"
-            "| Domestic Reg Found | `sos_domestic_verification = 1` | `key='sos_domestic' AND sublabel='Domestic Active'` |\n"
-            "| In Stated Oper. State | `formation_state = primary_address.state` | Reg state matches operating address state |\n"
-            "| No Registry Found | `sos_match_boolean = false/null` | All vendors returned 'failure' or no data |\n\n"
-            "**'No Registry Found' — 3-layer decision tree:**\n"
-            "```\nIs sos_filings array empty?\n"
-            "  YES → Definitive 'No Registry Found'  (UI: 'No Registry Data to Display')\n"
-            "  NO  → Check sos_match_boolean\n"
-            "         false → sos_match returned 'failure'\n"
-            "         true  → Registry found (check active status)\n"
-            "                   sos_active_verification=0 → Found but INACTIVE\n"
-            "                   sos_active_verification=1 → Found and ACTIVE ✅\n```\n\n"
-            "**Note:** `sos_match_verification = 0` ≠ always 'no registry' — "
-            "it is also 0 when a filing exists but is inactive or foreign-only."
+            "**All 6 KYB signals derived exclusively from rds_ production tables:**\n\n"
+            "| Signal | Fact / Review Task | Source Table | Rule |\n|---|---|---|---|\n"
+            "| Registry Found | `sos_match_boolean=true` | `rds_warehouse_public.facts` | `index.ts:1421` |\n"
+            "| Domestic Found | `key='sos_domestic' sublabel='Domestic Active'` | `rds_integration_data.business_entity_review_task` | `verification_results.sql:36` |\n"
+            "| State Match | `key='sos_state' sublabel='State Match'` | `rds_integration_data.business_entity_review_task` | `SOSBadges.ts` |\n"
+            "| SOS Active | `sos_active=true` | `rds_warehouse_public.facts` | `index.ts:1426` |\n"
+            "| Possible Sole Prop | `is_sole_prop=true/null` | `rds_warehouse_public.facts` | `index.ts:552-616` |\n"
+            "| No Registry Found | `sos_match_boolean=false` + `sos_active=null` | `rds_warehouse_public.facts` | `index.ts:1421/1431` |\n\n"
+            "**⚠️ NOT used:** `clients.verification_results` · `datascience.smb_zoominfo_standardized_joined` "
+            "— these are materialized Redshift tables, not linked to production.\n\n"
+            "**sos_domestic** is derived from `rds_integration_data.business_entity_review_task` "
+            "(`key='sos_domestic'`, `sublabel='Domestic Active'`), NOT from a facts table column.\n\n"
+            "**state_match** is derived from `rds_integration_data.business_entity_review_task` "
+            "(`key='sos_state'`, `sublabel='State Match'`). It is NOT available in the facts table.\n\n"
+            "**Key files:** `warehouse-service/datapooler/adapters/db/models/facts.py` · "
+            "`warehouse-service/datapooler/adapters/redshift/customer_file/procedures/build-customer-export.sql:43-68`"
         ),
-        source_table="rds_warehouse_public.facts (sos_match_boolean) · clients.verification_results (sos_domestic_verification, sos_match_verification)",
-        source_file="integration-service/lib/facts/kyb/index.ts · warehouse-service/.../verification_results.sql · microsites/.../BusinessRegistrationTab.tsx",
-        source_file_line="index.ts:1371-1435 · verification_results.sql:36-51 · BusinessRegistrationTab.tsx:167-176",
+        source_table="rds_warehouse_public.facts · rds_integration_data.business_entity_review_task · rds_integration_data.business_entity_verification",
+        source_file="integration-service/lib/facts/kyb/index.ts · warehouse-service/.../build-customer-export.sql",
+        source_file_line="index.ts:1371-1435 (sos_match) · 1426-1434 (sos_active) · 552-616 (is_sole_prop)",
         json_obj={
-            "sos_funnel": _sos_bar[["Category","Count"]].to_dict("records"),
-            "signal_mapping": {
-                "registry_found": "sos_match_boolean=true (facts API)",
-                "domestic_reg_found": "sos_domestic_verification=1 (clients.verification_results)",
-                "state_match": "formation_state=primary_address.state",
-                "no_registry_found": "sos_match_boolean=false/null + sos_filings=[]"
-            }
+            "data_sources": "rds_ tables only (production-linked)",
+            "excluded_tables": ["clients.verification_results","datascience.smb_zoominfo_standardized_joined"],
+            "signals": _sig_df[["Signal","Count","Source Table"]].to_dict("records"),
         },
-        sql=_reg_sql, icon="🏛️", color="#22c55e")
+        sql=f"""-- KYB Signal Summary — rds_ tables only (no clients.* or datascience.*)
+SELECT
+  rbcm.business_id,
+  -- 1. Registry Found (rds_warehouse_public.facts)
+  MAX(CASE WHEN f_bool.name='sos_match_boolean'
+    THEN JSON_EXTRACT_PATH_TEXT(f_bool.value,'value') END)  AS registry_found,
+  -- 2. SOS Active (rds_warehouse_public.facts)
+  MAX(CASE WHEN f_act.name='sos_active'
+    THEN JSON_EXTRACT_PATH_TEXT(f_act.value,'value') END)   AS sos_active,
+  -- 3. Domestic Found (rds_integration_data.business_entity_review_task)
+  MAX(CASE WHEN bert.key='sos_domestic' AND bert.sublabel='Domestic Active'
+    THEN 1 ELSE 0 END)                                       AS domestic_found,
+  -- 4. State Match (rds_integration_data.business_entity_review_task)
+  MAX(CASE WHEN bert.key='sos_state' AND bert.sublabel='State Match'
+    THEN 1 ELSE 0 END)                                       AS state_match,
+  -- 5. Possible Sole Prop (rds_warehouse_public.facts)
+  MAX(CASE WHEN f_sp.name='is_sole_prop'
+    THEN JSON_EXTRACT_PATH_TEXT(f_sp.value,'value') END)    AS is_sole_prop
+FROM rds_cases_public.rel_business_customer_monitoring rbcm
+LEFT JOIN rds_warehouse_public.facts f_bool
+  ON f_bool.business_id = rbcm.business_id AND f_bool.name = 'sos_match_boolean'
+LEFT JOIN rds_warehouse_public.facts f_act
+  ON f_act.business_id = rbcm.business_id AND f_act.name = 'sos_active'
+LEFT JOIN rds_warehouse_public.facts f_sp
+  ON f_sp.business_id = rbcm.business_id AND f_sp.name = 'is_sole_prop'
+LEFT JOIN rds_integration_data.business_entity_verification bev
+  ON bev.business_id = rbcm.business_id
+LEFT JOIN rds_integration_data.business_entity_review_task bert
+  ON bert.business_entity_verification_id = bev.id
+  AND bert.key IN ('sos_domestic','sos_state')
+WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}
+GROUP BY rbcm.business_id;""",
+        icon="📊", color="#3B82F6")
 
     # ── Gap/anomaly explanations for registry signals ──────────────────────
     _gap_panels = []
