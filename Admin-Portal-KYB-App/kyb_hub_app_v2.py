@@ -7103,35 +7103,38 @@ ORDER BY avg_impact_pts ASC;"""
                "or represent the worst possible registry states.")
 
     _G2_KEYS = ["g2_found_but_inactive","g2_domestic_no_submitted","g2_verif_match_false"]
+
+    # ── Left: rules bar chart + per-rule drilldowns  ·  Right: registry state donut ──
     _gc1, _gc2 = st.columns([2, 1])
     with _gc1:
         _group_chart_and_drilldowns(_G2_KEYS, "SOS/Registry — Anomalies by Rule", _SOS_AN_COLS, "g2")
-        with _gc2:
-            # Registry state donut — use funnel_df to stay consistent with Section 1
-            _smb_g2 = _fdf["sos_match_boolean"].astype(str).str.lower().str.strip() if not _fdf.empty and "sos_match_boolean" in _fdf.columns else pd.Series(dtype=str)
-            _sact_g2 = _fdf["sos_active"].astype(str).str.lower().str.strip() if not _fdf.empty and "sos_active" in _fdf.columns else pd.Series(dtype=str)
-            if not _smb_g2.empty:
-                _reg_dist = pd.DataFrame({
-                    "State": ["Registry Active","Registry Inactive","No Registry (false)","Unknown/Null"],
-                    "Count": [
-                        int(((_smb_g2=="true") & (_sact_g2=="true")).sum()),
-                        int(((_smb_g2=="true") & (_sact_g2=="false")).sum()),
-                        int((_smb_g2=="false").sum()),
-                        int((_smb_g2.isin(["","none","nan"])).sum()),
-                    ]
-                })
-                _reg_dist = _reg_dist[_reg_dist["Count"]>0]
-                if not _reg_dist.empty:
-                    fig_reg_donut = px.pie(_reg_dist, names="State", values="Count", hole=0.5,
-                                          title="Registry State Distribution",
-                                          color="State",
-                                          color_discrete_map={"Registry Active":"#22c55e",
-                                                              "Registry Inactive":"#ef4444",
-                                                              "No Registry (false)":"#f97316",
-                                                              "Unknown/Null":"#64748b"})
-                    fig_reg_donut.update_layout(height=240, margin=dict(t=40,b=10,l=10,r=10))
-                    st.plotly_chart(dark_chart(fig_reg_donut), use_container_width=True)
+    with _gc2:
+        # Registry state donut — funnel_df for consistency with Section 1
+        _smb_g2  = _fdf["sos_match_boolean"].astype(str).str.lower().str.strip() if not _fdf.empty and "sos_match_boolean" in _fdf.columns else pd.Series(dtype=str)
+        _sact_g2 = _fdf["sos_active"].astype(str).str.lower().str.strip() if not _fdf.empty and "sos_active" in _fdf.columns else pd.Series(dtype=str)
+        if not _smb_g2.empty:
+            _reg_dist = pd.DataFrame({
+                "State": ["Registry Active","Registry Inactive","No Registry (false)","Unknown/Null"],
+                "Count": [
+                    int(((_smb_g2=="true") & (_sact_g2=="true")).sum()),
+                    int(((_smb_g2=="true") & (_sact_g2=="false")).sum()),
+                    int((_smb_g2=="false").sum()),
+                    int((_smb_g2.isin(["","none","nan"])).sum()),
+                ]
+            })
+            _reg_dist = _reg_dist[_reg_dist["Count"]>0]
+            if not _reg_dist.empty:
+                fig_reg_donut = px.pie(_reg_dist, names="State", values="Count", hole=0.5,
+                                       title="Registry State Distribution",
+                                       color="State",
+                                       color_discrete_map={"Registry Active":"#22c55e",
+                                                           "Registry Inactive":"#ef4444",
+                                                           "No Registry (false)":"#f97316",
+                                                           "Unknown/Null":"#64748b"})
+                fig_reg_donut.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_reg_donut), use_container_width=True)
 
+    # Anomaly cards with full severity badge + drilldown table + detail_panel
     for _akey in _G2_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
@@ -7150,44 +7153,102 @@ ORDER BY avg_impact_pts ASC;"""
 
     _TIN_AN_COLS = ["tin_submitted","tin_match_status","tin_match","sos_match_boolean","sos_active","formation_state","naics_code"]
 
-    # TIN outcome distribution chart
+    # TIN outcome bar + pie (left/right) then per-outcome drilldown expanders below
     if not _sdf.empty:
-        _tin_dist_data = {
-            "TIN Pass (tin_match_boolean=true)":  int((_s("tin_match")=="true").sum()),
-            "TIN Fail (tin_match_boolean=false)": int((_s("tin_match")=="false").sum()),
-            "TIN Not Checked (null)":             int((_s("tin_match").isin(["","none","nan"])).sum()),
+        _tin_pass_bids  = _sdf[_s("tin_match")=="true"]["business_id"].tolist()
+        _tin_fail_bids  = _sdf[_s("tin_match")=="false"]["business_id"].tolist()
+        _tin_nc_bids    = _sdf[_s("tin_match").isin(["","none","nan"])]["business_id"].tolist()
+        _tin_dist_data  = {
+            "TIN Pass (tin_match_boolean=true)":  len(_tin_pass_bids),
+            "TIN Fail (tin_match_boolean=false)": len(_tin_fail_bids),
+            "TIN Not Checked (null)":             len(_tin_nc_bids),
         }
         _tin_dist_df = pd.DataFrame(list(_tin_dist_data.items()), columns=["Outcome","Count"])
         _tin_dist_df = _tin_dist_df[_tin_dist_df["Count"]>0]
+        _TIN_COLOR_MAP = {
+            "TIN Pass (tin_match_boolean=true)":  "#22c55e",
+            "TIN Fail (tin_match_boolean=false)":  "#ef4444",
+            "TIN Not Checked (null)":              "#64748b",
+        }
         if not _tin_dist_df.empty:
             _tc1, _tc2 = st.columns([1.5, 1])
             with _tc1:
                 fig_tin_bar = px.bar(_tin_dist_df, x="Count", y="Outcome", orientation="h",
-                                     color="Outcome",
-                                     color_discrete_map={
-                                         "TIN Pass (tin_match_boolean=true)":"#22c55e",
-                                         "TIN Fail (tin_match_boolean=false)":"#ef4444",
-                                         "TIN Not Checked (null)":"#64748b",
-                                     },
+                                     color="Outcome", color_discrete_map=_TIN_COLOR_MAP,
                                      text="Count", title="TIN/EIN Outcome Distribution (portfolio)")
                 fig_tin_bar.update_traces(textposition="outside")
                 fig_tin_bar.update_layout(height=220, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
                 st.plotly_chart(dark_chart(fig_tin_bar), use_container_width=True)
             with _tc2:
                 fig_tin_pie = px.pie(_tin_dist_df, names="Outcome", values="Count", hole=0.5,
-                                     title="TIN Outcome Mix",
-                                     color="Outcome",
-                                     color_discrete_map={
-                                         "TIN Pass (tin_match_boolean=true)":"#22c55e",
-                                         "TIN Fail (tin_match_boolean=false)":"#ef4444",
-                                         "TIN Not Checked (null)":"#64748b",
-                                     })
+                                     title="TIN Outcome Mix", color="Outcome",
+                                     color_discrete_map=_TIN_COLOR_MAP)
                 fig_tin_pie.update_layout(height=220, margin=dict(t=40,b=10,l=10,r=10))
                 st.plotly_chart(dark_chart(fig_tin_pie), use_container_width=True)
 
-    _G3_KEYS = ["g3_tin_submitted_not_checked","g1_tin_status_bool_mismatch"]
-    _group_chart_and_drilldowns(_G3_KEYS, "TIN/EIN — Anomalies by Rule", _TIN_AN_COLS, "g3")
-    for _akey in ["g3_tin_submitted_not_checked"]:
+        # Per-outcome drilldown expanders — one per bar in the chart
+        _tin_outcome_drilldowns = [
+            ("tin_pass_drilldown",  "TIN Pass (tin_match_boolean=true)",  "#22c55e", _tin_pass_bids,
+             "IRS confirmed the EIN matches the submitted legal name. "
+             "Source: index.ts:482 — tin_match_boolean=true when tin_match.value==='success'.\n\n"
+             "**Action:** No action needed — TIN verification complete."),
+            ("tin_fail_drilldown",  "TIN Fail (tin_match_boolean=false)", "#ef4444", _tin_fail_bids,
+             "IRS returned a mismatch. Most common cause: DBA/trade name submitted instead of legal name on EIN cert (CP-575/147C). "
+             "Source: index.ts:429 — tin_match.value.status='failure' from Middesk IRS lookup.\n\n"
+             "**Action:** Request IRS EIN letter (CP-575 or 147C). Compare legal name to submitted name."),
+            ("tin_nc_drilldown",    "TIN Not Checked (tin_match_boolean=null)", "#64748b", _tin_nc_bids,
+             "No IRS EIN check result exists. Either no EIN was submitted, or the Middesk TIN task never completed. "
+             "Source: index.ts:482 — tin_match_boolean is only written when tin_match has a value.\n\n"
+             "**Sub-split:** businesses with tin_submitted non-null → Middesk task pending/failed. "
+             "Businesses with tin_submitted=null → no EIN given at onboarding.\n\n"
+             "**Action:** Check tin_submitted fact. If present, investigate Middesk review task status."),
+        ]
+        for _tk, _tl, _tc, _tbids, _tdesc in _tin_outcome_drilldowns:
+            if not _tbids: continue
+            with st.expander(f"👁️ Show {len(_tbids):,} businesses — {_tl}", expanded=False):
+                st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_tc};
+                    border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
+                  <span style="color:#a78bfa;font-weight:700">⚙️ What this outcome means · How calculated</span>
+                </div>""", unsafe_allow_html=True)
+                st.markdown(_tdesc)
+                st.markdown("---")
+                if stats_df is not None and not stats_df.empty:
+                    _ts = stats_df[stats_df["business_id"].isin(_tbids)][
+                        ["business_id"] + [c for c in _TIN_AN_COLS if c in stats_df.columns]
+                    ].rename(columns={
+                        "tin_submitted":"TIN Submitted","tin_match_status":"TIN Match Status",
+                        "tin_match":"TIN Match Bool","sos_match_boolean":"SOS Match Bool",
+                        "sos_active":"SOS Active","formation_state":"Formation State","naics_code":"NAICS",
+                    })
+                    st.dataframe(_ts, use_container_width=True, hide_index=True)
+                else:
+                    st.dataframe(pd.DataFrame({"business_id":_tbids}), use_container_width=True, hide_index=True)
+                _tdl = pd.DataFrame({"business_id":_tbids}).to_csv(index=False).encode()
+                st.download_button(f"⬇️ Download {len(_tbids)} IDs (CSV)", _tdl,
+                                   f"{_tk}.csv","text/csv", key=f"dl_{_tk}")
+                _tinv = st.columns(min(4, len(_tbids)))
+                for _tii, _bid_t2 in enumerate(_tbids[:4]):
+                    with _tinv[_tii]:
+                        if st.button(f"🔍 {_bid_t2[:12]}…", key=f"inv_{_tk}_{_tii}",
+                                     help=f"Investigate {_bid_t2}"):
+                            st.session_state["_pending_bid"] = _bid_t2
+                            st.session_state["_bid_just_set"] = _bid_t2
+                            st.rerun()
+            detail_panel(
+                f"🔐 TIN/EIN: {_tl}",
+                f"{len(_tbids):,} businesses · {len(_tbids)/max(total_biz,1)*100:.1f}% of portfolio",
+                what_it_means=_tdesc,
+                source_table="rds_warehouse_public.facts (tin_match_boolean, tin_match, tin_submitted)",
+                source_file="integration-service/lib/facts/kyb/index.ts lines 399-491",
+                json_obj={"outcome": _tl, "count": len(_tbids),
+                          "business_ids_sample": _tbids[:5]},
+                icon="🔐", color=_tc
+            )
+
+    # Anomaly rules (TIN submitted not checked + CRITICAL mismatch cross-ref)
+    _G3_KEYS = ["g3_tin_submitted_not_checked"]
+    _group_chart_and_drilldowns(_G3_KEYS, "TIN/EIN — Anomaly Rules", _TIN_AN_COLS, "g3")
+    for _akey in _G3_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
         _seg[_akey] = _bids
@@ -7195,7 +7256,7 @@ ORDER BY avg_impact_pts ASC;"""
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _TIN_AN_COLS, meta=_m)
     if _an.get("g1_tin_status_bool_mismatch"):
         st.info(f"ℹ️ CRITICAL: {len(_an['g1_tin_status_bool_mismatch']):,} businesses with tin_match_status=success "
-                "but tin_match_boolean=false shown in **6.1 Data Integrity Contradictions** above.")
+                "but tin_match_boolean=false — shown in **6.1 Data Integrity Contradictions** above.")
     if not _an.get("g3_tin_submitted_not_checked") and not _an.get("g1_tin_status_bool_mismatch"):
         st.success("✅ No TIN/EIN anomalies detected.", icon="✅")
 
@@ -7354,33 +7415,33 @@ ORDER BY avg_impact_pts ASC;"""
                      "naics_code","formation_state"]
     _G6_KEYS = ["g6_watchlist_inactive","g6_watchlist_no_reg","g6_bk_tin_fail","g6_multi_public_records","g6_adverse_no_wl"]
 
-    _fig_g6 = _group_summary_chart(_G6_KEYS, "Risk Signal Combinations — Business Count by Rule")
-    if _fig_g6:
-        _rc1, _rc2 = st.columns([2, 1])
-        with _rc1:
-            st.plotly_chart(dark_chart(_fig_g6), use_container_width=True)
-        with _rc2:
-            # Risk signal summary radar-style table
-            if not _sdf.empty:
-                _risk_summary = {
-                    "Watchlist Hits>0": int((_si("watchlist_hits")>0).sum()),
-                    "Bankruptcies>0":   int((_si("num_bankruptcies")>0).sum()),
-                    "Judgements>0":     int((_si("num_judgements")>0).sum()),
-                    "Liens>0":          int((_si("num_liens")>0).sum()),
-                    "Adverse Media>0":  int((_si("adverse_media")>0).sum()),
-                }
-                _risk_df = pd.DataFrame(list(_risk_summary.items()), columns=["Signal","Businesses"])
-                _risk_df = _risk_df[_risk_df["Businesses"]>0]
-                if not _risk_df.empty:
-                    fig_risk_bar = px.bar(_risk_df, x="Businesses", y="Signal", orientation="h",
-                                          color="Signal",
-                                          color_discrete_sequence=["#ef4444","#f97316","#f59e0b","#f59e0b","#3B82F6"],
-                                          text="Businesses", title="Risk Signals Present")
-                    fig_risk_bar.update_traces(textposition="outside")
-                    fig_risk_bar.update_layout(height=240, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
-                    st.plotly_chart(dark_chart(fig_risk_bar), use_container_width=True)
-
-    _group_chart_and_drilldowns(_G6_KEYS, "Risk Signal Combinations — by Rule", _RISK_AN_COLS, "g6")
+    # Left: rules bar chart with per-rule drilldowns · Right: individual signal presence summary
+    _rc1, _rc2 = st.columns([2, 1])
+    with _rc1:
+        _group_chart_and_drilldowns(_G6_KEYS, "Risk Signal Combinations — Business Count by Rule", _RISK_AN_COLS, "g6")
+    with _rc2:
+        # Raw signal presence bar (how many businesses have each individual risk signal)
+        if not _sdf.empty:
+            _risk_summary = {
+                "Watchlist Hits>0":  int((_si("watchlist_hits")>0).sum()),
+                "Bankruptcies>0":    int((_si("num_bankruptcies")>0).sum()),
+                "Judgements>0":      int((_si("num_judgements")>0).sum()),
+                "Liens>0":           int((_si("num_liens")>0).sum()),
+                "Adverse Media>0":   int((_si("adverse_media")>0).sum()),
+            }
+            _risk_df = pd.DataFrame(list(_risk_summary.items()), columns=["Signal","Businesses"])
+            _risk_df = _risk_df[_risk_df["Businesses"]>0]
+            if not _risk_df.empty:
+                fig_risk_bar = px.bar(_risk_df, x="Businesses", y="Signal", orientation="h",
+                                      color="Signal",
+                                      color_discrete_sequence=["#ef4444","#f97316","#f59e0b","#f59e0b","#3B82F6"],
+                                      text="Businesses", title="Individual Risk Signals Present")
+                fig_risk_bar.update_traces(textposition="outside")
+                fig_risk_bar.update_layout(height=max(220, len(_risk_df)*48),
+                                           showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
+                st.plotly_chart(dark_chart(fig_risk_bar), use_container_width=True)
+                st.caption("Individual signal counts (any business can appear in multiple bars). "
+                           "Left chart shows combined anomaly rules requiring 2+ signals to co-occur.")
     for _akey in _G6_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
