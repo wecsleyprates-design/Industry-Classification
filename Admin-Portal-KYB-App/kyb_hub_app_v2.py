@@ -2314,10 +2314,12 @@ def detail_panel(
     links: list = None,
     color: str = "#3B82F6",
     icon: str = "📊",
+    inline_runner: bool = True,  # show ▶ Run SQL button inline when sql is provided
 ):
     """
     Universal collapsible detail panel — shows source file (linked), table,
-    API endpoint, JSON, SQL, and Python code for the Python Runner.
+    API endpoint, JSON, SQL, Python code, and an inline SQL runner.
+    Set inline_runner=False to suppress the runner (e.g. in non-Redshift contexts).
     """
     with st.expander(f"{icon} **{label}** — {value_display[:80]}  ·  click for source, JSON, SQL & Python"):
 
@@ -2381,6 +2383,68 @@ def detail_panel(
         elif _py:
             st.markdown("**Python (paste into 🐍 Runner):**")
             st.code(_py, language="python")
+
+        # ── Inline SQL Runner ─────────────────────────────────────────────────
+        # Runs the diagnostic SQL directly here so the user doesn't need to
+        # copy-paste to the AI Agent tab. Only shown when sql is provided and
+        # inline_runner=True. Uses the same run_sql() function as the rest of the app.
+        if sql and inline_runner:
+            _dp_sql_clean = _clean_sql(sql)
+            # Only run if the SQL looks executable (has a SELECT and no unfilled placeholders)
+            _has_placeholders = "'{" in sql or "'{date" in sql or "'{business_id}" in sql
+            _run_key = f"dp_run_{hash(sql) % 99999:05d}"
+            _res_key = f"dp_res_{hash(sql) % 99999:05d}"
+
+            if _has_placeholders:
+                st.markdown(
+                    "<div style='background:#1e293b;border-left:3px solid #f59e0b;"
+                    "border-radius:5px;padding:6px 12px;margin:6px 0;font-size:.76rem;color:#fde68a'>"
+                    "⚠️ This SQL contains placeholders like <code>{date_from}</code> or "
+                    "<code>{business_id}</code>. Fill them in above before running, or "
+                    "copy to the 🤖 AI Agent tab to run with auto-filled context."
+                    "</div>",
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown("**▶ Inline SQL Runner:**")
+                _run_btn, _clear_btn = st.columns([1, 4])
+                with _run_btn:
+                    _do_run = st.button("▶ Run SQL", key=_run_key,
+                                        help="Execute this SQL against live Redshift and show results here")
+                with _clear_btn:
+                    if st.button("✕ Clear results", key=f"{_run_key}_clr",
+                                 help="Clear cached results for this query"):
+                        if _res_key in st.session_state:
+                            del st.session_state[_res_key]
+
+                if _do_run:
+                    with st.spinner("Running SQL against Redshift…"):
+                        try:
+                            _dp_result, _dp_err = run_sql(_dp_sql_clean)
+                            if _dp_result is not None and not _dp_result.empty:
+                                st.session_state[_res_key] = ("ok", _dp_result)
+                            elif _dp_err:
+                                st.session_state[_res_key] = ("err", _dp_err)
+                            else:
+                                st.session_state[_res_key] = ("empty", None)
+                        except Exception as _dp_ex:
+                            st.session_state[_res_key] = ("err", str(_dp_ex))
+
+                if _res_key in st.session_state:
+                    _status, _data = st.session_state[_res_key]
+                    if _status == "ok":
+                        st.markdown(f"<div style='color:#22c55e;font-size:.76rem;margin:4px 0'>"
+                                    f"✅ {len(_data):,} rows returned</div>", unsafe_allow_html=True)
+                        st.dataframe(_data, use_container_width=True, hide_index=True)
+                        # Download results
+                        _dp_csv = _data.to_csv(index=False).encode()
+                        st.download_button("⬇️ Download results (CSV)", _dp_csv,
+                                           f"sql_result_{_run_key}.csv", "text/csv",
+                                           key=f"{_run_key}_dl")
+                    elif _status == "empty":
+                        st.info("Query executed — 0 rows returned. The condition was not met for any business in the current dataset.", icon="ℹ️")
+                    else:
+                        st.error(f"SQL error: {_data}", icon="❌")
 
 
 def _clean_sql(sql: str) -> str:
