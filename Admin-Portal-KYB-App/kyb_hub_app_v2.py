@@ -2390,10 +2390,16 @@ def detail_panel(
         # inline_runner=True. Uses the same run_sql() function as the rest of the app.
         if sql and inline_runner:
             _dp_sql_clean = _clean_sql(sql)
-            # Only run if the SQL looks executable (has a SELECT and no unfilled placeholders)
-            _has_placeholders = "'{" in sql or "'{date" in sql or "'{business_id}" in sql
-            _run_key = f"dp_run_{hash(sql) % 99999:05d}"
-            _res_key = f"dp_res_{hash(sql) % 99999:05d}"
+            # Unique key: combine hash of sql content + hash of label to avoid collisions
+            # when multiple detail_panels share similar SQL strings on the same page.
+            _dp_uid = abs(hash(sql + label)) % 9999999
+            _run_key = f"dp_run_{_dp_uid}"
+            _res_key = f"dp_res_{_dp_uid}"
+            _has_placeholders = (
+                "'{" in sql or "{date_from}" in sql or "{date_to}" in sql
+                or "{business_id}" in sql or "'{business_id}" in sql
+                or "'{date" in sql
+            )
 
             if _has_placeholders:
                 st.markdown(
@@ -4965,8 +4971,64 @@ if tab=="🏠 Home":
         ),
     }
 
+    def _inline_sql_runner(sql_str: str, runner_key: str):
+        """Render an inline ▶ Run SQL button + results for any SQL string.
+        runner_key must be unique across the page."""
+        if not sql_str or not sql_str.strip():
+            return
+        _clean = _clean_sql(sql_str)
+        _has_ph = (
+            "{date_from}" in sql_str or "{date_to}" in sql_str
+            or "{business_id}" in sql_str or "'{business_id}" in sql_str
+            or "'{date" in sql_str or "'{bid}" in sql_str
+        )
+        _rk  = f"inl_{runner_key}"
+        _res  = f"inl_res_{runner_key}"
+        _clrk = f"inl_clr_{runner_key}"
+
+        if _has_ph:
+            st.markdown(
+                "<div style='background:#1e293b;border-left:3px solid #f59e0b;"
+                "border-radius:5px;padding:5px 10px;margin:4px 0;font-size:.74rem;color:#fde68a'>"
+                "⚠️ SQL has unfilled placeholders — copy to 🤖 AI Agent tab to run with context."
+                "</div>",
+                unsafe_allow_html=True
+            )
+            return
+
+        _rb, _cb = st.columns([1, 5])
+        with _rb:
+            _do = st.button("▶ Run SQL", key=_rk,
+                            help="Execute against live Redshift and show results here")
+        with _cb:
+            if st.button("✕ Clear", key=_clrk, help="Clear cached result"):
+                st.session_state.pop(_res, None)
+
+        if _do:
+            with st.spinner("Running…"):
+                try:
+                    _df, _err = run_sql(_clean)
+                    st.session_state[_res] = ("ok", _df) if (_df is not None and not _df.empty) \
+                        else ("err", _err) if _err else ("empty", None)
+                except Exception as _ex:
+                    st.session_state[_res] = ("err", str(_ex))
+
+        if _res in st.session_state:
+            _st, _dt = st.session_state[_res]
+            if _st == "ok":
+                st.success(f"✅ {len(_dt):,} rows", icon="✅")
+                st.dataframe(_dt, use_container_width=True, hide_index=True)
+                st.download_button("⬇️ Download CSV", _dt.to_csv(index=False).encode(),
+                                   f"{runner_key}.csv", "text/csv",
+                                   key=f"{_rk}_dl")
+            elif _st == "empty":
+                st.info("Query returned 0 rows — condition not met in current dataset.", icon="ℹ️")
+            else:
+                st.error(f"SQL error: {_dt}", icon="❌")
+
     def _drilldown_table(seg_key, label, cols_from_stats=None):
-        """Show an expander with business IDs + key signals + how-calculated explanation."""
+        """Show an expander with business IDs + key signals + how-calculated explanation + SQL runner."""
+        import re as _re
         bids = _seg.get(seg_key, [])
         if not bids: return
         with st.expander(f"👁️ Show {len(bids):,} business IDs — {label}", expanded=False):
@@ -4978,6 +5040,16 @@ if tab=="🏠 Home":
                   <span style="color:#a78bfa;font-weight:700">⚙️ How this metric is calculated</span>
                 </div>""", unsafe_allow_html=True)
                 st.markdown(calc_text)
+
+                # ── Extract SQL from calc_text and render inline runner ───
+                _sql_blocks = _re.findall(r"```sql\s*(.*?)```", calc_text, _re.DOTALL | _re.IGNORECASE)
+                for _sqi, _sq in enumerate(_sql_blocks):
+                    if _sq.strip():
+                        st.markdown("**▶ Inline SQL Runner** (from Diagnostic SQL above):")
+                        _inline_sql_runner(
+                            _sq.strip(),
+                            runner_key=f"dt_{seg_key}_{_sqi}"
+                        )
                 st.markdown("---")
 
             # ── Business IDs + signals ───────────────────────────────────
@@ -7144,6 +7216,20 @@ ORDER BY avg_impact_pts ASC;"""
                     f"**Action:** {_m2.get('action','')}\n\n"
                     f"**Source:** `{_m2.get('source','')}`"
                 )
+                # ── Diagnostic SQL runner for this rule ───────────────────
+                _rule_sql = _m2.get("sql","")
+                if _rule_sql:
+                    st.markdown("**▶ Inline SQL Runner** (diagnostic SQL for this rule):")
+                    _inline_sql_runner(_rule_sql, runner_key=f"{prefix}_{_rk}_rule")
+                # Also extract any SQL from _SEG_CALC for this key
+                _seg_calc_text = _SEG_CALC.get(_rk, "")
+                if _seg_calc_text:
+                    import re as _re2
+                    _extra_sqls = _re2.findall(r"```sql\s*(.*?)```", _seg_calc_text, _re2.DOTALL | _re2.IGNORECASE)
+                    for _esqi, _esq in enumerate(_extra_sqls):
+                        if _esq.strip() and _esq.strip() != _rule_sql.strip():
+                            st.markdown(f"**▶ Inline SQL Runner** (from ⚙️ explanation):")
+                            _inline_sql_runner(_esq.strip(), runner_key=f"{prefix}_{_rk}_calc_{_esqi}")
                 st.markdown("---")
                 # Business ID table with key KYB signals
                 if stats_df is not None and not stats_df.empty:
