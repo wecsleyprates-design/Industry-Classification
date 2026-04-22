@@ -6852,6 +6852,43 @@ ORDER BY avg_impact_pts ASC;"""
 
     _SOS_AN_COLS = ["sos_match_boolean","sos_match_status","sos_active","sos_match_verif","sos_domestic_verif","formation_state","tin_submitted","tin_match_status","tin_match","idv_passed","naics_code","watchlist_hits","num_bankruptcies"]
 
+    def _investigate_rows(bids: list, score_map: dict = None, flags_map: dict = None,
+                          context_label: str = "", key_prefix: str = "inv"):
+        """
+        Render one row per business ID with:
+          - Full UUID in monospace
+          - Weighted score + anomaly flags (if available)
+          - 🔍 Investigate button that sets the business ID and triggers a success toast
+        Replaces the old st.columns(4) truncated-UUID pattern used throughout Section 6.
+        """
+        if not bids:
+            return
+        for _idx, _bid in enumerate(bids):
+            _sc  = int(score_map.get(_bid, 0)) if score_map else 0
+            _flg = flags_map.get(_bid, []) if flags_map else []
+            _sev_icons = " ".join(
+                _SEV_ICON.get(_an_meta.get(k,{}).get("severity","LOW"),"⚪")
+                + " " + _an_meta.get(k,{}).get("title","")[:28]
+                for k in _flg[:3]
+            ) if _flg else context_label
+            _row_l, _row_r = st.columns([5, 1])
+            with _row_l:
+                st.markdown(
+                    f"<div style='background:#0f172a;border-left:3px solid #3B82F6;"
+                    f"border-radius:5px;padding:5px 12px;font-size:.75rem;color:#CBD5E1;margin:2px 0'>"
+                    f"<code style='color:#60A5FA;font-size:.82rem'>{_bid}</code>"
+                    + (f"&nbsp;&nbsp;<span style='color:#f59e0b'>⚡ {_sc}pts</span>" if _sc else "")
+                    + (f"&nbsp;·&nbsp;<span style='color:#94A3B8'>{_sev_icons}</span>" if _sev_icons else "")
+                    + "</div>",
+                    unsafe_allow_html=True
+                )
+            with _row_r:
+                if st.button("🔍 Investigate", key=f"{key_prefix}_{_bid[:16]}_{_idx}",
+                             help=f"Set Business ID to {_bid} and navigate to any entity tab"):
+                    st.session_state["_pending_bid"] = _bid
+                    st.session_state["_bid_just_set"] = _bid
+                    st.rerun()
+
     # ── 6.0 Scorecard: scoring formula explanation ──────────────────────────
     detail_panel(
         "📊 6.0 Portfolio Health Scorecard — How Weighted Score is Calculated",
@@ -6961,14 +6998,8 @@ ORDER BY avg_impact_pts ASC;"""
             st.download_button(f"⬇️ Download {len(_sc_bids)} IDs (CSV)", _sc_dl,
                                f"scorecard_{_sc_label[:15].replace(' ','_')}.csv","text/csv",
                                key=f"dl_sc_{_sc_label[:12]}")
-            _sc_inv = st.columns(min(4, len(_sc_bids)))
-            for _si2, _bid_sc in enumerate(_sc_bids[:4]):
-                with _sc_inv[_si2]:
-                    if st.button(f"🔍 {_bid_sc[:12]}…", key=f"inv_sc_{_sc_label[:8]}_{_si2}",
-                                 help=f"Investigate {_bid_sc}"):
-                        st.session_state["_pending_bid"] = _bid_sc
-                        st.session_state["_bid_just_set"] = _bid_sc
-                        st.rerun()
+            st.caption("Click 🔍 Investigate to set a business ID in the filter bar, then switch to any entity tab.")
+            _investigate_rows(_sc_bids, _biz_score, _biz_flags_s6, key_prefix=f"sc_{_sc_label[:8]}")
 
     # Helper: build summary bar chart + per-rule drilldown expanders for a group
     def _group_chart_and_drilldowns(group_keys, group_title, cols_for_table, prefix="gc"):
@@ -7045,14 +7076,9 @@ ORDER BY avg_impact_pts ASC;"""
                 _dl_r = pd.DataFrame({"business_id": _rbids}).to_csv(index=False).encode()
                 st.download_button(f"⬇️ Download {len(_rbids)} IDs (CSV)", _dl_r,
                                    f"{_rk}_bids.csv","text/csv", key=f"dl_{prefix}_{_rk}")
-                _inv_r = st.columns(min(4, len(_rbids)))
-                for _ri, _bid_r in enumerate(_rbids[:4]):
-                    with _inv_r[_ri]:
-                        if st.button(f"🔍 {_bid_r[:12]}…", key=f"inv_{prefix}_{_rk}_{_ri}",
-                                     help=f"Investigate {_bid_r}"):
-                            st.session_state["_pending_bid"] = _bid_r
-                            st.session_state["_bid_just_set"] = _bid_r
-                            st.rerun()
+                st.caption("Click 🔍 Investigate to set a business ID, then switch to any entity tab.")
+                _investigate_rows(_rbids, _biz_score, _biz_flags_s6,
+                                  context_label=_m2.get("title",""), key_prefix=f"{prefix}_{_rk}")
 
     # (kept for backward compat — now delegates to _group_chart_and_drilldowns)
     def _group_summary_chart(group_keys, group_title):
@@ -7277,14 +7303,9 @@ ORDER BY avg_impact_pts ASC;"""
                 _tdl = pd.DataFrame({"business_id":_tbids}).to_csv(index=False).encode()
                 st.download_button(f"⬇️ Download {len(_tbids)} IDs (CSV)", _tdl,
                                    f"{_tk}.csv","text/csv", key=f"dl_{_tk}")
-                _tinv = st.columns(min(4, len(_tbids)))
-                for _tii, _bid_t2 in enumerate(_tbids[:4]):
-                    with _tinv[_tii]:
-                        if st.button(f"🔍 {_bid_t2[:12]}…", key=f"inv_{_tk}_{_tii}",
-                                     help=f"Investigate {_bid_t2}"):
-                            st.session_state["_pending_bid"] = _bid_t2
-                            st.session_state["_bid_just_set"] = _bid_t2
-                            st.rerun()
+                st.caption("Click 🔍 Investigate to set a business ID, then switch to any entity tab.")
+                _investigate_rows(_tbids, _biz_score, _biz_flags_s6,
+                                  context_label=_tl, key_prefix=f"tin_{_tk}")
             detail_panel(
                 f"🔐 TIN/EIN: {_tl}",
                 f"{len(_tbids):,} businesses · {len(_tbids)/max(total_biz,1)*100:.1f}% of portfolio",
@@ -7690,14 +7711,9 @@ ORDER BY avg_impact_pts ASC;"""
                     )
 
                     # Investigate buttons for this band
-                    _band_inv_cols = st.columns(min(4, len(_bids_in_band)))
-                    for _ii, _bid_b in enumerate(_bids_in_band[:4]):
-                        with _band_inv_cols[_ii]:
-                            if st.button(f"🔍 {_bid_b[:12]}…", key=f"inv_band{_cnt}_{_ii}",
-                                         help=f"Investigate {_bid_b}"):
-                                st.session_state["_pending_bid"] = _bid_b
-                                st.session_state["_bid_just_set"] = _bid_b
-                                st.rerun()
+                    st.caption("Click 🔍 Investigate to set a business ID, then switch to any entity tab.")
+                    _investigate_rows(_bids_in_band, _biz_score, _biz_flags_s6,
+                                      context_label=_band_label, key_prefix=f"band{_cnt}")
 
             # detail_panel must be OUTSIDE st.expander — Streamlit forbids nested expanders
             detail_panel(
@@ -7903,15 +7919,10 @@ ORDER BY avg_impact_pts ASC;"""
                             f"cooc_{_k1[:8]}_{_k2[:8]}.csv", "text/csv",
                             key=f"dl_cooc_{_pair_seg_key}"
                         )
-                        _inv_cols2 = st.columns(min(4, len(_both_bids)))
-                        for _jj, _bid_p in enumerate(_both_bids[:4]):
-                            with _inv_cols2[_jj]:
-                                if st.button(f"🔍 {_bid_p[:12]}…",
-                                             key=f"inv_cooc_{_pair_seg_key}_{_jj}",
-                                             help=f"Investigate {_bid_p}"):
-                                    st.session_state["_pending_bid"] = _bid_p
-                                    st.session_state["_bid_just_set"] = _bid_p
-                                    st.rerun()
+                        st.caption("Click 🔍 Investigate to set a business ID, then switch to any entity tab.")
+                        _investigate_rows(_both_bids, _biz_score, _biz_flags_s6,
+                                          context_label=f"{_t1[:20]} × {_t2[:20]}",
+                                          key_prefix=f"cooc_{_pair_seg_key}")
 
                     # detail_panel OUTSIDE expander — Streamlit forbids nested expanders
                     detail_panel(
