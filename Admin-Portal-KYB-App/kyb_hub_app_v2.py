@@ -6852,6 +6852,88 @@ ORDER BY avg_impact_pts ASC;"""
 
     _SOS_AN_COLS = ["sos_match_boolean","sos_match_status","sos_active","sos_match_verif","sos_domestic_verif","formation_state","tin_submitted","tin_match_status","tin_match","idv_passed","naics_code","watchlist_hits","num_bankruptcies"]
 
+    # ── 6.0 Scorecard drilldowns — one expander per band ────────────────────
+    _scorecard_bands = [
+        ("✅ 0 Anomalies — Structurally Clean", 0, "#22c55e",
+         "These businesses have no cross-field contradictions. All KYB signals are internally consistent."),
+        ("⚠️ 1 Anomaly — Isolated Issue", 1, "#f59e0b",
+         "One signal contradiction detected. Usually resolvable with a single targeted action."),
+        ("🟠 2–3 Anomalies — Compounded Risk", None, "#f97316",
+         "Multiple contradictions co-occur. Needs investigation before any approval or decline decision."),
+        ("🔴 4+ Anomalies — Systematic Failure", None, "#ef4444",
+         "Full manual review required. Structural KYB data consistency has broken down for these businesses."),
+    ]
+    for _sc_label, _sc_exact, _sc_col, _sc_desc in _scorecard_bands:
+        if _sc_exact is not None:
+            _sc_bids = _biz_score_df[_biz_score_df["anomaly_count"]==_sc_exact]["business_id"].tolist()
+        elif "2–3" in _sc_label:
+            _sc_bids = _biz_score_df[_biz_score_df["anomaly_count"].between(2,3)]["business_id"].tolist()
+        else:
+            _sc_bids = _biz_score_df[_biz_score_df["anomaly_count"]>=4]["business_id"].tolist()
+        if not _sc_bids:
+            continue
+        with st.expander(f"👁️ Show {len(_sc_bids):,} businesses — {_sc_label}", expanded=False):
+            st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_sc_col};
+                border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
+              <span style="color:#a78bfa;font-weight:700">⚙️ What this band means</span>
+            </div>""", unsafe_allow_html=True)
+            st.markdown(_sc_desc)
+            st.markdown("---")
+            # Which anomalies does each business trigger?
+            _sc_tbl = _biz_score_df[_biz_score_df["business_id"].isin(_sc_bids)][
+                ["business_id","anomaly_score","anomaly_count"]
+            ].copy()
+            _sc_tbl["Anomalies Triggered"] = _sc_tbl["business_id"].map(
+                lambda b: " · ".join(
+                    _SEV_ICON.get(_an_meta.get(k,{}).get("severity","LOW"),"⚪")
+                    + " " + _an_meta.get(k,{}).get("title","")[:28]
+                    for k in _biz_flags_s6.get(b,[])
+                )
+            )
+            _sc_tbl = _sc_tbl.rename(columns={"anomaly_score":"Weighted Score","anomaly_count":"# Anomalies"})
+            st.dataframe(_sc_tbl, use_container_width=True, hide_index=True)
+            # Key signals
+            if stats_df is not None and not stats_df.empty:
+                _sc_sig = stats_df[stats_df["business_id"].isin(_sc_bids)][
+                    ["business_id"] + [c for c in _SOS_AN_COLS if c in stats_df.columns]
+                ].copy().rename(columns={
+                    "sos_match_boolean":"SOS Match Bool","sos_active":"SOS Active",
+                    "tin_match":"TIN Match Bool","tin_match_status":"TIN Match Status",
+                    "naics_code":"NAICS","watchlist_hits":"WL Hits","num_bankruptcies":"BK",
+                    "formation_state":"Formation State","tin_submitted":"TIN Submitted",
+                })
+                if not _sc_sig.empty:
+                    st.markdown("**Key KYB signals:**")
+                    st.dataframe(_sc_sig, use_container_width=True, hide_index=True)
+            _sc_dl = pd.DataFrame({"business_id":_sc_bids}).to_csv(index=False).encode()
+            st.download_button(f"⬇️ Download {len(_sc_bids)} IDs (CSV)", _sc_dl,
+                               f"scorecard_{_sc_label[:15].replace(' ','_')}.csv", "text/csv",
+                               key=f"dl_sc_{_sc_label[:12]}")
+            _sc_inv = st.columns(min(4, len(_sc_bids)))
+            for _si2, _bid_sc in enumerate(_sc_bids[:4]):
+                with _sc_inv[_si2]:
+                    if st.button(f"🔍 {_bid_sc[:12]}…", key=f"inv_sc_{_sc_label[:8]}_{_si2}",
+                                 help=f"Investigate {_bid_sc}"):
+                        st.session_state["_pending_bid"] = _bid_sc
+                        st.session_state["_bid_just_set"] = _bid_sc
+                        st.rerun()
+        detail_panel(
+            f"📊 Scorecard Band: {_sc_label}",
+            f"{len(_sc_bids):,} businesses — {len(_sc_bids)/max(total_biz,1)*100:.1f}% of portfolio",
+            what_it_means=_sc_desc + (
+                "\n\n**Anomaly count:** total distinct cross-field contradiction rules triggered per business "
+                "(check_agent_v2.DETERMINISTIC_CHECKS). "
+                "This count is independent of the Section 4 Red Flag score — "
+                "red flags measure risk signals (watchlist, BK, etc.), "
+                "while anomaly count measures structural data consistency failures."
+            ),
+            source_table="stats_df · funnel_df (in memory)",
+            source_file="check_agent_v2.py (DETERMINISTIC_CHECKS) — 20 rules across 7 groups",
+            json_obj={"band": _sc_label, "businesses": len(_sc_bids),
+                      "business_ids_sample": _sc_bids[:5]},
+            icon="📊", color=_sc_col
+        )
+
     # Helper: build summary bar chart for a group's anomalies
     def _group_summary_chart(group_keys, group_title):
         """Horizontal bar chart of anomaly counts across all rules in a group."""
@@ -6910,14 +6992,17 @@ ORDER BY avg_impact_pts ASC;"""
         with _gc1:
             st.plotly_chart(dark_chart(_fig_g2), use_container_width=True)
         with _gc2:
-            # Mini donut: registry state distribution
-            if not _sdf.empty:
+            # Registry state donut — use funnel_df to stay consistent with Section 1
+            _smb_g2 = _fdf["sos_match_boolean"].astype(str).str.lower().str.strip() if not _fdf.empty and "sos_match_boolean" in _fdf.columns else pd.Series(dtype=str)
+            _sact_g2 = _fdf["sos_active"].astype(str).str.lower().str.strip() if not _fdf.empty and "sos_active" in _fdf.columns else pd.Series(dtype=str)
+            if not _smb_g2.empty:
                 _reg_dist = pd.DataFrame({
-                    "State": ["Registry Active","Registry Inactive","No Registry"],
+                    "State": ["Registry Active","Registry Inactive","No Registry (false)","Unknown/Null"],
                     "Count": [
-                        int((_s("sos_match_boolean")=="true") & (_s("sos_active")=="true")).sum() if not _sdf.empty else 0,
-                        int((_s("sos_match_boolean")=="true") & (_s("sos_active")=="false")).sum() if not _sdf.empty else 0,
-                        int((_s("sos_match_boolean")=="false")).sum() if not _sdf.empty else 0,
+                        int(((_smb_g2=="true") & (_sact_g2=="true")).sum()),
+                        int(((_smb_g2=="true") & (_sact_g2=="false")).sum()),
+                        int((_smb_g2=="false").sum()),
+                        int((_smb_g2.isin(["","none","nan"])).sum()),
                     ]
                 })
                 _reg_dist = _reg_dist[_reg_dist["Count"]>0]
@@ -6927,7 +7012,8 @@ ORDER BY avg_impact_pts ASC;"""
                                           color="State",
                                           color_discrete_map={"Registry Active":"#22c55e",
                                                               "Registry Inactive":"#ef4444",
-                                                              "No Registry":"#f97316"})
+                                                              "No Registry (false)":"#f97316",
+                                                              "Unknown/Null":"#64748b"})
                     fig_reg_donut.update_layout(height=240, margin=dict(t=40,b=10,l=10,r=10))
                     st.plotly_chart(dark_chart(fig_reg_donut), use_container_width=True)
 
@@ -7012,51 +7098,57 @@ ORDER BY avg_impact_pts ASC;"""
     _G4_KEYS = ["g4_sos_ok_tin_fail","g4_sos_inactive_tin_ok","g4_no_sos_tin_ok"]
     _cross_total = sum(len(_an.get(k,[])) for k in _G4_KEYS)
 
-    # Full Registry × TIN cross-tabulation chart
-    if not _sdf.empty:
-        _sos_act   = _s("sos_active")
-        _sos_bool  = _s("sos_match_boolean")
-        _tin_bool  = _s("tin_match")
-        # Derive registry state
-        def _reg_state(row_idx):
-            s_bool = _sos_bool.iloc[row_idx]
-            s_act  = _sos_act.iloc[row_idx]
-            if s_bool == "true" and s_act == "true":   return "Active"
-            if s_bool == "true" and s_act == "false":  return "Inactive"
-            if s_bool == "false":                       return "No Registry (false)"
+    # Full Registry × TIN cross-tabulation — use funnel_df for registry, sdf for TIN
+    # funnel_df has sos_match_boolean/sos_active; _sdf has tin_match after enrichment
+    _cross_base = _fdf.copy() if not _fdf.empty else _sdf.copy()
+    if not _cross_base.empty:
+        _smb_4 = _cross_base["sos_match_boolean"].astype(str).str.lower().str.strip() if "sos_match_boolean" in _cross_base.columns else pd.Series([""] * len(_cross_base))
+        _sact_4 = _cross_base["sos_active"].astype(str).str.lower().str.strip() if "sos_active" in _cross_base.columns else pd.Series([""] * len(_cross_base))
+        # Merge TIN from sdf
+        _tin_merged = _cross_base[["business_id"]].merge(
+            _sdf[["business_id","tin_match"]] if not _sdf.empty and "tin_match" in _sdf.columns else pd.DataFrame(columns=["business_id","tin_match"]),
+            on="business_id", how="left"
+        )
+        _tin_4 = _tin_merged["tin_match"].astype(str).str.lower().str.strip().fillna("") if "tin_match" in _tin_merged.columns else pd.Series([""] * len(_cross_base))
+        def _reg_state_4(i):
+            s_bool = _smb_4.iloc[i]; s_act = _sact_4.iloc[i]
+            if s_bool == "true" and s_act == "true":  return "SOS Active"
+            if s_bool == "true" and s_act == "false": return "SOS Inactive"
+            if s_bool == "true":                       return "SOS Active"   # sos_active null but match=true
+            if s_bool == "false":                      return "No Registry"
             return "Unknown/Null"
-        def _tin_state(row_idx):
-            t = _tin_bool.iloc[row_idx]
+        def _tin_state_4(i):
+            t = _tin_4.iloc[i]
             if t == "true":  return "TIN Pass"
             if t == "false": return "TIN Fail"
             return "Not Checked"
-        _cross_rows = [{"Registry State": _reg_state(i), "TIN State": _tin_state(i)}
-                       for i in range(len(_sdf))]
-        _cross_df = pd.DataFrame(_cross_rows)
-        if not _cross_df.empty:
-            _ct = _cross_df.groupby(["Registry State","TIN State"]).size().reset_index(name="Businesses")
-            _ct_pivot = _ct.pivot(index="Registry State", columns="TIN State", values="Businesses").fillna(0).astype(int)
-            _xc1, _xc2 = st.columns([1.5, 1])
-            with _xc1:
-                fig_cross_heat = px.imshow(
-                    _ct_pivot.values,
-                    x=list(_ct_pivot.columns), y=list(_ct_pivot.index),
-                    color_continuous_scale=["#0f172a","#1e3a5f","#22c55e"],
-                    text_auto=True, aspect="auto",
-                    title="Registry State × TIN State (all businesses)"
-                )
-                fig_cross_heat.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
-                st.plotly_chart(dark_chart(fig_cross_heat), use_container_width=True)
-            with _xc2:
-                fig_cross_bar = px.bar(
-                    _ct, x="TIN State", y="Businesses", color="Registry State",
-                    barmode="group",
-                    color_discrete_map={"Active":"#22c55e","Inactive":"#ef4444",
-                                        "No Registry (false)":"#f97316","Unknown/Null":"#64748b"},
-                    title="Registry × TIN Distribution"
-                )
-                fig_cross_bar.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
-                st.plotly_chart(dark_chart(fig_cross_bar), use_container_width=True)
+        _cross_rows = [{"Registry State": _reg_state_4(i), "TIN State": _tin_state_4(i)}
+                       for i in range(len(_cross_base))]
+    _cross_df = pd.DataFrame(_cross_rows) if not _cross_base.empty else pd.DataFrame()
+    if not _cross_df.empty:
+        _ct = _cross_df.groupby(["Registry State","TIN State"]).size().reset_index(name="Businesses")
+        _ct_pivot = _ct.pivot(index="Registry State", columns="TIN State", values="Businesses").fillna(0).astype(int)
+        _xc1, _xc2 = st.columns([1.5, 1])
+        with _xc1:
+            fig_cross_heat = px.imshow(
+                _ct_pivot.values,
+                x=list(_ct_pivot.columns), y=list(_ct_pivot.index),
+                color_continuous_scale=["#0f172a","#1e3a5f","#22c55e"],
+                text_auto=True, aspect="auto",
+                title="Registry State × TIN State (all businesses)"
+            )
+            fig_cross_heat.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_cross_heat), use_container_width=True)
+        with _xc2:
+            fig_cross_bar = px.bar(
+                _ct, x="TIN State", y="Businesses", color="Registry State",
+                barmode="group",
+                color_discrete_map={"SOS Active":"#22c55e","SOS Inactive":"#ef4444",
+                                    "No Registry":"#f97316","Unknown/Null":"#64748b"},
+                title="Registry × TIN Distribution"
+            )
+            fig_cross_bar.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(fig_cross_bar), use_container_width=True)
 
     for _akey in _G4_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
@@ -7379,33 +7471,34 @@ ORDER BY avg_impact_pts ASC;"""
                                 st.session_state["_bid_just_set"] = _bid_b
                                 st.rerun()
 
-                detail_panel(
-                    f"📊 Anomaly Band: {_cnt} anomal{'y' if _cnt==1 else 'ies'} — {_n_biz:,} businesses",
-                    f"{_n_biz:,} businesses · {_n_biz/max(total_biz,1)*100:.1f}% of portfolio · {_band_label}",
-                    what_it_means=(
-                        f"**Band definition:** Businesses with exactly {_cnt} simultaneous "
-                        f"cross-field KYB anomalies detected by the 20 deterministic rules.\n\n"
-                        f"**Severity interpretation:**\n"
-                        f"- 0 anomalies → structurally clean, no cross-field contradictions\n"
-                        f"- 1 anomaly → isolated issue, typically resolvable with one action\n"
-                        f"- 2–3 anomalies → compounded risk, needs investigation before decision\n"
-                        f"- 4+ anomalies → systematic KYB failure, full manual review required\n\n"
-                        f"**Weighted score range for {_cnt} anomal{'y' if _cnt==1 else 'ies'}:** "
-                        f"{_cnt}–{_cnt*4} points\n\n"
-                        f"**Rules evaluated:** 20 deterministic rules across 7 groups "
-                        f"(check_agent_v2.DETERMINISTIC_CHECKS). Zero LLM. Zero new Redshift queries."
-                    ),
-                    source_table="stats_df · funnel_df (already in memory — zero new queries)",
-                    source_file="check_agent_v2.py (DETERMINISTIC_CHECKS)",
-                    json_obj={
-                        "band_anomaly_count": _cnt,
-                        "businesses_in_band": _n_biz,
-                        "pct_of_portfolio": f"{_n_biz/max(total_biz,1)*100:.1f}%",
-                        "business_ids": _bids_in_band[:10],
-                        "severity_label": _band_label,
-                    },
-                    icon="📊", color=_col
-                )
+            # detail_panel must be OUTSIDE st.expander — Streamlit forbids nested expanders
+            detail_panel(
+                f"📊 Anomaly Band: {_cnt} anomal{'y' if _cnt==1 else 'ies'} — {_n_biz:,} businesses",
+                f"{_n_biz:,} businesses · {_n_biz/max(total_biz,1)*100:.1f}% of portfolio · {_band_label}",
+                what_it_means=(
+                    f"**Band definition:** Businesses with exactly {_cnt} simultaneous "
+                    f"cross-field KYB anomalies detected by the 20 deterministic rules.\n\n"
+                    f"**Severity interpretation:**\n"
+                    f"- 0 anomalies → structurally clean, no cross-field contradictions\n"
+                    f"- 1 anomaly → isolated issue, typically resolvable with one action\n"
+                    f"- 2–3 anomalies → compounded risk, needs investigation before decision\n"
+                    f"- 4+ anomalies → systematic KYB failure, full manual review required\n\n"
+                    f"**Weighted score range for {_cnt} anomal{'y' if _cnt==1 else 'ies'}:** "
+                    f"{_cnt}–{_cnt*4} points\n\n"
+                    f"**Rules evaluated:** 20 deterministic rules across 7 groups "
+                    f"(check_agent_v2.DETERMINISTIC_CHECKS). Zero LLM. Zero new Redshift queries."
+                ),
+                source_table="stats_df · funnel_df (already in memory — zero new queries)",
+                source_file="check_agent_v2.py (DETERMINISTIC_CHECKS)",
+                json_obj={
+                    "band_anomaly_count": _cnt,
+                    "businesses_in_band": _n_biz,
+                    "pct_of_portfolio": f"{_n_biz/max(total_biz,1)*100:.1f}%",
+                    "business_ids": _bids_in_band[:10],
+                    "severity_label": _band_label,
+                },
+                icon="📊", color=_col
+            )
 
         # ── Top 10 most anomalous businesses ──────────────────────────────────
         st.markdown("---")
@@ -7592,22 +7685,23 @@ ORDER BY avg_impact_pts ASC;"""
                                     st.session_state["_bid_just_set"] = _bid_p
                                     st.rerun()
 
-                        detail_panel(
-                            f"🔥 Co-Occurrence: {_t1[:25]} × {_t2[:25]}",
-                            f"{len(_both_bids):,} businesses trigger both · Pair severity: {_sev_pair}",
-                            what_it_means=_SEG_CALC[_pair_seg_key],
-                            source_table="stats_df · funnel_df (in memory)",
-                            source_file=f"{_an_meta[_k1].get('source','')} · {_an_meta[_k2].get('source','')}",
-                            json_obj={
-                                "anomaly_1": _t1, "source_1": _an_meta[_k1].get("source",""),
-                                "anomaly_2": _t2, "source_2": _an_meta[_k2].get("source",""),
-                                "co_occurring_businesses": len(_both_bids),
-                                "business_ids_sample": _both_bids[:5],
-                                "pair_severity": _sev_pair,
-                                "action": f"{_an_meta[_k1].get('action','')} | {_an_meta[_k2].get('action','')}",
-                            },
-                            icon="🔥", color=_col_pair
-                        )
+                    # detail_panel OUTSIDE expander — Streamlit forbids nested expanders
+                    detail_panel(
+                        f"🔥 Co-Occurrence: {_t1[:25]} × {_t2[:25]}",
+                        f"{len(_both_bids):,} businesses trigger both · Pair severity: {_sev_pair}",
+                        what_it_means=_SEG_CALC[_pair_seg_key],
+                        source_table="stats_df · funnel_df (in memory)",
+                        source_file=f"{_an_meta[_k1].get('source','')} · {_an_meta[_k2].get('source','')}",
+                        json_obj={
+                            "anomaly_1": _t1, "source_1": _an_meta[_k1].get("source",""),
+                            "anomaly_2": _t2, "source_2": _an_meta[_k2].get("source",""),
+                            "co_occurring_businesses": len(_both_bids),
+                            "business_ids_sample": _both_bids[:5],
+                            "pair_severity": _sev_pair,
+                            "action": f"{_an_meta[_k1].get('action','')} | {_an_meta[_k2].get('action','')}",
+                        },
+                        icon="🔥", color=_col_pair
+                    )
 
         detail_panel("🔬 Portfolio Anomaly Triage — Section 6.8",
             f"{len(_biz_score_df[_biz_score_df['anomaly_score']>0]):,} businesses with ≥1 anomaly · "
