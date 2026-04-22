@@ -6852,47 +6852,98 @@ ORDER BY avg_impact_pts ASC;"""
 
     _SOS_AN_COLS = ["sos_match_boolean","sos_match_status","sos_active","sos_match_verif","sos_domestic_verif","formation_state","tin_submitted","tin_match_status","tin_match","idv_passed","naics_code","watchlist_hits","num_bankruptcies"]
 
-    # ── 6.0 Scorecard drilldowns — one expander per band ────────────────────
+    # ── 6.0 Scorecard: scoring formula explanation ──────────────────────────
+    detail_panel(
+        "📊 6.0 Portfolio Health Scorecard — How Weighted Score is Calculated",
+        f"{total_biz:,} businesses · {_n_clean:,} clean · {_n_1+_n_2_3+_n_4plus:,} with anomalies",
+        what_it_means=(
+            "**What 'Weighted Score' means in the table:**\n\n"
+            "Each business gets a weighted score computed as the sum of severity points "
+            "for every deterministic rule it triggers:\n\n"
+            "| Severity | Points | Example rules |\n|---|---|---|\n"
+            "| CRITICAL | 4 pts | tin_match_status=success AND tin_match_boolean=false (data integrity bug) |\n"
+            "| HIGH | 3 pts | SOS Inactive + TIN Verified; Watchlist Hit + No Registry |\n"
+            "| MEDIUM | 2 pts | SOS Active + TIN Failed; Registry Active but Inactive per verif_results |\n"
+            "| LOW / NOTICE | 1 pt | NAICS Fallback 561499; Adverse Media + No Watchlist |\n\n"
+            "**Example:** A business that triggers 'SOS Inactive + TIN Verified' (HIGH=3pts) "
+            "AND 'NAICS Fallback 561499' (LOW=1pt) gets Weighted Score = 4, # Anomalies = 2.\n\n"
+            "**# Anomalies** = raw count of rules triggered (unweighted).\n"
+            "**Weighted Score** = sum of severity points (weighted).\n\n"
+            "**This scoring is independent of the Section 4 Red Flag score.** "
+            "Red Flags measure risk signal intensity (watchlist hits, bankruptcies, etc.). "
+            "The anomaly score measures structural KYB data *consistency failures* — "
+            "contradictions between signals that should agree with each other.\n\n"
+            "**20 rules evaluated across 7 groups (check_agent_v2.DETERMINISTIC_CHECKS):**\n"
+            "- G1 (Data Integrity): 3 impossible-state rules\n"
+            "- G2 (SOS/Registry): 3 registry inconsistency rules\n"
+            "- G3 (TIN/EIN): 1 EIN gap rule\n"
+            "- G4 (Cross-Section S1×S2): 3 Registry×TIN contradiction rules\n"
+            "- G5 (NAICS): 2 classification anomaly rules\n"
+            "- G6 (Risk Signals): 5 risk combination rules\n"
+            "- G7 (Worth Score): 3 score vs KYB consistency rules"
+        ),
+        source_table="stats_df · funnel_df (already in memory — zero new Redshift queries)",
+        source_file="check_agent_v2.py (DETERMINISTIC_CHECKS) — 20 rules across 7 groups",
+        json_obj={
+            "scoring_formula": {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "NOTICE": 1},
+            "portfolio_summary": {
+                "clean_0_anomalies": _n_clean,
+                "1_anomaly": _n_1,
+                "2_3_anomalies": _n_2_3,
+                "4plus_anomalies": _n_4plus,
+                "critical_combos": _n_crit,
+            }
+        },
+        icon="📊", color="#3B82F6"
+    )
+
+    # ── 6.0 Scorecard: per-band drilldowns (business IDs + key signals + investigate) ──
     _scorecard_bands = [
-        ("✅ 0 Anomalies — Structurally Clean", 0, "#22c55e",
-         "These businesses have no cross-field contradictions. All KYB signals are internally consistent."),
-        ("⚠️ 1 Anomaly — Isolated Issue", 1, "#f59e0b",
-         "One signal contradiction detected. Usually resolvable with a single targeted action."),
-        ("🟠 2–3 Anomalies — Compounded Risk", None, "#f97316",
-         "Multiple contradictions co-occur. Needs investigation before any approval or decline decision."),
-        ("🔴 4+ Anomalies — Systematic Failure", None, "#ef4444",
-         "Full manual review required. Structural KYB data consistency has broken down for these businesses."),
+        ("✅ 0 Anomalies — Structurally Clean",   lambda df: df[df["anomaly_count"]==0],                     "#22c55e",
+         "No cross-field contradictions. All 20 deterministic rules pass. Weighted score = 0."),
+        ("⚠️ 1 Anomaly — Isolated Issue",          lambda df: df[df["anomaly_count"]==1],                     "#f59e0b",
+         "Exactly 1 contradiction rule triggered. Usually resolvable with one targeted action. Weighted score = 1–4pts."),
+        ("🟠 2–3 Anomalies — Compounded Risk",     lambda df: df[df["anomaly_count"].between(2,3)],           "#f97316",
+         "2–3 rules triggered simultaneously. Anomalies often share a root cause. Weighted score = 2–12pts."),
+        ("🔴 4+ Anomalies — Systematic Failure",   lambda df: df[df["anomaly_count"]>=4],                     "#ef4444",
+         "4 or more rules triggered. Systematic KYB data breakdown. Full manual review required. Weighted score = 4–80pts."),
     ]
-    for _sc_label, _sc_exact, _sc_col, _sc_desc in _scorecard_bands:
-        if _sc_exact is not None:
-            _sc_bids = _biz_score_df[_biz_score_df["anomaly_count"]==_sc_exact]["business_id"].tolist()
-        elif "2–3" in _sc_label:
-            _sc_bids = _biz_score_df[_biz_score_df["anomaly_count"].between(2,3)]["business_id"].tolist()
-        else:
-            _sc_bids = _biz_score_df[_biz_score_df["anomaly_count"]>=4]["business_id"].tolist()
+    for _sc_label, _sc_fn, _sc_col, _sc_desc in _scorecard_bands:
+        _sc_sub = _sc_fn(_biz_score_df)
+        _sc_bids = _sc_sub["business_id"].tolist()
         if not _sc_bids:
             continue
         with st.expander(f"👁️ Show {len(_sc_bids):,} businesses — {_sc_label}", expanded=False):
             st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_sc_col};
                 border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
-              <span style="color:#a78bfa;font-weight:700">⚙️ What this band means</span>
+              <span style="color:#a78bfa;font-weight:700">⚙️ Band definition · Scoring formula</span>
             </div>""", unsafe_allow_html=True)
-            st.markdown(_sc_desc)
+            st.markdown(
+                f"{_sc_desc}\n\n"
+                f"**Weighted Score formula:** CRITICAL=4pts · HIGH=3pts · MEDIUM=2pts · LOW/NOTICE=1pt per rule triggered."
+            )
             st.markdown("---")
-            # Which anomalies does each business trigger?
-            _sc_tbl = _biz_score_df[_biz_score_df["business_id"].isin(_sc_bids)][
-                ["business_id","anomaly_score","anomaly_count"]
-            ].copy()
+            # Table: business_id, weighted score, # anomalies, which rules triggered
+            _sc_tbl = _sc_sub[["business_id","anomaly_score","anomaly_count"]].copy()
             _sc_tbl["Anomalies Triggered"] = _sc_tbl["business_id"].map(
                 lambda b: " · ".join(
                     _SEV_ICON.get(_an_meta.get(k,{}).get("severity","LOW"),"⚪")
-                    + " " + _an_meta.get(k,{}).get("title","")[:28]
+                    + " " + _an_meta.get(k,{}).get("title","")[:30]
                     for k in _biz_flags_s6.get(b,[])
-                )
+                ) or "None"
             )
-            _sc_tbl = _sc_tbl.rename(columns={"anomaly_score":"Weighted Score","anomaly_count":"# Anomalies"})
-            st.dataframe(_sc_tbl, use_container_width=True, hide_index=True)
-            # Key signals
+            _sc_tbl = _sc_tbl.rename(columns={
+                "anomaly_score": "Weighted Score (pts)",
+                "anomaly_count": "# Anomalies"
+            })
+            st.dataframe(_sc_tbl, use_container_width=True, hide_index=True,
+                         column_config={
+                             "Weighted Score (pts)": st.column_config.NumberColumn(
+                                 help="Sum of severity points: CRITICAL=4 · HIGH=3 · MEDIUM=2 · LOW/NOTICE=1"),
+                             "# Anomalies": st.column_config.NumberColumn(
+                                 help="Raw count of contradiction rules triggered (unweighted)"),
+                         })
+            # Key KYB signals
             if stats_df is not None and not stats_df.empty:
                 _sc_sig = stats_df[stats_df["business_id"].isin(_sc_bids)][
                     ["business_id"] + [c for c in _SOS_AN_COLS if c in stats_df.columns]
@@ -6903,11 +6954,12 @@ ORDER BY avg_impact_pts ASC;"""
                     "formation_state":"Formation State","tin_submitted":"TIN Submitted",
                 })
                 if not _sc_sig.empty:
-                    st.markdown("**Key KYB signals:**")
+                    st.markdown("**Key KYB signals for these businesses:**")
                     st.dataframe(_sc_sig, use_container_width=True, hide_index=True)
+            # Download + investigate
             _sc_dl = pd.DataFrame({"business_id":_sc_bids}).to_csv(index=False).encode()
             st.download_button(f"⬇️ Download {len(_sc_bids)} IDs (CSV)", _sc_dl,
-                               f"scorecard_{_sc_label[:15].replace(' ','_')}.csv", "text/csv",
+                               f"scorecard_{_sc_label[:15].replace(' ','_')}.csv","text/csv",
                                key=f"dl_sc_{_sc_label[:12]}")
             _sc_inv = st.columns(min(4, len(_sc_bids)))
             for _si2, _bid_sc in enumerate(_sc_bids[:4]):
@@ -6917,26 +6969,93 @@ ORDER BY avg_impact_pts ASC;"""
                         st.session_state["_pending_bid"] = _bid_sc
                         st.session_state["_bid_just_set"] = _bid_sc
                         st.rerun()
-        detail_panel(
-            f"📊 Scorecard Band: {_sc_label}",
-            f"{len(_sc_bids):,} businesses — {len(_sc_bids)/max(total_biz,1)*100:.1f}% of portfolio",
-            what_it_means=_sc_desc + (
-                "\n\n**Anomaly count:** total distinct cross-field contradiction rules triggered per business "
-                "(check_agent_v2.DETERMINISTIC_CHECKS). "
-                "This count is independent of the Section 4 Red Flag score — "
-                "red flags measure risk signals (watchlist, BK, etc.), "
-                "while anomaly count measures structural data consistency failures."
-            ),
-            source_table="stats_df · funnel_df (in memory)",
-            source_file="check_agent_v2.py (DETERMINISTIC_CHECKS) — 20 rules across 7 groups",
-            json_obj={"band": _sc_label, "businesses": len(_sc_bids),
-                      "business_ids_sample": _sc_bids[:5]},
-            icon="📊", color=_sc_col
-        )
 
-    # Helper: build summary bar chart for a group's anomalies
+    # Helper: build summary bar chart + per-rule drilldown expanders for a group
+    def _group_chart_and_drilldowns(group_keys, group_title, cols_for_table, prefix="gc"):
+        """Horizontal bar chart of all rules in a group, then per-rule drilldown expanders."""
+        _rows = [{"Rule": _an_meta[k]["title"][:38],
+                  "Count": len(_an.get(k,[])),
+                  "Severity": _an_meta[k]["severity"],
+                  "Color": _SEV_COLOR.get(_an_meta[k]["severity"],"#64748b"),
+                  "key": k}
+                 for k in group_keys if k in _an_meta]
+        if not _rows:
+            return
+        _gdf = pd.DataFrame(_rows).sort_values("Count", ascending=True)
+        _active = _gdf[_gdf["Count"]>0]
+        if _active.empty:
+            return
+        _cmap = dict(zip(_active["Rule"], _active["Color"]))
+        _fig = px.bar(_active, x="Count", y="Rule", orientation="h",
+                      color="Rule", color_discrete_map=_cmap,
+                      text="Count", title=group_title)
+        _fig.update_traces(textposition="outside")
+        _fig.update_layout(height=max(160, len(_active)*52), showlegend=False,
+                           margin=dict(t=40,b=10,l=10,r=60))
+        st.plotly_chart(dark_chart(_fig), use_container_width=True)
+
+        # Per-rule drilldown expanders — one per bar in the chart
+        for _, _row in _active.iterrows():
+            _rk  = _row["key"]
+            _rt  = _row["Rule"]
+            _rc  = _row["Color"]
+            _rsev= _row["Severity"]
+            _rbids = _an.get(_rk, [])
+            if not _rbids:
+                continue
+            with st.expander(
+                f"👁️ {_SEV_ICON.get(_rsev,'⚪')} Show {len(_rbids):,} businesses — {_rt}",
+                expanded=False
+            ):
+                _m2 = _an_meta.get(_rk, {})
+                st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_rc};
+                    border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
+                  <span style="color:#a78bfa;font-weight:700">⚙️ How this rule is defined · Why it matters</span>
+                </div>""", unsafe_allow_html=True)
+                st.markdown(
+                    f"**{_m2.get('title','')}** ({_rsev})\n\n"
+                    f"{_m2.get('desc','')}\n\n"
+                    f"**Action:** {_m2.get('action','')}\n\n"
+                    f"**Source:** `{_m2.get('source','')}`"
+                )
+                st.markdown("---")
+                # Business ID table with key KYB signals
+                if stats_df is not None and not stats_df.empty:
+                    _rt_sig = stats_df[stats_df["business_id"].isin(_rbids)][
+                        ["business_id"] + [c for c in cols_for_table if c in stats_df.columns]
+                    ].copy().rename(columns={
+                        "sos_match_boolean":"SOS Match Bool","sos_match_status":"SOS Match Status",
+                        "sos_active":"SOS Active","sos_match_verif":"sos_match_verif(0/1)",
+                        "sos_domestic_verif":"sos_domestic_verif(0/1)",
+                        "formation_state":"Formation State","tin_submitted":"TIN Submitted",
+                        "tin_match_status":"TIN Match Status","tin_match":"TIN Match Bool",
+                        "idv_passed":"IDV Passed","naics_code":"NAICS",
+                        "watchlist_hits":"WL Hits","num_bankruptcies":"BK",
+                        "num_judgements":"Judgements","num_liens":"Liens","adverse_media":"Adverse Media",
+                        "revenue":"Revenue",
+                    })
+                    if not _rt_sig.empty:
+                        st.dataframe(_rt_sig, use_container_width=True, hide_index=True)
+                    else:
+                        st.dataframe(pd.DataFrame({"business_id": _rbids}),
+                                     use_container_width=True, hide_index=True)
+                else:
+                    st.dataframe(pd.DataFrame({"business_id": _rbids}),
+                                 use_container_width=True, hide_index=True)
+                _dl_r = pd.DataFrame({"business_id": _rbids}).to_csv(index=False).encode()
+                st.download_button(f"⬇️ Download {len(_rbids)} IDs (CSV)", _dl_r,
+                                   f"{_rk}_bids.csv","text/csv", key=f"dl_{prefix}_{_rk}")
+                _inv_r = st.columns(min(4, len(_rbids)))
+                for _ri, _bid_r in enumerate(_rbids[:4]):
+                    with _inv_r[_ri]:
+                        if st.button(f"🔍 {_bid_r[:12]}…", key=f"inv_{prefix}_{_rk}_{_ri}",
+                                     help=f"Investigate {_bid_r}"):
+                            st.session_state["_pending_bid"] = _bid_r
+                            st.session_state["_bid_just_set"] = _bid_r
+                            st.rerun()
+
+    # (kept for backward compat — now delegates to _group_chart_and_drilldowns)
     def _group_summary_chart(group_keys, group_title):
-        """Horizontal bar chart of anomaly counts across all rules in a group."""
         _rows = [{"Rule": _an_meta[k]["title"][:38],
                   "Count": len(_an.get(k,[])),
                   "Severity": _an_meta[k]["severity"],
@@ -6963,17 +7082,15 @@ ORDER BY avg_impact_pts ASC;"""
                "These are bugs, data freshness gaps, or pipeline ordering issues — not risk signals.")
 
     _G1_KEYS = ["g1_tin_status_bool_mismatch","g1_sos_active_match_false","g1_verif_active_false"]
-    _fig_g1 = _group_summary_chart(_G1_KEYS, "Data Integrity — Contradictions by Rule")
-    if _fig_g1:
-        st.plotly_chart(dark_chart(_fig_g1), use_container_width=True)
-
+    # Chart + per-rule drilldown expanders (chart bars are interactive via expanders below)
+    _group_chart_and_drilldowns(_G1_KEYS, "Data Integrity — Contradictions by Rule", _SOS_AN_COLS, "g1")
+    # Anomaly cards (severity badge + full detail_panel)
     for _akey in _G1_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
         _seg[_akey] = _bids
         _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _SOS_AN_COLS, meta=_m)
-
     if not any(_an.get(k) for k in _G1_KEYS):
         st.success("✅ No data integrity contradictions detected in this portfolio.", icon="✅")
 
@@ -6986,11 +7103,9 @@ ORDER BY avg_impact_pts ASC;"""
                "or represent the worst possible registry states.")
 
     _G2_KEYS = ["g2_found_but_inactive","g2_domestic_no_submitted","g2_verif_match_false"]
-    _fig_g2 = _group_summary_chart(_G2_KEYS, "SOS/Registry — Anomalies by Rule")
-    if _fig_g2:
-        _gc1, _gc2 = st.columns([2, 1])
-        with _gc1:
-            st.plotly_chart(dark_chart(_fig_g2), use_container_width=True)
+    _gc1, _gc2 = st.columns([2, 1])
+    with _gc1:
+        _group_chart_and_drilldowns(_G2_KEYS, "SOS/Registry — Anomalies by Rule", _SOS_AN_COLS, "g2")
         with _gc2:
             # Registry state donut — use funnel_df to stay consistent with Section 1
             _smb_g2 = _fdf["sos_match_boolean"].astype(str).str.lower().str.strip() if not _fdf.empty and "sos_match_boolean" in _fdf.columns else pd.Series(dtype=str)
@@ -7023,7 +7138,6 @@ ORDER BY avg_impact_pts ASC;"""
         _seg[_akey] = _bids
         _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _SOS_AN_COLS, meta=_m)
-
     if not any(_an.get(k) for k in _G2_KEYS):
         st.success("✅ No SOS/registry anomalies detected.", icon="✅")
 
@@ -7071,17 +7185,17 @@ ORDER BY avg_impact_pts ASC;"""
                 fig_tin_pie.update_layout(height=220, margin=dict(t=40,b=10,l=10,r=10))
                 st.plotly_chart(dark_chart(fig_tin_pie), use_container_width=True)
 
-    _G3_KEYS = ["g3_tin_submitted_not_checked"]
-    for _akey in _G3_KEYS:
+    _G3_KEYS = ["g3_tin_submitted_not_checked","g1_tin_status_bool_mismatch"]
+    _group_chart_and_drilldowns(_G3_KEYS, "TIN/EIN — Anomalies by Rule", _TIN_AN_COLS, "g3")
+    for _akey in ["g3_tin_submitted_not_checked"]:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
         _seg[_akey] = _bids
         _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _TIN_AN_COLS, meta=_m)
-
     if _an.get("g1_tin_status_bool_mismatch"):
-        st.info(f"ℹ️ {len(_an['g1_tin_status_bool_mismatch']):,} businesses with tin_match_status=success but "
-                "tin_match_boolean=false are shown in **6.1 Data Integrity Contradictions** above (CRITICAL).")
+        st.info(f"ℹ️ CRITICAL: {len(_an['g1_tin_status_bool_mismatch']):,} businesses with tin_match_status=success "
+                "but tin_match_boolean=false shown in **6.1 Data Integrity Contradictions** above.")
     if not _an.get("g3_tin_submitted_not_checked") and not _an.get("g1_tin_status_bool_mismatch"):
         st.success("✅ No TIN/EIN anomalies detected.", icon="✅")
 
@@ -7150,13 +7264,14 @@ ORDER BY avg_impact_pts ASC;"""
             fig_cross_bar.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
             st.plotly_chart(dark_chart(fig_cross_bar), use_container_width=True)
 
+    # Per-rule drilldowns for 6.4 (chart bars → expanders with business IDs + signals)
+    _group_chart_and_drilldowns(_G4_KEYS, "Registry × TIN — Contradictions by Rule", _CROSS_COLS, "g4")
     for _akey in _G4_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
         _seg[_akey] = _bids
         _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _CROSS_COLS, meta=_m)
-
     if _cross_total == 0:
         st.success("✅ No Registry × TIN contradictions detected.", icon="✅")
 
@@ -7216,13 +7331,13 @@ ORDER BY avg_impact_pts ASC;"""
                     fig_gap.update_layout(height=260, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
                     st.plotly_chart(dark_chart(fig_gap), use_container_width=True)
 
+    _group_chart_and_drilldowns(_G5_KEYS, "NAICS — Classification Anomalies by Rule", _NAICS_AN_COLS, "g5")
     for _akey in _G5_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
         _seg[_akey] = _bids
         _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _NAICS_AN_COLS, meta=_m)
-
     if not any(_an.get(k) for k in _G5_KEYS):
         st.success("✅ No NAICS classification anomalies detected.", icon="✅")
 
@@ -7265,13 +7380,13 @@ ORDER BY avg_impact_pts ASC;"""
                     fig_risk_bar.update_layout(height=240, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
                     st.plotly_chart(dark_chart(fig_risk_bar), use_container_width=True)
 
+    _group_chart_and_drilldowns(_G6_KEYS, "Risk Signal Combinations — by Rule", _RISK_AN_COLS, "g6")
     for _akey in _G6_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
         _seg[_akey] = _bids
         _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _RISK_AN_COLS, meta=_m)
-
     if not any(_an.get(k) for k in _G6_KEYS):
         st.success("✅ No high-severity risk signal combinations detected.", icon="✅")
 
@@ -7333,6 +7448,7 @@ ORDER BY avg_impact_pts ASC;"""
                       <div style="color:#CBD5E1;font-size:.76rem;margin-top:4px">Score declined but all KYB checks pass. Decline is driven by missing financial data (no Plaid). Manual review candidate.</div>
                     </div>""", unsafe_allow_html=True)
 
+    _group_chart_and_drilldowns(_G7_KEYS, "Worth Score Anomalies — by Rule", _WS_AN_COLS, "g7")
     for _akey in _G7_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
