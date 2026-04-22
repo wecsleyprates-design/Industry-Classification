@@ -7104,25 +7104,28 @@ ORDER BY avg_impact_pts ASC;"""
 
     _G2_KEYS = ["g2_found_but_inactive","g2_domestic_no_submitted","g2_verif_match_false"]
 
-    # ── Left: rules bar chart + per-rule drilldowns  ·  Right: registry state donut ──
-    _gc1, _gc2 = st.columns([2, 1])
-    with _gc1:
-        _group_chart_and_drilldowns(_G2_KEYS, "SOS/Registry — Anomalies by Rule", _SOS_AN_COLS, "g2")
-    with _gc2:
-        # Registry state donut — funnel_df for consistency with Section 1
-        _smb_g2  = _fdf["sos_match_boolean"].astype(str).str.lower().str.strip() if not _fdf.empty and "sos_match_boolean" in _fdf.columns else pd.Series(dtype=str)
-        _sact_g2 = _fdf["sos_active"].astype(str).str.lower().str.strip() if not _fdf.empty and "sos_active" in _fdf.columns else pd.Series(dtype=str)
-        if not _smb_g2.empty:
-            _reg_dist = pd.DataFrame({
-                "State": ["Registry Active","Registry Inactive","No Registry (false)","Unknown/Null"],
-                "Count": [
-                    int(((_smb_g2=="true") & (_sact_g2=="true")).sum()),
-                    int(((_smb_g2=="true") & (_sact_g2=="false")).sum()),
-                    int((_smb_g2=="false").sum()),
-                    int((_smb_g2.isin(["","none","nan"])).sum()),
-                ]
-            })
-            _reg_dist = _reg_dist[_reg_dist["Count"]>0]
+    # ── Build registry state donut data from funnel_df (always available) ──────
+    _smb_g2  = _fdf["sos_match_boolean"].astype(str).str.lower().str.strip() if not _fdf.empty and "sos_match_boolean" in _fdf.columns else pd.Series(dtype=str)
+    _sact_g2 = _fdf["sos_active"].astype(str).str.lower().str.strip() if not _fdf.empty and "sos_active" in _fdf.columns else pd.Series(dtype=str)
+    _reg_active   = int(((_smb_g2=="true") & (_sact_g2=="true")).sum()) if not _smb_g2.empty else 0
+    _reg_inactive = int(((_smb_g2=="true") & (_sact_g2=="false")).sum()) if not _smb_g2.empty else 0
+    _reg_no_reg   = int((_smb_g2=="false").sum()) if not _smb_g2.empty else 0
+    _reg_null     = int((_smb_g2.isin(["","none","nan"])).sum()) if not _smb_g2.empty else 0
+    _reg_dist = pd.DataFrame({
+        "State": ["Registry Active","Registry Inactive","No Registry (false)","Unknown/Null"],
+        "Count": [_reg_active, _reg_inactive, _reg_no_reg, _reg_null]
+    })
+    _reg_dist = _reg_dist[_reg_dist["Count"]>0]
+
+    # ── Check if any G2 anomalies exist to decide layout ─────────────────────
+    _g2_any = any(_an.get(k) for k in _G2_KEYS)
+
+    if _g2_any:
+        # Anomalies found: Left = rule chart + drilldowns, Right = registry donut
+        _gc1, _gc2 = st.columns([2, 1])
+        with _gc1:
+            _group_chart_and_drilldowns(_G2_KEYS, "SOS/Registry — Anomalies by Rule", _SOS_AN_COLS, "g2")
+        with _gc2:
             if not _reg_dist.empty:
                 fig_reg_donut = px.pie(_reg_dist, names="State", values="Count", hole=0.5,
                                        title="Registry State Distribution",
@@ -7133,16 +7136,64 @@ ORDER BY avg_impact_pts ASC;"""
                                                            "Unknown/Null":"#64748b"})
                 fig_reg_donut.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
                 st.plotly_chart(dark_chart(fig_reg_donut), use_container_width=True)
+    else:
+        # No anomalies: show the registry donut full-width alongside a rules status table
+        _nc1, _nc2 = st.columns([1, 1])
+        with _nc1:
+            if not _reg_dist.empty:
+                fig_reg_donut = px.pie(_reg_dist, names="State", values="Count", hole=0.5,
+                                       title="Registry State Distribution",
+                                       color="State",
+                                       color_discrete_map={"Registry Active":"#22c55e",
+                                                           "Registry Inactive":"#ef4444",
+                                                           "No Registry (false)":"#f97316",
+                                                           "Unknown/Null":"#64748b"})
+                fig_reg_donut.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_reg_donut), use_container_width=True)
+        with _nc2:
+            # Rules status table — show all 3 rules with PASS status
+            _rules_status = pd.DataFrame([
+                {"Rule": _an_meta[k]["title"], "Severity": _an_meta[k]["severity"],
+                 "Status": "✅ No businesses triggered", "Count": 0}
+                for k in _G2_KEYS if k in _an_meta
+            ])
+            st.markdown("**SOS/Registry Rules Status — All Clear:**")
+            st.dataframe(_rules_status, use_container_width=True, hide_index=True,
+                         column_config={
+                             "Rule": st.column_config.TextColumn(width="large"),
+                             "Status": st.column_config.TextColumn(),
+                             "Count": st.column_config.NumberColumn(),
+                         })
+            detail_panel(
+                "✅ 6.2 SOS/Registry Anomalies — All Rules Clear",
+                f"0 anomalies across {len(_G2_KEYS)} rules · {total_biz:,} businesses checked",
+                what_it_means=(
+                    "All 3 SOS/Registry anomaly rules returned 0 businesses. "
+                    "This means:\n\n"
+                    "**Rule 1 — Registry Found but SOS Inactive:** No businesses with "
+                    "sos_match_boolean=true AND sos_active=false. All found registries are currently active.\n\n"
+                    "**Rule 2 — sos_domestic_verif=1 but sos_match_verif=0:** "
+                    "No inconsistency in clients.verification_results between domestic and submitted-active flags.\n\n"
+                    "**Rule 3 — sos_match_verif=1 but sos_match_boolean=false:** "
+                    "No freshness gap between Redshift verification_results and the Facts API.\n\n"
+                    "**Source:** check_agent_v2.DETERMINISTIC_CHECKS · "
+                    "index.ts:1421 (sos_match_boolean) · verification_results.sql:36-51"
+                ),
+                source_table="stats_df · funnel_df (clients.verification_results)",
+                source_file="check_agent_v2.py (g2_found_but_inactive, g2_domestic_no_submitted, g2_verif_match_false)",
+                json_obj={k: {"count": 0, "severity": _an_meta.get(k,{}).get("severity","")} for k in _G2_KEYS},
+                icon="✅", color="#22c55e"
+            )
 
-    # Anomaly cards with full severity badge + drilldown table + detail_panel
+    # Anomaly cards (only rendered when anomalies exist)
     for _akey in _G2_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
         if not _bids: continue
         _seg[_akey] = _bids
         _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
         _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _SOS_AN_COLS, meta=_m)
-    if not any(_an.get(k) for k in _G2_KEYS):
-        st.success("✅ No SOS/registry anomalies detected.", icon="✅")
+    if not _g2_any:
+        st.success("✅ No SOS/registry anomalies detected in this portfolio.", icon="✅")
 
     # ════════════════════════════════════════════════════════════════════════
     # 6.3  GROUP 3: TIN/EIN ANOMALIES
