@@ -4983,6 +4983,36 @@ if tab=="🏠 Home":
                                _bid_csv, f"{seg_key}_business_ids.csv", "text/csv",
                                key=f"dl_{seg_key}")
 
+            # ── Investigate rows (full UUID + context + button) ───────────
+            st.caption("Click 🔍 Investigate to set a business ID in the filter bar, then navigate to any entity tab.")
+            for _irow_idx, _irow_bid in enumerate(bids):
+                _irow_l, _irow_r = st.columns([5, 1])
+                with _irow_l:
+                    # Show the key KYB signal values inline as context (from the already-rendered table above)
+                    _irow_signals = []
+                    if stats_df is not None and not stats_df.empty:
+                        _irow_row = stats_df[stats_df["business_id"]==_irow_bid]
+                        if not _irow_row.empty:
+                            _r = _irow_row.iloc[0]
+                            if "sos_match_boolean" in _r: _irow_signals.append(f"SOS={_r['sos_match_boolean']}")
+                            if "tin_match" in _r: _irow_signals.append(f"TIN={_r['tin_match']}")
+                            if "naics_code" in _r and str(_r.get('naics_code','')).strip() not in ("","None","nan"):
+                                _irow_signals.append(f"NAICS={str(_r['naics_code'])[:8]}")
+                    _ctx = " · ".join(_irow_signals) if _irow_signals else label[:40]
+                    st.markdown(
+                        f"<div style='background:#0f172a;border-left:3px solid #3B82F6;"
+                        f"border-radius:5px;padding:5px 12px;font-size:.75rem;color:#CBD5E1;margin:2px 0'>"
+                        f"<code style='color:#60A5FA;font-size:.82rem'>{_irow_bid}</code>"
+                        f"&nbsp;&nbsp;<span style='color:#94A3B8'>{_ctx}</span></div>",
+                        unsafe_allow_html=True
+                    )
+                with _irow_r:
+                    if st.button("🔍 Investigate", key=f"dt_{seg_key}_{_irow_bid[:14]}_{_irow_idx}",
+                                 help=f"Set Business ID to {_irow_bid} and navigate to any entity tab"):
+                        st.session_state["_pending_bid"] = _irow_bid
+                        st.session_state["_bid_just_set"] = _irow_bid
+                        st.rerun()
+
     # ── KPI Row — 5 cards: Onboarded · No Registry Found · Registry Found · Domestic Reg Found · State Match
     #             + Row 2: Possible Sole Prop · No Domestic Reg Found · No State Match
     k1,k2,k3,k4,k5 = st.columns(5)
@@ -7765,31 +7795,9 @@ ORDER BY avg_impact_pts ASC;"""
         _top10_disp = _top10[[c for c in _display_cols if c in _top10.columns]].rename(columns=_col_rename)
         st.dataframe(_top10_disp, use_container_width=True, hide_index=True)
 
-        # Per-business investigate rows
-        st.caption("Each row below: full UUID · weighted score · triggered anomalies · Investigate button")
-        _top10_bids = _top10["business_id"].tolist()
-        for _i, _bid_t in enumerate(_top10_bids):
-            _score_t   = int(_biz_score.get(_bid_t, 0))
-            _flags_t   = _biz_flags_s6.get(_bid_t, [])
-            _sev_list  = [f"{_SEV_ICON.get(_an_meta.get(k,{}).get('severity','LOW'),'⚪')} {_an_meta.get(k,{}).get('title','')[:30]}"
-                          for k in _flags_t]
-            _bc1, _bc2 = st.columns([5, 1])
-            with _bc1:
-                st.markdown(
-                    f"<div style='background:#0f172a;border-left:3px solid #3B82F6;border-radius:5px;"
-                    f"padding:6px 12px;font-size:.75rem;color:#CBD5E1;margin:2px 0'>"
-                    f"<code style='color:#60A5FA;font-size:.82rem'>{_bid_t}</code><br/>"
-                    f"<span style='color:#f59e0b'>⚡ {_score_t} pts</span> &nbsp;·&nbsp; "
-                    f"<span style='color:#94A3B8'>{' &nbsp;·&nbsp; '.join(_sev_list)}</span>"
-                    f"</div>",
-                    unsafe_allow_html=True
-                )
-            with _bc2:
-                if st.button(f"🔍 Investigate", key=f"s6_inv_{_bid_t[:12]}_{_i}",
-                             help=f"Set Business ID to {_bid_t}"):
-                    st.session_state["_pending_bid"] = _bid_t
-                    st.session_state["_bid_just_set"] = _bid_t
-                    st.rerun()
+        # Per-business investigate rows — full UUID + score + anomaly names + button
+        st.caption("Each row: full UUID · weighted score · triggered anomalies · 🔍 Investigate button")
+        _investigate_rows(_top10["business_id"].tolist(), _biz_score, _biz_flags_s6, key_prefix="top10_s6")
 
         # ── Co-occurrence heatmap + per-cell drilldowns ───────────────────────
         st.markdown("---")
@@ -8018,7 +8026,8 @@ ORDER BY avg_impact_pts ASC;"""
             </div>""", unsafe_allow_html=True)
         with col_btn:
             st.markdown("<br>", unsafe_allow_html=True)
-            if st.button("Investigate →", key=f"inv_{bid_check}", use_container_width=True):
+            if st.button("🔍 Investigate", key=f"inv_{bid_check}", use_container_width=True,
+                         help=f"Set Business ID to {bid_check} and navigate to any entity tab"):
                 st.session_state["_pending_bid"] = bid_check
                 st.session_state["_bid_just_set"] = bid_check
                 st.rerun()
@@ -8170,7 +8179,8 @@ ORDER BY avg_impact_pts ASC;"""
 
             with col_btn:
                 st.markdown("<br>", unsafe_allow_html=True)
-                if st.button("Investigate →", key=f"top10_{bid_check}", use_container_width=True):
+                if st.button("🔍 Investigate", key=f"top10_{bid_check}", use_container_width=True,
+                             help=f"Set Business ID to {bid_check} and navigate to any entity tab"):
                     st.session_state["_pending_bid"] = bid_check
                     st.session_state["_bid_just_set"] = bid_check
                     st.rerun()
