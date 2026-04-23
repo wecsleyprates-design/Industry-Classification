@@ -5773,32 +5773,42 @@ if tab=="🏠 Home":
                         )
                 st.markdown("---")
 
-            # ── Business IDs + sos_filings signals ──────────────────────────
-            # Show ONLY fields derivable from the sos_filings API JSON chunk:
-            #   sos_match_boolean, sos_active, formation_state, formation_date
-            #   + sos_filings[].* parsed fields (foreign_domestic, jurisdiction,
-            #     entity_type, filing_name, registration_date, has_officers, state)
-            # EXCLUDED: sos_match_verif/sos_domestic_verif/sos_active_verif (clients.*),
-            #           tin_*/idv_passed/naics_code/watchlist_hits (unrelated facts)
-            # Source: rds_warehouse_public.facts (stats_df) +
-            #         _sos_filings_df (JSON_ARRAY_ELEMENTS parse of sos_filings)
+            # ── Business IDs + all relevant signals ──────────────────────────
+            # Columns: sos_filings[] fields + TIN + IDV + NAICS + Watchlist + is_sole_prop
+            # Source: stats_df (rds_warehouse_public.facts) +
+            #         _sos_filings_df (JSON_ARRAY_ELEMENTS parse of sos_filings[])
+            # EXCLUDED: sos_match_verif/sos_domestic_verif/sos_active_verif (clients.* materialized)
 
-            # Build base table from stats_df (facts table signals)
-            _base_cols = ["sos_match_boolean","sos_match_status","sos_active",
-                          "formation_state","formation_date"]
+            # Build base table from stats_df (all relevant facts)
+            _base_cols = [
+                # sos_filings-derived facts
+                "sos_match_boolean","sos_match_status","sos_active",
+                "formation_state","formation_date",
+                # TIN facts (index.ts:399-491)
+                "tin_submitted","tin_match_status","tin_match",
+                # IDV fact (index.ts:528-550)
+                "idv_passed",
+                # Classification fact (aiNaicsEnrichment.ts:63)
+                "naics_code",
+                # Risk fact
+                "watchlist_hits",
+                # Sole prop derived fact (index.ts:552-616)
+                "is_sole_prop",
+            ]
             if stats_df is not None and not stats_df.empty:
                 _sub = stats_df[stats_df["business_id"].isin(bids)][
                     ["business_id"] + [c for c in _base_cols if c in stats_df.columns]
                 ].copy()
             elif funnel_df is not None and not funnel_df.empty:
-                _funnel_base = ["sos_match_boolean","sos_active","formation_state"]
+                _funnel_base = ["sos_match_boolean","sos_active","formation_state",
+                                "tin_submitted","tin_match_boolean","operating_state"]
                 _sub = funnel_df[funnel_df["business_id"].isin(bids)][
                     ["business_id"] + [c for c in _funnel_base if c in funnel_df.columns]
                 ].copy()
             else:
                 _sub = pd.DataFrame({"business_id": bids})
 
-            # Enrich with sos_filings[] parsed fields (aggregate per business — take first filing)
+            # Enrich with sos_filings[] parsed fields (aggregate per business)
             if _sos_filings_df is not None and not _sos_filings_df.empty:
                 _sf_agg = (
                     _sos_filings_df[_sos_filings_df["business_id"].isin(bids)]
@@ -5818,36 +5828,56 @@ if tab=="🏠 Home":
                 )
                 _sub = _sub.merge(_sf_agg, on="business_id", how="left")
 
-            # Rename to human-readable — all sourced from sos_filings API JSON
             _rename = {
-                "sos_match_boolean":  "sos_match_boolean",      # derived from sos_match fact
-                "sos_match_status":   "sos_match.value.status", # sos_match.value.status
-                "sos_active":         "sos_active",              # derived from sos_filings[].active
-                "formation_state":    "Formation State",         # sos_filings[].state (Middesk)
-                "formation_date":     "Formation Date",          # sos_filings[].filing_date
-                "foreign_domestic":   "Domestic/Foreign",        # sos_filings[].foreign_domestic
-                "jurisdiction":       "Jurisdiction(s)",         # sos_filings[].jurisdiction
-                "entity_type":        "Entity Type",             # sos_filings[].entity_type
-                "filing_name":        "Filing Name",             # sos_filings[].filing_name
-                "registration_date":  "Registration Date",       # sos_filings[].registration_date
-                "has_officers":       "Officers Present",        # sos_filings[].officers non-empty
-                "filing_state":       "Filing State(s)",         # sos_filings[].state
-                "n_filings":          "# Filings",               # count of sos_filings[] entries
+                # sos_filings-derived
+                "sos_match_boolean":  "SOS Match",
+                "sos_match_status":   "SOS Match Status",
+                "sos_active":         "SOS Active",
+                "formation_state":    "Formation State",
+                "formation_date":     "Formation Date",
+                "foreign_domestic":   "Dom/Foreign",
+                "jurisdiction":       "Jurisdiction(s)",
+                "entity_type":        "Entity Type",
+                "filing_name":        "Filing Name",
+                "registration_date":  "Registration Date",
+                "has_officers":       "Officers",
+                "filing_state":       "Filing State(s)",
+                "n_filings":          "# Filings",
+                # TIN facts
+                "tin_submitted":      "TIN Submitted",
+                "tin_match_status":   "TIN Status",
+                "tin_match":          "TIN Match",
+                # IDV
+                "idv_passed":         "IDV Passed",
+                # Classification
+                "naics_code":         "NAICS",
+                # Risk
+                "watchlist_hits":     "WL Hits",
+                # Sole prop
+                "is_sole_prop":       "Sole Prop",
             }
             _sub = _sub.rename(columns={k: v for k, v in _rename.items() if k in _sub.columns})
             _col_cfg = {
-                "sos_match_boolean":      st.column_config.TextColumn(help="sos_match_boolean fact — derived from sos_match.value==='success' (index.ts:1421)"),
-                "sos_match.value.status": st.column_config.TextColumn(help="sos_match.value.status — 'success'|'failure' per vendor (Middesk/OC/Trulioo)"),
-                "sos_active":             st.column_config.TextColumn(help="sos_active fact — derived from sos_filings[].some(f=>f.active===true) (index.ts:1426)"),
-                "Formation State":        st.column_config.TextColumn(help="From sos_filings[].state via Middesk (formation_state fact)"),
-                "Formation Date":         st.column_config.TextColumn(help="From sos_filings[].filing_date via Middesk (formation_date fact)"),
-                "Domestic/Foreign":       st.column_config.TextColumn(help="sos_filings[].foreign_domestic = 'domestic'|'foreign' (API JSON)"),
-                "Jurisdiction(s)":        st.column_config.TextColumn(help="sos_filings[].jurisdiction = 'us::fl','us::de',etc. (index.ts transformer)"),
-                "Entity Type":            st.column_config.TextColumn(help="sos_filings[].entity_type = 'llc'|'corporation'|'lp'|'llp'|'sole proprietorship' (types.ts:20-32)"),
-                "Filing Name":            st.column_config.TextColumn(help="sos_filings[].filing_name — legal name on the SOS filing"),
-                "Registration Date":      st.column_config.TextColumn(help="sos_filings[].registration_date — incorporation date (ISO 8601)"),
-                "Officers Present":       st.column_config.NumberColumn(help="1 = sos_filings[].officers is non-empty (officers filtered by jurisdiction, index.ts:767-987)"),
-                "Filing State(s)":        st.column_config.TextColumn(help="sos_filings[].state — state(s) of the filing(s)"),
+                "SOS Match":          st.column_config.TextColumn(help="sos_match_boolean — derived from sos_match.value==='success' (index.ts:1421)"),
+                "SOS Match Status":   st.column_config.TextColumn(help="sos_match.value.status — 'success'|'failure' (Middesk/OC/Trulioo)"),
+                "SOS Active":         st.column_config.TextColumn(help="sos_active — from sos_filings[].some(f=>f.active===true) (index.ts:1426)"),
+                "Formation State":    st.column_config.TextColumn(help="formation_state fact — from sos_filings[].state via Middesk"),
+                "Formation Date":     st.column_config.TextColumn(help="formation_date fact — from sos_filings[].filing_date via Middesk"),
+                "Dom/Foreign":        st.column_config.TextColumn(help="sos_filings[].foreign_domestic = 'domestic'|'foreign'"),
+                "Jurisdiction(s)":    st.column_config.TextColumn(help="sos_filings[].jurisdiction = 'us::fl','us::de',etc."),
+                "Entity Type":        st.column_config.TextColumn(help="sos_filings[].entity_type = 'llc'|'corporation'|'lp'|'llp' (types.ts:20-32)"),
+                "Filing Name":        st.column_config.TextColumn(help="sos_filings[].filing_name — legal name on the SOS filing"),
+                "Registration Date":  st.column_config.TextColumn(help="sos_filings[].registration_date — incorporation date"),
+                "Officers":           st.column_config.NumberColumn(help="1 = sos_filings[].officers non-empty (index.ts:767-987)"),
+                "Filing State(s)":    st.column_config.TextColumn(help="sos_filings[].state — filing jurisdiction state(s)"),
+                "# Filings":          st.column_config.NumberColumn(help="Count of entries in sos_filings[] array"),
+                "TIN Submitted":      st.column_config.TextColumn(help="tin_submitted fact — EIN provided at onboarding, masked (index.ts:399)"),
+                "TIN Status":         st.column_config.TextColumn(help="tin_match.value.status — 'success'=IRS confirmed | 'failure'=mismatch (index.ts:429)"),
+                "TIN Match":          st.column_config.TextColumn(help="tin_match_boolean — true=IRS confirmed EIN matches legal name (index.ts:482)"),
+                "IDV Passed":         st.column_config.TextColumn(help="idv_passed_boolean — Plaid biometric IDV result (index.ts:541)"),
+                "NAICS":              st.column_config.TextColumn(help="naics_code fact — '561499'=last resort fallback (aiNaicsEnrichment.ts:63)"),
+                "WL Hits":            st.column_config.NumberColumn(help="watchlist_hits — PEP/OFAC/sanctions hits (Middesk+Trulioo combined)"),
+                "Sole Prop":          st.column_config.TextColumn(help="is_sole_prop — true|false|null. null=not enough data (index.ts:552-616)"),
                 "# Filings":              st.column_config.NumberColumn(help="Count of entries in sos_filings[] array"),
             }
             if not _sub.empty:
