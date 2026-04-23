@@ -5781,9 +5781,11 @@ if tab=="🏠 Home":
             #         _sos_filings_df (JSON_ARRAY_ELEMENTS parse of sos_filings[])
             # EXCLUDED: sos_match_verif/sos_domestic_verif/sos_active_verif (clients.* materialized)
 
-            # Build base table from stats_df (all relevant facts)
-            _base_cols = [
-                # sos_filings-derived facts
+            # Build base table: all facts-table columns — always use full set regardless of cols_from_stats
+            # cols_from_stats parameter is kept for API compatibility but ignored here;
+            # we always show the complete column set described in the user documentation.
+            _base_cols_all = [
+                # sos_filings-derived facts (rds_warehouse_public.facts)
                 "sos_match_boolean","sos_match_status","sos_active",
                 "formation_state","formation_date",
                 # TIN facts (index.ts:399-491)
@@ -5798,8 +5800,10 @@ if tab=="🏠 Home":
                 "is_sole_prop",
             ]
             if stats_df is not None and not stats_df.empty:
+                # Use all columns that exist in stats_df (superset of _base_cols_all)
+                _available = [c for c in _base_cols_all if c in stats_df.columns]
                 _sub = stats_df[stats_df["business_id"].isin(bids)][
-                    ["business_id"] + [c for c in _base_cols if c in stats_df.columns]
+                    ["business_id"] + _available
                 ].copy()
             elif funnel_df is not None and not funnel_df.empty:
                 _funnel_base = ["sos_match_boolean","sos_active","formation_state",
