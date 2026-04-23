@@ -5980,13 +5980,10 @@ if tab=="🏠 Home":
             unsafe_allow_html=True
         )
         # Level 2 — Filings empty vs not empty (both within no-registry group)
-        kp2,kp3 = st.columns(2)
+        kp2, = st.columns(1)
         with kp2: kpi("↳ 📭 YES — SOS Filings Array Empty", f"{_n_fe:,}",
                       f"{rate(_n_fe,_sos_not_found)} of no-reg · sos_active=null → sos_filings=[]",
                       "#f97316" if _n_fe>0 else "#64748b")
-        with kp3: kpi("↳ 📋 NO — SOS Filings Array Present (→ see Registry Found)", f"{_n_fne:,}",
-                      f"{rate(_n_fne,_sos_not_found)} of no-reg · filings exist, match=failure → moved to Registry Found",
-                      "#3B82F6" if _n_fne>0 else "#64748b")
         st.markdown("</div>", unsafe_allow_html=True)
 
     # No Registry drilldowns — only no-registry sub-segments here
@@ -6088,47 +6085,25 @@ if tab=="🏠 Home":
                        f"{rate(_n_states_diff,_sos_found_extended)} · multi-state or foreign qual needed",
                        "#f59e0b" if _n_states_diff>0 else "#22c55e")
 
-        # Level 2D — Domestic/Foreign from sos_filings[].foreign_domestic (API JSON fact)
-        krd1,krd2,krd3 = st.columns(3)
-        with krd1: kpi("↳ ✅ Domestic Active",   f"{_domestic_active_n:,}",
-                       f"{rate(_domestic_active_n,_sos_found_extended)} · sos_filings[].foreign_domestic='domestic' AND active=true",
-                       "#22c55e" if _domestic_active_n>0 else "#64748b")
-        with krd2: kpi("↳ ⚠️ Domestic Inactive", f"{_domestic_inactive_n:,}",
-                       f"{rate(_domestic_inactive_n,_sos_found_extended)} · sos_filings[].foreign_domestic='domestic' AND active=false",
-                       "#f59e0b" if _domestic_inactive_n>0 else "#64748b")
-        with krd3: kpi("↳ 🌍 Foreign Only",  f"{_n_reg_foreign:,}",
+        # Level 2D — Domestic vs Foreign only (as requested)
+        krd1,krd2 = st.columns(2)
+        with krd1: kpi("↳ 🏠 Domestic Filing", f"{_n_reg_domestic:,}",
+                       f"{rate(_n_reg_domestic,_sos_found_extended)} · sos_filings[].foreign_domestic='domestic'",
+                       "#22c55e" if _n_reg_domestic>0 else "#64748b")
+        with krd2: kpi("↳ 🌍 Foreign Filing Only", f"{_n_reg_foreign:,}",
                        f"{rate(_n_reg_foreign,_sos_found_extended)} · sos_filings[].foreign_domestic='foreign'",
                        "#f59e0b" if _n_reg_foreign>0 else "#64748b")
 
-        # Level 2E — State match from sos_filings[].state vs primary_address.state + Sole prop
-        kre1,kre2 = st.columns(2)
-        with kre1: kpi("↳ 📍 Filing State = Operating State", f"{_state_match:,}",
-                       f"{rate(_state_match,_sos_found_extended)} · sos_filings[].state = primary_address.state",
-                       "#22c55e" if _state_match>0 else "#64748b")
-        with kre2: kpi("↳ 🧍 Possible Sole Prop", f"{_possible_sole_prop:,}",
-                       f"{rate(_possible_sole_prop,total_biz)} · is_sole_prop=true/null (API JSON fact)",
-                       "#8B5CF6" if _possible_sole_prop>0 else "#64748b")
-
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── Registry Found drilldowns ─────────────────────────────────────────────
-    _drilldown_table("sos_found_extended",       f"Registry Found (all) — {_sos_found_extended:,} businesses (sos_filings[] non-empty)", _SOS_COLS)
-    _drilldown_table("sos_found",                f"↳ sos_match=true — {_sos_found:,} businesses (primary path)", _SOS_COLS)
-    _drilldown_table("dt_filings_present_noreg", f"↳ Filings present, match=failure — {len(_seg.get('dt_filings_present_noreg',[])):,} businesses", _SOS_COLS)
-    _drilldown_table("dt_ne_true_active",        f"↳ Active — {_n_neta:,} businesses (sos_active=true)", _SOS_COLS)
-    _drilldown_table("dt_ne_true_inactive",      f"↳ Inactive — {_n_neti:,} businesses (sos_active=false)", _SOS_COLS)
-    _drilldown_table("reg_domestic",             f"↳ Domestic Filing — {_n_reg_domestic:,} businesses (foreign_domestic='domestic')", _SOS_COLS)
-    _drilldown_table("reg_foreign",              f"↳ Foreign Filing Only — {_n_reg_foreign:,} businesses (foreign_domestic='foreign')", _SOS_COLS)
-    _drilldown_table("states_same",              f"↳ Filing State = Operating State — {_n_states_same:,} businesses", _SOS_COLS)
-    _drilldown_table("states_diff",              f"↳ Filing State ≠ Operating State — {_n_states_diff:,} businesses", _SOS_COLS)
-    _drilldown_table("domestic_active",          f"↳ Domestic Active — {_domestic_active_n:,} businesses", _SOS_COLS)
-    _drilldown_table("domestic_inactive",        f"↳ Domestic Inactive — {_domestic_inactive_n:,} businesses", _SOS_COLS)
-    _drilldown_table("domestic_missing",         f"↳ No Domestic Data — {_domestic_missing_n:,} businesses", _SOS_COLS)
-    _drilldown_table("state_match",              f"↳ Filing State Match — {_state_match:,} businesses", _SOS_COLS)
-    _drilldown_table("no_state_match",           f"↳ Filing State Mismatch — {_no_state_match:,} businesses", _SOS_COLS)
-    _drilldown_table("sole_prop_true",           f"↳ Sole Prop Confirmed — {_n_sp_t:,} businesses", _SOS_COLS)
-    _drilldown_table("sole_prop_null",           f"↳ Sole Prop Possible (null) — {_n_sp_n:,} businesses", _SOS_COLS)
-    _drilldown_table("sole_prop_false",          f"↳ Not Sole Prop — {_n_sp_f:,} businesses", _SOS_COLS)
+    # ── Registry Found drilldowns (only for the visible cards) ───────────────
+    _drilldown_table("sos_found_extended", f"Registry Found (all) — {_sos_found_extended:,} businesses (sos_filings[] non-empty)", _SOS_COLS)
+    _drilldown_table("dt_ne_true_active",  f"↳ Active — {_n_neta:,} businesses (sos_active=true)", _SOS_COLS)
+    _drilldown_table("dt_ne_true_inactive",f"↳ Inactive — {_n_neti:,} businesses (sos_active=false)", _SOS_COLS)
+    _drilldown_table("reg_domestic",       f"↳ Domestic Filing — {_n_reg_domestic:,} businesses (foreign_domestic='domestic')", _SOS_COLS)
+    _drilldown_table("reg_foreign",        f"↳ Foreign Filing Only — {_n_reg_foreign:,} businesses (foreign_domestic='foreign')", _SOS_COLS)
+    _drilldown_table("states_same",        f"↳ Filing State = Operating State — {_n_states_same:,} businesses", _SOS_COLS)
+    _drilldown_table("states_diff",        f"↳ Filing State ≠ Operating State — {_n_states_diff:,} businesses", _SOS_COLS)
 
     # ═══════════════════════════════════════════════════════════════════════════════
     # REGISTRY FOUND DEEP ANALYSIS — from sos_filings[] JSON (all from facts table)
