@@ -4030,19 +4030,22 @@ if tab=="🏠 Home":
         _sos_found     = int((_smb == "true").sum())
         _sos_not_found = int(_no_reg_mask.sum())
 
-        # ── sos_filings EMPTY vs NOT EMPTY — scoped to No Registry group ─────────
+        # ── sos_filings EMPTY — strictly within No Registry (sos_match_boolean=false) ──
         # Derivation (index.ts:1431): sos_active=undefined when sos_filings=[]
-        # Proxy: sos_active is null/missing → filings array was empty
-        # CRITICAL: these are sub-segments of No Registry Found (sos_match_boolean=false)
-        # NOT of the whole portfolio — rates should be vs _sos_not_found
+        # Proxy: sos_active is null/missing in facts → filings array was empty
+        # ONLY for businesses where sos_match_boolean=false (the no-registry group)
         _filings_empty_mask    = _no_reg_mask & _sa.isin(["","none","nan","null"])
-        _filings_notempty_mask = _no_reg_mask & ~_sa.isin(["","none","nan","null"])
 
-        # Among filings NOT empty + sos_match=false: match=false (already guaranteed) vs match=true
-        # (sos_match_boolean can only be false in the no_reg group by definition)
-        _filings_ne_match_false_mask = _filings_notempty_mask  # all NOT-empty in no-reg group have match=false
-        # sos_match=true is the REGISTRY FOUND group — separate, not a no-registry sub-segment
-        _filings_ne_match_true_mask  = _filings_notempty_mask & (_smb == "true")  # will be 0 (contradictory)
+        # ── sos_filings PRESENT with data — move to "Registry Found" extended group ──
+        # Per the API JSON (sos_filings chunk): even when sos_match='failure',
+        # if sos_active is present (not null), there IS data in sos_filings[].
+        # These businesses HAVE filing data → treat as "Registry Found" (extended).
+        # The sos_filings.value[] array has: jurisdiction, active, foreign_domestic, state, filing_name, etc.
+        _filings_present_in_noreg_mask = _no_reg_mask & ~_sa.isin(["","none","nan","null"])
+
+        # Among filings NOT empty + sos_match=false: match=false (already guaranteed)
+        _filings_ne_match_false_mask = _filings_present_in_noreg_mask
+        _filings_ne_match_true_mask  = _filings_present_in_noreg_mask & (_smb == "true")  # edge case
 
         # ── sos_active_verif (from stats_df via verification_results.sql:47-51) ─
         _av_col = stats_df.set_index("business_id")["sos_active_verif"] if (
@@ -4142,55 +4145,106 @@ if tab=="🏠 Home":
         _no_domestic_mask = _not_false_mask & ~_is_domestic
         _no_domestic_found = int(_no_domestic_mask.sum())
 
+        # ── Registry Found EXTENDED = sos_match=true + filings-present-in-noreg ─
+        # Per the API JSON: sos_filings[] has foreign_domestic='domestic'|'foreign'
+        # Businesses with sos_match=false but filings present HAVE data → treat as extended registry
+        _reg_found_extended_mask = _registry_found_mask | _filings_present_in_noreg_mask
+        _sos_found_extended = int(_reg_found_extended_mask.sum())
+
+        # ── Domestic vs Foreign from sos_filings[].foreign_domestic ─────────────
+        # Source: API JSON sos_filings.value[].foreign_domestic = 'domestic' | 'foreign'
+        # Proxy from available signals:
+        #   Domestic = sos_domestic_verif=1 (sublabel='Domestic Active') among registry found
+        #   Foreign  = registry found but sos_domestic_verif=0
+        # Extended domestic = domestic_active among registry-found-extended group
+        _dom_av_col = stats_df.set_index("business_id")["sos_domestic_verif"] if (
+            stats_df is not None and not stats_df.empty and "sos_domestic_verif" in stats_df.columns
+        ) else pd.Series(dtype=float)
+        def _dav(bid): return int(_dom_av_col.get(bid, 0) or 0)
+
+        _reg_domestic_mask  = _reg_found_extended_mask & _funnel["business_id"].apply(lambda b: _dav(b)==1)
+        _reg_foreign_mask   = _reg_found_extended_mask & _funnel["business_id"].apply(lambda b: _dav(b)==0)
+        _n_reg_domestic     = int(_reg_domestic_mask.sum())
+        _n_reg_foreign      = int(_reg_foreign_mask.sum())
+
+        # ── Formation state vs operating state for Registry Found group ──────────
+        # From sos_filings[].state (formation) vs primary_address.state (operating)
+        # formation_state comes from Middesk businessEntityVerification.formation_state
+        # operating_state comes from primary_address.value.state (onboarding form)
+        _op_state_col   = _funnel.get("operating_state", pd.Series([""] * len(_funnel)))
+        _form_state_col = _funnel["formation_state"].astype(str).str.upper().str.strip().fillna("") if "formation_state" in _funnel.columns else pd.Series([""] * len(_funnel))
+        _op_state_col_u = _op_state_col.astype(str).str.upper().str.strip().fillna("")
+        _states_same_mask  = _reg_found_extended_mask & (_form_state_col!="") & (_form_state_col==_op_state_col_u)
+        _states_diff_mask  = _reg_found_extended_mask & (_form_state_col!="") & (_form_state_col!=_op_state_col_u)
+        _n_states_same     = int(_states_same_mask.sum())
+        _n_states_diff     = int(_states_diff_mask.sum())
+
     else:
         _sos_found = sos_ok; _sos_not_found = total_biz - sos_ok
         _possible_sole_prop = 0; _domestic_sos_found = sos_ok; _only_domestic_reg = sos_ok
         _no_domestic_found = 0; _state_match = 0; _no_state_match = 0
         _sos_found_verified = 0
         _domestic_active_n = 0; _domestic_inactive_n = 0; _domestic_missing_n = 0
-        for _nm in ["_no_reg_mask","_sole_prop_mask","_no_domestic_mask","_no_state_match_mask",
-                    "_state_match_mask","_is_domestic","_filings_empty_mask","_filings_notempty_mask",
-                    "_filings_ne_match_false_mask","_filings_ne_match_true_mask",
-                    "_filings_ne_true_inactive_mask","_filings_ne_true_active_mask",
-                    "_dom_active_mask","_dom_inactive_mask","_dom_missing_mask",
-                    "_sp_true_mask","_sp_null_mask","_sp_false_mask","_sole_prop_possible_mask",
-                    "_not_false_mask"]:
-            locals()[_nm] = pd.Series(dtype=bool)
+        _sos_found_extended = 0; _n_reg_domestic = 0; _n_reg_foreign = 0
+        _n_states_same = 0; _n_states_diff = 0
         _sole_prop_mask = pd.Series(dtype=bool)
+        _reg_found_extended_mask = pd.Series(dtype=bool)
+        _reg_domestic_mask = pd.Series(dtype=bool)
+        _reg_foreign_mask = pd.Series(dtype=bool)
+        _states_same_mask = pd.Series(dtype=bool)
+        _states_diff_mask = pd.Series(dtype=bool)
+        _filings_empty_mask = pd.Series(dtype=bool)
+        _filings_present_in_noreg_mask = pd.Series(dtype=bool)
+        _filings_ne_match_false_mask = pd.Series(dtype=bool)
+        _filings_ne_match_true_mask = pd.Series(dtype=bool)
+        _filings_ne_true_inactive_mask = pd.Series(dtype=bool)
+        _filings_ne_true_active_mask = pd.Series(dtype=bool)
+        _dom_active_mask = _dom_inactive_mask = _dom_missing_mask = pd.Series(dtype=bool)
+        _sp_true_mask = _sp_null_mask = _sp_false_mask = _sole_prop_possible_mask = pd.Series(dtype=bool)
+        _no_reg_mask = _not_false_mask = _is_domestic = _no_domestic_mask = pd.Series(dtype=bool)
+        _registry_found_mask = _state_match_mask = _no_state_match_mask = pd.Series(dtype=bool)
 
     # ── Build business-ID segment maps from funnel_df for drilldowns ─────────
     _seg = {}
     if not _funnel.empty:
-        _sl_f = lambda v: str(v or "").lower().strip()
-        # Row 1 standard segments
-        _seg["sos_found"]         = _funnel[_smb=="true"]["business_id"].tolist()
-        _seg["no_sos"]            = _funnel[_no_reg_mask]["business_id"].tolist()
-        _seg["domestic"]          = _funnel[_dom_active_mask]["business_id"].tolist()
-        _seg["state_match"]       = _funnel[_state_match_mask]["business_id"].tolist()
-        _seg["no_domestic"]       = _funnel[_no_domestic_mask]["business_id"].tolist()
-        _seg["no_state_match"]    = _funnel[_no_state_match_mask]["business_id"].tolist()
-        # Decision tree segments for No Registry Found
-        _seg["dt_filings_empty"]  = _funnel[_filings_empty_mask]["business_id"].tolist()
-        _seg["dt_filings_ne"]     = _funnel[_filings_notempty_mask]["business_id"].tolist()
-        _seg["dt_ne_false"]       = _funnel[_filings_ne_match_false_mask]["business_id"].tolist()
-        _seg["dt_ne_true"]        = _funnel[_filings_ne_match_true_mask]["business_id"].tolist()
-        _seg["dt_ne_true_inactive"]= _funnel[_filings_ne_true_inactive_mask]["business_id"].tolist()
-        _seg["dt_ne_true_active"] = _funnel[_filings_ne_true_active_mask]["business_id"].tolist()
-        # Domestic detail
-        _seg["domestic_active"]   = _funnel[_dom_active_mask]["business_id"].tolist()
-        _seg["domestic_inactive"] = _funnel[_dom_inactive_mask]["business_id"].tolist()
-        _seg["domestic_missing"]  = _funnel[_dom_missing_mask]["business_id"].tolist()
-        # Sole prop detail
-        _seg["sole_prop_true"]    = _funnel[_sp_true_mask]["business_id"].tolist()
-        _seg["sole_prop_null"]    = _funnel[_sp_null_mask]["business_id"].tolist()
-        _seg["sole_prop_false"]   = _funnel[_sp_false_mask]["business_id"].tolist()
-        _seg["possible_sole_prop"]= _funnel[_sole_prop_possible_mask]["business_id"].tolist()
+        # No Registry Found — strictly sos_match=false AND sos_filings empty
+        _seg["no_sos"]                 = _funnel[_no_reg_mask]["business_id"].tolist()
+        _seg["dt_filings_empty"]       = _funnel[_filings_empty_mask]["business_id"].tolist()
+        # Filings present in no-reg group → moved to Registry Found extended
+        _seg["dt_filings_present_noreg"] = _funnel[_filings_present_in_noreg_mask]["business_id"].tolist()
+        # Registry Found (sos_match=true) + extended (filings present even with match=failure)
+        _seg["sos_found"]              = _funnel[_registry_found_mask]["business_id"].tolist()
+        _seg["sos_found_extended"]     = _funnel[_reg_found_extended_mask]["business_id"].tolist()
+        _seg["dt_ne_true_inactive"]    = _funnel[_filings_ne_true_inactive_mask]["business_id"].tolist()
+        _seg["dt_ne_true_active"]      = _funnel[_filings_ne_true_active_mask]["business_id"].tolist()
+        _seg["dt_ne_false"]            = _funnel[_filings_ne_match_false_mask]["business_id"].tolist()
+        # Registry Found: Domestic vs Foreign (from sos_filings[].foreign_domestic)
+        _seg["reg_domestic"]           = _funnel[_reg_domestic_mask]["business_id"].tolist()
+        _seg["reg_foreign"]            = _funnel[_reg_foreign_mask]["business_id"].tolist()
+        # Formation state vs operating state
+        _seg["states_same"]            = _funnel[_states_same_mask]["business_id"].tolist()
+        _seg["states_diff"]            = _funnel[_states_diff_mask]["business_id"].tolist()
+        # Domestic detail (sub-segments of domestic group)
+        _seg["domestic"]               = _funnel[_dom_active_mask]["business_id"].tolist()
+        _seg["domestic_active"]        = _funnel[_dom_active_mask]["business_id"].tolist()
+        _seg["domestic_inactive"]      = _funnel[_dom_inactive_mask]["business_id"].tolist()
+        _seg["domestic_missing"]       = _funnel[_dom_missing_mask]["business_id"].tolist()
+        _seg["no_domestic"]            = _funnel[_no_domestic_mask]["business_id"].tolist()
+        # State match
+        _seg["state_match"]            = _funnel[_state_match_mask]["business_id"].tolist()
+        _seg["no_state_match"]         = _funnel[_no_state_match_mask]["business_id"].tolist()
+        # Sole prop
+        _seg["sole_prop_true"]         = _funnel[_sp_true_mask]["business_id"].tolist()
+        _seg["sole_prop_null"]         = _funnel[_sp_null_mask]["business_id"].tolist()
+        _seg["sole_prop_false"]        = _funnel[_sp_false_mask]["business_id"].tolist()
+        _seg["possible_sole_prop"]     = _funnel[_sole_prop_possible_mask]["business_id"].tolist()
     else:
         _seg = {k: [] for k in [
-            "sos_found","no_sos","domestic","state_match","no_domestic","no_state_match",
-            "dt_filings_empty","dt_filings_ne","dt_ne_false","dt_ne_true",
-            "dt_ne_true_inactive","dt_ne_true_active",
-            "domestic_active","domestic_inactive","domestic_missing",
+            "no_sos","dt_filings_empty","dt_filings_present_noreg",
+            "sos_found","sos_found_extended","dt_ne_true_inactive","dt_ne_true_active","dt_ne_false",
+            "reg_domestic","reg_foreign","states_same","states_diff",
+            "domestic","domestic_active","domestic_inactive","domestic_missing","no_domestic",
+            "state_match","no_state_match",
             "sole_prop_true","sole_prop_null","sole_prop_false","possible_sole_prop",
         ]}
 
@@ -5868,219 +5922,154 @@ if tab=="🏠 Home":
         )
         # Level 2 — Filings empty vs not empty (both within no-registry group)
         kp2,kp3 = st.columns(2)
-        with kp2: kpi("↳ 📭 YES — Filings Empty", f"{_n_fe:,}",
+        with kp2: kpi("↳ 📭 YES — SOS Filings Array Empty", f"{_n_fe:,}",
                       f"{rate(_n_fe,_sos_not_found)} of no-reg · sos_active=null → sos_filings=[]",
                       "#f97316" if _n_fe>0 else "#64748b")
-        with kp3: kpi("↳ 📋 NO — Filings Present", f"{_n_fne:,}",
-                      f"{rate(_n_fne,_sos_not_found)} of no-reg · sos_active≠null → filings exist but match=failure",
-                      "#f59e0b" if _n_fne>0 else "#64748b")
+        with kp3: kpi("↳ 📋 NO — SOS Filings Array Present (→ see Registry Found)", f"{_n_fne:,}",
+                      f"{rate(_n_fne,_sos_not_found)} of no-reg · filings exist, match=failure → moved to Registry Found",
+                      "#3B82F6" if _n_fne>0 else "#64748b")
         st.markdown("</div>", unsafe_allow_html=True)
 
     # No Registry drilldowns — only no-registry sub-segments here
     # dt_ne_true / dt_ne_true_inactive / dt_ne_true_active are in the Registry Found section below
     _drilldown_table("no_sos",           f"All No Registry Found — {_sos_not_found:,} businesses", _SOS_COLS)
-    _drilldown_table("dt_filings_empty", f"↳ YES: Filings Empty — {_n_fe:,} businesses (sos_active=null)", _SOS_COLS)
-    _drilldown_table("dt_filings_ne",    f"↳ NO: Filings Present — {_n_fne:,} businesses (sos_active≠null, match=failure)", _SOS_COLS)
+    _drilldown_table("dt_filings_empty", f"↳ YES: SOS Filings Array Empty — {_n_fe:,} businesses (sos_active=null)", _SOS_COLS)
+    # Filings-present-in-noreg businesses are in the Registry Found section
     if _n_fne > 0:
-        _drilldown_table("dt_ne_false",  f"    ↳ sos_match=false — {_n_nef:,} businesses (vendor failure despite filings)", _SOS_COLS)
+        st.info(f"ℹ️ {_n_fne:,} businesses had sos_filings data despite sos_match=failure — "
+                "see 🏛️ Registry Found → 'Filings present, match=failure' drilldown above.", icon="ℹ️")
 
     # ════════════════════════════════════════════════════════════════════════════
-    # ROW 3 — REGISTRY FOUND
+    # ROW 3 — REGISTRY FOUND (extended: sos_match=true + filings-present-in-noreg)
     # ════════════════════════════════════════════════════════════════════════════
     _section_header(
-        f"🏛️ Registry Found — {_sos_found:,} businesses ({rate(_sos_found,total_biz)})",
+        f"🏛️ Registry Found — {_sos_found_extended:,} businesses ({rate(_sos_found_extended,total_biz)})",
         (
-            "**What 'Registry Found' means:**\n"
-            "`sos_match_boolean=true` in `rds_warehouse_public.facts` — at least one vendor returned "
-            "a SOS filing record for this business. Corresponds to UI badge: 'Verified' (if also active) "
-            "or 'Missing Active Filing'.\n\n"
-            "**Exact source definition:**\n"
-            "| Field | Value |\n|---|---|\n"
-            "| Fact name | `sos_match` / `sos_match_boolean` |\n"
-            "| Review task key | `sos_match` |\n"
-            "| Review task sublabel | `'Submitted Active'` |\n"
-            "| Review task status | `'success'` |\n"
-            "| Message | `'The business is Active in the state of the submitted Office Address'` |\n\n"
-            "**Source (rds_ only):** `rds_warehouse_public.facts name='sos_match_boolean'`\n"
-            "**Derivation (index.ts:1421):**\n"
-            "```typescript\nsos_match_boolean = engine.getResolvedFact('sos_match')?.value === 'success'\n```\n"
-            "**Vendors that produce `sos_match`:**\n"
-            "- Middesk (pid=16): `reviewTasks.find(key==='sos_match').status`\n"
-            "- OpenCorporates (pid=23): `company_number present OR sosFilings.length>0`\n"
-            "- Trulioo (pid=38): `registrationNumber + formationDate + state` all present\n\n"
-            "```sql\n-- Returns: Registry Found businesses\n"
-            "SELECT rbcm.business_id,\n"
-            "       JSON_EXTRACT_PATH_TEXT(f.value,'value')              AS sos_match_boolean,\n"
-            "       JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS winning_vendor_pid,\n"
-            "       bert.sublabel AS sos_match_sublabel, bert.status AS sos_match_status\n"
-            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
-            "JOIN rds_warehouse_public.facts f\n"
-            "  ON f.business_id=rbcm.business_id AND f.name='sos_match_boolean'\n"
-            "  AND JSON_EXTRACT_PATH_TEXT(f.value,'value')='true'\n"
-            "LEFT JOIN rds_integration_data.business_entity_verification bev ON bev.business_id=rbcm.business_id\n"
-            "LEFT JOIN rds_integration_data.business_entity_review_task bert\n"
-            "  ON bert.business_entity_verification_id=bev.id AND bert.key='sos_match'\n"
-            "WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
-        ),
-        color="#22c55e"
-    )
-    # Level 1 — Registry Found total
-    kr0, = st.columns(1)
-    with kr0: kpi("🏛️ Registry Found", f"{_sos_found:,}",
-                  f"{rate(_sos_found,total_biz)} of {total_biz:,} onboarded",
-                  "#22c55e" if _sos_found/max(total_biz,1)>0.8 else "#f59e0b")
-    if _sos_found > 0:
-        st.markdown(
-            "<div style='margin-left:24px;border-left:2px dashed #475569;padding-left:12px;margin-top:4px'>",
-            unsafe_allow_html=True
-        )
-        # Level 2 — Active vs Inactive
-        kr1,kr2 = st.columns(2)
-        with kr1: kpi("↳ ✅ Active", f"{_n_neta:,}",
-                      f"{rate(_n_neta,_sos_found)} of reg-found · sos_active_verif=1",
-                      "#22c55e")
-        with kr2: kpi("↳ ⚠️ Inactive (dissolved/revoked)", f"{_n_neti:,}",
-                      f"{rate(_n_neti,_sos_found)} of reg-found · sos_active_verif=0",
-                      "#f59e0b" if _n_neti>0 else "#64748b")
-        # Level 3 — Verified sublabel
-        kr3, = st.columns(1)
-        with kr3: kpi("  ↳ 🏛️ Submitted Active (key='sos_match' sublabel='Submitted Active')", f"{_sos_found_verified:,}",
-                      f"{rate(_sos_found_verified,_sos_found)} of reg-found · review task confirmed",
-                      "#22c55e" if _sos_found_verified>0 else "#64748b")
-        st.markdown("</div>", unsafe_allow_html=True)
-    _drilldown_table("sos_found",          f"Registry Found — {_sos_found:,} businesses (sos_match_boolean=true)", _SOS_COLS)
-    _drilldown_table("dt_ne_true_active",  f"↳ Active — {_n_neta:,} businesses (sos_active_verif=1)", _SOS_COLS)
-    _drilldown_table("dt_ne_true_inactive",f"↳ Inactive — {_n_neti:,} businesses (sos_active_verif=0)", _SOS_COLS)
-
-    # ════════════════════════════════════════════════════════════════════════════
-    # ROW 4 — DOMESTIC REGISTRATION
-    # ════════════════════════════════════════════════════════════════════════════
-    _section_header(
-        f"🏠 Domestic Registration — {_domestic_active_n:,} Active · {_domestic_inactive_n:,} Inactive · {_domestic_missing_n:,} No Data",
-        (
-            "**What 'Domestic Registration Found' means:**\n"
-            "Review task `key='sos_domestic'` has `sublabel='Domestic Active'` — the business has an "
-            "active SOS filing in the state where it was originally incorporated.\n\n"
-            "**What 'No Domestic Registration Found' means:**\n"
-            "`key='sos_domestic'` is missing OR has `sublabel='Domestic Inactive'` — no active domestic filing. "
-            "Business may only have foreign registrations (e.g. DE+FL+GA where FL/GA are foreign).\n\n"
-            "**⚠️ Not in rds_warehouse_public.facts directly.** "
-            "`sos_domestic` is NOT a named fact. It must be derived from:\n\n"
-            "**Option A — Review task (rds_ only, fastest):**\n"
-            "`rds_integration_data.business_entity_review_task` where `key='sos_domestic'`\n\n"
-            "**Option B — Parse sos_filings JSONB (rds_ only, derivable):**\n"
-            "```sql\n-- Returns: domestic_found=1 if any filing has foreign_domestic='domestic' AND active=true\n"
+            "**What 'Registry Found' means (per API JSON sos_filings fact):**\n"
+            "A business has a registry record if its `sos_filings` array (from `rds_warehouse_public.facts` "
+            "name='sos_filings') contains at least one entry. This includes:\n"
+            "- `sos_match_boolean=true` — vendor confirmed a match (primary path)\n"
+            "- Filings present even when `sos_match='failure'` — data exists in the array\n\n"
+            "**API JSON structure (sos_filings fact):**\n"
+            "```json\nsos_filings.value = [\n"
+            "  {\n"
+            "    'jurisdiction': 'us::fl',\n"
+            "    'filing_date': '2023-05-31',\n"
+            "    'entity_type': 'LLC',\n"
+            "    'active': true,\n"
+            "    'foreign_domestic': 'domestic',  ← 'domestic' or 'foreign'\n"
+            "    'state': 'FL',\n"
+            "    'filing_name': 'PIZZA AND A CHEF LLC',\n"
+            "    'officers': [...]\n"
+            "  }\n]\n```\n\n"
+            "**Key fields from sos_filings JSON (per API doc):**\n"
+            "| Field | Meaning |\n|---|---|\n"
+            "| `foreign_domestic` | `'domestic'` = incorporated here · `'foreign'` = foreign qualification |\n"
+            "| `active` | `true` = in good standing · `false` = inactive/dissolved |\n"
+            "| `state` | State of the filing (formation state for domestic) |\n"
+            "| `jurisdiction` | e.g. `'us::fl'` = Florida, US |\n"
+            "| `entity_type` | LLC, Corp, etc. |\n\n"
+            "**Source (rds_ only):** `rds_warehouse_public.facts name='sos_filings'`\n"
+            "**Winning vendor:** Middesk (pid=16) — `factWithHighestConfidence` rule\n"
+            "**Key file:** `integration-service/lib/facts/kyb/index.ts:717` (sos_filings fact)\n\n"
+            "```sql\n-- Returns: all sos_filings data per business (parse JSON array)\n"
             "SELECT f.business_id,\n"
-            "  MAX(CASE WHEN filing->>'foreign_domestic'='domestic'\n"
-            "            AND (filing->>'active')::boolean=true THEN 1 ELSE 0 END) AS domestic_found_derived\n"
+            "       filing->>'foreign_domestic' AS foreign_domestic,\n"
+            "       (filing->>'active')::boolean AS filing_active,\n"
+            "       filing->>'state'             AS filing_state,\n"
+            "       filing->>'entity_type'       AS entity_type,\n"
+            "       filing->>'filing_date'       AS filing_date,\n"
+            "       filing->>'filing_name'       AS filing_name\n"
             "FROM rds_warehouse_public.facts f,\n"
             "     JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing\n"
-            "WHERE f.name='sos_filings' AND LENGTH(f.value)<60000\n"
-            "  AND f.business_id='{business_id}'\n"
-            "GROUP BY f.business_id;\n```\n\n"
-            "| Sublabel | sos_domestic_verif | Meaning |\n|---|---|---|\n"
-            "| `'Domestic Active'` | 1 | Active domestic filing confirmed |\n"
-            "| `'Domestic Inactive'` | 0 | Filing exists but inactive |\n"
-            "| (row absent) | 0 | No domestic task ran at all |\n\n"
-            "**Source:** `rds_integration_data.business_entity_review_task` key=`'sos_domestic'` · "
-            "`warehouse-service/.../verification_results.sql:36-39` (derivation reference) · "
-            "`customer-admin-webapp/src/constants/SOSBadges.ts`\n\n"
-            "```sql\n-- Returns: domestic status from review task (rds_ only)\n"
-            "SELECT bev.business_id,\n"
-            "       bert.sublabel AS sos_domestic_sublabel, bert.status,\n"
-            "       CASE WHEN bert.sublabel='Domestic Active' THEN 1 ELSE 0 END AS domestic_found\n"
-            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
-            "JOIN rds_integration_data.business_entity_verification bev ON bev.business_id=rbcm.business_id\n"
-            "LEFT JOIN rds_integration_data.business_entity_review_task bert\n"
-            "  ON bert.business_entity_verification_id=bev.id AND bert.key='sos_domestic'\n"
-            "WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
+            "WHERE f.name = 'sos_filings' AND LENGTH(f.value) < 60000\n"
+            "  AND f.business_id IN (\n"
+            "    SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring\n"
+            "    WHERE DATE(created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}\n"
+            "  );\n```"
         ),
         color="#22c55e"
     )
-    kd1,kd2,kd3 = st.columns(3)
-    with kd1: kpi("✅ Domestic Active",    f"{_domestic_active_n:,}", f"{rate(_domestic_active_n,total_biz)} · sublabel='Domestic Active'", "#22c55e" if _domestic_active_n>0 else "#64748b")
-    with kd2: kpi("⚠️ Domestic Inactive", f"{_domestic_inactive_n:,}", f"{rate(_domestic_inactive_n,total_biz)} · sublabel='Domestic Inactive'", "#f59e0b" if _domestic_inactive_n>0 else "#64748b")
-    with kd3: kpi("❌ No Domestic Data",  f"{_domestic_missing_n:,}", f"{rate(_domestic_missing_n,total_biz)} · no sos_domestic task", "#f97316" if _domestic_missing_n>0 else "#64748b")
-    _drilldown_table("domestic_active",   f"Domestic Active — {_domestic_active_n:,} businesses (sublabel='Domestic Active')", _SOS_COLS)
-    _drilldown_table("domestic_inactive", f"Domestic Inactive — {_domestic_inactive_n:,} businesses (sublabel='Domestic Inactive')", _SOS_COLS)
-    _drilldown_table("domestic_missing",  f"No Domestic Data — {_domestic_missing_n:,} businesses (no sos_domestic review task)", _SOS_COLS)
-    _drilldown_table("no_domestic",       f"No Domestic Reg (combined) — {_no_domestic_found:,} businesses", _SOS_COLS)
 
-    # ════════════════════════════════════════════════════════════════════════════
-    # ROW 5 — STATE MATCH
-    # ════════════════════════════════════════════════════════════════════════════
-    _section_header(
-        f"📍 State Match — {_state_match:,} matched · {_no_state_match:,} not matched",
-        (
-            "**What 'State Match' means:**\n"
-            "Review task `key='sos_state'` has `sublabel='State Match'` — the submitted operating state "
-            "matches the state found in the SOS filing.\n\n"
-            "**⚠️ State Match is NOT in rds_warehouse_public.facts.** "
-            "It is NOT a named fact. It comes exclusively from:\n"
-            "`rds_integration_data.business_entity_review_task` where `key='sos_state'`\n\n"
-            "**It is also tracked in entity-matching scoring** "
-            "(NOT used here — non-rds_ tables excluded per team instruction):\n"
-            "`datascience.smb_zoominfo_standardized_joined.state_match = 5` (match) or `0` (no match)\n\n"
-            "| key | sublabel | Meaning |\n|---|---|---|\n"
-            "| `sos_state` | `'State Match'` | Operating state = SOS filing state |\n"
-            "| `sos_state` | `'No State Match'` | States differ |\n\n"
-            "**Source (rds_ only):** `rds_integration_data.business_entity_review_task`\n"
-            "**UI badge:** `customer-admin-webapp/src/constants/SOSBadges.ts`\n\n"
-            "```sql\n-- Returns: state match status from review task (rds_ only)\n"
-            "SELECT bev.business_id, bert.sublabel AS sos_state_sublabel, bert.status\n"
-            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
-            "JOIN rds_integration_data.business_entity_verification bev ON bev.business_id=rbcm.business_id\n"
-            "LEFT JOIN rds_integration_data.business_entity_review_task bert\n"
-            "  ON bert.business_entity_verification_id=bev.id AND bert.key='sos_state'\n"
-            "WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
-        ),
-        color="#22c55e"
-    )
-    ks1,ks2 = st.columns(2)
-    with ks1: kpi("📍 State Match",    f"{_state_match:,}", f"{rate(_state_match,total_biz)} · key='sos_state' sublabel='State Match'", "#22c55e" if _state_match/max(total_biz,1)>0.6 else "#f59e0b")
-    with ks2: kpi("📍 No State Match", f"{_no_state_match:,}", f"{rate(_no_state_match,total_biz)} · key='sos_state' sublabel='No State Match'", "#f59e0b" if _no_state_match>0 else "#22c55e")
-    _drilldown_table("state_match",    f"State Match — {_state_match:,} businesses (sos_state sublabel='State Match')", _SOS_COLS)
-    _drilldown_table("no_state_match", f"No State Match — {_no_state_match:,} businesses (sos_state sublabel='No State Match')", _SOS_COLS)
+    # Level 1 — Registry Found total (extended)
+    kr0, = st.columns(1)
+    with kr0: kpi("🏛️ Registry Found",
+                  f"{_sos_found_extended:,}",
+                  f"{rate(_sos_found_extended,total_biz)} of {total_biz:,} onboarded · sos_filings[] non-empty",
+                  "#22c55e" if _sos_found_extended/max(total_biz,1)>0.8 else "#f59e0b")
 
-    # ════════════════════════════════════════════════════════════════════════════
-    # ROW 6 — POSSIBLE SOLE PROPRIETOR
-    # ════════════════════════════════════════════════════════════════════════════
-    _section_header(
-        f"🧍 Possible Sole Proprietor — {_possible_sole_prop:,} businesses ({rate(_possible_sole_prop,total_biz)})",
-        (
-            "**What `is_sole_prop` means (index.ts:552-616):**\n\n"
-            "| Value | Meaning | When set |\n|---|---|---|\n"
-            "| `true` | Confirmed sole prop | Single owner + TIN last-4 matches IDV SSN last-4 (index.ts:604-609) |\n"
-            "| `null` | Not enough data — POSSIBLE | No TIN, no owners, or no IDV completed (index.ts:564-583) |\n"
-            "| `false` | Not a sole prop | Multiple owners OR IDV SSN doesn't match TIN (index.ts:572-614) |\n\n"
-            "**'Possible Sole Prop' = `true` OR `null`** — null means *we don't know*, not that it's false.\n\n"
-            "**Also inferred by AI (`aiSanitization.ts`):** Sets `is_sole_proprietor=true` when "
-            "business name looks like a person's name at a residential address.\n"
-            "Proxy in this app: `is_sole_prop=true` AND `sos_match_boolean=false` (no entity in SOS → likely unregistered individual).\n\n"
-            "**Source (rds_ only):** `rds_warehouse_public.facts` where `name='is_sole_prop'`\n"
-            "**Key file:** `integration-service/lib/facts/kyb/index.ts:552-616` · "
-            "`integration-service/lib/aiEnrichment/aiSanitization.ts`\n\n"
-            "```sql\n-- Returns: is_sole_prop value per business\n"
-            "SELECT rbcm.business_id,\n"
-            "       JSON_EXTRACT_PATH_TEXT(f.value,'value') AS is_sole_prop,\n"
-            "       JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS source_pid\n"
-            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
-            "LEFT JOIN rds_warehouse_public.facts f\n"
-            "  ON f.business_id=rbcm.business_id AND f.name='is_sole_prop'\n"
-            "WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
-        ),
-        color="#8B5CF6"
-    )
-    ksp1,ksp2,ksp3,ksp4 = st.columns(4)
-    with ksp1: kpi("🧍 is_sole_prop=true",  f"{_n_sp_t:,}", f"{rate(_n_sp_t,total_biz)} · confirmed (index.ts:604)", "#8B5CF6" if _n_sp_t>0 else "#64748b")
-    with ksp2: kpi("❓ is_sole_prop=null",  f"{_n_sp_n:,}", f"{rate(_n_sp_n,total_biz)} · not enough data", "#6366f1" if _n_sp_n>0 else "#64748b")
-    with ksp3: kpi("❌ is_sole_prop=false", f"{_n_sp_f:,}", f"{rate(_n_sp_f,total_biz)} · multiple owners or mismatch", "#64748b")
-    with ksp4: kpi("🤖 AI-inferred (proxy)",f"{_n_sp_ai:,}", f"{rate(_n_sp_ai,total_biz)} · is_sole_prop=true + no SOS", "#a78bfa" if _n_sp_ai>0 else "#64748b")
-    _drilldown_table("sole_prop_true",    f"Confirmed Sole Prop (true) — {_n_sp_t:,} businesses", _SOS_COLS)
-    _drilldown_table("sole_prop_null",    f"Possible Sole Prop (null) — {_n_sp_n:,} businesses (not enough data)", _SOS_COLS)
-    _drilldown_table("sole_prop_false",   f"Not Sole Prop (false) — {_n_sp_f:,} businesses", _SOS_COLS)
-    _drilldown_table("sole_prop_ai",      f"AI-Inferred (proxy) — {_n_sp_ai:,} businesses (is_sole_prop=true + no SOS)", _SOS_COLS)
-    _drilldown_table("possible_sole_prop",f"All Possible Sole Prop (true OR null) — {_possible_sole_prop:,} businesses", _SOS_COLS)
+    if _sos_found_extended > 0:
+        st.markdown("<div style='margin-left:24px;border-left:2px dashed #475569;padding-left:12px;margin-top:4px'>",
+                    unsafe_allow_html=True)
+
+        # Level 2A — Active vs Inactive (from sos_active fact)
+        kra1,kra2 = st.columns(2)
+        with kra1: kpi("↳ ✅ Active (sos_active=true)", f"{_n_neta:,}",
+                       f"{rate(_n_neta,_sos_found_extended)} of reg-found · sos_active=true in facts",
+                       "#22c55e")
+        with kra2: kpi("↳ ⚠️ Inactive (dissolved/revoked)", f"{_n_neti:,}",
+                       f"{rate(_n_neti,_sos_found_extended)} of reg-found · sos_active=false",
+                       "#f59e0b" if _n_neti>0 else "#64748b")
+
+        # Level 2B — Domestic vs Foreign (from sos_filings[].foreign_domestic)
+        krb1,krb2 = st.columns(2)
+        with krb1: kpi("↳ 🏠 Domestic Filing", f"{_n_reg_domestic:,}",
+                       f"{rate(_n_reg_domestic,_sos_found_extended)} of reg-found · sos_filings[].foreign_domestic='domestic'",
+                       "#22c55e" if _n_reg_domestic>0 else "#64748b")
+        with krb2: kpi("↳ 🌍 Foreign Filing Only", f"{_n_reg_foreign:,}",
+                       f"{rate(_n_reg_foreign,_sos_found_extended)} of reg-found · sos_filings[].foreign_domestic='foreign'",
+                       "#f59e0b" if _n_reg_foreign>0 else "#64748b")
+
+        # Level 2C — Formation state vs Operating state
+        krc1,krc2 = st.columns(2)
+        with krc1: kpi("↳ 📍 Formation = Operating State", f"{_n_states_same:,}",
+                       f"{rate(_n_states_same,_sos_found_extended)} · formation_state = primary_address.state",
+                       "#22c55e" if _n_states_same>0 else "#64748b")
+        with krc2: kpi("↳ 📍 States Differ", f"{_n_states_diff:,}",
+                       f"{rate(_n_states_diff,_sos_found_extended)} · multi-state or foreign qual needed",
+                       "#f59e0b" if _n_states_diff>0 else "#22c55e")
+
+        # Level 2D — Domestic filing breakdown (from sos_domestic review task)
+        krd1,krd2,krd3 = st.columns(3)
+        with krd1: kpi("↳ ✅ Domestic Active",   f"{_domestic_active_n:,}",
+                       f"{rate(_domestic_active_n,_sos_found_extended)} · sublabel='Domestic Active'",
+                       "#22c55e" if _domestic_active_n>0 else "#64748b")
+        with krd2: kpi("↳ ⚠️ Domestic Inactive", f"{_domestic_inactive_n:,}",
+                       f"{rate(_domestic_inactive_n,_sos_found_extended)} · sublabel='Domestic Inactive'",
+                       "#f59e0b" if _domestic_inactive_n>0 else "#64748b")
+        with krd3: kpi("↳ ❌ No Domestic Data",  f"{_domestic_missing_n:,}",
+                       f"{rate(_domestic_missing_n,_sos_found_extended)} · no sos_domestic task",
+                       "#f97316" if _domestic_missing_n>0 else "#64748b")
+
+        # Level 2E — State match + Sole prop
+        kre1,kre2 = st.columns(2)
+        with kre1: kpi("↳ 📍 State Match",    f"{_state_match:,}",
+                       f"{rate(_state_match,_sos_found_extended)} · sos_state sublabel='State Match'",
+                       "#22c55e" if _state_match>0 else "#64748b")
+        with kre2: kpi("↳ 🧍 Possible Sole Prop", f"{_possible_sole_prop:,}",
+                       f"{rate(_possible_sole_prop,total_biz)} · is_sole_prop=true/null",
+                       "#8B5CF6" if _possible_sole_prop>0 else "#64748b")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # Registry Found drilldowns
+    _drilldown_table("sos_found_extended",     f"Registry Found (all) — {_sos_found_extended:,} businesses (sos_filings[] non-empty)", _SOS_COLS)
+    _drilldown_table("sos_found",              f"↳ sos_match=true — {_sos_found:,} businesses (primary path)", _SOS_COLS)
+    _drilldown_table("dt_filings_present_noreg",f"↳ Filings present, match=failure — {len(_seg.get('dt_filings_present_noreg',[])):,} businesses", _SOS_COLS)
+    _drilldown_table("dt_ne_true_active",      f"↳ Active — {_n_neta:,} businesses (sos_active=true)", _SOS_COLS)
+    _drilldown_table("dt_ne_true_inactive",    f"↳ Inactive — {_n_neti:,} businesses (sos_active=false)", _SOS_COLS)
+    _drilldown_table("reg_domestic",           f"↳ Domestic Filing — {_n_reg_domestic:,} businesses (foreign_domestic='domestic')", _SOS_COLS)
+    _drilldown_table("reg_foreign",            f"↳ Foreign Filing Only — {_n_reg_foreign:,} businesses (foreign_domestic='foreign')", _SOS_COLS)
+    _drilldown_table("states_same",            f"↳ Formation=Operating State — {_n_states_same:,} businesses", _SOS_COLS)
+    _drilldown_table("states_diff",            f"↳ States Differ — {_n_states_diff:,} businesses", _SOS_COLS)
+    _drilldown_table("domestic_active",        f"↳ Domestic Active — {_domestic_active_n:,} businesses", _SOS_COLS)
+    _drilldown_table("domestic_inactive",      f"↳ Domestic Inactive — {_domestic_inactive_n:,} businesses", _SOS_COLS)
+    _drilldown_table("domestic_missing",       f"↳ No Domestic Data — {_domestic_missing_n:,} businesses", _SOS_COLS)
+    _drilldown_table("state_match",            f"↳ State Match — {_state_match:,} businesses", _SOS_COLS)
+    _drilldown_table("no_state_match",         f"↳ No State Match — {_no_state_match:,} businesses", _SOS_COLS)
+    _drilldown_table("sole_prop_true",         f"↳ Sole Prop Confirmed — {_n_sp_t:,} businesses", _SOS_COLS)
+    _drilldown_table("sole_prop_null",         f"↳ Sole Prop Possible (null) — {_n_sp_n:,} businesses", _SOS_COLS)
+    _drilldown_table("sole_prop_false",        f"↳ Not Sole Prop — {_n_sp_f:,} businesses", _SOS_COLS)
 
     # ── Legacy gap panels (foreign_only + domestic_no_state) ──────────────────
     _sos_found_set = set(_seg.get("sos_found",[]))
