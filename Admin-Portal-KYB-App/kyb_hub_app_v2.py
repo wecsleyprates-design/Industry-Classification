@@ -3672,42 +3672,49 @@ if tab=="🏠 Home":
         """)
 
     @st.cache_data(ttl=600, show_spinner=False)
-    def _load_sos_review_tasks_for_bids(bid_tuple):
-        """Load SOS review task sublabels from rds_integration_data.business_entity_review_task.
-        Returns one row per business with:
-          - sos_match_sublabel   : 'Submitted Active' | other | null  (key='sos_match')
-          - sos_domestic_sublabel: 'Domestic Active' | 'Domestic Inactive' | null (key='sos_domestic')
-          - sos_state_sublabel   : 'State Match' | 'No State Match' | null (key='sos_state')
-          - sos_match_status     : 'success' | 'warning' | 'failure' (key='sos_match')
-          - sos_domestic_status  : 'success' | 'warning' | 'failure' (key='sos_domestic')
-        Source: rds_integration_data.business_entity_review_task
-          via rds_integration_data.business_entity_verification (business_id link)
-        Authoritative labels from customer-admin-webapp/src/constants/SOSBadges.ts.
+    def _load_sos_filings_for_bids(bid_tuple):
+        """Parse sos_filings[] JSON array from rds_warehouse_public.facts.
+        Source: API JSON sos_filings fact (name='sos_filings').
+        ALL signals derived from the sos_filings JSON array — no review tasks, no materialized tables.
+
+        Returns one row per FILING (multiple rows per business if multiple filings):
+          - business_id
+          - foreign_domestic  : 'domestic' | 'foreign'   (sos_filings[].foreign_domestic)
+          - filing_active     : true | false               (sos_filings[].active)
+          - filing_state      : 'FL','DE',etc.             (sos_filings[].state)
+          - jurisdiction      : 'us::fl', 'us::de', etc.  (sos_filings[].jurisdiction)
+          - entity_type       : 'llc','corporation',etc.   (sos_filings[].entity_type)
+          - non_profit        : true | false               (sos_filings[].non_profit)
+          - registration_date : date string                (sos_filings[].registration_date)
+          - filing_name       : business name on filing    (sos_filings[].filing_name)
+          - has_officers      : 1 if officers[] non-empty  (sos_filings[].officers)
+          - filing_index      : 0-based index in array
+
+        Source: integration-service/lib/facts/kyb/index.ts lines 767-987 (transformer)
+                integration-service/lib/facts/kyb/types.ts lines 20-32 (SoSRegistration schema)
+                warehouse-service/datapooler/adapters/db/models/facts.py (storage)
         """
         if not bid_tuple:
             return None, "No business IDs"
         bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
         return run_sql(f"""
             SELECT
-                bev.business_id,
-                MAX(CASE WHEN bert.key='sos_match'
-                    THEN bert.sublabel END)    AS sos_match_sublabel,
-                MAX(CASE WHEN bert.key='sos_match'
-                    THEN bert.status END)      AS sos_match_status,
-                MAX(CASE WHEN bert.key='sos_domestic'
-                    THEN bert.sublabel END)    AS sos_domestic_sublabel,
-                MAX(CASE WHEN bert.key='sos_domestic'
-                    THEN bert.status END)      AS sos_domestic_status,
-                MAX(CASE WHEN bert.key='sos_state'
-                    THEN bert.sublabel END)    AS sos_state_sublabel,
-                MAX(CASE WHEN bert.key='sos_state'
-                    THEN bert.status END)      AS sos_state_status
-            FROM rds_integration_data.business_entity_review_task bert
-            JOIN rds_integration_data.business_entity_verification bev
-                ON bev.id = bert.business_entity_verification_id
-            WHERE bev.business_id IN ({bid_list})
-              AND bert.key IN ('sos_match','sos_domestic','sos_state')
-            GROUP BY bev.business_id
+                f.business_id,
+                filing->>'foreign_domestic'                              AS foreign_domestic,
+                (filing->>'active')::boolean                            AS filing_active,
+                UPPER(COALESCE(filing->>'state',''))                    AS filing_state,
+                LOWER(COALESCE(filing->>'jurisdiction',''))              AS jurisdiction,
+                LOWER(COALESCE(filing->>'entity_type','unknown'))        AS entity_type,
+                CASE WHEN filing->>'non_profit' = 'true' THEN 1 ELSE 0 END AS non_profit,
+                LEFT(COALESCE(filing->>'registration_date', filing->>'filing_date',''), 10) AS registration_date,
+                filing->>'filing_name'                                  AS filing_name,
+                CASE WHEN JSON_ARRAY_LENGTH(filing->'officers') > 0 THEN 1 ELSE 0 END AS has_officers,
+                filing->>'id'                                           AS filing_id
+            FROM rds_warehouse_public.facts f,
+                 JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing
+            WHERE f.name = 'sos_filings'
+              AND LENGTH(f.value) < 60000
+              AND f.business_id IN ({bid_list})
         """)
 
     @st.cache_data(ttl=600, show_spinner=False)
@@ -3837,17 +3844,67 @@ if tab=="🏠 Home":
         else:
             funnel_df["idv_last4_ssn"] = None
 
-    # Load SOS review task sublabels (sos_match/sos_domestic/sos_state)
-    # Source: rds_integration_data.business_entity_review_task
+    # Load sos_filings[] JSON array parsed into one row per filing
+    # Source: rds_warehouse_public.facts name='sos_filings' — ALL signals from API JSON
+    # Replaces _load_sos_review_tasks_for_bids (review tasks are NOT facts, NOT in API JSON)
     with st.spinner(""):
-        _sos_tasks_df, _sos_tasks_err = _load_sos_review_tasks_for_bids(tuple(_authoritative_bids))
-    # Merge review task columns into funnel_df
-    if funnel_df is not None and not funnel_df.empty and _sos_tasks_df is not None and not _sos_tasks_df.empty:
-        funnel_df = funnel_df.merge(_sos_tasks_df, on="business_id", how="left")
-    elif funnel_df is not None and not funnel_df.empty:
-        for _col in ["sos_match_sublabel","sos_match_status","sos_domestic_sublabel",
-                     "sos_domestic_status","sos_state_sublabel","sos_state_status"]:
-            funnel_df[_col] = None
+        _sos_filings_df, _sos_filings_err = _load_sos_filings_for_bids(tuple(_authoritative_bids))
+    # Build per-business aggregated signals from sos_filings[]
+    # These are the correct derivations — all from rds_warehouse_public.facts
+    _sfg = {}   # business_id → aggregated filing signals
+    if _sos_filings_df is not None and not _sos_filings_df.empty:
+        for _bid_sf, _grp in _sos_filings_df.groupby("business_id"):
+            _sfg[_bid_sf] = {
+                # Domestic vs Foreign (sos_filings[].foreign_domestic)
+                "has_domestic_active":   int((_grp["foreign_domestic"]=="domestic") & (_grp["filing_active"]==True)).sum() > 0,
+                "has_domestic_inactive": int((_grp["foreign_domestic"]=="domestic") & (_grp["filing_active"]!=True)).sum() > 0,
+                "has_domestic":          (_grp["foreign_domestic"]=="domestic").any(),
+                "has_foreign":           (_grp["foreign_domestic"]=="foreign").any(),
+                "n_filings":             len(_grp),
+                "n_active":              int((_grp["filing_active"]==True).sum()),
+                "n_inactive":            int((_grp["filing_active"]!=True).sum()),
+                "all_active":            (_grp["filing_active"]==True).all(),
+                "all_inactive":          (_grp["filing_active"]!=True).all(),
+                "jurisdictions":         _grp["jurisdiction"].dropna().unique().tolist(),
+                "filing_states":         _grp["filing_state"].dropna().unique().tolist(),
+                "entity_types":          _grp["entity_type"].dropna().unique().tolist(),
+                "non_profit":            (_grp["non_profit"]==1).any(),
+                "has_officers":          (_grp["has_officers"]==1).any(),
+                "registration_date":     _grp["registration_date"].dropna().min(),
+                "filing_names":          _grp["filing_name"].dropna().unique().tolist(),
+            }
+    # Merge derived signals into funnel_df for use in all Section 1 computations
+    if funnel_df is not None and not funnel_df.empty:
+        _sf_rows = []
+        for _bid in funnel_df["business_id"].tolist():
+            _s = _sfg.get(_bid, {})
+            _sf_rows.append({
+                "business_id":        _bid,
+                "sos_domestic_sublabel": "domestic active" if _s.get("has_domestic_active") else (
+                    "domestic inactive" if _s.get("has_domestic_inactive") else ""),
+                "sos_state_sublabel":  "",  # computed below from filing_state vs operating_state
+                "has_domestic":       _s.get("has_domestic", False),
+                "has_foreign":        _s.get("has_foreign", False),
+                "n_filings":          _s.get("n_filings", 0),
+                "all_active":         _s.get("all_active", False),
+                "all_inactive":       _s.get("all_inactive", False),
+                "non_profit":         _s.get("non_profit", False),
+                "has_officers":       _s.get("has_officers", False),
+                "registration_date":  _s.get("registration_date",""),
+                "jurisdictions":      ", ".join(_s.get("jurisdictions",[])),
+                "entity_types":       ", ".join(_s.get("entity_types",[])),
+            })
+        _sf_merge = pd.DataFrame(_sf_rows)
+        funnel_df = funnel_df.merge(_sf_merge, on="business_id", how="left")
+        # Compute state match from sos_filings[].state vs primary_address.state (both facts)
+        for _i, _row in funnel_df.iterrows():
+            _bid_sm = _row["business_id"]
+            _op_st  = str(_row.get("operating_state","") or "").upper().strip()
+            _fs     = _sfg.get(_bid_sm,{}).get("filing_states",[])
+            _match  = any(s.upper().strip()==_op_st for s in _fs) if _op_st and _fs else False
+            funnel_df.at[_i,"sos_state_sublabel"] = "state match" if _match else (
+                "no state match" if (_op_st and _fs) else ""
+            )
 
     # Build per-business flag map from the pivoted stats_df (faster than flag_df loop)
     biz_flags = {}
@@ -4072,11 +4129,13 @@ if tab=="🏠 Home":
             stats_df is not None and not stats_df.empty and "sos_match_verif" in stats_df.columns
         ) else 0
 
-        # ── Domestic Registration (sos_domestic sublabel) ─────────────────────
-        # Source: verification_results.sql:36-39 + sos_domestic review task
-        _dom_sub = _sv("sos_domestic_sublabel")   # from _sos_tasks_df merged into funnel_df
+        # ── Domestic Registration — derived from sos_filings[].foreign_domestic + active ──
+        # Source: rds_warehouse_public.facts name='sos_filings' → sos_filings[].foreign_domestic
+        # from API JSON: "foreign_domestic": "domestic" | "foreign"
+        # NOT from review task sublabels (those are not facts, not in API JSON)
+        _dom_sub = _sv("sos_domestic_sublabel")   # computed above from sos_filings[] parse
         _dom_active_mask   = _dom_sub == "domestic active"
-        _dom_inactive_mask = _dom_sub.isin(["domestic inactive","foreign active","foreign inactive"])
+        _dom_inactive_mask = _dom_sub.isin(["domestic inactive"])
         _dom_missing_mask  = _dom_sub.isin(["","none","nan","null"])
 
         _domestic_active_n   = int(_dom_active_mask.sum())
@@ -6029,47 +6088,435 @@ if tab=="🏠 Home":
                        f"{rate(_n_states_diff,_sos_found_extended)} · multi-state or foreign qual needed",
                        "#f59e0b" if _n_states_diff>0 else "#22c55e")
 
-        # Level 2D — Domestic filing breakdown (from sos_domestic review task)
+        # Level 2D — Domestic/Foreign from sos_filings[].foreign_domestic (API JSON fact)
         krd1,krd2,krd3 = st.columns(3)
         with krd1: kpi("↳ ✅ Domestic Active",   f"{_domestic_active_n:,}",
-                       f"{rate(_domestic_active_n,_sos_found_extended)} · sublabel='Domestic Active'",
+                       f"{rate(_domestic_active_n,_sos_found_extended)} · sos_filings[].foreign_domestic='domestic' AND active=true",
                        "#22c55e" if _domestic_active_n>0 else "#64748b")
         with krd2: kpi("↳ ⚠️ Domestic Inactive", f"{_domestic_inactive_n:,}",
-                       f"{rate(_domestic_inactive_n,_sos_found_extended)} · sublabel='Domestic Inactive'",
+                       f"{rate(_domestic_inactive_n,_sos_found_extended)} · sos_filings[].foreign_domestic='domestic' AND active=false",
                        "#f59e0b" if _domestic_inactive_n>0 else "#64748b")
-        with krd3: kpi("↳ ❌ No Domestic Data",  f"{_domestic_missing_n:,}",
-                       f"{rate(_domestic_missing_n,_sos_found_extended)} · no sos_domestic task",
-                       "#f97316" if _domestic_missing_n>0 else "#64748b")
+        with krd3: kpi("↳ 🌍 Foreign Only",  f"{_n_reg_foreign:,}",
+                       f"{rate(_n_reg_foreign,_sos_found_extended)} · sos_filings[].foreign_domestic='foreign'",
+                       "#f59e0b" if _n_reg_foreign>0 else "#64748b")
 
-        # Level 2E — State match + Sole prop
+        # Level 2E — State match from sos_filings[].state vs primary_address.state + Sole prop
         kre1,kre2 = st.columns(2)
-        with kre1: kpi("↳ 📍 State Match",    f"{_state_match:,}",
-                       f"{rate(_state_match,_sos_found_extended)} · sos_state sublabel='State Match'",
+        with kre1: kpi("↳ 📍 Filing State = Operating State", f"{_state_match:,}",
+                       f"{rate(_state_match,_sos_found_extended)} · sos_filings[].state = primary_address.state",
                        "#22c55e" if _state_match>0 else "#64748b")
         with kre2: kpi("↳ 🧍 Possible Sole Prop", f"{_possible_sole_prop:,}",
-                       f"{rate(_possible_sole_prop,total_biz)} · is_sole_prop=true/null",
+                       f"{rate(_possible_sole_prop,total_biz)} · is_sole_prop=true/null (API JSON fact)",
                        "#8B5CF6" if _possible_sole_prop>0 else "#64748b")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Registry Found drilldowns
-    _drilldown_table("sos_found_extended",     f"Registry Found (all) — {_sos_found_extended:,} businesses (sos_filings[] non-empty)", _SOS_COLS)
-    _drilldown_table("sos_found",              f"↳ sos_match=true — {_sos_found:,} businesses (primary path)", _SOS_COLS)
-    _drilldown_table("dt_filings_present_noreg",f"↳ Filings present, match=failure — {len(_seg.get('dt_filings_present_noreg',[])):,} businesses", _SOS_COLS)
-    _drilldown_table("dt_ne_true_active",      f"↳ Active — {_n_neta:,} businesses (sos_active=true)", _SOS_COLS)
-    _drilldown_table("dt_ne_true_inactive",    f"↳ Inactive — {_n_neti:,} businesses (sos_active=false)", _SOS_COLS)
-    _drilldown_table("reg_domestic",           f"↳ Domestic Filing — {_n_reg_domestic:,} businesses (foreign_domestic='domestic')", _SOS_COLS)
-    _drilldown_table("reg_foreign",            f"↳ Foreign Filing Only — {_n_reg_foreign:,} businesses (foreign_domestic='foreign')", _SOS_COLS)
-    _drilldown_table("states_same",            f"↳ Formation=Operating State — {_n_states_same:,} businesses", _SOS_COLS)
-    _drilldown_table("states_diff",            f"↳ States Differ — {_n_states_diff:,} businesses", _SOS_COLS)
-    _drilldown_table("domestic_active",        f"↳ Domestic Active — {_domestic_active_n:,} businesses", _SOS_COLS)
-    _drilldown_table("domestic_inactive",      f"↳ Domestic Inactive — {_domestic_inactive_n:,} businesses", _SOS_COLS)
-    _drilldown_table("domestic_missing",       f"↳ No Domestic Data — {_domestic_missing_n:,} businesses", _SOS_COLS)
-    _drilldown_table("state_match",            f"↳ State Match — {_state_match:,} businesses", _SOS_COLS)
-    _drilldown_table("no_state_match",         f"↳ No State Match — {_no_state_match:,} businesses", _SOS_COLS)
-    _drilldown_table("sole_prop_true",         f"↳ Sole Prop Confirmed — {_n_sp_t:,} businesses", _SOS_COLS)
-    _drilldown_table("sole_prop_null",         f"↳ Sole Prop Possible (null) — {_n_sp_n:,} businesses", _SOS_COLS)
-    _drilldown_table("sole_prop_false",        f"↳ Not Sole Prop — {_n_sp_f:,} businesses", _SOS_COLS)
+    # ── Registry Found drilldowns ─────────────────────────────────────────────
+    _drilldown_table("sos_found_extended",       f"Registry Found (all) — {_sos_found_extended:,} businesses (sos_filings[] non-empty)", _SOS_COLS)
+    _drilldown_table("sos_found",                f"↳ sos_match=true — {_sos_found:,} businesses (primary path)", _SOS_COLS)
+    _drilldown_table("dt_filings_present_noreg", f"↳ Filings present, match=failure — {len(_seg.get('dt_filings_present_noreg',[])):,} businesses", _SOS_COLS)
+    _drilldown_table("dt_ne_true_active",        f"↳ Active — {_n_neta:,} businesses (sos_active=true)", _SOS_COLS)
+    _drilldown_table("dt_ne_true_inactive",      f"↳ Inactive — {_n_neti:,} businesses (sos_active=false)", _SOS_COLS)
+    _drilldown_table("reg_domestic",             f"↳ Domestic Filing — {_n_reg_domestic:,} businesses (foreign_domestic='domestic')", _SOS_COLS)
+    _drilldown_table("reg_foreign",              f"↳ Foreign Filing Only — {_n_reg_foreign:,} businesses (foreign_domestic='foreign')", _SOS_COLS)
+    _drilldown_table("states_same",              f"↳ Filing State = Operating State — {_n_states_same:,} businesses", _SOS_COLS)
+    _drilldown_table("states_diff",              f"↳ Filing State ≠ Operating State — {_n_states_diff:,} businesses", _SOS_COLS)
+    _drilldown_table("domestic_active",          f"↳ Domestic Active — {_domestic_active_n:,} businesses", _SOS_COLS)
+    _drilldown_table("domestic_inactive",        f"↳ Domestic Inactive — {_domestic_inactive_n:,} businesses", _SOS_COLS)
+    _drilldown_table("domestic_missing",         f"↳ No Domestic Data — {_domestic_missing_n:,} businesses", _SOS_COLS)
+    _drilldown_table("state_match",              f"↳ Filing State Match — {_state_match:,} businesses", _SOS_COLS)
+    _drilldown_table("no_state_match",           f"↳ Filing State Mismatch — {_no_state_match:,} businesses", _SOS_COLS)
+    _drilldown_table("sole_prop_true",           f"↳ Sole Prop Confirmed — {_n_sp_t:,} businesses", _SOS_COLS)
+    _drilldown_table("sole_prop_null",           f"↳ Sole Prop Possible (null) — {_n_sp_n:,} businesses", _SOS_COLS)
+    _drilldown_table("sole_prop_false",          f"↳ Not Sole Prop — {_n_sp_f:,} businesses", _SOS_COLS)
+
+    # ═══════════════════════════════════════════════════════════════════════════════
+    # REGISTRY FOUND DEEP ANALYSIS — from sos_filings[] JSON (all from facts table)
+    # Source: rds_warehouse_public.facts name='sos_filings'
+    # All signals from the API JSON sos_filings chunk — no review tasks, no materialized tables
+    # ═══════════════════════════════════════════════════════════════════════════════
+    if _sos_filings_df is not None and not _sos_filings_df.empty:
+        # Filter to Registry Found businesses only
+        _rf_bids = set(_seg.get("sos_found_extended",[]))
+        _sf_rf   = _sos_filings_df[_sos_filings_df["business_id"].isin(_rf_bids)].copy()
+
+        if not _sf_rf.empty:
+            st.markdown("---")
+            st.markdown("#### 📋 Registry Found — Deep Analysis from `sos_filings[]` API JSON")
+            st.caption(
+                "All charts below are derived from `rds_warehouse_public.facts name='sos_filings'` — "
+                "parsing the `sos_filings[].jurisdiction`, `foreign_domestic`, `active`, `entity_type`, "
+                "`officers`, and `registration_date` fields from the API JSON. "
+                "Source: `integration-service/lib/facts/kyb/index.ts` lines 767-987 · "
+                "`integration-service/lib/facts/kyb/types.ts` lines 20-32"
+            )
+
+            # ── 1. Jurisdiction Distribution ──────────────────────────────────────
+            _jur_sql = (
+                "-- Returns: jurisdiction distribution from sos_filings[].jurisdiction (API JSON)\n"
+                "-- Source: rds_warehouse_public.facts name='sos_filings'\n"
+                "-- jurisdiction = 'us::' + registration_state.toLowerCase() (index.ts transformer)\n"
+                "SELECT filing->>'jurisdiction' AS jurisdiction,\n"
+                "       COUNT(DISTINCT f.business_id) AS businesses,\n"
+                "       SUM(CASE WHEN (filing->>'active')::boolean THEN 1 ELSE 0 END) AS active_filings,\n"
+                "       SUM(CASE WHEN filing->>'foreign_domestic'='domestic' THEN 1 ELSE 0 END) AS domestic_count\n"
+                "FROM rds_warehouse_public.facts f,\n"
+                "     JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing\n"
+                "WHERE f.name='sos_filings' AND LENGTH(f.value)<60000\n"
+                "  AND f.business_id IN (\n"
+                "    SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring\n"
+                f"   WHERE DATE(created_at) BETWEEN '{hub_date_from}' AND '{hub_date_to}'{hub_cust_clause()}\n"
+                "  )\n"
+                "GROUP BY 1 ORDER BY businesses DESC LIMIT 20;"
+            )
+            TAX_HAVEN_SET = {"us::de","us::nv","us::wy","us::sd","us::mt","us::nm"}
+            _jur_df = _sf_rf.groupby("jurisdiction").agg(
+                businesses=("business_id","nunique"),
+                active_filings=("filing_active", lambda x: (x==True).sum()),
+                domestic_count=("foreign_domestic", lambda x: (x=="domestic").sum()),
+            ).reset_index().sort_values("businesses",ascending=False).head(20)
+            _jur_df["Tax Haven"] = _jur_df["jurisdiction"].isin(TAX_HAVEN_SET).map({True:"⚠️ Yes",False:"No"})
+            _jur_df["State"] = _jur_df["jurisdiction"].str.replace("us::","").str.upper()
+
+            _jc1,_jc2 = st.columns([2,1])
+            with _jc1:
+                _jur_color = _jur_df["jurisdiction"].apply(
+                    lambda j: "#ef4444" if j in TAX_HAVEN_SET else "#22c55e")
+                fig_jur = px.bar(_jur_df, x="businesses", y="State", orientation="h",
+                                 color=_jur_df["Tax Haven"],
+                                 color_discrete_map={"⚠️ Yes":"#ef4444","No":"#22c55e"},
+                                 text="businesses",
+                                 title="Jurisdiction Distribution (sos_filings[].jurisdiction)")
+                fig_jur.update_traces(textposition="outside", texttemplate="%{x:,}")
+                fig_jur.update_layout(height=max(300,len(_jur_df)*38),
+                                      showlegend=True, margin=dict(t=40,b=10,l=10,r=60))
+                st.plotly_chart(dark_chart(fig_jur), use_container_width=True)
+            with _jc2:
+                st.markdown("**⚙️ Jurisdiction = `'us::' + registration_state.toLowerCase()`**")
+                st.markdown(
+                    "From `index.ts` transformer (line 767-987). "
+                    "Red bars = tax-haven states (DE/NV/WY/SD/MT/NM) — "
+                    "higher shell company risk, entity resolution gap likely."
+                )
+                st.dataframe(_jur_df[["State","businesses","domestic_count","Tax Haven"]].rename(
+                    columns={"businesses":"Businesses","domestic_count":"Domestic Filings"}),
+                    use_container_width=True, hide_index=True)
+            detail_panel("📍 Jurisdiction Distribution",
+                f"{len(_jur_df)} jurisdictions · {_sf_rf['business_id'].nunique():,} businesses",
+                what_it_means=(
+                    "**`sos_filings[].jurisdiction` — how it's computed (index.ts:767-987):**\n"
+                    "`jurisdiction = 'us::' + registration_state.toLowerCase()`\n\n"
+                    "**Tax-haven states** (DE/NV/WY/SD/MT/NM):\n"
+                    "- High shell company formation risk\n"
+                    "- Middesk finds foreign qualification in operating state, misses domestic filing\n"
+                    "- Entity resolution gap: formation state filing not retrieved\n\n"
+                    "**KYB action:** For tax-haven jurisdictions — verify both the domestic filing "
+                    "(in DE/NV/WY) AND the foreign qualification in the operating state.\n\n"
+                    "**Source:** `rds_warehouse_public.facts name='sos_filings'` · "
+                    "`integration-service/lib/facts/kyb/index.ts lines 767-987`"
+                ),
+                source_table="rds_warehouse_public.facts (name='sos_filings')",
+                source_file="integration-service/lib/facts/kyb/index.ts lines 767-987",
+                json_obj=_jur_df.to_dict("records"),
+                sql=_jur_sql, icon="📍", color="#22c55e")
+
+            # ── 2. Multi-Filing Histogram ─────────────────────────────────────────
+            _mf_sql = (
+                "-- Returns: filing count distribution (how many businesses have N filings)\n"
+                "-- Source: COUNT of sos_filings[] array entries per business\n"
+                "SELECT n_filings, COUNT(*) AS businesses\n"
+                "FROM (\n"
+                "  SELECT f.business_id, COUNT(filing) AS n_filings\n"
+                "  FROM rds_warehouse_public.facts f,\n"
+                "       JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing\n"
+                "  WHERE f.name='sos_filings' AND LENGTH(f.value)<60000\n"
+                f"  AND f.business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from}' AND '{hub_date_to}'{hub_cust_clause()})\n"
+                "  GROUP BY f.business_id\n"
+                ") GROUP BY n_filings ORDER BY n_filings;"
+            )
+            _mf_df = _sf_rf.groupby("business_id").size().reset_index(name="n_filings")
+            _mf_hist = _mf_df.groupby("n_filings")["business_id"].count().reset_index()
+            _mf_hist.columns = ["# Filings","Businesses"]
+            _mf_hist["Color"] = _mf_hist["# Filings"].apply(
+                lambda n: "#22c55e" if n==1 else "#f59e0b" if n==2 else "#f97316" if n==3 else "#ef4444")
+
+            _mc1,_mc2 = st.columns([2,1])
+            with _mc1:
+                fig_mf = px.bar(_mf_hist, x="# Filings", y="Businesses",
+                                color="# Filings",
+                                color_discrete_sequence=["#22c55e","#f59e0b","#f97316","#ef4444","#7f1d1d"],
+                                text="Businesses",
+                                title="Multi-Filing Distribution — sos_filings[] array length")
+                fig_mf.update_traces(textposition="outside")
+                fig_mf.update_layout(height=280, showlegend=False, margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_mf), use_container_width=True)
+            with _mc2:
+                _n_multi = int((_mf_df["n_filings"]>1).sum())
+                _n_single = int((_mf_df["n_filings"]==1).sum())
+                st.markdown(f"""<div style="background:#1E293B;border-radius:8px;padding:12px">
+                  <div style="color:#22c55e;font-weight:700">✅ Single filing: {_n_single:,}</div>
+                  <div style="color:#94A3B8;font-size:.78rem">One jurisdiction — lowest complexity</div>
+                  <div style="color:#f59e0b;font-weight:700;margin-top:8px">⚠️ Multi-filing: {_n_multi:,}</div>
+                  <div style="color:#94A3B8;font-size:.78rem">Multiple jurisdictions — check all are active</div>
+                </div>""", unsafe_allow_html=True)
+            detail_panel("📊 Multi-Filing Distribution",
+                f"{len(_mf_df):,} businesses · max {int(_mf_df['n_filings'].max()) if not _mf_df.empty else 0} filings",
+                what_it_means=(
+                    "**Why filing count matters for KYB:**\n"
+                    "- 1 filing = single jurisdiction, straightforward verification\n"
+                    "- 2+ filings = multi-state operation. Each foreign qualification must be "
+                    "in good standing in each state. Example: DE domestic + FL foreign + GA foreign.\n"
+                    "- A business with a foreign qualification filing but NO domestic filing → "
+                    "entity resolution gap: the primary incorporation record is missing.\n\n"
+                    "**`sos_filings[]` array length** is how many vendor-returned filing objects exist "
+                    "for this business. Source: `index.ts:717` (sos_filings fact, combineFacts rule).\n\n"
+                    "**Source:** `rds_warehouse_public.facts name='sos_filings'` · "
+                    "`integration-service/lib/facts/kyb/index.ts:717`"
+                ),
+                source_table="rds_warehouse_public.facts (name='sos_filings')",
+                source_file="integration-service/lib/facts/kyb/index.ts:717 (sos_filings fact, combineFacts)",
+                json_obj=_mf_hist.to_dict("records"),
+                sql=_mf_sql, icon="📊", color="#3B82F6")
+
+            # ── 3. Jurisdictional Good Standing — All-Active vs Partial vs All-Inactive ──
+            _gs_sql = (
+                "-- Returns: good standing status per business (all filings active vs partial vs none)\n"
+                "SELECT business_id,\n"
+                "  SUM(CASE WHEN (filing->>'active')::boolean THEN 1 ELSE 0 END) AS active_count,\n"
+                "  SUM(CASE WHEN NOT (filing->>'active')::boolean THEN 1 ELSE 0 END) AS inactive_count,\n"
+                "  COUNT(filing) AS total_filings\n"
+                "FROM rds_warehouse_public.facts f,\n"
+                "     JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing\n"
+                "WHERE f.name='sos_filings' AND LENGTH(f.value)<60000\n"
+                f"  AND f.business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from}' AND '{hub_date_to}'{hub_cust_clause()})\n"
+                "GROUP BY f.business_id;"
+            )
+            _gs_biz = _sf_rf.groupby("business_id").agg(
+                active_count=("filing_active", lambda x: (x==True).sum()),
+                inactive_count=("filing_active", lambda x: (x!=True).sum()),
+                total_filings=("filing_active","count"),
+            ).reset_index()
+            _gs_biz["status"] = _gs_biz.apply(
+                lambda r: "✅ All Active" if r["inactive_count"]==0 and r["total_filings"]>0
+                else ("🔴 All Inactive" if r["active_count"]==0 and r["total_filings"]>0
+                else "⚠️ Partial"), axis=1)
+            _gs_ct = _gs_biz["status"].value_counts().reset_index()
+            _gs_ct.columns = ["Status","Businesses"]
+            _n_all_active  = int((_gs_biz["status"]=="✅ All Active").sum())
+            _n_partial     = int((_gs_biz["status"]=="⚠️ Partial").sum())
+            _n_all_inactive= int((_gs_biz["status"]=="🔴 All Inactive").sum())
+
+            _gsc1,_gsc2 = st.columns([1,1])
+            with _gsc1:
+                fig_gs = px.pie(_gs_ct, names="Status", values="Businesses", hole=0.5,
+                                title="Jurisdictional Good Standing",
+                                color="Status",
+                                color_discrete_map={"✅ All Active":"#22c55e",
+                                                    "⚠️ Partial":"#f59e0b",
+                                                    "🔴 All Inactive":"#ef4444"})
+                fig_gs.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_gs), use_container_width=True)
+            with _gsc2:
+                st.markdown(f"""<div style="background:#1E293B;border-radius:8px;padding:12px">
+                  <div style="color:#22c55e;font-weight:700">✅ All Active: {_n_all_active:,} ({rate(_n_all_active,_sos_found_extended)})</div>
+                  <div style="color:#94A3B8;font-size:.78rem">Every sos_filings[].active = true</div>
+                  <div style="color:#f59e0b;font-weight:700;margin-top:6px">⚠️ Partial: {_n_partial:,} ({rate(_n_partial,_sos_found_extended)})</div>
+                  <div style="color:#94A3B8;font-size:.78rem">Some active, some inactive/unknown</div>
+                  <div style="color:#ef4444;font-weight:700;margin-top:6px">🔴 All Inactive: {_n_all_inactive:,} ({rate(_n_all_inactive,_sos_found_extended)})</div>
+                  <div style="color:#94A3B8;font-size:.78rem">All filings inactive/dissolved</div>
+                </div>""", unsafe_allow_html=True)
+            # Build segments for drilldowns
+            _seg["gs_all_active"]   = _gs_biz[_gs_biz["status"]=="✅ All Active"]["business_id"].tolist()
+            _seg["gs_partial"]      = _gs_biz[_gs_biz["status"]=="⚠️ Partial"]["business_id"].tolist()
+            _seg["gs_all_inactive"] = _gs_biz[_gs_biz["status"]=="🔴 All Inactive"]["business_id"].tolist()
+            _SEG_CALC["gs_all_active"]   = "**All Jurisdictions Active** — every `sos_filings[].active=true`. Entity is in good standing in ALL states where it has a filing.\n\n**Source:** `rds_warehouse_public.facts name='sos_filings'` · `integration-service/lib/facts/kyb/index.ts:1426-1434`"
+            _SEG_CALC["gs_partial"]      = "**Partial Good Standing** — some `sos_filings[].active=true`, some `false`/`undefined`. Entity may be active in one state but revoked in another.\n\n**KYB action:** Check each filing jurisdiction separately.\n\n**Source:** `rds_warehouse_public.facts name='sos_filings'`"
+            _SEG_CALC["gs_all_inactive"] = "**All Filings Inactive** — every `sos_filings[].active=false` or `undefined`. Entity is NOT in good standing in any jurisdiction.\n\n**KYB action:** Block approval. Request SOS reinstatement documents.\n\n**Source:** `rds_warehouse_public.facts name='sos_filings'`"
+            _drilldown_table("gs_all_active",   f"✅ All Active — {_n_all_active:,} businesses (all filings active)", _SOS_COLS)
+            _drilldown_table("gs_partial",      f"⚠️ Partial — {_n_partial:,} businesses (mixed active/inactive)", _SOS_COLS)
+            _drilldown_table("gs_all_inactive", f"🔴 All Inactive — {_n_all_inactive:,} businesses (all filings inactive)", _SOS_COLS)
+            detail_panel("⚖️ Jurisdictional Good Standing",
+                f"All Active: {_n_all_active:,} · Partial: {_n_partial:,} · All Inactive: {_n_all_inactive:,}",
+                what_it_means=(
+                    "**Why this matters beyond `sos_active`:**\n"
+                    "`sos_active=true` (the summary fact) means ANY filing is active. "
+                    "But a business with 3 filings where 1 is active and 2 are inactive/revoked "
+                    "will show `sos_active=true` yet has compliance issues in 2 jurisdictions.\n\n"
+                    "This analysis checks ALL `sos_filings[].active` values per business.\n\n"
+                    "**Source:** `rds_warehouse_public.facts name='sos_filings'` · "
+                    "`integration-service/lib/facts/kyb/index.ts:1426-1434` (sos_active DEPENDENT fact)"
+                ),
+                source_table="rds_warehouse_public.facts (name='sos_filings')",
+                source_file="integration-service/lib/facts/kyb/index.ts:1426-1434",
+                json_obj=_gs_ct.to_dict("records"),
+                sql=_gs_sql, icon="⚖️", color="#22c55e")
+
+            # ── 4. Entity Type Distribution ───────────────────────────────────────
+            _et_sql = (
+                "-- Returns: entity type from sos_filings[].entity_type (API JSON)\n"
+                "-- Values: 'llc','corporation','llp','lp','sole proprietorship' (index.ts transformer)\n"
+                "SELECT LOWER(COALESCE(filing->>'entity_type','unknown')) AS entity_type,\n"
+                "       COUNT(DISTINCT f.business_id) AS businesses,\n"
+                "       SUM(CASE WHEN filing->>'non_profit'='true' THEN 1 ELSE 0 END) AS non_profit_count\n"
+                "FROM rds_warehouse_public.facts f,\n"
+                "     JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing\n"
+                "WHERE f.name='sos_filings' AND LENGTH(f.value)<60000\n"
+                f"  AND f.business_id IN (SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring WHERE DATE(created_at) BETWEEN '{hub_date_from}' AND '{hub_date_to}'{hub_cust_clause()})\n"
+                "GROUP BY 1 ORDER BY businesses DESC;"
+            )
+            _et_df = _sf_rf.groupby("entity_type")["business_id"].nunique().reset_index()
+            _et_df.columns = ["Entity Type","Businesses"]
+            _et_df["Entity Type"] = _et_df["Entity Type"].str.upper().str.strip()
+            _np_n = int((_sf_rf["non_profit"]==1)["business_id"].nunique() if "non_profit" in _sf_rf.columns and _sf_rf["non_profit"].dtype != object else 0)
+            # Risk scoring per entity type (KYB specialist perspective)
+            _ET_RISK = {
+                "LLC":"🟢 Standard","CORPORATION":"🟢 Standard","LLP":"🟡 EDD Required",
+                "LP":"🔴 High Risk","SOLE PROPRIETORSHIP":"🔵 Special","UNKNOWN":"⚪ Unknown",
+            }
+            _et_df["KYB Risk"] = _et_df["Entity Type"].map(lambda e: _ET_RISK.get(e,"⚪"))
+
+            _etc1,_etc2 = st.columns([1,1])
+            with _etc1:
+                _et_color = {"LLC":"#22c55e","CORPORATION":"#22c55e","LLP":"#f59e0b",
+                             "LP":"#ef4444","SOLE PROPRIETORSHIP":"#3B82F6","UNKNOWN":"#64748b"}
+                fig_et = px.pie(_et_df, names="Entity Type", values="Businesses", hole=0.5,
+                                title="Entity Type from sos_filings[].entity_type",
+                                color="Entity Type", color_discrete_map=_et_color)
+                fig_et.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+                st.plotly_chart(dark_chart(fig_et), use_container_width=True)
+            with _etc2:
+                st.dataframe(_et_df.rename(columns={"Businesses":"Count"}),
+                             use_container_width=True, hide_index=True)
+                if _np_n > 0:
+                    st.markdown(f"<div style='background:#1e293b;border-left:3px solid #8B5CF6;border-radius:5px;padding:6px 10px;font-size:.78rem'>🔵 Non-Profit: {_np_n:,} businesses (sos_filings[].non_profit=true)</div>",
+                                unsafe_allow_html=True)
+            detail_panel("🏢 Entity Type Distribution",
+                f"{len(_et_df)} entity types · {_et_df['Businesses'].sum():,} businesses",
+                what_it_means=(
+                    "**`sos_filings[].entity_type` values (index.ts transformer):**\n"
+                    "| Type | KYB Risk | Why |\n|---|---|---|\n"
+                    "| LLC | 🟢 Standard | Most common, limited liability |\n"
+                    "| Corporation | 🟢 Standard | Formal governance, board required |\n"
+                    "| LLP | 🟡 EDD | Professional services (law/accounting) — industry AML risk |\n"
+                    "| LP (Limited Partnership) | 🔴 High | Often investment/real estate — shell company risk |\n"
+                    "| Sole Proprietorship | 🔵 Special | No SOS filing expected — check is_sole_prop fact |\n\n"
+                    "**`non_profit=true`** (from OpenCorporates transformer) — "
+                    "non-profits have different AML obligations and revenue profiles.\n\n"
+                    "**Source:** `rds_warehouse_public.facts name='sos_filings'` · "
+                    "`integration-service/lib/facts/kyb/types.ts:20-32` (SoSRegistration schema)"
+                ),
+                source_table="rds_warehouse_public.facts (name='sos_filings')",
+                source_file="integration-service/lib/facts/kyb/types.ts:20-32 (SoSRegistration schema)",
+                json_obj=_et_df.to_dict("records"),
+                sql=_et_sql, icon="🏢", color="#3B82F6")
+
+            # ── 5. Officers Present / Absent ──────────────────────────────────────
+            _of_biz = _sf_rf.groupby("business_id")["has_officers"].max().reset_index()
+            _n_has_officers  = int((_of_biz["has_officers"]==1).sum())
+            _n_no_officers   = int((_of_biz["has_officers"]!=1).sum())
+            _seg["has_officers"]  = _of_biz[_of_biz["has_officers"]==1]["business_id"].tolist()
+            _seg["no_officers"]   = _of_biz[_of_biz["has_officers"]!=1]["business_id"].tolist()
+            _SEG_CALC["has_officers"] = "**Officers present in sos_filings[].officers** — filtered by jurisdiction match (index.ts transformer). At least one officer record was found in the SOS filing.\n\n**Source:** `rds_warehouse_public.facts name='sos_filings'` · `integration-service/lib/facts/kyb/index.ts:767-987`"
+            _SEG_CALC["no_officers"]  = "**No officers in sos_filings[].officers** — the sos_filings[] entries have empty officers arrays after jurisdiction filtering. Cannot confirm beneficial ownership from the SOS record.\n\n**KYB action:** Request officer/director documentation directly from applicant.\n\n**Source:** `rds_warehouse_public.facts name='sos_filings'`"
+            _ofc1,_ofc2 = st.columns(2)
+            with _ofc1: kpi("✅ Officers Present in SOS Filing", f"{_n_has_officers:,}",
+                            f"{rate(_n_has_officers,_sos_found_extended)} · sos_filings[].officers non-empty",
+                            "#22c55e" if _n_has_officers>0 else "#64748b")
+            with _ofc2: kpi("⚠️ No Officers in SOS Filing", f"{_n_no_officers:,}",
+                            f"{rate(_n_no_officers,_sos_found_extended)} · beneficial ownership gap",
+                            "#f59e0b" if _n_no_officers>0 else "#64748b")
+            _drilldown_table("has_officers", f"Officers Present — {_n_has_officers:,} businesses", _SOS_COLS)
+            _drilldown_table("no_officers",  f"No Officers in Filing — {_n_no_officers:,} businesses (beneficial ownership gap)", _SOS_COLS)
+            detail_panel("👤 Officers in SOS Filing",
+                f"Present: {_n_has_officers:,} · Absent: {_n_no_officers:,}",
+                what_it_means=(
+                    "**`sos_filings[].officers` — how it's built (index.ts:767-987):**\n"
+                    "The officers array is filtered at fact-engine time: only officers whose "
+                    "`jurisdictions[]` contains the filing's `jurisdiction` are included. "
+                    "This means the Fact Engine has already done jurisdiction-matching.\n\n"
+                    "**What 'no officers' means for KYB:**\n"
+                    "- Cannot confirm beneficial owner identity from the SOS record alone\n"
+                    "- Must rely on IDV (Plaid biometrics) and `people` fact (submitted owners)\n"
+                    "- Cross-reference: if `is_sole_prop=true` AND officers empty → expected (sole props)\n\n"
+                    "**Source:** `rds_warehouse_public.facts name='sos_filings'` · "
+                    "`integration-service/lib/facts/kyb/index.ts lines 767-987`"
+                ),
+                source_table="rds_warehouse_public.facts (name='sos_filings')",
+                source_file="integration-service/lib/facts/kyb/index.ts:767-987 (officer filtering by jurisdiction)",
+                json_obj={"officers_present":_n_has_officers,"no_officers":_n_no_officers},
+                icon="👤", color="#3B82F6")
+
+            # ── 6. Business Age from sos_filings[].registration_date ─────────────
+            _sf_rf_rd = _sf_rf[_sf_rf["registration_date"].notna() & (_sf_rf["registration_date"]!="")].copy()
+            if not _sf_rf_rd.empty:
+                _sf_rf_rd["reg_date"]   = pd.to_datetime(_sf_rf_rd["registration_date"], errors="coerce")
+                _sf_rf_rd["age_months"] = ((pd.Timestamp.now() - _sf_rf_rd["reg_date"]).dt.days / 30.44).round(1)
+                # Per-business: use earliest registration date (formation date)
+                _age_biz = _sf_rf_rd.groupby("business_id")["age_months"].min().reset_index()
+                _age_biz["band"] = pd.cut(_age_biz["age_months"],
+                    bins=[-1,6,24,60,float("inf")],
+                    labels=["< 6 months","6–24 months","2–5 years","5+ years"])
+                _age_ct = _age_biz["band"].value_counts().reindex(
+                    ["< 6 months","6–24 months","2–5 years","5+ years"],fill_value=0).reset_index()
+                _age_ct.columns = ["Age Band","Businesses"]
+                _n_very_new = int(_age_biz["age_months"].lt(6).sum())
+                _avg_age    = round(float(_age_biz["age_months"].mean())/12, 1)
+
+                _agc1,_agc2 = st.columns([2,1])
+                with _agc1:
+                    fig_age = px.bar(_age_ct, x="Age Band", y="Businesses",
+                                     color="Age Band",
+                                     color_discrete_map={"< 6 months":"#ef4444","6–24 months":"#f59e0b",
+                                                         "2–5 years":"#3B82F6","5+ years":"#22c55e"},
+                                     text="Businesses",
+                                     title="Business Age from sos_filings[].registration_date")
+                    fig_age.update_traces(textposition="outside")
+                    fig_age.update_layout(height=280, showlegend=False, margin=dict(t=40,b=10,l=10,r=10))
+                    st.plotly_chart(dark_chart(fig_age), use_container_width=True)
+                with _agc2:
+                    st.markdown(f"""<div style="background:#1E293B;border-radius:8px;padding:12px">
+                      <div style="color:#CBD5E1;font-size:.78rem">Average portfolio age</div>
+                      <div style="color:#60A5FA;font-weight:700;font-size:1.2rem">{_avg_age} years</div>
+                      <div style="color:#ef4444;font-weight:700;margin-top:8px">⚠️ Very new (<6m): {_n_very_new:,}</div>
+                      <div style="color:#94A3B8;font-size:.75rem">Worth Score penalized · No vendor track record</div>
+                    </div>""", unsafe_allow_html=True)
+                # Build age segments for drilldowns
+                for _band_lbl, _lo, _hi in [("new_lt6",0,6),("mid_6_24",6,24),("est_2_5",24,60),("mature_5p",60,9999)]:
+                    _seg[f"age_{_band_lbl}"] = _age_biz[
+                        (_age_biz["age_months"]>=_lo) & (_age_biz["age_months"]<_hi)
+                    ]["business_id"].tolist()
+                    _SEG_CALC[f"age_{_band_lbl}"] = (
+                        f"**Business age band derived from `sos_filings[].registration_date`**\n"
+                        "Age = (today - registration_date) in months. "
+                        "Uses earliest filing registration_date across all filings per business.\n\n"
+                        "**Worth Score impact:** `age_business` is a key firmographic feature "
+                        "(Company Profile model category). Very new businesses (<6m) are penalized.\n\n"
+                        "**Source:** `rds_warehouse_public.facts name='sos_filings'` → `registration_date` field\n"
+                        "`integration-service/lib/facts/kyb/types.ts:20-32` (SoSRegistration schema)"
+                    )
+                _drilldown_table("age_new_lt6",   f"< 6 Months Old — {len(_seg.get('age_new_lt6',[])):,} businesses (highest risk)", _SOS_COLS)
+                _drilldown_table("age_mid_6_24",  f"6–24 Months — {len(_seg.get('age_mid_6_24',[])):,} businesses", _SOS_COLS)
+                _drilldown_table("age_est_2_5",   f"2–5 Years — {len(_seg.get('age_est_2_5',[])):,} businesses", _SOS_COLS)
+                _drilldown_table("age_mature_5p",  f"5+ Years — {len(_seg.get('age_mature_5p',[])):,} businesses (most established)", _SOS_COLS)
+                detail_panel("📅 Business Age from sos_filings[].registration_date",
+                    f"Avg: {_avg_age} years · {_n_very_new:,} very new (<6 months)",
+                    what_it_means=(
+                        "**`sos_filings[].registration_date` (index.ts types.ts:20-32):**\n"
+                        "The date the SOS filing was registered. Used as the authoritative formation date.\n\n"
+                        "**Worth Score impact:** `age_business = today - registration_date`. "
+                        "This feeds directly into the Company Profile XGBoost model. "
+                        "Very new businesses (< 6 months) receive significant penalties.\n\n"
+                        "**KYB impact:** Businesses < 6 months old have:\n"
+                        "- No track record in commercial databases (ZoomInfo/Equifax may not have data)\n"
+                        "- SOS filing may not be fully propagated\n"
+                        "- Higher probability of missing IDV / TIN verification\n\n"
+                        "**Source:** `rds_warehouse_public.facts name='sos_filings'` · "
+                        "`integration-service/lib/facts/kyb/types.ts:20-32`"
+                    ),
+                    source_table="rds_warehouse_public.facts (name='sos_filings')",
+                    source_file="integration-service/lib/facts/kyb/types.ts:20-32 (registration_date field)",
+                    json_obj=_age_ct.to_dict("records"),
+                    icon="📅", color="#3B82F6")
 
     # ── Legacy gap panels (foreign_only + domestic_no_state) ──────────────────
     _sos_found_set = set(_seg.get("sos_found",[]))
@@ -7419,6 +7866,131 @@ ORDER BY avg_impact_pts ASC;"""
                    "or the rds_manual_score_public schema is not accessible from this Redshift connection.")
 
     # ════════════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════════════
+    # PORTFOLIO-LEVEL KYB RISK SIGNALS (from sos_filings[] — rds_ facts only)
+    # Shell Company Signal · Multi-Jurisdiction Good Standing · Entity Type Risk Mix
+    # ════════════════════════════════════════════════════════════════════════
+    if _sos_filings_df is not None and not _sos_filings_df.empty:
+        st.markdown("---")
+        st.markdown("### 🛡️ Portfolio-Level KYB Risk Signals — from sos_filings[] fact")
+        st.caption(
+            "All signals derived from `rds_warehouse_public.facts name='sos_filings'` — "
+            "parsing `sos_filings[].jurisdiction`, `foreign_domestic`, `active`, `entity_type`, `officers`. "
+            "No materialized tables. Source: `integration-service/lib/facts/kyb/index.ts lines 767-987`"
+        )
+
+        _all_bids_sf = set(_seg.get("sos_found_extended",[]))
+        _sf_all = _sos_filings_df.copy()
+        _sf_portfolio = _sf_all  # use all loaded filings for portfolio metrics
+
+        # ── A. Shell Company Signal Rate ──────────────────────────────────────
+        # Definition: sos_filings[].jurisdiction in tax-haven + no officers + domestic filing
+        # Source: jurisdiction (index.ts transformer) + officers array + foreign_domestic
+        TAX_HAVEN_J = {"us::de","us::nv","us::wy","us::sd","us::mt","us::nm"}
+        _shell_bids_map = {}
+        for _bid_sh, _grp in _sf_portfolio.groupby("business_id"):
+            _is_th = _grp["jurisdiction"].isin(TAX_HAVEN_J).any()
+            _no_off = (_grp["has_officers"]==0).all()
+            _is_dom = (_grp["foreign_domestic"]=="domestic").any()
+            if _is_th and _no_off and _is_dom:
+                _shell_bids_map[_bid_sh] = {
+                    "jurisdictions": _grp["jurisdiction"].tolist(),
+                    "entity_types":  _grp["entity_type"].tolist(),
+                    "filings":       len(_grp),
+                }
+        _n_shell = len(_shell_bids_map)
+        _seg["shell_signal"] = list(_shell_bids_map.keys())
+        _SEG_CALC["shell_signal"] = (
+            "**Shell Company Signal — 3 conditions from sos_filings[]:**\n\n"
+            "1. `sos_filings[].jurisdiction` IN {us::de, us::nv, us::wy, us::sd, us::mt, us::nm} "
+            "→ tax-haven state registration\n"
+            "2. `sos_filings[].officers` is empty for all filings → no officers found\n"
+            "3. `sos_filings[].foreign_domestic='domestic'` → at least one domestic filing\n\n"
+            "**Why this combination signals a shell entity:**\n"
+            "Tax-haven incorporation + no officers + domestic-classified filing = "
+            "the classic shell company structure: incorporated in DE/NV/WY for legal advantages, "
+            "no identifiable officers in the SOS record.\n\n"
+            "**KYB action:** Enhanced Due Diligence (EDD). Request formation documents, "
+            "ownership structure, and officer verification.\n\n"
+            "**Source:** `rds_warehouse_public.facts name='sos_filings'` → "
+            "`jurisdiction`, `officers`, `foreign_domestic` fields"
+        )
+
+        # ── B. Multi-Jurisdiction Good Standing Rate ──────────────────────────
+        _mj_biz = _sf_portfolio.groupby("business_id").agg(
+            n_juris=("jurisdiction","nunique"),
+            all_active=("filing_active", lambda x: (x==True).all()),
+        ).reset_index()
+        _mj_multi = _mj_biz[_mj_biz["n_juris"]>1]
+        _n_mj_all_active = int((_mj_multi["all_active"]==True).sum())
+        _n_mj_not_all    = int((_mj_multi["all_active"]!=True).sum())
+        _n_mj_total      = len(_mj_multi)
+        _seg["mj_all_active"] = _mj_multi[_mj_multi["all_active"]==True]["business_id"].tolist()
+        _seg["mj_not_active"] = _mj_multi[_mj_multi["all_active"]!=True]["business_id"].tolist()
+        _SEG_CALC["mj_all_active"] = "**Multi-jurisdiction businesses where ALL filings are active** — entity is in good standing in every state where it has an SOS filing.\n\n**Source:** `sos_filings[].active` across all filing jurisdictions"
+        _SEG_CALC["mj_not_active"] = "**Multi-jurisdiction businesses with at least one inactive filing** — entity is revoked or dissolved in at least one operating state. This is a compliance issue.\n\n**KYB action:** Identify which jurisdiction is inactive and require reinstatement.\n\n**Source:** `sos_filings[].active` per jurisdiction"
+
+        # ── C. Entity Type Risk Mix ───────────────────────────────────────────
+        _HIGH_RISK_ET = {"lp","llp"}
+        _et_risk_bids = _sf_portfolio[_sf_portfolio["entity_type"].isin(_HIGH_RISK_ET)]["business_id"].unique().tolist()
+        _np_bids      = _sf_portfolio[_sf_portfolio["non_profit"]==1]["business_id"].unique().tolist()
+        _n_high_risk_et = len(_et_risk_bids)
+        _n_np_et        = len(_np_bids)
+        _seg["high_risk_et"] = _et_risk_bids
+        _seg["non_profit_et"]= _np_bids
+        _SEG_CALC["high_risk_et"] = "**LP or LLP entity type** — these entity structures carry elevated AML risk:\n- LP (Limited Partnership): often used in real estate/investment structures, higher shell company risk\n- LLP: typically professional services (law/accounting) — industry-specific AML risk\n\n**KYB action:** Enhanced Due Diligence (EDD) protocol required.\n\n**Source:** `sos_filings[].entity_type` (index.ts transformer)"
+        _SEG_CALC["non_profit_et"] = "**Non-profit entity** — `sos_filings[].non_profit=true` (from OpenCorporates transformer). Non-profits have different revenue profiles and AML obligations. Worth Score financial model may not apply normally.\n\n**Source:** `sos_filings[].non_profit` field"
+
+        # ── Render ────────────────────────────────────────────────────────────
+        _pra,_prb,_prc,_prd,_pre = st.columns(5)
+        with _pra: kpi("⚠️ Shell Signal", f"{_n_shell:,}",
+                       f"{rate(_n_shell,total_biz)} · tax-haven + no officers + domestic",
+                       "#ef4444" if _n_shell>0 else "#22c55e")
+        with _prb: kpi("✅ Multi-Juris All Active", f"{_n_mj_all_active:,}",
+                       f"{rate(_n_mj_all_active,_n_mj_total)} of multi-filing · all jurisdictions ok",
+                       "#22c55e" if _n_mj_all_active>0 else "#64748b")
+        with _prc: kpi("🔴 Multi-Juris Issues", f"{_n_mj_not_all:,}",
+                       f"{rate(_n_mj_not_all,_n_mj_total)} of multi-filing · inactive in some state",
+                       "#ef4444" if _n_mj_not_all>0 else "#64748b")
+        with _prd: kpi("🔴 LP/LLP (EDD)", f"{_n_high_risk_et:,}",
+                       f"{rate(_n_high_risk_et,total_biz)} · LP or LLP entity type",
+                       "#f97316" if _n_high_risk_et>0 else "#64748b")
+        with _pre: kpi("🔵 Non-Profit", f"{_n_np_et:,}",
+                       f"{rate(_n_np_et,total_biz)} · sos_filings[].non_profit=true",
+                       "#3B82F6" if _n_np_et>0 else "#64748b")
+
+        _drilldown_table("shell_signal",  f"⚠️ Shell Company Signal — {_n_shell:,} businesses (tax-haven + no officers)", _SOS_COLS)
+        _drilldown_table("mj_all_active", f"✅ Multi-Juris All Active — {_n_mj_all_active:,} businesses", _SOS_COLS)
+        _drilldown_table("mj_not_active", f"🔴 Multi-Juris Issues — {_n_mj_not_all:,} businesses", _SOS_COLS)
+        _drilldown_table("high_risk_et",  f"🔴 LP/LLP (EDD Required) — {_n_high_risk_et:,} businesses", _SOS_COLS)
+        _drilldown_table("non_profit_et", f"🔵 Non-Profit — {_n_np_et:,} businesses", _SOS_COLS)
+
+        detail_panel("🛡️ Portfolio KYB Risk Signals",
+            f"Shell: {_n_shell:,} · Multi-Juris Issues: {_n_mj_not_all:,} · LP/LLP: {_n_high_risk_et:,}",
+            what_it_means=(
+                "**All 5 signals derived from `sos_filings[]` JSON array (rds_ facts only):**\n\n"
+                "| Signal | Source fields | Rule |\n|---|---|---|\n"
+                "| Shell Signal | `jurisdiction` + `officers` + `foreign_domestic` | Tax-haven + no officers + domestic filing |\n"
+                "| Multi-Juris All Active | `active` per `jurisdiction` | All filings active in all states |\n"
+                "| Multi-Juris Issues | `active` per `jurisdiction` | At least one filing inactive |\n"
+                "| LP/LLP EDD | `entity_type` in {'lp','llp'} | High-risk entity structures |\n"
+                "| Non-Profit | `non_profit=true` | OpenCorporates transformer flag |\n\n"
+                "**No materialized tables used.** All from `rds_warehouse_public.facts name='sos_filings'`.\n\n"
+                "**Source:** `integration-service/lib/facts/kyb/index.ts lines 767-987` · "
+                "`integration-service/lib/facts/kyb/types.ts lines 20-32`"
+            ),
+            source_table="rds_warehouse_public.facts (name='sos_filings')",
+            source_file="integration-service/lib/facts/kyb/index.ts:767-987 · types.ts:20-32",
+            json_obj={
+                "shell_signal": _n_shell,
+                "mj_all_active": _n_mj_all_active,
+                "mj_not_active": _n_mj_not_all,
+                "lp_llp_edd": _n_high_risk_et,
+                "non_profit": _n_np_et,
+                "data_source": "rds_warehouse_public.facts name='sos_filings' — no materialized tables",
+            },
+            icon="🛡️", color="#8B5CF6")
+
     # SECTION 6 — PORTFOLIO ANOMALY & CONTRADICTION SCANNER
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
