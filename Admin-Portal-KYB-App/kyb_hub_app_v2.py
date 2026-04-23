@@ -5853,16 +5853,13 @@ if tab=="🏠 Home":
                       "#f59e0b" if _n_fne>0 else "#64748b")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # Decision tree drilldowns (inside the no-registry section)
-    _drilldown_table("no_sos",            f"All No Registry Found — {_sos_not_found:,} businesses", _SOS_COLS)
-    _drilldown_table("dt_filings_empty",  f"↳ YES: Filings Empty — {_n_fe:,} businesses (sos_active=null)", _SOS_COLS)
-    _drilldown_table("dt_filings_ne",     f"↳ NO: Filings NOT Empty — {_n_fne:,} businesses (sos_active present)", _SOS_COLS)
+    # No Registry drilldowns — only no-registry sub-segments here
+    # dt_ne_true / dt_ne_true_inactive / dt_ne_true_active are in the Registry Found section below
+    _drilldown_table("no_sos",           f"All No Registry Found — {_sos_not_found:,} businesses", _SOS_COLS)
+    _drilldown_table("dt_filings_empty", f"↳ YES: Filings Empty — {_n_fe:,} businesses (sos_active=null)", _SOS_COLS)
+    _drilldown_table("dt_filings_ne",    f"↳ NO: Filings Present — {_n_fne:,} businesses (sos_active≠null, match=failure)", _SOS_COLS)
     if _n_fne > 0:
-        _drilldown_table("dt_ne_false",       f"    ↳ sos_match=false — {_n_nef:,} businesses (vendor failure despite filings)", _SOS_COLS)
-        _drilldown_table("dt_ne_true",        f"    ↳ sos_match=true — {_n_net:,} businesses (registry confirmed)", _SOS_COLS)
-    if _n_net > 0:
-        _drilldown_table("dt_ne_true_inactive",f"        ↳ INACTIVE — {_n_neti:,} businesses (sos_active_verif=0)", _SOS_COLS)
-        _drilldown_table("dt_ne_true_active",  f"        ↳ ACTIVE ✅ — {_n_neta:,} businesses (sos_active_verif=1)", _SOS_COLS)
+        _drilldown_table("dt_ne_false",  f"    ↳ sos_match=false — {_n_nef:,} businesses (vendor failure despite filings)", _SOS_COLS)
 
     # ════════════════════════════════════════════════════════════════════════════
     # ROW 3 — REGISTRY FOUND
