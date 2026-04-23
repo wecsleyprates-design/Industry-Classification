@@ -4088,10 +4088,24 @@ if tab=="🏠 Home":
         _sos_not_found = int(_no_reg_mask.sum())
 
         # ── sos_filings EMPTY — strictly within No Registry (sos_match_boolean=false) ──
-        # Derivation (index.ts:1431): sos_active=undefined when sos_filings=[]
-        # Proxy: sos_active is null/missing in facts → filings array was empty
-        # ONLY for businesses where sos_match_boolean=false (the no-registry group)
-        _filings_empty_mask    = _no_reg_mask & _sa.isin(["","none","nan","null"])
+        # PRIMARY check: sos_active is null/missing in facts table
+        #   Derivation (index.ts:1431): sos_active is a DEPENDENT fact derived from sos_filings[].
+        #   It is NOT written to facts when sos_filings.length === 0.
+        #   So: sos_active absent in rds_warehouse_public.facts → sos_filings[] = []
+        # SECONDARY check: business is absent from _sos_filings_df
+        #   (_load_sos_filings_for_bids uses JSON_ARRAY_ELEMENTS → returns 0 rows when array is [])
+        #   If a business appears in no_reg group AND is absent from _sos_filings_df,
+        #   the sos_filings fact either doesn't exist OR its value array is empty.
+        _bids_with_filings = set(_sos_filings_df["business_id"].tolist()) if (
+            _sos_filings_df is not None and not _sos_filings_df.empty
+        ) else set()
+        # A business has empty sos_filings[] if:
+        #   (a) sos_active is null/missing in funnel_df (primary proxy, index.ts:1431)
+        #   AND (b) it appears in no rows of _sos_filings_df (secondary confirmation)
+        _filings_empty_mask = _no_reg_mask & (
+            _sa.isin(["","none","nan","null"]) &
+            _funnel["business_id"].apply(lambda b: b not in _bids_with_filings)
+        )
 
         # ── sos_filings PRESENT with data — move to "Registry Found" extended group ──
         # Per the API JSON (sos_filings chunk): even when sos_match='failure',
@@ -4704,19 +4718,41 @@ if tab=="🏠 Home":
             "**Why this is definitive:** An empty `sos_filings` array means NO vendor returned even one filing record. "
             "There is nothing to check — entity existence is completely unverifiable.\n\n"
             "**Source:** `integration-service/lib/facts/kyb/index.ts` lines 1426-1431\n\n"
-            "**Diagnostic SQL:**\n"
-            "```sql\n-- Returns: businesses with sos_active missing (= sos_filings was empty)\n"
+            "**Diagnostic SQL (rds_ tables only — verifies sos_filings[] is actually empty or absent):**\n"
+            "```sql\n-- Returns: businesses where sos_filings[] is empty OR the fact is absent.\n"
+            "-- TWO-LAYER CHECK:\n"
+            "--   Layer 1: sos_filings fact row is missing from facts table (fact was never written)\n"
+            "--   Layer 2: sos_filings fact row exists BUT value array is empty ([] in JSON)\n"
+            "-- Both mean sos_filings.length === 0 → sos_active is NOT written (index.ts:1431)\n"
             "SELECT rbcm.business_id,\n"
-            "       vr.sos_match_verification, vr.sos_active_verification, vr.sos_domestic_verification,\n"
-            "       JSON_EXTRACT_PATH_TEXT(f_match.value,'value') AS sos_match_boolean\n"
+            "       CASE\n"
+            "         WHEN f_sf.business_id IS NULL THEN 'sos_filings fact absent'\n"
+            "         ELSE 'sos_filings value is empty array []'\n"
+            "       END                                                       AS reason,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_act.value,'value')              AS sos_active,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_match.value,'value')            AS sos_match_boolean,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_match.value,'source','platformId') AS winning_vendor_pid\n"
             "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "-- Check sos_filings fact (absent or empty array)\n"
+            "LEFT JOIN rds_warehouse_public.facts f_sf\n"
+            "  ON f_sf.business_id = rbcm.business_id AND f_sf.name = 'sos_filings'\n"
+            "  AND LENGTH(f_sf.value) < 60000\n"
+            "-- Check sos_active (proxy: absent when sos_filings=[] per index.ts:1431)\n"
             "LEFT JOIN rds_warehouse_public.facts f_act\n"
             "  ON f_act.business_id = rbcm.business_id AND f_act.name = 'sos_active'\n"
+            "-- Check sos_match_boolean for additional context\n"
             "LEFT JOIN rds_warehouse_public.facts f_match\n"
             "  ON f_match.business_id = rbcm.business_id AND f_match.name = 'sos_match_boolean'\n"
-            "LEFT JOIN clients.verification_results vr ON vr.business_id = rbcm.business_id\n"
-            "WHERE f_act.business_id IS NULL\n"
-            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```"
+            "WHERE (\n"
+            "  f_sf.business_id IS NULL                                       -- fact row absent\n"
+            "  OR JSON_ARRAY_LENGTH(f_sf.value::json->'value') = 0           -- fact row exists but array is []\n"
+            ")\n"
+            "  AND f_act.business_id IS NULL                                  -- sos_active also absent (confirming proxy)\n"
+            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
+            "**Why two layers?**\n"
+            "- `sos_filings` fact absent → vendor never returned any filing data\n"
+            "- `sos_filings` fact present with `value=[]` → vendor returned an empty array explicitly\n"
+            "Both map to `sos_filings.length === 0` in the Fact Engine (index.ts:1431)"
         ),
         "dt_filings_ne": (
             "**What 'sos_filings array NOT EMPTY' means:**\n"
@@ -5427,15 +5463,21 @@ if tab=="🏠 Home":
             "| No SOS Data | `undefined/null` | sos_filings = [] — no data returned at all |\n"
             "| SOS Inactive | `false` | Data returned, but all filings are inactive |\n\n"
             "**Flag score contribution:** +8 points (No SOS Data)\n\n"
-            "**Diagnostic SQL:**\n"
-            "```sql\n-- Returns: No-SOS businesses with sos_match_boolean for cross-check\n"
+            "**Diagnostic SQL (rds_ tables only):**\n"
+            "```sql\n-- Returns: No SOS data businesses — sos_filings absent or empty, sos_active absent\n"
+            "-- Source: rds_warehouse_public.facts only (no materialized tables)\n"
             "SELECT rbcm.business_id,\n"
-            "       JSON_EXTRACT_PATH_TEXT(f_bool.value,'value') AS sos_match_boolean,\n"
-            "       vr.sos_match_verification,\n"
-            "       vr.sos_domestic_verification,\n"
-            "       JSON_EXTRACT_PATH_TEXT(f_tin.value,'value')  AS tin_match_boolean,\n"
-            "       JSON_EXTRACT_PATH_TEXT(f_n.value,'value')    AS naics_code\n"
+            "       CASE\n"
+            "         WHEN f_sf.business_id IS NULL THEN 'sos_filings fact absent'\n"
+            "         ELSE 'sos_filings array empty []'\n"
+            "       END                                                       AS sos_filings_status,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_bool.value,'value')              AS sos_match_boolean,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_tin.value,'value')               AS tin_match_boolean,\n"
+            "       JSON_EXTRACT_PATH_TEXT(f_n.value,'value')                 AS naics_code\n"
             "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            "LEFT JOIN rds_warehouse_public.facts f_sf\n"
+            "  ON f_sf.business_id = rbcm.business_id AND f_sf.name = 'sos_filings'\n"
+            "  AND LENGTH(f_sf.value) < 60000\n"
             "LEFT JOIN rds_warehouse_public.facts f_act\n"
             "  ON f_act.business_id = rbcm.business_id AND f_act.name = 'sos_active'\n"
             "LEFT JOIN rds_warehouse_public.facts f_bool\n"
@@ -5444,8 +5486,11 @@ if tab=="🏠 Home":
             "  ON f_tin.business_id = rbcm.business_id AND f_tin.name = 'tin_match_boolean'\n"
             "LEFT JOIN rds_warehouse_public.facts f_n\n"
             "  ON f_n.business_id = rbcm.business_id AND f_n.name = 'naics_code'\n"
-            "LEFT JOIN clients.verification_results vr ON vr.business_id = rbcm.business_id\n"
-            "WHERE f_act.business_id IS NULL\n"
+            "WHERE (\n"
+            "  f_sf.business_id IS NULL\n"
+            "  OR JSON_ARRAY_LENGTH(f_sf.value::json->'value') = 0\n"
+            ")\n"
+            "  AND f_act.business_id IS NULL\n"
             "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
             "**Source:** `integration-service/lib/facts/kyb/index.ts` lines 1426-1435 · "
             "`microsites/.../BusinessRegistrationTab.tsx` line 167 (UI null state)"
