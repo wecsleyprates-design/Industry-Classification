@@ -3761,10 +3761,11 @@ if tab=="🏠 Home":
                     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_state,
                 MAX(CASE WHEN f.name='formation_date'
                     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_date,
-                -- Registry flags — clients.verification_results (verification_results.sql)
-                MAX(vr.sos_match_verification)                                      AS sos_match_verif,
-                MAX(vr.sos_domestic_verification)                                   AS sos_domestic_verif,
-                MAX(vr.sos_active_verification)                                     AS sos_active_verif,
+                -- SOS verification flags derived from rds_integration_data.business_entity_review_task
+                -- (rds_ tables only — no clients.verification_results materialized table)
+                MAX(CASE WHEN bert.key='sos_match'    AND bert.sublabel='Submitted Active' THEN 1 ELSE 0 END) AS sos_match_verif,
+                MAX(CASE WHEN bert.key='sos_domestic' AND bert.sublabel='Domestic Active'  THEN 1 ELSE 0 END) AS sos_domestic_verif,
+                MAX(CASE WHEN bert.key='sos_active'   AND bert.status='Success'             THEN 1 ELSE 0 END) AS sos_active_verif,
                 -- TIN / EIN (index.ts lines 399-491)
                 MAX(CASE WHEN f.name='tin_submitted'
                     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_submitted,
