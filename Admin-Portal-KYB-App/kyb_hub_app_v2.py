@@ -5674,7 +5674,29 @@ if tab=="🏠 Home":
                 st.dataframe(_sub, use_container_width=True, hide_index=True,
                              column_config={k: v for k, v in _col_cfg.items() if k in _sub.columns})
             else:
-                st.dataframe(pd.DataFrame({"business_id": bids}), use_container_width=True, hide_index=True)
+                # stats_df unavailable — fall back to funnel_df which always loads
+                # funnel_df has: sos_match_boolean, sos_active, formation_state, tin_submitted,
+                #                tin_match_boolean, tin_status, middesk_confidence, operating_state
+                _fallback_cols = ["sos_match_boolean","sos_active","formation_state",
+                                   "tin_submitted","tin_match_boolean","operating_state"]
+                if funnel_df is not None and not funnel_df.empty:
+                    _fb = funnel_df[funnel_df["business_id"].isin(bids)][
+                        ["business_id"] + [c for c in _fallback_cols if c in funnel_df.columns]
+                    ].rename(columns={
+                        "sos_match_boolean":"SOS Match Boolean",
+                        "sos_active":"SOS Active",
+                        "formation_state":"Formation State",
+                        "tin_submitted":"TIN Submitted",
+                        "tin_match_boolean":"TIN Match Boolean",
+                        "operating_state":"Operating State",
+                    })
+                    if not _fb.empty:
+                        st.caption("⚠️ stats_df unavailable — showing funnel_df signals (subset of columns)")
+                        st.dataframe(_fb, use_container_width=True, hide_index=True)
+                    else:
+                        st.dataframe(pd.DataFrame({"business_id": bids}), use_container_width=True, hide_index=True)
+                else:
+                    st.dataframe(pd.DataFrame({"business_id": bids}), use_container_width=True, hide_index=True)
 
             # ── Download ─────────────────────────────────────────────────
             _bid_csv = pd.DataFrame({"business_id": bids}).to_csv(index=False).encode()
