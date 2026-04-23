@@ -6133,16 +6133,7 @@ if tab=="🏠 Home":
         st.markdown("<div style='margin-left:24px;border-left:2px dashed #475569;padding-left:12px;margin-top:4px'>",
                     unsafe_allow_html=True)
 
-        # Level 2A — Active vs Inactive (from sos_active fact)
-        kra1,kra2 = st.columns(2)
-        with kra1: kpi("↳ ✅ Active (sos_active=true)", f"{_n_neta:,}",
-                       f"{rate(_n_neta,_sos_found_extended)} of reg-found · sos_active=true in facts",
-                       "#22c55e")
-        with kra2: kpi("↳ ⚠️ Inactive (dissolved/revoked)", f"{_n_neti:,}",
-                       f"{rate(_n_neti,_sos_found_extended)} of reg-found · sos_active=false",
-                       "#f59e0b" if _n_neti>0 else "#64748b")
-
-        # Level 2B — Domestic vs Foreign (from sos_filings[].foreign_domestic)
+        # Domestic vs Foreign (sos_filings[].foreign_domestic — API JSON)
         krb1,krb2 = st.columns(2)
         with krb1: kpi("↳ 🏠 Domestic Filing", f"{_n_reg_domestic:,}",
                        f"{rate(_n_reg_domestic,_sos_found_extended)} of reg-found · sos_filings[].foreign_domestic='domestic'",
@@ -6151,7 +6142,7 @@ if tab=="🏠 Home":
                        f"{rate(_n_reg_foreign,_sos_found_extended)} of reg-found · sos_filings[].foreign_domestic='foreign'",
                        "#f59e0b" if _n_reg_foreign>0 else "#64748b")
 
-        # Level 2C — Formation state vs Operating state
+        # Formation state vs Operating state (formation_state fact vs primary_address.state fact)
         krc1,krc2 = st.columns(2)
         with krc1: kpi("↳ 📍 Formation = Operating State", f"{_n_states_same:,}",
                        f"{rate(_n_states_same,_sos_found_extended)} · formation_state = primary_address.state",
@@ -6160,25 +6151,14 @@ if tab=="🏠 Home":
                        f"{rate(_n_states_diff,_sos_found_extended)} · multi-state or foreign qual needed",
                        "#f59e0b" if _n_states_diff>0 else "#22c55e")
 
-        # Level 2D — Domestic vs Foreign only (as requested)
-        krd1,krd2 = st.columns(2)
-        with krd1: kpi("↳ 🏠 Domestic Filing", f"{_n_reg_domestic:,}",
-                       f"{rate(_n_reg_domestic,_sos_found_extended)} · sos_filings[].foreign_domestic='domestic'",
-                       "#22c55e" if _n_reg_domestic>0 else "#64748b")
-        with krd2: kpi("↳ 🌍 Foreign Filing Only", f"{_n_reg_foreign:,}",
-                       f"{rate(_n_reg_foreign,_sos_found_extended)} · sos_filings[].foreign_domestic='foreign'",
-                       "#f59e0b" if _n_reg_foreign>0 else "#64748b")
-
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ── Registry Found drilldowns (only for the visible cards) ───────────────
+    # ── Registry Found drilldowns — matching the visible KPI cards only ──────
     _drilldown_table("sos_found_extended", f"Registry Found (all) — {_sos_found_extended:,} businesses (sos_filings[] non-empty)", _SOS_COLS)
-    _drilldown_table("dt_ne_true_active",  f"↳ Active — {_n_neta:,} businesses (sos_active=true)", _SOS_COLS)
-    _drilldown_table("dt_ne_true_inactive",f"↳ Inactive — {_n_neti:,} businesses (sos_active=false)", _SOS_COLS)
     _drilldown_table("reg_domestic",       f"↳ Domestic Filing — {_n_reg_domestic:,} businesses (foreign_domestic='domestic')", _SOS_COLS)
     _drilldown_table("reg_foreign",        f"↳ Foreign Filing Only — {_n_reg_foreign:,} businesses (foreign_domestic='foreign')", _SOS_COLS)
-    _drilldown_table("states_same",        f"↳ Filing State = Operating State — {_n_states_same:,} businesses", _SOS_COLS)
-    _drilldown_table("states_diff",        f"↳ Filing State ≠ Operating State — {_n_states_diff:,} businesses", _SOS_COLS)
+    _drilldown_table("states_same",        f"↳ Formation = Operating State — {_n_states_same:,} businesses", _SOS_COLS)
+    _drilldown_table("states_diff",        f"↳ States Differ — {_n_states_diff:,} businesses", _SOS_COLS)
 
     # ═══════════════════════════════════════════════════════════════════════════════
     # REGISTRY FOUND DEEP ANALYSIS — from sos_filings[] JSON (all from facts table)
@@ -6706,40 +6686,59 @@ WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';"""
         "No materialized `clients.*` or `datascience.*` tables used."
     )
 
-    # Build signal summary from facts-only data
+    # KYB Signal Summary — ONLY signals from sos_filings API JSON chunk
+    # All from rds_warehouse_public.facts — no review task sublabels, no materialized tables
+    # Aligned with the visible KPI cards in Section 1
     _sig_rows = [
-        # signal, count, pct, source_fact, source_table, color, icon
-        ("No Registry Found",         _sos_not_found,       rate(_sos_not_found,total_biz),
-         "sos_match_boolean=false · sos_active=null",  "rds_warehouse_public.facts name='sos_match_boolean'", "#ef4444","❌"),
-        ("Filings Empty (def. no reg)",len(_seg.get("dt_filings_empty",[])),
+        # (signal_label, count, pct, source_field, source_table, color, icon)
+        ("No Registry Found",
+         _sos_not_found,
+         rate(_sos_not_found,total_biz),
+         "sos_match_boolean=false (facts table)",
+         "rds_warehouse_public.facts name='sos_match_boolean'",
+         "#ef4444","❌"),
+
+        ("SOS Filings Array Empty",
+         len(_seg.get("dt_filings_empty",[])),
          rate(len(_seg.get("dt_filings_empty",[])),total_biz),
-         "sos_active=null → sos_filings=[]", "rds_warehouse_public.facts name='sos_active' (absent)", "#f97316","📭"),
-        ("Registry Found (Active)",   len(_seg.get("dt_ne_true_active",[])),
-         rate(len(_seg.get("dt_ne_true_active",[])),total_biz),
-         "key='sos_match' sublabel='Submitted Active' status='success'",
-         "rds_integration_data.business_entity_review_task", "#22c55e","✅"),
-        ("Registry Found (Inactive)", len(_seg.get("dt_ne_true_inactive",[])),
-         rate(len(_seg.get("dt_ne_true_inactive",[])),total_biz),
-         "key='sos_active' status≠'Success'",
-         "rds_integration_data.business_entity_review_task", "#f59e0b","⚠️"),
-        ("Domestic Reg Active",       _domestic_active_n,   rate(_domestic_active_n,total_biz),
-         "key='sos_domestic' sublabel='Domestic Active'",
-         "rds_integration_data.business_entity_review_task", "#22c55e","🏠"),
-        ("Domestic Reg Inactive",     _domestic_inactive_n, rate(_domestic_inactive_n,total_biz),
-         "key='sos_domestic' sublabel='Domestic Inactive'",
-         "rds_integration_data.business_entity_review_task", "#f59e0b","⚠️"),
-        ("No Domestic Data",          _domestic_missing_n,  rate(_domestic_missing_n,total_biz),
-         "no sos_domestic review task row",
-         "rds_integration_data.business_entity_review_task (absent)", "#f97316","❌"),
-        ("State Match",               _state_match,         rate(_state_match,total_biz),
-         "key='sos_state' sublabel='State Match'",
-         "rds_integration_data.business_entity_review_task", "#22c55e","📍"),
-        ("No State Match",            _no_state_match,      rate(_no_state_match,total_biz),
-         "key='sos_state' sublabel='No State Match'",
-         "rds_integration_data.business_entity_review_task", "#f59e0b","📍"),
-        ("Possible Sole Prop",        _possible_sole_prop,  rate(_possible_sole_prop,total_biz),
-         "is_sole_prop=true OR null (index.ts:552-616)",
-         "rds_warehouse_public.facts name='is_sole_prop'", "#8B5CF6","🧍"),
+         "sos_active absent + sos_filings absent/empty[] (index.ts:1431)",
+         "rds_warehouse_public.facts name='sos_active' (absent)",
+         "#f97316","📭"),
+
+        ("Registry Found",
+         _sos_found_extended,
+         rate(_sos_found_extended,total_biz),
+         "sos_filings[] non-empty (sos_match_boolean=true OR filings present)",
+         "rds_warehouse_public.facts name='sos_filings'",
+         "#22c55e","🏛️"),
+
+        ("Domestic Filing",
+         _n_reg_domestic,
+         rate(_n_reg_domestic,total_biz),
+         "sos_filings[].foreign_domestic='domestic'",
+         "rds_warehouse_public.facts name='sos_filings'",
+         "#22c55e","🏠"),
+
+        ("Foreign Filing Only",
+         _n_reg_foreign,
+         rate(_n_reg_foreign,total_biz),
+         "sos_filings[].foreign_domestic='foreign'",
+         "rds_warehouse_public.facts name='sos_filings'",
+         "#f59e0b","🌍"),
+
+        ("Filing State = Operating State",
+         _n_states_same,
+         rate(_n_states_same,total_biz),
+         "sos_filings[].state = primary_address.state (both facts)",
+         "rds_warehouse_public.facts name='sos_filings' + name='primary_address'",
+         "#22c55e","📍"),
+
+        ("Filing States Differ",
+         _n_states_diff,
+         rate(_n_states_diff,total_biz),
+         "sos_filings[].state ≠ primary_address.state",
+         "rds_warehouse_public.facts name='sos_filings' + name='primary_address'",
+         "#f59e0b","📍"),
     ]
     _sig_df = pd.DataFrame(_sig_rows,
         columns=["Signal","Count","Rate","Source Signal","Source Table","Color","Icon"])
