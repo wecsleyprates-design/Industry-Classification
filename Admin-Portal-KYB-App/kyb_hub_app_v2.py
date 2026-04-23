@@ -4024,21 +4024,24 @@ if tab=="🏠 Home":
         # DECISION TREE signals (index.ts:1421-1434 + verification_results.sql)
         # ════════════════════════════════════════════════════════════════
 
-        # ── sos_filings EMPTY vs NOT EMPTY ───────────────────────────────────
-        # Derivation: sos_active = undefined when sos_filings=[] (index.ts:1431)
-        # sos_active missing/null in facts  → filings array was empty
-        # sos_active present ('true'/'false') → filings array was NOT empty
-        _filings_empty_mask = _sa.isin(["","none","nan","null"])
-        _filings_notempty_mask = ~_filings_empty_mask
-
         # ── sos_match_boolean breakdown ───────────────────────────────────────
-        _no_reg_mask   = (_smb == "false")          # vendor returned failure
+        _no_reg_mask   = (_smb == "false")          # sos_match returned 'failure'
         _sos_found     = int((_smb == "true").sum())
         _sos_not_found = int(_no_reg_mask.sum())
 
-        # Among filings NOT empty: match=false vs match=true
-        _filings_ne_match_false_mask = _filings_notempty_mask & _no_reg_mask
-        _filings_ne_match_true_mask  = _filings_notempty_mask & (_smb == "true")
+        # ── sos_filings EMPTY vs NOT EMPTY — scoped to No Registry group ─────────
+        # Derivation (index.ts:1431): sos_active=undefined when sos_filings=[]
+        # Proxy: sos_active is null/missing → filings array was empty
+        # CRITICAL: these are sub-segments of No Registry Found (sos_match_boolean=false)
+        # NOT of the whole portfolio — rates should be vs _sos_not_found
+        _filings_empty_mask    = _no_reg_mask & _sa.isin(["","none","nan","null"])
+        _filings_notempty_mask = _no_reg_mask & ~_sa.isin(["","none","nan","null"])
+
+        # Among filings NOT empty + sos_match=false: match=false (already guaranteed) vs match=true
+        # (sos_match_boolean can only be false in the no_reg group by definition)
+        _filings_ne_match_false_mask = _filings_notempty_mask  # all NOT-empty in no-reg group have match=false
+        # sos_match=true is the REGISTRY FOUND group — separate, not a no-registry sub-segment
+        _filings_ne_match_true_mask  = _filings_notempty_mask & (_smb == "true")  # will be 0 (contradictory)
 
         # ── sos_active_verif (from stats_df via verification_results.sql:47-51) ─
         _av_col = stats_df.set_index("business_id")["sos_active_verif"] if (
@@ -4046,11 +4049,17 @@ if tab=="🏠 Home":
         ) else pd.Series(dtype=float)
         def _av(bid): return int(_av_col.get(bid, 0) or 0)
 
-        # Among match=true: sos_active_verif=0 (inactive) vs =1 (active)
-        _filings_ne_true_inactive_mask = _filings_ne_match_true_mask & _funnel["business_id"].apply(
+        # ── Registry Found active status — scoped to sos_match_boolean=true ────
+        # These are the REGISTRY FOUND businesses split by active/inactive status
+        # sos_active_verif=0 → filing found but inactive (dissolved/revoked)
+        # sos_active_verif=1 → filing found and active in good standing
+        _registry_found_mask = (_smb == "true")
+        _filings_ne_true_inactive_mask = _registry_found_mask & _funnel["business_id"].apply(
             lambda b: _av(b) == 0)
-        _filings_ne_true_active_mask   = _filings_ne_match_true_mask & _funnel["business_id"].apply(
+        _filings_ne_true_active_mask   = _registry_found_mask & _funnel["business_id"].apply(
             lambda b: _av(b) == 1)
+        # dt_ne_true re-uses the registry found mask for the tree display
+        _filings_ne_match_true_mask = _registry_found_mask
 
         # ── Registry Found (verified sos_match_verification=1) ───────────────
         # Source: verification_results.sql:42-45
@@ -5781,14 +5790,22 @@ if tab=="🏠 Home":
             "**Fact derivation (index.ts:1421):**\n"
             "```typescript\nsos_match_boolean = engine.getResolvedFact('sos_match')?.value === 'success'\n"
             "// 'false' = sos_match returned 'failure'\n// null   = vendor not called\n```\n\n"
-            f"**🌳 Decision Tree — with current portfolio counts ({period_label}):**\n\n"
-            f"```\nIs sos_filings array empty?  (proxy: sos_active=null in rds_warehouse_public.facts)\n"
-            f"  YES → {_n_fe:,} businesses — Definitive 'No Registry Found'\n"
-            f"  NO  → {_n_fne:,} businesses — Filings exist, check sos_match_boolean:\n"
-            f"           false → {_n_nef:,} businesses — vendor returned 'failure' despite having filings\n"
-            f"           true  → {_n_net:,} businesses — Registry confirmed, check active status:\n"
-            f"                      sos_active_verif=0 → {_n_neti:,} businesses — Found but INACTIVE\n"
-            f"                      sos_active_verif=1 → {_n_neta:,} businesses — Found and ACTIVE ✅\n```\n\n"
+            f"**🌳 Decision Tree — No Registry Found · {_sos_not_found:,} businesses · {rate(_sos_not_found,total_biz)} of portfolio:**\n\n"
+            f"```\n❌ No Registry Found: {_sos_not_found:,} businesses\n"
+            f"   (sos_match_boolean = 'false' in rds_warehouse_public.facts)\n\n"
+            f"Is sos_filings array empty?  (proxy: sos_active absent from facts — index.ts:1431)\n"
+            f"  ├── YES → {_n_fe:,} businesses ({rate(_n_fe,_sos_not_found)} of no-reg)\n"
+            f"  │         Definitive 'No Registry Found': no vendor returned ANY filing\n"
+            f"  │         Signal: sos_active fact missing from rds_warehouse_public.facts\n"
+            f"  │\n"
+            f"  └── NO  → {_n_fne:,} businesses ({rate(_n_fne,_sos_not_found)} of no-reg)\n"
+            f"            Filings EXIST in sos_filings array BUT sos_match='failure'\n"
+            f"            Vendor had filing data but returned 'failure' for the overall match\n"
+            f"            (e.g. EIN mismatch, name mismatch, filing not in submitted state)\n```\n\n"
+            f"**Registry Found breakdown (separate group — sos_match_boolean=true):**\n"
+            f"```\n🏛️ Registry Found: {_sos_found:,} businesses\n"
+            f"  ├── ✅ Active   → {_n_neta:,} businesses (sos_active_verif=1)\n"
+            f"  └── ⚠️ Inactive → {_n_neti:,} businesses (sos_active_verif=0)\n```\n\n"
             "**How sos_filings empty is detected (index.ts:1431):**\n"
             "`sos_active` is a DEPENDENT fact. It is only written when `sos_filings.length > 0`. "
             "If `sos_active` is missing from `rds_warehouse_public.facts` → filings array was empty.\n\n"
@@ -5816,22 +5833,25 @@ if tab=="🏠 Home":
         ),
         color="#ef4444"
     )
-    kp1,kp2,kp3 = st.columns(3)
-    with kp1: kpi("❌ No Registry Found", f"{_sos_not_found:,}", f"{rate(_sos_not_found,total_biz)} of onboarded", "#ef4444" if _sos_not_found>0 else "#22c55e")
-    with kp2: kpi("📭 Filings Empty (YES)", f"{_n_fe:,}", f"{rate(_n_fe,_sos_not_found)} of no-reg · sos_active=null", "#f97316" if _n_fe>0 else "#64748b")
-    with kp3: kpi("📋 Filings NOT Empty (NO)", f"{_n_fne:,}", f"{rate(_n_fne,_sos_not_found)} of no-reg · sos_active present", "#3B82F6" if _n_fne>0 else "#64748b")
+    # Level 1 — No Registry Found total
+    kp1, = st.columns(1)
+    with kp1: kpi("❌ No Registry Found", f"{_sos_not_found:,}",
+                  f"{rate(_sos_not_found,total_biz)} of {total_biz:,} onboarded", "#ef4444" if _sos_not_found>0 else "#22c55e")
 
-    # NO sub-breakdown: sos_match_boolean=false vs true
-    if _n_fne > 0:
-        _nb1,_nb2 = st.columns(2)
-        with _nb1: kpi("  ↳ ❌ sos_match=false", f"{_n_nef:,}", f"{rate(_n_nef,_n_fne)} of filings-not-empty · vendor failure", "#f97316" if _n_nef>0 else "#64748b")
-        with _nb2: kpi("  ↳ 🏛️ sos_match=true → check active", f"{_n_net:,}", f"{rate(_n_net,_n_fne)} of filings-not-empty · registry confirmed", "#22c55e" if _n_net>0 else "#64748b")
-
-    # sos_match=true sub-breakdown: inactive vs active
-    if _n_net > 0:
-        _nc1,_nc2 = st.columns(2)
-        with _nc1: kpi("    ↳ ⚠️ Found, INACTIVE", f"{_n_neti:,}", f"{rate(_n_neti,_n_net)} of match=true · sos_active_verif=0", "#f59e0b" if _n_neti>0 else "#64748b")
-        with _nc2: kpi("    ↳ ✅ Found, ACTIVE", f"{_n_neta:,}", f"{rate(_n_neta,_n_net)} of match=true · sos_active_verif=1", "#22c55e")
+    if _sos_not_found > 0:
+        st.markdown(
+            "<div style='margin-left:24px;border-left:2px dashed #475569;padding-left:12px;margin-top:4px'>",
+            unsafe_allow_html=True
+        )
+        # Level 2 — Filings empty vs not empty (both within no-registry group)
+        kp2,kp3 = st.columns(2)
+        with kp2: kpi("↳ 📭 YES — Filings Empty", f"{_n_fe:,}",
+                      f"{rate(_n_fe,_sos_not_found)} of no-reg · sos_active=null → sos_filings=[]",
+                      "#f97316" if _n_fe>0 else "#64748b")
+        with kp3: kpi("↳ 📋 NO — Filings Present", f"{_n_fne:,}",
+                      f"{rate(_n_fne,_sos_not_found)} of no-reg · sos_active≠null → filings exist but match=failure",
+                      "#f59e0b" if _n_fne>0 else "#64748b")
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # Decision tree drilldowns (inside the no-registry section)
     _drilldown_table("no_sos",            f"All No Registry Found — {_sos_not_found:,} businesses", _SOS_COLS)
@@ -5884,10 +5904,33 @@ if tab=="🏠 Home":
         ),
         color="#22c55e"
     )
-    kr1,kr2 = st.columns(2)
-    with kr1: kpi("🏛️ Registry Found", f"{_sos_found:,}", f"{rate(_sos_found,total_biz)} of onboarded", "#22c55e" if _sos_found/max(total_biz,1)>0.8 else "#f59e0b")
-    with kr2: kpi("🏛️ Registry Found (Verified)", f"{_sos_found_verified:,}", f"{rate(_sos_found_verified,total_biz)} · sublabel='Submitted Active'", "#22c55e" if _sos_found_verified>0 else "#64748b")
-    _drilldown_table("sos_found", f"Registry Found — {_sos_found:,} businesses (sos_match_boolean=true)", _SOS_COLS)
+    # Level 1 — Registry Found total
+    kr0, = st.columns(1)
+    with kr0: kpi("🏛️ Registry Found", f"{_sos_found:,}",
+                  f"{rate(_sos_found,total_biz)} of {total_biz:,} onboarded",
+                  "#22c55e" if _sos_found/max(total_biz,1)>0.8 else "#f59e0b")
+    if _sos_found > 0:
+        st.markdown(
+            "<div style='margin-left:24px;border-left:2px dashed #475569;padding-left:12px;margin-top:4px'>",
+            unsafe_allow_html=True
+        )
+        # Level 2 — Active vs Inactive
+        kr1,kr2 = st.columns(2)
+        with kr1: kpi("↳ ✅ Active", f"{_n_neta:,}",
+                      f"{rate(_n_neta,_sos_found)} of reg-found · sos_active_verif=1",
+                      "#22c55e")
+        with kr2: kpi("↳ ⚠️ Inactive (dissolved/revoked)", f"{_n_neti:,}",
+                      f"{rate(_n_neti,_sos_found)} of reg-found · sos_active_verif=0",
+                      "#f59e0b" if _n_neti>0 else "#64748b")
+        # Level 3 — Verified sublabel
+        kr3, = st.columns(1)
+        with kr3: kpi("  ↳ 🏛️ Submitted Active (key='sos_match' sublabel='Submitted Active')", f"{_sos_found_verified:,}",
+                      f"{rate(_sos_found_verified,_sos_found)} of reg-found · review task confirmed",
+                      "#22c55e" if _sos_found_verified>0 else "#64748b")
+        st.markdown("</div>", unsafe_allow_html=True)
+    _drilldown_table("sos_found",          f"Registry Found — {_sos_found:,} businesses (sos_match_boolean=true)", _SOS_COLS)
+    _drilldown_table("dt_ne_true_active",  f"↳ Active — {_n_neta:,} businesses (sos_active_verif=1)", _SOS_COLS)
+    _drilldown_table("dt_ne_true_inactive",f"↳ Inactive — {_n_neti:,} businesses (sos_active_verif=0)", _SOS_COLS)
 
     # ════════════════════════════════════════════════════════════════════════════
     # ROW 4 — DOMESTIC REGISTRATION
@@ -6275,8 +6318,8 @@ LEFT JOIN rds_integration_data.business_entity_verification bev
 LEFT JOIN rds_integration_data.business_entity_review_task bert
   ON bert.business_entity_verification_id = bev.id
   AND bert.key IN ('sos_domestic','sos_state')
-WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}
-GROUP BY rbcm.business_id;""",
+WHERE DATE(rbcm.created_at) BETWEEN '{hub_date_from}' AND '{hub_date_to}'{hub_cust_clause()}
+GROUP BY rbcm.business_id;""".replace("{hub_date_from}", str(hub_date_from or "")).replace("{hub_date_to}", str(hub_date_to or "")),
         icon="📊", color="#3B82F6")
 
     # ── Gap/anomaly explanations for registry signals ──────────────────────
