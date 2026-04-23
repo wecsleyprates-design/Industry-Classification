@@ -5773,88 +5773,88 @@ if tab=="🏠 Home":
                         )
                 st.markdown("---")
 
-            # ── Business IDs + signals ───────────────────────────────────
-            if stats_df is not None and not stats_df.empty and cols_from_stats:
+            # ── Business IDs + sos_filings signals ──────────────────────────
+            # Show ONLY fields derivable from the sos_filings API JSON chunk:
+            #   sos_match_boolean, sos_active, formation_state, formation_date
+            #   + sos_filings[].* parsed fields (foreign_domestic, jurisdiction,
+            #     entity_type, filing_name, registration_date, has_officers, state)
+            # EXCLUDED: sos_match_verif/sos_domestic_verif/sos_active_verif (clients.*),
+            #           tin_*/idv_passed/naics_code/watchlist_hits (unrelated facts)
+            # Source: rds_warehouse_public.facts (stats_df) +
+            #         _sos_filings_df (JSON_ARRAY_ELEMENTS parse of sos_filings)
+
+            # Build base table from stats_df (facts table signals)
+            _base_cols = ["sos_match_boolean","sos_match_status","sos_active",
+                          "formation_state","formation_date"]
+            if stats_df is not None and not stats_df.empty:
                 _sub = stats_df[stats_df["business_id"].isin(bids)][
-                    ["business_id"] + [c for c in cols_from_stats if c in stats_df.columns]
+                    ["business_id"] + [c for c in _base_cols if c in stats_df.columns]
                 ].copy()
-                # Human-readable column names → source signal noted in tooltip via column config
-                _rename = {
-                    # Registry / SOS
-                    "sos_match_boolean": "SOS Match Boolean",
-                    "sos_match_status":  "SOS Match Status",
-                    "sos_active":        "SOS Active",
-                    "sos_match_verif":   "sos_match_verif (0/1)",
-                    "sos_domestic_verif":"sos_domestic_verif (0/1)",
-                    "sos_active_verif":  "sos_active_verif (0/1)",
-                    "formation_state":   "Formation State",
-                    "formation_date":    "Formation Date",
-                    # TIN / EIN
-                    "tin_submitted":     "TIN Submitted",
-                    "tin_match_status":  "TIN Match Status",
-                    "tin_match":         "TIN Match Boolean",
-                    # IDV
-                    "idv_passed":        "IDV Passed",
-                    # Classification
-                    "naics_code":        "NAICS Code",
-                    # Risk
-                    "watchlist_hits":    "Watchlist Hits",
-                    "num_bankruptcies":  "Bankruptcies",
-                    "num_judgements":    "Judgements",
-                    "num_liens":         "Liens",
-                    "adverse_media":     "Adverse Media",
-                    # Firmographic
-                    "revenue":           "Revenue",
-                }
-                _sub = _sub.rename(columns=_rename)
-                # Column config: tooltips explain what each signal means
-                _col_cfg = {
-                    "SOS Match Boolean":       st.column_config.TextColumn("SOS Match Boolean",  help="sos_match_boolean=true → any vendor found a registry record (index.ts:1421)"),
-                    "SOS Match Status":        st.column_config.TextColumn("SOS Match Status",   help="sos_match.value: 'success'|'failure' — per vendor (Middesk/OC/Trulioo)"),
-                    "SOS Active":              st.column_config.TextColumn("SOS Active",         help="sos_active: true if any filing has active=true OR status='active' (index.ts:1426)"),
-                    "sos_match_verif (0/1)":   st.column_config.NumberColumn("sos_match_verif",  help="1 only when key='sos_match' AND sublabel='Submitted Active' (verification_results.sql:42-45)"),
-                    "sos_domestic_verif (0/1)":st.column_config.NumberColumn("sos_domestic_verif",help="1 only when key='sos_domestic' AND sublabel='Domestic Active' (verification_results.sql:36-39)"),
-                    "sos_active_verif (0/1)":  st.column_config.NumberColumn("sos_active_verif", help="1 when category='sos', key='sos_active', status='Success' (verification_results.sql:47-51)"),
-                    "Formation State":         st.column_config.TextColumn("Formation State",    help="State of incorporation from Middesk businessEntityVerification.formation_state"),
-                    "Formation Date":          st.column_config.TextColumn("Formation Date",     help="Date of incorporation from Middesk businessEntityVerification.formation_date"),
-                    "TIN Submitted":           st.column_config.TextColumn("TIN Submitted",      help="EIN/TIN provided by the business at onboarding (masked)"),
-                    "TIN Match Status":        st.column_config.TextColumn("TIN Match Status",   help="tin_match.value.status: 'success'=IRS confirmed | 'failure'=IRS mismatch (index.ts:429)"),
-                    "TIN Match Boolean":       st.column_config.TextColumn("TIN Match Boolean",  help="tin_match_boolean: true=IRS confirmed EIN matches legal name (index.ts:482)"),
-                    "IDV Passed":              st.column_config.TextColumn("IDV Passed",         help="idv_passed_boolean: Plaid biometric IDV result for business owners"),
-                    "NAICS Code":              st.column_config.TextColumn("NAICS Code",         help="NAICS 2022 6-digit code. '561499' = last resort fallback (aiNaicsEnrichment.ts:63)"),
-                    "Watchlist Hits":          st.column_config.NumberColumn("Watchlist Hits",   help="Number of consolidated watchlist hits (PEP/OFAC/sanctions) from Middesk+Trulioo"),
-                    "Bankruptcies":            st.column_config.NumberColumn("Bankruptcies",     help="num_bankruptcies fact"),
-                    "Judgements":              st.column_config.NumberColumn("Judgements",       help="num_judgements fact"),
-                    "Liens":                   st.column_config.NumberColumn("Liens",            help="num_liens fact"),
-                    "Adverse Media":           st.column_config.NumberColumn("Adverse Media",    help="adverse_media_hits (separate from watchlist — filtered out of watchlist.value)"),
-                    "Revenue":                 st.column_config.TextColumn("Revenue",            help="Annual revenue estimate from ZoomInfo/Equifax firmographic data"),
-                }
+            elif funnel_df is not None and not funnel_df.empty:
+                _funnel_base = ["sos_match_boolean","sos_active","formation_state"]
+                _sub = funnel_df[funnel_df["business_id"].isin(bids)][
+                    ["business_id"] + [c for c in _funnel_base if c in funnel_df.columns]
+                ].copy()
+            else:
+                _sub = pd.DataFrame({"business_id": bids})
+
+            # Enrich with sos_filings[] parsed fields (aggregate per business — take first filing)
+            if _sos_filings_df is not None and not _sos_filings_df.empty:
+                _sf_agg = (
+                    _sos_filings_df[_sos_filings_df["business_id"].isin(bids)]
+                    .sort_values("business_id")
+                    .groupby("business_id")
+                    .agg(
+                        foreign_domestic=("foreign_domestic", lambda x: " / ".join(sorted(set(x.dropna())))),
+                        jurisdiction=("jurisdiction",    lambda x: " / ".join(sorted(set(x.dropna())))),
+                        entity_type=("entity_type",      lambda x: " / ".join(sorted(set(x.dropna())))),
+                        filing_name=("filing_name",      "first"),
+                        registration_date=("registration_date","min"),
+                        has_officers=("has_officers",    "max"),
+                        filing_state=("filing_state",    lambda x: " / ".join(sorted(set(str(s) for s in x.dropna())))),
+                        n_filings=("filing_state",       "count"),
+                    )
+                    .reset_index()
+                )
+                _sub = _sub.merge(_sf_agg, on="business_id", how="left")
+
+            # Rename to human-readable — all sourced from sos_filings API JSON
+            _rename = {
+                "sos_match_boolean":  "sos_match_boolean",      # derived from sos_match fact
+                "sos_match_status":   "sos_match.value.status", # sos_match.value.status
+                "sos_active":         "sos_active",              # derived from sos_filings[].active
+                "formation_state":    "Formation State",         # sos_filings[].state (Middesk)
+                "formation_date":     "Formation Date",          # sos_filings[].filing_date
+                "foreign_domestic":   "Domestic/Foreign",        # sos_filings[].foreign_domestic
+                "jurisdiction":       "Jurisdiction(s)",         # sos_filings[].jurisdiction
+                "entity_type":        "Entity Type",             # sos_filings[].entity_type
+                "filing_name":        "Filing Name",             # sos_filings[].filing_name
+                "registration_date":  "Registration Date",       # sos_filings[].registration_date
+                "has_officers":       "Officers Present",        # sos_filings[].officers non-empty
+                "filing_state":       "Filing State(s)",         # sos_filings[].state
+                "n_filings":          "# Filings",               # count of sos_filings[] entries
+            }
+            _sub = _sub.rename(columns={k: v for k, v in _rename.items() if k in _sub.columns})
+            _col_cfg = {
+                "sos_match_boolean":      st.column_config.TextColumn(help="sos_match_boolean fact — derived from sos_match.value==='success' (index.ts:1421)"),
+                "sos_match.value.status": st.column_config.TextColumn(help="sos_match.value.status — 'success'|'failure' per vendor (Middesk/OC/Trulioo)"),
+                "sos_active":             st.column_config.TextColumn(help="sos_active fact — derived from sos_filings[].some(f=>f.active===true) (index.ts:1426)"),
+                "Formation State":        st.column_config.TextColumn(help="From sos_filings[].state via Middesk (formation_state fact)"),
+                "Formation Date":         st.column_config.TextColumn(help="From sos_filings[].filing_date via Middesk (formation_date fact)"),
+                "Domestic/Foreign":       st.column_config.TextColumn(help="sos_filings[].foreign_domestic = 'domestic'|'foreign' (API JSON)"),
+                "Jurisdiction(s)":        st.column_config.TextColumn(help="sos_filings[].jurisdiction = 'us::fl','us::de',etc. (index.ts transformer)"),
+                "Entity Type":            st.column_config.TextColumn(help="sos_filings[].entity_type = 'llc'|'corporation'|'lp'|'llp'|'sole proprietorship' (types.ts:20-32)"),
+                "Filing Name":            st.column_config.TextColumn(help="sos_filings[].filing_name — legal name on the SOS filing"),
+                "Registration Date":      st.column_config.TextColumn(help="sos_filings[].registration_date — incorporation date (ISO 8601)"),
+                "Officers Present":       st.column_config.NumberColumn(help="1 = sos_filings[].officers is non-empty (officers filtered by jurisdiction, index.ts:767-987)"),
+                "Filing State(s)":        st.column_config.TextColumn(help="sos_filings[].state — state(s) of the filing(s)"),
+                "# Filings":              st.column_config.NumberColumn(help="Count of entries in sos_filings[] array"),
+            }
+            if not _sub.empty:
                 st.dataframe(_sub, use_container_width=True, hide_index=True,
                              column_config={k: v for k, v in _col_cfg.items() if k in _sub.columns})
             else:
-                # stats_df unavailable — fall back to funnel_df which always loads
-                # funnel_df has: sos_match_boolean, sos_active, formation_state, tin_submitted,
-                #                tin_match_boolean, tin_status, middesk_confidence, operating_state
-                _fallback_cols = ["sos_match_boolean","sos_active","formation_state",
-                                   "tin_submitted","tin_match_boolean","operating_state"]
-                if funnel_df is not None and not funnel_df.empty:
-                    _fb = funnel_df[funnel_df["business_id"].isin(bids)][
-                        ["business_id"] + [c for c in _fallback_cols if c in funnel_df.columns]
-                    ].rename(columns={
-                        "sos_match_boolean":"SOS Match Boolean",
-                        "sos_active":"SOS Active",
-                        "formation_state":"Formation State",
-                        "tin_submitted":"TIN Submitted",
-                        "tin_match_boolean":"TIN Match Boolean",
-                        "operating_state":"Operating State",
-                    })
-                    if not _fb.empty:
-                        st.caption("⚠️ stats_df unavailable — showing funnel_df signals (subset of columns)")
-                        st.dataframe(_fb, use_container_width=True, hide_index=True)
-                    else:
-                        st.dataframe(pd.DataFrame({"business_id": bids}), use_container_width=True, hide_index=True)
-                else:
-                    st.dataframe(pd.DataFrame({"business_id": bids}), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame({"business_id": bids}), use_container_width=True, hide_index=True)
 
             # ── Download ─────────────────────────────────────────────────
             _bid_csv = pd.DataFrame({"business_id": bids}).to_csv(index=False).encode()
@@ -5868,15 +5868,28 @@ if tab=="🏠 Home":
                 _irow_l, _irow_r = st.columns([5, 1])
                 with _irow_l:
                     # Show the key KYB signal values inline as context (from the already-rendered table above)
+                    # Context from sos_filings[] fields (API JSON) — not from unrelated facts
                     _irow_signals = []
                     if stats_df is not None and not stats_df.empty:
                         _irow_row = stats_df[stats_df["business_id"]==_irow_bid]
                         if not _irow_row.empty:
                             _r = _irow_row.iloc[0]
-                            if "sos_match_boolean" in _r: _irow_signals.append(f"SOS={_r['sos_match_boolean']}")
-                            if "tin_match" in _r: _irow_signals.append(f"TIN={_r['tin_match']}")
-                            if "naics_code" in _r and str(_r.get('naics_code','')).strip() not in ("","None","nan"):
-                                _irow_signals.append(f"NAICS={str(_r['naics_code'])[:8]}")
+                            _smb_v = str(_r.get("sos_match_boolean","") or "")
+                            _sa_v  = str(_r.get("sos_active","") or "")
+                            _fs_v  = str(_r.get("formation_state","") or "")
+                            if _smb_v: _irow_signals.append(f"sos_match={_smb_v}")
+                            if _sa_v:  _irow_signals.append(f"sos_active={_sa_v}")
+                            if _fs_v and _fs_v not in ("","None","nan"): _irow_signals.append(f"state={_fs_v}")
+                    # Enrich with sos_filings[] fields if available
+                    if _sos_filings_df is not None and not _sos_filings_df.empty:
+                        _sf_row = _sos_filings_df[_sos_filings_df["business_id"]==_irow_bid]
+                        if not _sf_row.empty:
+                            _fd = str(_sf_row["foreign_domestic"].iloc[0] or "")
+                            _et = str(_sf_row["entity_type"].iloc[0] or "")
+                            _ju = str(_sf_row["jurisdiction"].iloc[0] or "")
+                            if _fd: _irow_signals.append(f"{_fd}")
+                            if _et and _et!="unknown": _irow_signals.append(f"{_et}")
+                            if _ju: _irow_signals.append(f"{_ju}")
                     _ctx = " · ".join(_irow_signals) if _irow_signals else label[:40]
                     st.markdown(
                         f"<div style='background:#0f172a;border-left:3px solid #3B82F6;"
@@ -5893,12 +5906,29 @@ if tab=="🏠 Home":
                         st.rerun()
 
     # ── Column list for all Section 1 drilldown tables (rds_ signals only) ─────
+    # _SOS_COLS — columns from rds_warehouse_public.facts that are derivable from the
+    # sos_filings API JSON chunk (sos_filings.value[].* fields) or directly linked facts.
+    # EXCLUDED: sos_match_verif/sos_domestic_verif/sos_active_verif (clients.* materialized),
+    #           tin_submitted/tin_match/idv_passed/naics_code/watchlist_hits/is_sole_prop
+    #           (separate facts unrelated to the sos_filings chunk)
+    # Source: integration-service/lib/facts/kyb/types.ts:20-32 (SoSRegistration schema)
     _SOS_COLS = [
-        "sos_match_boolean","sos_match_status","sos_active",
-        "sos_match_verif","sos_domestic_verif","sos_active_verif",
-        "formation_state","formation_date",
-        "tin_submitted","tin_match_status","tin_match",
-        "idv_passed","naics_code","watchlist_hits","is_sole_prop",
+        "sos_match_boolean",   # sos_match_boolean fact — derived from sos_match (index.ts:1421)
+        "sos_match_status",    # sos_match.value.status — 'success'|'failure'
+        "sos_active",          # sos_active fact — derived from sos_filings[].active (index.ts:1426)
+        "formation_state",     # formation_state fact — from sos_filings[].state via Middesk
+        "formation_date",      # formation_date fact — from sos_filings[].filing_date via Middesk
+    ]
+    # Extended sos_filings fields — come from _sos_filings_df (parsed JSON array)
+    # These are added to drilldown tables when _sos_filings_df is available
+    _SOS_FILINGS_EXTRA_COLS = [
+        "foreign_domestic",    # sos_filings[].foreign_domestic = 'domestic'|'foreign'
+        "jurisdiction",        # sos_filings[].jurisdiction = 'us::fl', 'us::de', etc.
+        "entity_type",         # sos_filings[].entity_type = 'llc'|'corporation'|etc.
+        "filing_name",         # sos_filings[].filing_name = legal name on the filing
+        "registration_date",   # sos_filings[].registration_date = incorporation date
+        "has_officers",        # sos_filings[].officers is non-empty (1=yes, 0=no)
+        "filing_state",        # sos_filings[].state = filing jurisdiction state
     ]
 
     # ── Pre-compute tree counts ────────────────────────────────────────────────
