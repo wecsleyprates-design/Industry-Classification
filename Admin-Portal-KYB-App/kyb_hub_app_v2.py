@@ -3820,6 +3820,9 @@ if tab=="🏠 Home":
                 -- Firmographic
                 MAX(CASE WHEN f.name='revenue'
                     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS revenue,
+                -- Legal name — used by DirectSOS enrichment agent for entity matching
+                MAX(CASE WHEN f.name='legal_name'
+                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS legal_name,
                 MAX(f.received_at) AS last_seen,
                 MIN(f.received_at) AS first_seen,
                 COUNT(DISTINCT f.name) AS fact_count
@@ -3835,7 +3838,8 @@ if tab=="🏠 Home":
                   'tin_submitted','tin_match','tin_match_boolean',
                   'idv_passed_boolean','is_sole_prop','naics_code',
                   'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
-                  'adverse_media_hits','revenue','formation_date','formation_state'
+                  'adverse_media_hits','revenue','formation_date','formation_state',
+                  'legal_name'
               )
             GROUP BY f.business_id
         """)
@@ -8470,16 +8474,16 @@ is uncertain — the filing might belong to a different entity with a similar na
         st.info("Registry Intelligence requires sos_filings data. Load a date range and customer to populate.", icon="ℹ️")
 
     # ── BLOCK 5: Direct SOS Enrichment Agent ─────────────────────────────────
-    # Triggered gap-fill: queries OpenCorporates API + state open APIs directly
-    # to confirm Q1/Q2 for businesses where vendor data is absent or proxy-only.
-    # Results are labeled with source_platform_id=99 / source_vendor_name=DirectSOS.
+    # Automatic gap-fill: identifies candidates from current portfolio, runs lookups
+    # automatically, then shows results table + before/after comparison + impact analysis.
+    # User can also run individual on-demand lookups for testing/investigation.
     st.markdown("---")
     st.markdown("#### 🏛️ Block 5 — Direct SOS Enrichment Agent")
     st.caption(
-        "Gap-fill agent: queries OpenCorporates public API and state open data APIs directly "
-        "to confirm Q1/Q2 for businesses where vendor data is absent, null, or proxy-only. "
-        "Results are labeled **🏛️ DirectSOS** — explicitly distinct from vendor-provided data. "
-        "Triggered only for high-value gaps: tax-haven formation states and multi-state compliance gaps."
+        "Automatically identifies gaps in the current portfolio, queries OpenCorporates API and state open data APIs "
+        "to fill them, then shows a before/after comparison with impact analysis. "
+        "Results are labeled **🏛️ DirectSOS** (pid=99) — explicitly distinct from vendor-provided data. "
+        "A manual on-demand lookup is also available for individual investigation."
     )
 
     try:
@@ -8524,181 +8528,292 @@ is uncertain — the filing might belong to a different entity with a similar na
                 "`integration-service/lib/facts/kyb/index.ts:717` (sos_filings transformer)"
             )
 
-        # Identify candidates for enrichment from current portfolio
+        # ── Source hierarchy explanation ──────────────────────────────────────
+        with st.expander("⚙️ How Direct SOS Enrichment works — source hierarchy, methods, labeling"):
+            st.markdown(
+                "**Source confidence hierarchy:**\n\n"
+                "| Priority | Source | Label | How determined |\n|---|---|---|---|\n"
+                "| 1 | Vendor explicit | `Middesk` / `OpenCorporates` / `Baselayer` | `sos_filings[].foreign_domestic` set by vendor |\n"
+                "| 2 | DirectSOS (conf ≥ 70%) | `🏛️ DirectSOS · conf:70%+` | OC API + LLM entity match — high confidence |\n"
+                "| 3 | DirectSOS (conf 55-70%) | `🏛️ DirectSOS · conf:55-70%` | Use with caution |\n"
+                "| 4 | Proxy ⚠️ | State comparison | `sos_filings[].state` vs `formation_state` or `primary_address.state` |\n"
+                "| 5 | No data | — | No vendor data, no direct lookup result |\n\n"
+                "**When a business is a candidate:**\n"
+                "- Domestic Filing not confirmed AND formation state is a tax-haven (DE/NV/WY/SD/MT/NM)\n"
+                "- Operating Authorization not confirmed AND multi-state entity (formation ≠ operating state)\n"
+                "- Either classification is proxy-only (upgrade to confirmed)\n\n"
+                "**Lookup methods (in priority order):**\n"
+                "1. State open data APIs (MO, IN — confirmed public JSON, no ToS concerns)\n"
+                "2. OpenCorporates public API (all 50 states, same source as vendor pid=23)\n"
+                "3. GPT-4o-mini entity matcher (borderline confidence 40-85%)\n\n"
+                "**Source identification per result:**\n"
+                "```\nsource_platform_id = '99'  ← distinct from all vendors\n"
+                "source_vendor_name  = 'DirectSOS'\n"
+                "source_url          = exact URL (fully auditable)\n"
+                "is_proxy            = False (always — direct lookup, never inferred)\n```"
+            )
+
+        # ── STEP 1: Identify enrichment candidates automatically ──────────────
+        _legal_names_map = {}
+        if stats_df is not None and not stats_df.empty and "legal_name" in stats_df.columns:
+            _legal_names_map = stats_df.set_index("business_id")["legal_name"].to_dict()
+
         _enrich_candidates = []
-        if not _funnel.empty and _sos_filings_df is not None:
+        if not _funnel.empty:
             for _, _row in _funnel.iterrows():
-                _bid  = _row.get("business_id","")
-                _fs   = str(_row.get("formation_state","") or "").upper().strip()
-                _os   = str(_row.get("operating_state","") or "").upper().strip()
-                _q1f  = _bid in _q1_all if '_q1_all' in dir() else False
-                _q2f  = _bid in _q2_all if '_q2_all' in dir() else False
-                _q1p  = _bid in _q1_bids_proxy - _q1_bids_explicit if '_q1_bids_proxy' in dir() else False
-                _q2p  = _bid in _q2_bids_proxy - _q2_bids_explicit if '_q2_bids_proxy' in dir() else False
+                _bid = _row.get("business_id","")
+                _fs  = str(_row.get("formation_state","") or "").upper().strip()
+                _os  = str(_row.get("operating_state","") or "").upper().strip()
+                _dom_f  = _bid in _dom_all  if '_dom_all'  in dir() else False
+                _op_f   = _bid in _op_all   if '_op_all'   in dir() else False
+                _dom_p  = (_bid in _dom_proxy - _dom_explicit) if '_dom_proxy' in dir() else False
+                _op_p   = (_bid in _op_proxy  - _op_explicit)  if '_op_proxy'  in dir() else False
                 _should, _reason = should_trigger_lookup(
-                    business_id=_bid, q1_found=_q1f, q2_found=_q2f,
-                    q1_is_proxy=_q1p, q2_is_proxy=_q2p,
+                    business_id=_bid, q1_found=_dom_f, q2_found=_op_f,
+                    q1_is_proxy=_dom_p, q2_is_proxy=_op_p,
                     formation_state=_fs or None, operating_state=_os,
                 )
                 if _should:
+                    _lname = str(_legal_names_map.get(_bid,"") or "").strip()
                     _enrich_candidates.append({
-                        "business_id":     _bid,
-                        "formation_state": _fs,
-                        "operating_state": _os,
-                        "trigger_reason":  _reason,
+                        "business_id":        _bid,
+                        "legal_name":         _lname,
+                        "formation_state":    _fs,
+                        "operating_state":    _os,
+                        "trigger_reason":     _reason,
+                        "domestic_before":    "✅ Explicit" if _bid in (_dom_explicit if '_dom_explicit' in dir() else set()) else
+                                              ("🟡 Proxy ⚠️" if _dom_p else "❌ Not found"),
+                        "op_auth_before":     "✅ Explicit" if _bid in (_op_explicit if '_op_explicit' in dir() else set()) else
+                                              ("🟡 Proxy ⚠️" if _op_p else "❌ Not found"),
+                        "has_legal_name":     bool(_lname),
                     })
 
         _n_candidates = len(_enrich_candidates)
-        _col_cand_a, _col_cand_b = st.columns([3,1])
-        with _col_cand_a:
-            st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid #3B82F6;
-                border-radius:6px;padding:8px 14px;margin:4px 0">
-              <span style="color:#60a5fa;font-weight:700">{_n_candidates:,} businesses</span>
-              <span style="color:#94a3b8;font-size:.82rem"> eligible for Direct SOS enrichment
-              (tax-haven gap · multi-state gap · proxy-only Q1/Q2)</span>
-            </div>""", unsafe_allow_html=True)
+        _n_with_name  = sum(1 for c in _enrich_candidates if c["has_legal_name"])
 
-        # Session state for enrichment results
+        # ── Candidate table — always shown automatically ───────────────────────
+        st.markdown(f"**📋 Step 1 — Enrichment Candidates ({_n_candidates:,} identified automatically)**")
+        if _n_candidates == 0:
+            st.success("✅ No enrichment gaps detected — all businesses in this portfolio have explicit vendor classification.", icon="✅")
+        else:
+            # Show why each business is a candidate
+            _cand_df = pd.DataFrame([{
+                "Business ID":         c["business_id"],
+                "Legal Name":          c["legal_name"] or "⚠️ Missing",
+                "Formation State":     c["formation_state"] or "—",
+                "Operating State":     c["operating_state"] or "—",
+                "Domestic (before)":   c["domestic_before"],
+                "Op. Auth (before)":   c["op_auth_before"],
+                "Why Candidate":       c["trigger_reason"],
+            } for c in _enrich_candidates])
+            st.dataframe(_cand_df, use_container_width=True, hide_index=True)
+            st.caption(
+                f"**{_n_candidates:,} businesses** need Direct SOS enrichment · "
+                f"**{_n_with_name:,}** have legal names (required for lookup) · "
+                f"**{_n_candidates - _n_with_name:,}** missing legal names (will be skipped)."
+            )
+            if _n_with_name == 0:
+                st.warning(
+                    "No legal names available. `legal_name` is loaded from `rds_warehouse_public.facts name='legal_name'` "
+                    "via `_load_stats_for_bids()`. Ensure stats_df is loaded for the current date range.",
+                    icon="⚠️"
+                )
+
+        # Session state for results
         if "direct_sos_results" not in st.session_state:
             st.session_state["direct_sos_results"] = {}
+        _stored_results = st.session_state.get("direct_sos_results", {})
 
-        # On-demand single business lookup
-        st.markdown("**🔍 On-Demand Lookup — single business:**")
-        _od_col1, _od_col2, _od_col3 = st.columns([3, 1, 1])
-        with _od_col1:
-            _od_name = st.text_input(
-                "Business name to search", key="sos_direct_name",
-                placeholder="e.g. PORFIRIO AUTO REPAIR LLC"
-            )
-        with _od_col2:
-            _od_state = st.text_input(
-                "State (2-letter)", key="sos_direct_state",
-                placeholder="e.g. MO"
-            )
-        with _od_col3:
-            _od_date = st.text_input(
-                "Formation year (optional)", key="sos_direct_date",
-                placeholder="e.g. 2023"
-            )
+        # ── STEP 2: Automatic portfolio enrichment ────────────────────────────
+        st.markdown("---")
+        st.markdown(f"**🏛️ Step 2 — Portfolio Enrichment** (automatic)")
+        if _n_candidates > 0 and _n_with_name > 0:
+            _runnable = [c for c in _enrich_candidates if c["has_legal_name"]][:20]
+            _already_run = [c for c in _runnable if c["business_id"] in _stored_results]
+            _pending_run = [c for c in _runnable if c["business_id"] not in _stored_results]
 
-        if st.button("🏛️ Run Direct SOS Lookup", key="sos_direct_run"):
-            if _od_name.strip() and _od_state.strip():
-                _agent = SOSDirectAgent(
-                    openai_api_key = st.session_state.get("openai_key", ""),
-                    oc_api_token   = st.session_state.get("oc_token", ""),
-                )
-                with st.spinner(f"Querying SOS portal for '{_od_name}' in {_od_state.upper()}..."):
-                    _od_result = _agent.lookup(
-                        business_id     = "on-demand",
-                        legal_name      = _od_name.strip(),
-                        operating_state = _od_state.upper().strip(),
-                        formation_state = _od_state.upper().strip(),
-                        formation_date  = _od_date.strip() or None,
-                        force           = True,
+            _status_col, _btn_col = st.columns([3,1])
+            with _status_col:
+                if _already_run:
+                    st.info(
+                        f"**{len(_already_run):,}** businesses already enriched this session · "
+                        f"**{len(_pending_run):,}** pending · "
+                        f"Results cached until session ends or cleared.",
+                        icon="ℹ️"
                     )
-                if _od_result.succeeded:
-                    st.success(
-                        f"✅ Found: **{_od_result.registered_name}** · "
-                        f"State: {_od_result.filing_state} · "
-                        f"Active: {_od_result.active} · "
-                        f"Match confidence: {_od_result.match_confidence:.0%}",
-                        icon="🏛️"
-                    )
-                    st.caption(f"Source: {_od_result.source_method} · URL: {_od_result.source_url}")
-                    st.caption(f"Match reason: {_od_result.match_reason}")
-                    st.json(_od_result.to_dict())
                 else:
-                    st.warning(
-                        f"No confirmed match found. "
-                        f"Error: {_od_result.error or 'No candidates above confidence threshold.'}"
+                    st.info(
+                        f"**{len(_runnable):,}** businesses ready to enrich. "
+                        f"Rate-limited to ~40 req/min via OpenCorporates API.",
+                        icon="ℹ️"
                     )
-            else:
-                st.warning("Please enter both business name and state.", icon="⚠️")
-
-        # Portfolio batch enrichment
-        if _n_candidates > 0:
-            st.markdown(f"**📦 Portfolio Batch Enrichment** — {_n_candidates:,} candidates:")
-            _batch_col1, _batch_col2 = st.columns([2,1])
-            with _batch_col1:
-                st.markdown(
-                    f"Found {_n_candidates:,} businesses where Direct SOS lookup would fill a gap. "
-                    f"Click to run batch enrichment (rate-limited: ~40 req/min via OpenCorporates API)."
-                )
-            with _batch_col2:
-                if st.button(f"🏛️ Enrich {min(_n_candidates,20):,} businesses",
-                             key="sos_batch_run",
-                             help="Runs up to 20 businesses to stay within rate limits"):
-                    _agent = SOSDirectAgent(
+            with _btn_col:
+                _run_label = f"▶ Run {len(_pending_run):,} lookups" if _pending_run else "▶ Re-run all"
+                if st.button(_run_label, key="sos_auto_run", type="primary"):
+                    _targets = _runnable if not _pending_run else _pending_run
+                    _agent   = SOSDirectAgent(
                         openai_api_key = st.session_state.get("openai_key",""),
                         oc_api_token   = st.session_state.get("oc_token",""),
                     )
-                    # Need legal names — load from funnel
-                    _batch_input = []
-                    _legal_names = {}
-                    if stats_df is not None and "legal_name" in stats_df.columns:
-                        _legal_names = stats_df.set_index("business_id")["legal_name"].to_dict()
-                    for _c in _enrich_candidates[:20]:
-                        _bid = _c["business_id"]
-                        _batch_input.append({
-                            "business_id":     _bid,
-                            "legal_name":      str(_legal_names.get(_bid,"") or ""),
-                            "formation_state": _c["formation_state"],
-                            "operating_state": _c["operating_state"],
-                        })
-                    # Filter out empty names
-                    _batch_input = [b for b in _batch_input if b["legal_name"].strip()]
-                    if not _batch_input:
-                        st.warning("No legal names available for enrichment candidates. "
-                                   "legal_name must be loaded in stats_df.", icon="⚠️")
-                    else:
-                        _prog = st.progress(0, text="Running DirectSOS batch...")
-                        _batch_results = []
-                        for _bi, _biz in enumerate(_batch_input):
-                            _r = _agent.lookup(
-                                business_id     = _biz["business_id"],
-                                legal_name      = _biz["legal_name"],
-                                operating_state = _biz["operating_state"],
-                                formation_state = _biz["formation_state"] or None,
-                            )
-                            _batch_results.append(_r)
-                            st.session_state["direct_sos_results"][_biz["business_id"]] = _r
-                            _prog.progress((_bi+1)/len(_batch_input),
-                                          text=f"Processed {_bi+1}/{len(_batch_input)}...")
-                            time.sleep(1.5)  # rate limit
-                        _prog.empty()
-                        _succeeded = [r for r in _batch_results if r.succeeded]
-                        st.success(
-                            f"✅ Enrichment complete: {len(_succeeded)}/{len(_batch_results)} confirmed · "
-                            f"{len(_batch_results)-len(_succeeded)} not found or below confidence threshold."
+                    _prog = st.progress(0, text="Running DirectSOS lookups...")
+                    _new_results = []
+                    for _bi, _biz in enumerate(_targets):
+                        _r = _agent.lookup(
+                            business_id     = _biz["business_id"],
+                            legal_name      = _biz["legal_name"],
+                            operating_state = _biz["operating_state"],
+                            formation_state = _biz["formation_state"] or None,
                         )
+                        _new_results.append(_r)
+                        st.session_state["direct_sos_results"][_biz["business_id"]] = _r
+                        _prog.progress(
+                            (_bi+1)/len(_targets),
+                            text=f"🏛️ {_biz['legal_name'][:40]} — {_biz['operating_state']} ({_bi+1}/{len(_targets)})"
+                        )
+                        time.sleep(1.5)
+                    _prog.empty()
+                    _ok = [r for r in _new_results if r.succeeded]
+                    st.success(
+                        f"✅ **{len(_ok):,}/{len(_new_results):,} confirmed** via DirectSOS · "
+                        f"{len(_new_results)-len(_ok):,} not found or below confidence threshold.",
+                        icon="🏛️"
+                    )
+                    st.rerun()
 
-            # Display stored enrichment results
-            _stored = st.session_state.get("direct_sos_results", {})
-            if _stored:
-                st.markdown(f"**Enrichment results ({len(_stored):,} businesses):**")
-                _res_rows = []
-                for _bid, _r in _stored.items():
-                    _res_rows.append({
-                        "business_id":      _bid,
-                        "Registered Name":  _r.registered_name or "—",
-                        "Filing State":     _r.filing_state or "—",
-                        "Active":           "✅" if _r.active else "❌" if _r.active is False else "?",
-                        "Q1 Found":         "✅" if _r.q1_found else "❌",
-                        "Q2 Found":         "✅" if _r.q2_found else "❌",
-                        "Source":           f"🏛️ {_r.source_method}",
-                        "Confidence":       f"{_r.match_confidence:.0%}",
-                        "Match Reason":     _r.match_reason[:80] if _r.match_reason else "—",
-                        "Source URL":       _r.source_url or "—",
-                    })
+        # ── STEP 3: Results table + before/after comparison ───────────────────
+        if _stored_results:
+            st.markdown("---")
+            st.markdown(f"**📊 Step 3 — Enrichment Results & Before/After Comparison** ({len(_stored_results):,} businesses)")
+
+            # Build results table
+            _res_rows = []
+            _before_dom_ok  = 0; _after_dom_ok  = 0
+            _before_op_ok   = 0; _after_op_ok   = 0
+            for _c in _enrich_candidates:
+                _bid = _c["business_id"]
+                _r   = _stored_results.get(_bid)
+                if not _r: continue
+                _dom_after = "✅ DirectSOS" if _r.q1_found and _r.match_confidence >= 0.55 else _c["domestic_before"]
+                _op_after  = "✅ DirectSOS" if _r.q2_found and _r.match_confidence >= 0.55 else _c["op_auth_before"]
+                _dom_changed = _dom_after != _c["domestic_before"]
+                _op_changed  = _op_after  != _c["op_auth_before"]
+                if "✅" in _c["domestic_before"]: _before_dom_ok += 1
+                if "✅" in _dom_after:            _after_dom_ok  += 1
+                if "✅" in _c["op_auth_before"]:  _before_op_ok  += 1
+                if "✅" in _op_after:             _after_op_ok   += 1
+                _res_rows.append({
+                    "Business ID":          _bid,
+                    "Legal Name":           _c["legal_name"] or "—",
+                    "Registered Name":      _r.registered_name or "—",
+                    "Filing State":         _r.filing_state or "—",
+                    "Active":               "✅" if _r.active else ("❌" if _r.active is False else "?"),
+                    "Domestic (before)":    _c["domestic_before"],
+                    "Domestic (after)":     _dom_after + (" 🆕" if _dom_changed else ""),
+                    "Op. Auth (before)":    _c["op_auth_before"],
+                    "Op. Auth (after)":     _op_after + (" 🆕" if _op_changed else ""),
+                    "Confidence":           f"{_r.match_confidence:.0%}",
+                    "Method":               f"🏛️ {_r.source_method.replace('_',' ')}",
+                    "Match Reason":         (_r.match_reason or "—")[:80],
+                    "Source URL":           _r.source_url or "—",
+                })
+
+            if _res_rows:
                 _res_df = pd.DataFrame(_res_rows)
                 st.dataframe(_res_df, use_container_width=True, hide_index=True)
-                _res_csv = _res_df.to_csv(index=False).encode()
                 st.download_button("⬇️ Download enrichment results (CSV)",
-                                   _res_csv, "direct_sos_enrichment.csv", "text/csv",
+                                   _res_df.to_csv(index=False).encode(),
+                                   "direct_sos_enrichment.csv","text/csv",
                                    key="dl_direct_sos")
-                if st.button("🗑️ Clear enrichment results", key="clear_direct_sos"):
-                    st.session_state["direct_sos_results"] = {}
-                    st.rerun()
+
+                # ── Before/After impact summary ───────────────────────────────
+                st.markdown("**📈 Impact Analysis — Before vs After DirectSOS Enrichment:**")
+                _imp1, _imp2, _imp3, _imp4 = st.columns(4)
+                _n_enriched  = len(_res_rows)
+                _n_confirmed = sum(1 for r in _res_rows if "🆕" in r.get("Domestic (after)","") or "🆕" in r.get("Op. Auth (after)",""))
+                _dom_lift    = _after_dom_ok - _before_dom_ok
+                _op_lift     = _after_op_ok  - _before_op_ok
+                for _col, _lbl, _val, _sub, _color in [
+                    (_imp1, "Businesses Looked Up",   f"{_n_enriched:,}",    "DirectSOS queries run", "#3B82F6"),
+                    (_imp2, "Newly Confirmed",         f"{_n_confirmed:,}",   "classifications upgraded", "#22c55e" if _n_confirmed else "#64748b"),
+                    (_imp3, "Domestic Filing Lift",    f"+{_dom_lift:,}" if _dom_lift >= 0 else str(_dom_lift), "more domestic filings confirmed", "#22c55e" if _dom_lift > 0 else "#64748b"),
+                    (_imp4, "Op. Auth Lift",           f"+{_op_lift:,}" if _op_lift >= 0 else str(_op_lift),  "more op. authorizations confirmed", "#22c55e" if _op_lift > 0 else "#64748b"),
+                ]:
+                    with _col:
+                        st.markdown(f"""<div style="background:#0f172a;border:1px solid {_color};border-radius:8px;padding:10px 14px">
+  <div style="color:{_color};font-size:.7rem;font-weight:700;text-transform:uppercase">{_lbl}</div>
+  <div style="color:#fff;font-size:1.6rem;font-weight:800">{_val}</div>
+  <div style="color:#6b7280;font-size:.7rem">{_sub}</div>
+</div>""", unsafe_allow_html=True)
+
+                # Confidence distribution bar chart
+                _conf_buckets = {"≥90%": 0, "70-89%": 0, "55-69%": 0, "<55%": 0, "Not found": 0}
+                for _bid, _r in _stored_results.items():
+                    if _r.skipped or _r.error: _conf_buckets["Not found"] += 1
+                    elif _r.match_confidence >= 0.90: _conf_buckets["≥90%"] += 1
+                    elif _r.match_confidence >= 0.70: _conf_buckets["70-89%"] += 1
+                    elif _r.match_confidence >= 0.55: _conf_buckets["55-69%"] += 1
+                    else: _conf_buckets["Not found"] += 1
+                _cb_df = pd.DataFrame({"Confidence": list(_conf_buckets.keys()), "Businesses": list(_conf_buckets.values())})
+                _cb_df = _cb_df[_cb_df["Businesses"] > 0]
+                if not _cb_df.empty:
+                    import plotly.express as px
+                    _fig_conf = px.bar(
+                        _cb_df, x="Confidence", y="Businesses", text="Businesses",
+                        color="Confidence",
+                        color_discrete_map={"≥90%":"#22c55e","70-89%":"#84cc16","55-69%":"#f59e0b","<55%":"#f97316","Not found":"#ef4444"},
+                        title="DirectSOS Match Confidence Distribution",
+                    )
+                    _fig_conf.update_layout(
+                        paper_bgcolor="#0f172a", plot_bgcolor="#0f172a",
+                        font_color="#94a3b8", showlegend=False,
+                        title_font_color="#f1f5f9", height=220,
+                        margin=dict(l=0,r=0,t=40,b=0),
+                    )
+                    _fig_conf.update_traces(textposition="outside", textfont_color="#f1f5f9")
+                    st.plotly_chart(_fig_conf, use_container_width=True)
+
+            if st.button("🗑️ Clear results and re-run", key="clear_direct_sos"):
+                st.session_state["direct_sos_results"] = {}
+                st.rerun()
+
+        # ── MANUAL ON-DEMAND LOOKUP (secondary, for testing) ──────────────────
+        st.markdown("---")
+        with st.expander("🔍 Manual Lookup — search any business by name + state (for testing/investigation)"):
+            st.caption("Use this to test individual lookups, verify a specific entity, or investigate a business not in the current portfolio.")
+            _od_col1, _od_col2, _od_col3 = st.columns([3, 1, 1])
+            with _od_col1:
+                _od_name = st.text_input("Business name", key="sos_direct_name", placeholder="e.g. PORFIRIO AUTO REPAIR LLC")
+            with _od_col2:
+                _od_state = st.text_input("State (2-letter)", key="sos_direct_state", placeholder="e.g. MO")
+            with _od_col3:
+                _od_date = st.text_input("Formation year (optional)", key="sos_direct_date", placeholder="e.g. 2023")
+            if st.button("🏛️ Run Lookup", key="sos_direct_run"):
+                if _od_name.strip() and _od_state.strip():
+                    _agent = SOSDirectAgent(
+                        openai_api_key=st.session_state.get("openai_key",""),
+                        oc_api_token=st.session_state.get("oc_token",""),
+                    )
+                    with st.spinner(f"Querying '{_od_name}' in {_od_state.upper()}..."):
+                        _od_r = _agent.lookup(
+                            business_id="on-demand", legal_name=_od_name.strip(),
+                            operating_state=_od_state.upper().strip(),
+                            formation_state=_od_state.upper().strip(),
+                            formation_date=_od_date.strip() or None, force=True,
+                        )
+                    if _od_r.succeeded:
+                        st.success(
+                            f"✅ **{_od_r.registered_name}** · State: {_od_r.filing_state} · "
+                            f"Active: {'✅' if _od_r.active else '❌'} · Confidence: {_od_r.match_confidence:.0%}",
+                            icon="🏛️"
+                        )
+                        st.caption(f"Source: {_od_r.source_method} · {_od_r.source_url}")
+                        st.caption(f"Match reason: {_od_r.match_reason}")
+                        with st.expander("Full result JSON"):
+                            st.json(_od_r.to_dict())
+                    else:
+                        st.warning(f"No confirmed match. {_od_r.error or 'No candidates above confidence threshold.'}")
+                else:
+                    st.warning("Please enter both business name and state.", icon="⚠️")
 
     # ════════════════════════════════════════════════════════════════════════
     # SECTION 3 — TIN VERIFICATION ANALYSIS (was Section 2)
