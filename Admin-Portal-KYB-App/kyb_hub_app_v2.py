@@ -11,7 +11,7 @@ Keys:  export OPENAI_API_KEY=your-key
        export REDSHIFT_DB=dev REDSHIFT_USER=... REDSHIFT_PASSWORD=...
 """
 
-import os, json, re, math
+import os, json, re, math, time
 from datetime import datetime, timezone
 from pathlib import Path
 import streamlit as st
@@ -305,6 +305,7 @@ PID = {
     "0":  ("Applicant",       "#94a3b8",  "Self-reported on onboarding form · businessDetails source · conf=1.0 by convention"),
     "-1": ("Calculated",      "#475569",  "Internally computed by Fact Engine — NOT a vendor. Derived from other facts via fn(). Source: sources.calculated in integration-service/lib/facts/sources.ts L1235"),
     "":   ("No source stored","#374155",  "platformId=null in database — fact has no source metadata. Check ruleApplied to understand origin."),
+    "99": ("DirectSOS",       "#06b6d4",  "Direct SOS portal lookup via OpenCorporates API + state open data APIs. Gap-fill agent (sos_direct_agent.py). Not a vendor — Worth AI internal enrichment."),
 }
 
 # Calculated facts — facts where source=sources.calculated (platformId=null, not a vendor)
@@ -8414,6 +8415,237 @@ the filing might belong to a different entity with a similar name or address.<br
 
     else:
         st.info("Registry Intelligence requires sos_filings data. Load a date range and customer to populate.", icon="ℹ️")
+
+    # ── BLOCK 5: Direct SOS Enrichment Agent ─────────────────────────────────
+    # Triggered gap-fill: queries OpenCorporates API + state open APIs directly
+    # to confirm Q1/Q2 for businesses where vendor data is absent or proxy-only.
+    # Results are labeled with source_platform_id=99 / source_vendor_name=DirectSOS.
+    st.markdown("---")
+    st.markdown("#### 🏛️ Block 5 — Direct SOS Enrichment Agent")
+    st.caption(
+        "Gap-fill agent: queries OpenCorporates public API and state open data APIs directly "
+        "to confirm Q1/Q2 for businesses where vendor data is absent, null, or proxy-only. "
+        "Results are labeled **🏛️ DirectSOS** — explicitly distinct from vendor-provided data. "
+        "Triggered only for high-value gaps: tax-haven formation states and multi-state compliance gaps."
+    )
+
+    try:
+        from sos_direct_agent import SOSDirectAgent, should_trigger_lookup, format_result_badge
+        _direct_sos_available = True
+    except ImportError:
+        _direct_sos_available = False
+
+    if not _direct_sos_available:
+        st.warning("sos_direct_agent.py not found. Place it in the Admin-Portal-KYB-App/ directory.", icon="⚠️")
+    else:
+        # Source confidence hierarchy explanation
+        with st.expander("⚙️ How Direct SOS Enrichment works — source hierarchy, methods, labeling"):
+            st.markdown(
+                "**Source confidence hierarchy after enrichment:**\n\n"
+                "| Priority | Source | Label | How determined |\n|---|---|---|---|\n"
+                "| 1 | Vendor explicit | `Middesk` / `OpenCorporates` / `Baselayer` | `sos_filings[].foreign_domestic` set by vendor |\n"
+                "| 2 | Direct SOS (high confidence) | `🏛️ DirectSOS · opencorporates_api · conf:85%+` | OpenCorporates API + LLM entity match ≥ 0.7 |\n"
+                "| 3 | Direct SOS (medium confidence) | `🏛️ DirectSOS · conf:55-70%` | Match score 0.55–0.70 — use with caution |\n"
+                "| 4 | Proxy ⚠️ | State comparison inferred | `sos_filings[].state` vs `formation_state` or `primary_address.state` |\n"
+                "| 5 | Unknown | No data | Neither vendor nor direct lookup found a match |\n\n"
+                "**Lookup methods:**\n"
+                "1. **OpenCorporates public API** (`api.opencorporates.com/v0.4/companies/search`) — covers all 50 US states. "
+                "Same data source as vendor pid=23 but queried directly with full context (name + state + formation year). "
+                "No API key needed for basic search; token optional for higher rate limits.\n"
+                "2. **State open data APIs** — Missouri, Indiana, Iowa, Colorado, Wisconsin have confirmed open JSON APIs "
+                "with no CAPTCHA, no ToS concerns. Used first when available.\n"
+                "3. **LLM entity matcher** (GPT-4o-mini) — scores candidate matches: "
+                "is the found entity the same legal entity as submitted? Returns confidence 0.0–1.0.\n\n"
+                "**What is NOT used:** Delaware, Nevada, Wyoming, Montana, South Dakota SOS portals are NOT scraped "
+                "directly — they have anti-automation measures and explicit ToS prohibitions. "
+                "OpenCorporates API covers these states instead.\n\n"
+                "**Source identification fields stored per result:**\n"
+                "```\nsource_platform_id = '99'          ← distinct from all vendors (16/23/17 etc.)\n"
+                "source_vendor_name  = 'DirectSOS'\n"
+                "source_url          = exact URL queried (fully auditable)\n"
+                "source_method       = 'opencorporates_api' | 'state_open_api'\n"
+                "match_confidence    = 0.0-1.0 (LLM-assessed entity match)\n"
+                "is_proxy            = False   (always False — direct lookup, not inferred)\n```\n\n"
+                "**Key file:** `Admin-Portal-KYB-App/sos_direct_agent.py` · "
+                "`integration-service/lib/facts/kyb/index.ts:640` (formation_state fact) · "
+                "`integration-service/lib/facts/kyb/index.ts:717` (sos_filings transformer)"
+            )
+
+        # Identify candidates for enrichment from current portfolio
+        _enrich_candidates = []
+        if not _funnel.empty and _sos_filings_df is not None:
+            for _, _row in _funnel.iterrows():
+                _bid  = _row.get("business_id","")
+                _fs   = str(_row.get("formation_state","") or "").upper().strip()
+                _os   = str(_row.get("operating_state","") or "").upper().strip()
+                _q1f  = _bid in _q1_all if '_q1_all' in dir() else False
+                _q2f  = _bid in _q2_all if '_q2_all' in dir() else False
+                _q1p  = _bid in _q1_bids_proxy - _q1_bids_explicit if '_q1_bids_proxy' in dir() else False
+                _q2p  = _bid in _q2_bids_proxy - _q2_bids_explicit if '_q2_bids_proxy' in dir() else False
+                _should, _reason = should_trigger_lookup(
+                    business_id=_bid, q1_found=_q1f, q2_found=_q2f,
+                    q1_is_proxy=_q1p, q2_is_proxy=_q2p,
+                    formation_state=_fs or None, operating_state=_os,
+                )
+                if _should:
+                    _enrich_candidates.append({
+                        "business_id":     _bid,
+                        "formation_state": _fs,
+                        "operating_state": _os,
+                        "trigger_reason":  _reason,
+                    })
+
+        _n_candidates = len(_enrich_candidates)
+        _col_cand_a, _col_cand_b = st.columns([3,1])
+        with _col_cand_a:
+            st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid #3B82F6;
+                border-radius:6px;padding:8px 14px;margin:4px 0">
+              <span style="color:#60a5fa;font-weight:700">{_n_candidates:,} businesses</span>
+              <span style="color:#94a3b8;font-size:.82rem"> eligible for Direct SOS enrichment
+              (tax-haven gap · multi-state gap · proxy-only Q1/Q2)</span>
+            </div>""", unsafe_allow_html=True)
+
+        # Session state for enrichment results
+        if "direct_sos_results" not in st.session_state:
+            st.session_state["direct_sos_results"] = {}
+
+        # On-demand single business lookup
+        st.markdown("**🔍 On-Demand Lookup — single business:**")
+        _od_col1, _od_col2, _od_col3 = st.columns([3, 1, 1])
+        with _od_col1:
+            _od_name = st.text_input(
+                "Business name to search", key="sos_direct_name",
+                placeholder="e.g. PORFIRIO AUTO REPAIR LLC"
+            )
+        with _od_col2:
+            _od_state = st.text_input(
+                "State (2-letter)", key="sos_direct_state",
+                placeholder="e.g. MO"
+            )
+        with _od_col3:
+            _od_date = st.text_input(
+                "Formation year (optional)", key="sos_direct_date",
+                placeholder="e.g. 2023"
+            )
+
+        if st.button("🏛️ Run Direct SOS Lookup", key="sos_direct_run"):
+            if _od_name.strip() and _od_state.strip():
+                _agent = SOSDirectAgent(
+                    openai_api_key = st.session_state.get("openai_key", ""),
+                    oc_api_token   = st.session_state.get("oc_token", ""),
+                )
+                with st.spinner(f"Querying SOS portal for '{_od_name}' in {_od_state.upper()}..."):
+                    _od_result = _agent.lookup(
+                        business_id     = "on-demand",
+                        legal_name      = _od_name.strip(),
+                        operating_state = _od_state.upper().strip(),
+                        formation_state = _od_state.upper().strip(),
+                        formation_date  = _od_date.strip() or None,
+                        force           = True,
+                    )
+                if _od_result.succeeded:
+                    st.success(
+                        f"✅ Found: **{_od_result.registered_name}** · "
+                        f"State: {_od_result.filing_state} · "
+                        f"Active: {_od_result.active} · "
+                        f"Match confidence: {_od_result.match_confidence:.0%}",
+                        icon="🏛️"
+                    )
+                    st.caption(f"Source: {_od_result.source_method} · URL: {_od_result.source_url}")
+                    st.caption(f"Match reason: {_od_result.match_reason}")
+                    st.json(_od_result.to_dict())
+                else:
+                    st.warning(
+                        f"No confirmed match found. "
+                        f"Error: {_od_result.error or 'No candidates above confidence threshold.'}"
+                    )
+            else:
+                st.warning("Please enter both business name and state.", icon="⚠️")
+
+        # Portfolio batch enrichment
+        if _n_candidates > 0:
+            st.markdown(f"**📦 Portfolio Batch Enrichment** — {_n_candidates:,} candidates:")
+            _batch_col1, _batch_col2 = st.columns([2,1])
+            with _batch_col1:
+                st.markdown(
+                    f"Found {_n_candidates:,} businesses where Direct SOS lookup would fill a gap. "
+                    f"Click to run batch enrichment (rate-limited: ~40 req/min via OpenCorporates API)."
+                )
+            with _batch_col2:
+                if st.button(f"🏛️ Enrich {min(_n_candidates,20):,} businesses",
+                             key="sos_batch_run",
+                             help="Runs up to 20 businesses to stay within rate limits"):
+                    _agent = SOSDirectAgent(
+                        openai_api_key = st.session_state.get("openai_key",""),
+                        oc_api_token   = st.session_state.get("oc_token",""),
+                    )
+                    # Need legal names — load from funnel
+                    _batch_input = []
+                    _legal_names = {}
+                    if stats_df is not None and "legal_name" in stats_df.columns:
+                        _legal_names = stats_df.set_index("business_id")["legal_name"].to_dict()
+                    for _c in _enrich_candidates[:20]:
+                        _bid = _c["business_id"]
+                        _batch_input.append({
+                            "business_id":     _bid,
+                            "legal_name":      str(_legal_names.get(_bid,"") or ""),
+                            "formation_state": _c["formation_state"],
+                            "operating_state": _c["operating_state"],
+                        })
+                    # Filter out empty names
+                    _batch_input = [b for b in _batch_input if b["legal_name"].strip()]
+                    if not _batch_input:
+                        st.warning("No legal names available for enrichment candidates. "
+                                   "legal_name must be loaded in stats_df.", icon="⚠️")
+                    else:
+                        _prog = st.progress(0, text="Running DirectSOS batch...")
+                        _batch_results = []
+                        for _bi, _biz in enumerate(_batch_input):
+                            _r = _agent.lookup(
+                                business_id     = _biz["business_id"],
+                                legal_name      = _biz["legal_name"],
+                                operating_state = _biz["operating_state"],
+                                formation_state = _biz["formation_state"] or None,
+                            )
+                            _batch_results.append(_r)
+                            st.session_state["direct_sos_results"][_biz["business_id"]] = _r
+                            _prog.progress((_bi+1)/len(_batch_input),
+                                          text=f"Processed {_bi+1}/{len(_batch_input)}...")
+                            time.sleep(1.5)  # rate limit
+                        _prog.empty()
+                        _succeeded = [r for r in _batch_results if r.succeeded]
+                        st.success(
+                            f"✅ Enrichment complete: {len(_succeeded)}/{len(_batch_results)} confirmed · "
+                            f"{len(_batch_results)-len(_succeeded)} not found or below confidence threshold."
+                        )
+
+            # Display stored enrichment results
+            _stored = st.session_state.get("direct_sos_results", {})
+            if _stored:
+                st.markdown(f"**Enrichment results ({len(_stored):,} businesses):**")
+                _res_rows = []
+                for _bid, _r in _stored.items():
+                    _res_rows.append({
+                        "business_id":      _bid,
+                        "Registered Name":  _r.registered_name or "—",
+                        "Filing State":     _r.filing_state or "—",
+                        "Active":           "✅" if _r.active else "❌" if _r.active is False else "?",
+                        "Q1 Found":         "✅" if _r.q1_found else "❌",
+                        "Q2 Found":         "✅" if _r.q2_found else "❌",
+                        "Source":           f"🏛️ {_r.source_method}",
+                        "Confidence":       f"{_r.match_confidence:.0%}",
+                        "Match Reason":     _r.match_reason[:80] if _r.match_reason else "—",
+                        "Source URL":       _r.source_url or "—",
+                    })
+                _res_df = pd.DataFrame(_res_rows)
+                st.dataframe(_res_df, use_container_width=True, hide_index=True)
+                _res_csv = _res_df.to_csv(index=False).encode()
+                st.download_button("⬇️ Download enrichment results (CSV)",
+                                   _res_csv, "direct_sos_enrichment.csv", "text/csv",
+                                   key="dl_direct_sos")
+                if st.button("🗑️ Clear enrichment results", key="clear_direct_sos"):
+                    st.session_state["direct_sos_results"] = {}
+                    st.rerun()
 
     # ════════════════════════════════════════════════════════════════════════
     # SECTION 3 — TIN VERIFICATION ANALYSIS (was Section 2)
