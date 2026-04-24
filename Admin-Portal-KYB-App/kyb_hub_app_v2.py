@@ -7934,60 +7934,56 @@ HAVING SUM(CASE WHEN LOWER(JSON_EXTRACT_PATH_TEXT(f.value,'value','0','foreign_d
             </div>""", unsafe_allow_html=True)
 
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 2 — REGISTRY INTELLIGENCE HUB
-    # Q1/Q2 Coverage · Vendor Quality Scorecard · Gap Analysis · Confidence
-    # All signals from rds_warehouse_public.facts ONLY
+    # SECTION 2 — REGISTRY COVERAGE ANALYSIS
+    # Domestic Filing · Operating Authorization · Vendor Quality · Confidence
+    # All signals from rds_warehouse_public.facts ONLY — 100% of portfolio
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("### 🔬 Section 2 — Registry Intelligence Hub")
+    st.markdown("### 🏛️ Section 2 — Registry Coverage Analysis")
     st.caption(
-        "Two questions every KYB review must answer: "
-        "(Q1) Did we find the domestic incorporation/formation filing? "
-        "(Q2) Did we find authorization to operate in the submitted state (foreign qualification)? "
-        "This section answers both — per business, per vendor, with explicit proxy labeling. "
+        "For each onboarded business: "
+        "**Did we find the domestic incorporation filing?** "
+        "**Did we find authorization to operate in the submitted state?** "
+        "Which vendor answered each question — and how confident are we? "
+        "All metrics cover 100% of the onboarded portfolio. "
         "All signals from `rds_warehouse_public.facts` only."
     )
 
     if _sos_filings_df is not None and not _sos_filings_df.empty and not _funnel.empty:
-        # ── Build per-business Q1/Q2 classification ──────────────────────────
-        # Q1: Did we find the DOMESTIC (incorporation/formation) filing?
-        #   Explicit: sos_filings[].foreign_domestic = 'domestic'   ← authoritative
-        #   Proxy:    sos_filings[].state = formation_state fact     ← inferred
-        # Q2: Did we find the FOREIGN QUALIFICATION in the submitted operating state?
+        # ── Build per-business classification ──────────────────────────────────
+        # Domestic Filing: Did we find the incorporation/formation filing in the entity's home state?
+        #   Explicit: sos_filings[].foreign_domestic = 'domestic'         ← authoritative (vendor set)
+        #   Proxy:    sos_filings[].state = formation_state fact           ← inferred (state comparison)
+        # Operating Authorization: Did we find a filing authorizing the entity to operate in the submitted state?
         #   Explicit: sos_filings[].foreign_domestic = 'foreign' AND state = operating_state
         #   Proxy:    sos_filings[].state = operating_state AND state ≠ formation_state
         # When both foreign_domestic and formation_state are NULL → UNKNOWN (never proxy-classified)
         # Source: rds_warehouse_public.facts name='sos_filings' + 'formation_state' + 'primary_address'
 
         # Build lookup maps from funnel_df
-        _bid_to_form  = {}  # business_id → formation_state (UPPER)
-        _bid_to_op    = {}  # business_id → operating_state (UPPER, from primary_address)
+        _bid_to_form  = {}
+        _bid_to_op    = {}
         if "formation_state" in _funnel.columns:
             _bid_to_form = _funnel.set_index("business_id")["formation_state"].str.upper().str.strip().fillna("").to_dict()
         if "operating_state" in _funnel.columns:
             _bid_to_op = _funnel.set_index("business_id")["operating_state"].str.upper().str.strip().fillna("").to_dict()
 
-        # Vendor labels
         _VENDOR_NAMES = {
-            "16": "Middesk",
-            "23": "OpenCorporates",
-            "17": "Baselayer",
-            "22": "Cobalt",
-            "4":  "Enigma",
-            "24": "ZoomInfo",
-            "0":  "BusinessDetails",
+            "16": "Middesk","23": "OpenCorporates","17": "Baselayer",
+            "22": "Cobalt","4": "Enigma","24": "ZoomInfo","0": "BusinessDetails",
         }
 
-        # Per-business classification
-        _q1_bids_explicit  = set()   # Q1 via foreign_domestic='domestic'
-        _q1_bids_proxy     = set()   # Q1 via filing.state = formation_state
-        _q2_bids_explicit  = set()   # Q2 via foreign_domestic='foreign' AND state=op_state
-        _q2_bids_proxy     = set()   # Q2 via filing.state=op_state AND state≠formation_state
-        _single_state_bids = set()   # formation_state = operating_state (Q1=Q2)
-        _vendor_per_bid    = {}      # business_id → vendor name (winning vendor)
+        # Per-business Domestic Filing / Operating Authorization classification
+        _dom_explicit  = set()   # Domestic Filing: foreign_domestic='domestic'
+        _dom_proxy     = set()   # Domestic Filing: filing.state = formation_state
+        _op_explicit   = set()   # Operating Auth: foreign_domestic='foreign' AND state=op_state
+        _op_proxy      = set()   # Operating Auth: filing.state=op_state AND state≠formation_state
+        _single_state_bids = set()  # formation = operating (Domestic Filing IS the authorization)
+        _vendor_per_bid    = {}
 
-        # Identify single-state businesses (formation = operating, Q1 answers Q2)
-        for _bid in _funnel["business_id"].tolist():
+        _all_portfolio_bids = set(_funnel["business_id"].tolist())
+
+        for _bid in _all_portfolio_bids:
             _fs = _bid_to_form.get(_bid, "")
             _os = _bid_to_op.get(_bid, "")
             if _fs and _os and _fs == _os:
@@ -7996,8 +7992,6 @@ HAVING SUM(CASE WHEN LOWER(JSON_EXTRACT_PATH_TEXT(f.value,'value','0','foreign_d
         for _bid, _grp in _sos_filings_df.groupby("business_id"):
             _fs = _bid_to_form.get(_bid, "")
             _os = _bid_to_op.get(_bid, "")
-
-            # Capture winning vendor (same for all rows of a business since it's fact-level)
             _vid = str(_grp["source_platform_id"].iloc[0] if "source_platform_id" in _grp.columns else "")
             _vendor_per_bid[_bid] = _VENDOR_NAMES.get(_vid, f"Vendor {_vid}" if _vid else "Unknown")
 
@@ -8005,212 +7999,244 @@ HAVING SUM(CASE WHEN LOWER(JSON_EXTRACT_PATH_TEXT(f.value,'value','0','foreign_d
                 _fd  = str(_row.get("foreign_domestic", "") or "").lower().strip()
                 _fst = str(_row.get("filing_state", "") or "").upper().strip()
 
-                # Q1 classification
+                # Domestic Filing classification
                 if _fd == "domestic":
-                    _q1_bids_explicit.add(_bid)
+                    _dom_explicit.add(_bid)
                 elif _fst and _fs and _fst == _fs:
-                    # Proxy: filing state = formation_state (independent fact sources)
-                    _q1_bids_proxy.add(_bid)
+                    _dom_proxy.add(_bid)
 
-                # Q2 classification (only relevant when formation ≠ operating state)
+                # Operating Authorization classification
                 if _bid not in _single_state_bids:
                     if _fd == "foreign" and _fst and _os and _fst == _os:
-                        _q2_bids_explicit.add(_bid)
+                        _op_explicit.add(_bid)
                     elif _fst and _os and _fst == _os and _fst != _fs:
-                        # Proxy: filing state = operating state AND ≠ formation state
-                        _q2_bids_proxy.add(_bid)
+                        _op_proxy.add(_bid)
 
-        # Combined Q1/Q2 sets
-        _q1_all = _q1_bids_explicit | _q1_bids_proxy
-        _q2_all = _q2_bids_explicit | _q2_bids_proxy
+        # Combined sets (plain-English names everywhere)
+        _dom_all = _dom_explicit | _dom_proxy
+        _op_all  = _op_explicit  | _op_proxy
 
-        # Registry-found businesses for scope
-        _reg_bids = set(_seg.get("sos_found_extended", []))
+        # Scopes — 100% of portfolio
+        _reg_bids       = set(_seg.get("sos_found_extended", []))
+        _no_reg_bids    = set(_seg.get("no_sos", []))
+        _rf_funnel_bids = _all_portfolio_bids & _reg_bids
 
-        # Four-state matrix (scoped to registry-found businesses)
-        _rf_funnel_bids = set(_funnel["business_id"].tolist()) & _reg_bids
-        _both_q   = _rf_funnel_bids & _q1_all & (_q2_all | _single_state_bids)
-        _q1_only  = _rf_funnel_bids & _q1_all - _q2_all - _single_state_bids
-        _q2_only  = _rf_funnel_bids & _q2_all - _q1_all
-        _neither  = _rf_funnel_bids - _q1_all - _q2_all - _single_state_bids
+        # Five-state matrix (100% of portfolio)
+        _fully_covered  = _rf_funnel_bids & _dom_all & (_op_all | _single_state_bids)
+        _dom_only       = (_rf_funnel_bids & _dom_all) - _op_all - _single_state_bids
+        _op_only        = (_rf_funnel_bids & _op_all)  - _dom_all
+        _filing_neither = _rf_funnel_bids - _dom_all - _op_all - _single_state_bids
+        _no_filing_data = _all_portfolio_bids & _no_reg_bids  # 5th state
 
-        # ── BLOCK 1: Q1/Q2 Coverage Matrix ───────────────────────────────────
-        st.markdown("#### 📊 Block 1 — Q1 / Q2 Coverage Matrix")
+        _portfolio_total = len(_all_portfolio_bids)
+
+        def _pct(n): return f"{round(100*n/max(_portfolio_total,1))}%"
+
+        # ── BLOCK 1: Registry Coverage Matrix (5 states, 100% portfolio) ──────
+        st.markdown("#### 📊 Block 1 — Registry Coverage Matrix")
         st.caption(
-            "Each registry-found business is classified into one of four states based on "
-            "which questions the filing data answers. Explicit = `foreign_domestic` field set by vendor. "
-            "Proxy = inferred from state comparisons when `foreign_domestic` is absent."
+            f"All {_portfolio_total:,} onboarded businesses classified into one of five states. "
+            "**Explicit** = `foreign_domestic` field set by vendor (authoritative). "
+            "**Proxy ⚠️** = inferred from state comparisons when `foreign_domestic` is absent — carries inherent uncertainty."
         )
 
-        _bc1, _bc2, _bc3, _bc4 = st.columns(4)
-        _n_both   = len(_both_q)
-        _n_q1only = len(_q1_only)
-        _n_q2only = len(_q2_only)
-        _n_nei    = len(_neither)
-        _rf_total = len(_rf_funnel_bids)
-
-        def _q_badge(label, explicit_n, proxy_n):
-            """Render explicit/proxy badge counts inside a card."""
+        def _q_badge(explicit_n, proxy_n):
             parts = []
             if explicit_n > 0: parts.append(f"<span style='color:#22c55e'>{explicit_n} explicit</span>")
-            if proxy_n   > 0: parts.append(f"<span style='color:#f59e0b'>{proxy_n} proxy</span>")
-            return f"<span style='font-size:.72rem'>{' · '.join(parts)}</span>" if parts else ""
+            if proxy_n   > 0: parts.append(f"<span style='color:#f59e0b'>{proxy_n} proxy ⚠️</span>")
+            return f"<span style='font-size:.7rem'>{' · '.join(parts)}</span>" if parts else ""
 
-        # Q1+Q2 both answered
-        _both_exp = len(_both_q & (_q1_bids_explicit | _q2_bids_explicit))
-        _both_prx = len(_both_q) - len(_both_q & (_q1_bids_explicit & (_q2_bids_explicit | _single_state_bids)))
+        _n_fc  = len(_fully_covered)
+        _n_do  = len(_dom_only)
+        _n_oo  = len(_op_only)
+        _n_fn  = len(_filing_neither)
+        _n_nfd = len(_no_filing_data)
+
+        _bc1, _bc2, _bc3 = st.columns(3)
+        _bc4, _bc5 = st.columns(2)
+
         with _bc1:
+            _fc_exp = len(_fully_covered & (_dom_explicit | _op_explicit | _single_state_bids))
+            _fc_prx = _n_fc - _fc_exp
             st.markdown(f"""<div style="background:#052e16;border:1px solid #22c55e;border-radius:8px;padding:10px 14px">
-  <div style="color:#22c55e;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em">✅ Q1 + Q2 Found</div>
-  <div style="color:#fff;font-size:1.8rem;font-weight:800;line-height:1.1">{_n_both:,}</div>
-  <div style="color:#6b7280;font-size:.72rem">{round(100*_n_both/max(_rf_total,1))}% of registry-found</div>
-  <div style="margin-top:4px;font-size:.72rem;color:#a3e635">Domestic + foreign qual both confirmed</div>
-  <div style="margin-top:3px">{_q_badge("", len(_both_q & _q1_bids_explicit & (_q2_bids_explicit|_single_state_bids)), len(_both_q) - len(_both_q & _q1_bids_explicit & (_q2_bids_explicit|_single_state_bids)))}</div>
+  <div style="color:#22c55e;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em">✅ Fully Covered</div>
+  <div style="color:#fff;font-size:1.8rem;font-weight:800;line-height:1.1">{_n_fc:,}</div>
+  <div style="color:#6b7280;font-size:.72rem">{_pct(_n_fc)} of all onboarded</div>
+  <div style="color:#a3e635;font-size:.72rem;margin-top:4px">Domestic incorporation + operating authorization both found</div>
+  <div style="margin-top:3px">{_q_badge(_fc_exp, _fc_prx)}</div>
 </div>""", unsafe_allow_html=True)
 
-        # Q1 only
-        _q1only_exp = len(_q1_only & _q1_bids_explicit)
-        _q1only_prx = len(_q1_only & _q1_bids_proxy - _q1_bids_explicit)
         with _bc2:
+            _do_exp = len(_dom_only & _dom_explicit)
+            _do_prx = len(_dom_only & _dom_proxy - _dom_explicit)
             st.markdown(f"""<div style="background:#1c1405;border:1px solid #f59e0b;border-radius:8px;padding:10px 14px">
-  <div style="color:#f59e0b;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em">⚠️ Q1 Only</div>
-  <div style="color:#fff;font-size:1.8rem;font-weight:800;line-height:1.1">{_n_q1only:,}</div>
-  <div style="color:#6b7280;font-size:.72rem">{round(100*_n_q1only/max(_rf_total,1))}% of registry-found</div>
-  <div style="margin-top:4px;font-size:.72rem;color:#fbbf24">Domestic found · no foreign qual in op. state</div>
-  <div style="margin-top:3px">{_q_badge("", _q1only_exp, _q1only_prx)}</div>
+  <div style="color:#f59e0b;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em">⚠️ Domestic Found · Op. Auth Missing</div>
+  <div style="color:#fff;font-size:1.8rem;font-weight:800;line-height:1.1">{_n_do:,}</div>
+  <div style="color:#6b7280;font-size:.72rem">{_pct(_n_do)} of all onboarded</div>
+  <div style="color:#fbbf24;font-size:.72rem;margin-top:4px">Domestic incorporation found · no filing confirms operating state authorization</div>
+  <div style="margin-top:3px">{_q_badge(_do_exp, _do_prx)}</div>
 </div>""", unsafe_allow_html=True)
 
-        # Q2 only
-        _q2only_exp = len(_q2_only & _q2_bids_explicit)
-        _q2only_prx = len(_q2_only & _q2_bids_proxy - _q2_bids_explicit)
         with _bc3:
+            _oo_exp = len(_op_only & _op_explicit)
+            _oo_prx = len(_op_only & _op_proxy - _op_explicit)
             st.markdown(f"""<div style="background:#1c0a05;border:1px solid #f97316;border-radius:8px;padding:10px 14px">
-  <div style="color:#f97316;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em">🔶 Q2 Only</div>
-  <div style="color:#fff;font-size:1.8rem;font-weight:800;line-height:1.1">{_n_q2only:,}</div>
-  <div style="color:#6b7280;font-size:.72rem">{round(100*_n_q2only/max(_rf_total,1))}% of registry-found</div>
-  <div style="margin-top:4px;font-size:.72rem;color:#fb923c">Foreign qual found · domestic unverified</div>
-  <div style="margin-top:3px">{_q_badge("", _q2only_exp, _q2only_prx)}</div>
+  <div style="color:#f97316;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em">🔶 Op. Auth Found · Domestic Unverified</div>
+  <div style="color:#fff;font-size:1.8rem;font-weight:800;line-height:1.1">{_n_oo:,}</div>
+  <div style="color:#6b7280;font-size:.72rem">{_pct(_n_oo)} of all onboarded</div>
+  <div style="color:#fb923c;font-size:.72rem;margin-top:4px">Operating state filing found · domestic incorporation origin unknown (tax-haven pattern)</div>
+  <div style="margin-top:3px">{_q_badge(_oo_exp, _oo_prx)}</div>
 </div>""", unsafe_allow_html=True)
 
-        # Neither
         with _bc4:
             st.markdown(f"""<div style="background:#1a0505;border:1px solid #ef4444;border-radius:8px;padding:10px 14px">
-  <div style="color:#ef4444;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em">❌ Neither</div>
-  <div style="color:#fff;font-size:1.8rem;font-weight:800;line-height:1.1">{_n_nei:,}</div>
-  <div style="color:#6b7280;font-size:.72rem">{round(100*_n_nei/max(_rf_total,1))}% of registry-found</div>
-  <div style="margin-top:4px;font-size:.72rem;color:#f87171">Registry data found but Q1 and Q2 unanswered</div>
+  <div style="color:#ef4444;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em">🔲 Filing Data · Neither Confirmed</div>
+  <div style="color:#fff;font-size:1.8rem;font-weight:800;line-height:1.1">{_n_fn:,}</div>
+  <div style="color:#6b7280;font-size:.72rem">{_pct(_n_fn)} of all onboarded</div>
+  <div style="color:#f87171;font-size:.72rem;margin-top:4px">Vendor returned filing data but neither domestic incorporation nor operating authorization can be confirmed</div>
 </div>""", unsafe_allow_html=True)
+
+        with _bc5:
+            st.markdown(f"""<div style="background:#0f0a1e;border:1px solid #6366f1;border-radius:8px;padding:10px 14px">
+  <div style="color:#818cf8;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em">⚫ No Filing Data</div>
+  <div style="color:#fff;font-size:1.8rem;font-weight:800;line-height:1.1">{_n_nfd:,}</div>
+  <div style="color:#6b7280;font-size:.72rem">{_pct(_n_nfd)} of all onboarded</div>
+  <div style="color:#a5b4fc;font-size:.72rem;margin-top:4px">Vendor found nothing — sos_filings[] is empty. Neither question can be answered.</div>
+</div>""", unsafe_allow_html=True)
+
+        # Sanity check
+        _matrix_total = _n_fc + _n_do + _n_oo + _n_fn + _n_nfd
+        if _matrix_total == _portfolio_total:
+            st.caption(f"✅ All {_portfolio_total:,} businesses accounted for across 5 states.")
+        else:
+            st.caption(f"⚠️ Matrix total: {_matrix_total:,} · Portfolio: {_portfolio_total:,} · "
+                       f"Gap: {abs(_portfolio_total - _matrix_total):,} (businesses missing from sos_filings_df)")
 
         # Proxy legend
         st.markdown("""<div style="margin-top:6px;font-size:.74rem;color:#6b7280">
-  <span style="color:#22c55e">■</span> <strong>Explicit</strong>: <code>sos_filings[].foreign_domestic</code> set by vendor (authoritative) &nbsp;·&nbsp;
-  <span style="color:#f59e0b">■</span> <strong>Proxy</strong>: inferred from <code>sos_filings[].state</code> vs <code>formation_state</code> or <code>primary_address.state</code> — inherits uncertainty when <code>foreign_domestic</code> absent
+  <span style="color:#22c55e">■</span> <strong>Explicit</strong>: <code>sos_filings[].foreign_domestic</code> set by vendor — authoritative &nbsp;·&nbsp;
+  <span style="color:#f59e0b">■</span> <strong>Proxy ⚠️</strong>: inferred from <code>sos_filings[].state</code> vs <code>formation_state</code>
+  or <code>primary_address.state</code> — uncertain when <code>foreign_domestic</code> absent (see decision tree in ⚙️ How Calculated)
 </div>""", unsafe_allow_html=True)
 
-        # Drilldowns for each state
+        # Drilldowns
         st.markdown("---")
-        _Q_HOW = (
-            "**Q1** = domestic incorporation filing found\n"
-            "- Explicit: `sos_filings[].foreign_domestic = 'domestic'` (set by Middesk from `registration.jurisdiction` or by OpenCorporates from `home_jurisdiction_code === jurisdiction_code`)\n"
-            "- Proxy: `sos_filings[].state = formation_state` fact — filing is in the state Middesk recorded as the entity's formation state. "
-            "Note: `formation_state` comes from `businessEntityVerification.formation_state` (Middesk) or `firmographic.home_jurisdiction_text` (OC) — an INDEPENDENT source from the filing state.\n\n"
-            "**Q2** = authorization to operate in submitted state found\n"
+        _DOM_OP_HOW = (
+            "**Domestic Filing** = the incorporation/formation filing in the entity's home state\n"
+            "- Explicit: `sos_filings[].foreign_domestic = 'domestic'` — set by Middesk from `registration.jurisdiction` "
+            "or by OpenCorporates from `home_jurisdiction_code === jurisdiction_code` (`index.ts:799-883`)\n"
+            "- Proxy: `sos_filings[].state = formation_state` fact — filing is in the state Middesk recorded as formation state. "
+            "`formation_state` comes from `businessEntityVerification.formation_state` (Middesk) — an INDEPENDENT source from the filing state.\n\n"
+            "**Operating Authorization** = a filing confirming the entity is authorized to operate in the submitted state\n"
             "- Explicit: `sos_filings[].foreign_domestic = 'foreign'` AND `sos_filings[].state = primary_address.state`\n"
-            "- Proxy: `sos_filings[].state = primary_address.state` AND `state ≠ formation_state` — filing is in the operating state but NOT the formation state, suggesting a foreign qualification. "
-            "⚠️ This proxy is UNCERTAIN: it cannot distinguish a foreign qual from a domestic filing when `formation_state` is null. "
-            "Only `foreign_domestic='foreign'` is authoritative.\n\n"
-            "**Single-state businesses:** when `formation_state = primary_address.state`, Q1 and Q2 collapse — finding the domestic filing IS the authorization. These are counted in Q1+Q2.\n\n"
-            "**Source tables:** `rds_warehouse_public.facts name='sos_filings'` · `name='formation_state'` · `name='primary_address'`\n"
-            "**Key file:** `integration-service/lib/facts/kyb/index.ts:640` (formation_state) · `:717` (sos_filings transformer)"
+            "- Proxy: `sos_filings[].state = primary_address.state` AND `state ≠ formation_state` — "
+            "⚠️ UNCERTAIN: cannot distinguish foreign qualification from domestic filing when `foreign_domestic` is absent.\n\n"
+            "**Single-state businesses** (`formation_state = primary_address.state`): finding the domestic incorporation IS the authorization — counted in Fully Covered.\n\n"
+            "**No Filing Data**: `sos_filings[]` is empty — `sos_active IS NULL` in `rds_warehouse_public.facts` "
+            "(proxy: `sos_active` only written when `sos_filings.length > 0`, per `index.ts:1431`).\n\n"
+            "**Source tables:** `rds_warehouse_public.facts name='sos_filings'` · `name='formation_state'` · `name='primary_address'` · `name='sos_active'`"
         )
 
-        def _q_drilldown(seg_bids, label, seg_key_prefix):
+        def _cov_drilldown(seg_bids, label, seg_key_prefix, include_no_filing=False):
             if not seg_bids: return
             _bids_list = sorted(seg_bids)
             with st.expander(f"👁️ Show {len(_bids_list):,} business IDs — {label}", expanded=False):
                 st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid #8B5CF6;
                     border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
-                  <span style="color:#a78bfa;font-weight:700">⚙️ How Q1/Q2 is determined</span>
+                  <span style="color:#a78bfa;font-weight:700">⚙️ How this classification is determined</span>
                 </div>""", unsafe_allow_html=True)
-                st.markdown(_Q_HOW)
-                # Table
-                if _sos_filings_df is not None and not _sos_filings_df.empty:
-                    _sf_seg = _sos_filings_df[_sos_filings_df["business_id"].isin(_bids_list)].groupby("business_id").agg(
-                        vendor=("source_vendor_name", "first") if "source_vendor_name" in _sos_filings_df.columns else ("filing_state","count"),
+                st.markdown(_DOM_OP_HOW)
+                if not include_no_filing and _sos_filings_df is not None and not _sos_filings_df.empty:
+                    _sf_s = _sos_filings_df[_sos_filings_df["business_id"].isin(_bids_list)].groupby("business_id").agg(
+                        vendor=("source_vendor_name","first") if "source_vendor_name" in _sos_filings_df.columns else ("filing_state","count"),
                         foreign_domestic=("foreign_domestic", lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
                         filing_states=("filing_state", lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
-                        n_filings=("filing_state", "count"),
-                        filing_active=("filing_active", "max"),
-                        entity_type=("entity_type", "first"),
+                        n_filings=("filing_state","count"),
+                        entity_type=("entity_type","first"),
                     ).reset_index()
-                    # Merge formation_state and operating_state from funnel
-                    _fs_col = pd.Series(_bid_to_form)
-                    _os_col = pd.Series(_bid_to_op)
-                    _sf_seg["formation_state"] = _sf_seg["business_id"].map(_fs_col)
-                    _sf_seg["operating_state"]  = _sf_seg["business_id"].map(_os_col)
-                    _sf_seg["q1_method"] = _sf_seg["business_id"].apply(
-                        lambda b: "Explicit" if b in _q1_bids_explicit else ("Proxy" if b in _q1_bids_proxy else "—"))
-                    _sf_seg["q2_method"] = _sf_seg["business_id"].apply(
-                        lambda b: "Explicit" if b in _q2_bids_explicit else
-                                  ("Single-state" if b in _single_state_bids else
-                                   ("Proxy ⚠️" if b in _q2_bids_proxy else "—")))
-                    _sf_seg = _sf_seg.rename(columns={
-                        "vendor":"Winning Vendor","foreign_domestic":"Dom/Foreign",
+                    _sf_s["formation_state"]   = _sf_s["business_id"].map(pd.Series(_bid_to_form))
+                    _sf_s["operating_state"]    = _sf_s["business_id"].map(pd.Series(_bid_to_op))
+                    _sf_s["Domestic Method"]    = _sf_s["business_id"].apply(
+                        lambda b: "Explicit ✅" if b in _dom_explicit else ("Proxy ⚠️" if b in _dom_proxy else "Not found ❌"))
+                    _sf_s["Op. Auth Method"]    = _sf_s["business_id"].apply(
+                        lambda b: "Explicit ✅" if b in _op_explicit else
+                                  ("Single-state 🔵" if b in _single_state_bids else
+                                   ("Proxy ⚠️" if b in _op_proxy else "Not found ❌")))
+                    _sf_s = _sf_s.rename(columns={
+                        "vendor":"Vendor","foreign_domestic":"Dom/Foreign Filed",
                         "filing_states":"Filing State(s)","n_filings":"# Filings",
-                        "filing_active":"Any Active","entity_type":"Entity Type",
-                        "formation_state":"Formation State","operating_state":"Operating State",
-                        "q1_method":"Q1 Method","q2_method":"Q2 Method",
+                        "entity_type":"Entity Type","formation_state":"Formation State",
+                        "operating_state":"Operating State",
                     })
-                    _ordered = ["business_id","Winning Vendor","Formation State","Operating State",
-                                "Filing State(s)","Dom/Foreign","Q1 Method","Q2 Method",
-                                "# Filings","Any Active","Entity Type"]
-                    _sf_seg = _sf_seg[[c for c in _ordered if c in _sf_seg.columns]]
-                    st.dataframe(_sf_seg, use_container_width=True, hide_index=True)
-                    _dl = _sf_seg.to_csv(index=False).encode()
+                    _ord = ["business_id","Vendor","Formation State","Operating State",
+                            "Filing State(s)","Dom/Foreign Filed","Domestic Method","Op. Auth Method",
+                            "# Filings","Entity Type"]
+                    _sf_s = _sf_s[[c for c in _ord if c in _sf_s.columns]]
+                    st.dataframe(_sf_s, use_container_width=True, hide_index=True)
                     st.download_button(f"⬇️ Download {len(_bids_list)} IDs (CSV)",
-                                       _dl, f"{seg_key_prefix}_ids.csv", "text/csv",
-                                       key=f"dl_q_{seg_key_prefix}")
-                # Investigate
+                                       _sf_s.to_csv(index=False).encode(),
+                                       f"{seg_key_prefix}_ids.csv","text/csv",
+                                       key=f"dl_cov_{seg_key_prefix}")
+                else:
+                    # No filing data — show basic table from funnel
+                    _nfd_df = _funnel[_funnel["business_id"].isin(_bids_list)][
+                        ["business_id"] + [c for c in ["sos_match_boolean","sos_active","formation_state","operating_state"] if c in _funnel.columns]
+                    ].copy()
+                    _nfd_df["Domestic Filing"] = "❌ Not found"
+                    _nfd_df["Op. Authorization"] = "❌ Not found"
+                    st.dataframe(_nfd_df, use_container_width=True, hide_index=True)
+                    st.download_button(f"⬇️ Download {len(_bids_list)} IDs (CSV)",
+                                       _nfd_df.to_csv(index=False).encode(),
+                                       f"{seg_key_prefix}_ids.csv","text/csv",
+                                       key=f"dl_cov_{seg_key_prefix}")
+                # Investigate buttons
                 st.caption("Click 🔍 Investigate to set a business ID in the filter bar.")
                 for _idx, _bid in enumerate(_bids_list[:50]):
                     _il, _ir = st.columns([5,1])
-                    _v = _vendor_per_bid.get(_bid, "?")
-                    _q1m = "✅ Explicit" if _bid in _q1_bids_explicit else ("🟡 Proxy" if _bid in _q1_bids_proxy else "❌")
-                    _q2m = "✅ Explicit" if _bid in _q2_bids_explicit else ("🔵 Single-state" if _bid in _single_state_bids else ("🟡 Proxy⚠️" if _bid in _q2_bids_proxy else "❌"))
+                    _v = _vendor_per_bid.get(_bid, "No filing data")
+                    _dm = "✅ Explicit" if _bid in _dom_explicit else ("🟡 Proxy" if _bid in _dom_proxy else "❌")
+                    _om = "✅ Explicit" if _bid in _op_explicit else ("🔵 Single-state" if _bid in _single_state_bids else ("🟡 Proxy⚠️" if _bid in _op_proxy else "❌"))
                     with _il:
-                        st.markdown(f"<span style='font-family:monospace;font-size:.78rem'>{_bid}</span> &nbsp; "
-                                    f"<span style='color:#94a3b8;font-size:.72rem'>{_v} · Q1:{_q1m} · Q2:{_q2m}</span>",
-                                    unsafe_allow_html=True)
+                        st.markdown(
+                            f"<span style='font-family:monospace;font-size:.78rem'>{_bid}</span> &nbsp; "
+                            f"<span style='color:#94a3b8;font-size:.72rem'>{_v} · "
+                            f"Domestic:{_dm} · Op.Auth:{_om}</span>",
+                            unsafe_allow_html=True)
                     with _ir:
-                        if st.button("🔍", key=f"inv_q_{seg_key_prefix}_{_idx}"):
+                        if st.button("🔍", key=f"inv_cov_{seg_key_prefix}_{_idx}"):
                             st.session_state["_pending_bid"] = _bid
                             st.rerun()
 
-        _q_drilldown(_both_q,  "✅ Q1+Q2 Found — both domestic and foreign qual confirmed", "q_both")
-        _q_drilldown(_q1_only, "⚠️ Q1 Only — domestic found, no foreign qual in operating state", "q_q1only")
-        _q_drilldown(_q2_only, "🔶 Q2 Only — foreign qual found, domestic unverified (entity resolution gap)", "q_q2only")
-        _q_drilldown(_neither, "❌ Neither — registry data present but neither Q answered", "q_neither")
+        _cov_drilldown(_fully_covered, "✅ Fully Covered — domestic + operating authorization both found", "cov_full")
+        _cov_drilldown(_dom_only,      "⚠️ Domestic Found · Op. Auth Missing — incorporated but no operating state filing", "cov_dom")
+        _cov_drilldown(_op_only,       "🔶 Op. Auth Found · Domestic Unverified — operating state filing found, origin unknown", "cov_op")
+        _cov_drilldown(_filing_neither,"🔲 Filing Data · Neither Confirmed — vendor returned data but cannot confirm either", "cov_neither")
+        _cov_drilldown(_no_filing_data,"⚫ No Filing Data — vendor found nothing, sos_filings[] empty", "cov_nfd", include_no_filing=True)
 
-        # ── BLOCK 2: Vendor Quality Scorecard ────────────────────────────────
+        # ── BLOCK 2: Vendor Quality Scorecard (100% portfolio scope) ─────────
         st.markdown("---")
         st.markdown("#### 🏭 Block 2 — Vendor Quality Scorecard")
         st.caption(
-            "For each vendor that won the `factWithHighestConfidence` rule for `sos_filings` in this portfolio: "
-            "how often did their data answer Q1, Q2, and confirm the match? "
-            "⚠️ This reflects winning-vendor performance only — not a head-to-head across all vendors "
-            "(alternatives are not persisted in `rds_warehouse_public.facts`)."
+            "For each vendor that won `factWithHighestConfidence` for `sos_filings` — how often did their data "
+            "confirm the domestic incorporation and operating authorization, and confirm the entity match? "
+            "Denominator = all onboarded businesses (Registry Found + No Filing Data). "
+            "⚠️ Reflects winning-vendor performance only — alternatives are not persisted in `rds_warehouse_public.facts`."
         )
 
         _vendor_rows = []
-        _TAXHAVEN = {"DE","NV","WY","SD","MT","NM"}
-        _all_bids_list = _funnel["business_id"].tolist()
-        _taxhaven_bids = {b for b in _all_bids_list if (_bid_to_form.get(b,"") in _TAXHAVEN)}
+        _TAXHAVEN    = {"DE","NV","WY","SD","MT","NM"}
+        _taxhaven_bids = {b for b in _all_portfolio_bids if _bid_to_form.get(b,"") in _TAXHAVEN}
 
         _sos_match_by_bid = {}
         if "sos_match_boolean" in _funnel.columns:
             _sos_match_by_bid = _funnel.set_index("business_id")["sos_match_boolean"].str.lower().to_dict()
 
-        # Get all unique vendors across the portfolio
+        # Vendor attribution from sos_match_boolean fact source (for no-filing businesses)
+        # When sos_filings is empty, check sos_match_boolean.source.platformId
+        _smb_vendor_by_bid = {}
+        # (This would require loading source.platformId from sos_match_boolean fact;
+        #  for now we use sos_filings source_vendor_name for registry-found businesses)
+
         if "source_vendor_name" in _sos_filings_df.columns:
             _vendor_groups = _sos_filings_df.groupby("source_vendor_name")["business_id"].apply(set).to_dict()
         else:
@@ -8218,21 +8244,34 @@ HAVING SUM(CASE WHEN LOWER(JSON_EXTRACT_PATH_TEXT(f.value,'value','0','foreign_d
 
         for _vname, _vbids in sorted(_vendor_groups.items(), key=lambda x: -len(x[1])):
             if not _vname or str(_vname) in ("nan","None",""): continue
-            _vbids_rf = _vbids & _reg_bids  # scoped to registry-found
-            _n_v = len(_vbids_rf)
-            if _n_v == 0: continue
-            _v_q1   = len(_vbids_rf & _q1_all)
-            _v_q2   = len(_vbids_rf & (_q2_all | _single_state_bids))
-            _v_match= sum(1 for b in _vbids_rf if _sos_match_by_bid.get(b,"") == "true")
-            _v_th   = len(_vbids_rf & _taxhaven_bids)
-            _v_th_q1= len(_vbids_rf & _taxhaven_bids & _q1_all)
+            # Denominator: all portfolio businesses this vendor served (registry found only for now;
+            # full attribution requires sos_match_boolean source which is noted as a known gap)
+            _vbids_portfolio = _vbids & _all_portfolio_bids
+            _n_v_total = len(_vbids_portfolio)
+            if _n_v_total == 0: continue
+            _v_dom    = len(_vbids_portfolio & _dom_all)
+            _v_op     = len(_vbids_portfolio & (_op_all | _single_state_bids))
+            _v_match  = sum(1 for b in _vbids_portfolio if _sos_match_by_bid.get(b,"") == "true")
+            _v_th     = len(_vbids_portfolio & _taxhaven_bids)
+            _v_th_dom = len(_vbids_portfolio & _taxhaven_bids & _dom_all)
             _vendor_rows.append({
-                "Vendor": _vname,
-                "Businesses Served": _n_v,
-                "Q1 Found Rate": f"{round(100*_v_q1/max(_n_v,1))}% ({_v_q1})",
-                "Q2 Found Rate": f"{round(100*_v_q2/max(_n_v,1))}% ({_v_q2})",
-                "Match Confirmed": f"{round(100*_v_match/max(_n_v,1))}% ({_v_match})",
-                "Tax-Haven Q1 Rate": f"{round(100*_v_th_q1/max(_v_th,1))}% ({_v_th_q1}/{_v_th})" if _v_th else "n/a (0 tax-haven)",
+                "Vendor":                _vname,
+                "Businesses":            _n_v_total,
+                "Domestic Filing Rate":  f"{round(100*_v_dom/max(_n_v_total,1))}% ({_v_dom})",
+                "Op. Auth Rate":         f"{round(100*_v_op/max(_n_v_total,1))}% ({_v_op})",
+                "Match Confirmed":       f"{round(100*_v_match/max(_n_v_total,1))}% ({_v_match})",
+                "Tax-Haven Dom. Rate":   f"{round(100*_v_th_dom/max(_v_th,1))}% ({_v_th_dom}/{_v_th})" if _v_th else "n/a",
+            })
+        # Add unattributed row for No Filing Data businesses not in any vendor group
+        _unattr_bids = _no_filing_data - set().union(*_vendor_groups.values()) if _vendor_groups else _no_filing_data
+        if _unattr_bids:
+            _vendor_rows.append({
+                "Vendor":                "⚫ No vendor attribution",
+                "Businesses":            len(_unattr_bids),
+                "Domestic Filing Rate":  "0% (0)",
+                "Op. Auth Rate":         "0% (0)",
+                "Match Confirmed":       "0% (0)",
+                "Tax-Haven Dom. Rate":   "n/a",
             })
 
         if _vendor_rows:
@@ -8240,20 +8279,22 @@ HAVING SUM(CASE WHEN LOWER(JSON_EXTRACT_PATH_TEXT(f.value,'value','0','foreign_d
             st.dataframe(_vdf, use_container_width=True, hide_index=True)
             detail_panel(
                 "🏭 Vendor Quality Scorecard",
-                "Registry-found portfolio",
+                f"{_portfolio_total:,} businesses (100% of portfolio)",
                 what_it_means=(
-                    "For each vendor that won `factWithHighestConfidence` for `sos_filings`:\n\n"
-                    "- **Q1 Found Rate**: % of businesses this vendor served where a domestic filing was confirmed (explicit or proxy)\n"
-                    "- **Q2 Found Rate**: % where foreign qual in operating state was confirmed (or single-state where Q1=Q2)\n"
-                    "- **Match Confirmed**: % where `sos_match_boolean='true'` (vendor confirmed entity match)\n"
-                    "- **Tax-Haven Q1 Rate**: of businesses with `formation_state ∈ {DE,NV,WY,SD,MT,NM}`, % where domestic (tax-haven) filing was found\n\n"
-                    "⚠️ **Important limitation:** `factWithHighestConfidence` selects one winning vendor per business. "
-                    "This scorecard shows what the winning vendor delivered — not a cross-vendor comparison. "
-                    "A vendor only appears here if it was selected as winner for at least one business in this portfolio."
+                    "**Column definitions (plain English):**\n\n"
+                    "- **Businesses**: how many in the portfolio this vendor served (won `factWithHighestConfidence` for `sos_filings`)\n"
+                    "- **Domestic Filing Rate**: % where a domestic incorporation filing was confirmed (explicit `foreign_domestic='domestic'` OR `filing.state=formation_state` proxy)\n"
+                    "- **Op. Auth Rate**: % where operating state authorization was confirmed (explicit foreign qual OR single-state entity)\n"
+                    "- **Match Confirmed**: % where `sos_match_boolean='true'` — vendor confirmed the filing belongs to the submitted business\n"
+                    "- **Tax-Haven Dom. Rate**: of businesses formed in DE/NV/WY/SD/MT/NM, % where the domestic (tax-haven state) filing was found\n\n"
+                    "⚠️ **Known limitation:** Denominator is businesses where this vendor won `sos_filings`. "
+                    "No Registry Found businesses cannot be attributed to a specific vendor from `rds_warehouse_public.facts` alone — "
+                    "this would require reading `source.platformId` from the `sos_match_boolean` fact. "
+                    "The '⚫ No vendor attribution' row captures these."
                 ),
                 source_table="rds_warehouse_public.facts name='sos_filings' (source.platformId + source.name)",
                 sql=(
-                    "-- Winning vendor per business from sos_filings fact\n"
+                    "-- Vendor attribution from sos_filings winning source\n"
                     "SELECT\n"
                     "  JSON_EXTRACT_PATH_TEXT(value,'source','name')       AS vendor,\n"
                     "  JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS platform_id,\n"
@@ -8274,44 +8315,39 @@ HAVING SUM(CASE WHEN LOWER(JSON_EXTRACT_PATH_TEXT(f.value,'value','0','foreign_d
 
         _gaps_s2 = []
 
-        # Gap A: Q1 not answered (no domestic found)
-        _q1_missing = _rf_funnel_bids - _q1_all
-        if _q1_missing:
-            _q1_miss_exp = len(_q1_missing & _q1_bids_explicit)  # should be 0 by definition
-            _gaps_s2.append(("🔴", f"Q1 Not Answered — {len(_q1_missing):,} businesses: Domestic incorporation not confirmed",
-                f"""<strong>Observed:</strong> {len(_q1_missing):,} registry-found businesses where no filing has <code>foreign_domestic='domestic'</code>
-and no filing state matches the <code>formation_state</code> fact.<br/><br/>
+        _dom_missing = _rf_funnel_bids - _dom_all
+        if _dom_missing:
+            _gaps_s2.append(("🔴", f"Domestic Incorporation Unverified — {len(_dom_missing):,} businesses",
+                f"""<strong>Observed:</strong> {len(_dom_missing):,} registry-found businesses where no filing confirms domestic incorporation.<br/><br/>
 <strong>Why this matters:</strong> The domestic incorporation record — which contains the true formation date,
-registered agent, and officer history — was NOT verified. The filing found may be a foreign qualification only.<br/><br/>
+registered agent, and officer history — was NOT confirmed. The filing found may be a foreign qualification only.<br/><br/>
 <strong>Common causes:</strong>
 <ol style="margin:4px 0;padding-left:16px">
   <li><strong>Tax-haven incorporation:</strong> Entity formed in DE/NV/WY; vendor found only the operating-state foreign qualification</li>
   <li><strong>OpenCorporates limitation:</strong> OC did not have <code>home_jurisdiction_code</code> to set <code>foreign_domestic</code>, and <code>formation_state</code> fact is also null</li>
-  <li><strong>Middesk name/address mismatch:</strong> Vendor found a filing but couldn't confirm it's the domestic one</li>
+  <li><strong>Middesk name/address mismatch:</strong> Vendor found a filing but could not confirm it is the domestic one</li>
 </ol>
+<strong>Action:</strong> Use Block 5 — Direct SOS Enrichment Agent to fill this gap via OpenCorporates API.<br/>
 <strong>Source:</strong> <code>rds_warehouse_public.facts name='sos_filings'</code> · <code>name='formation_state'</code>"""))
 
-        # Gap B: Multi-state but Q2 not answered
-        _multi_state_bids = _rf_funnel_bids - _single_state_bids  # formation ≠ operating
-        _q2_missing_multi = _multi_state_bids - _q2_all
-        if _q2_missing_multi:
-            _gaps_s2.append(("🟠", f"Q2 Not Answered for Multi-State Businesses — {len(_q2_missing_multi):,} businesses",
-                f"""<strong>Observed:</strong> {len(_q2_missing_multi):,} businesses where <code>formation_state ≠ primary_address.state</code>
-(multi-state entity) but no filing was found in the submitted operating state.<br/><br/>
-<strong>Why this matters:</strong> These businesses claim to operate in a state where we have no SOS filing confirming
-their authorization. An entity operating in a state without a domestic registration OR a foreign qualification
-filing in that state may be non-compliant with state registration requirements.<br/><br/>
+        _multi_state = _rf_funnel_bids - _single_state_bids
+        _op_missing_multi = _multi_state - _op_all
+        if _op_missing_multi:
+            _gaps_s2.append(("🟠", f"Operating State Authorization Gap — {len(_op_missing_multi):,} multi-state businesses",
+                f"""<strong>Observed:</strong> {len(_op_missing_multi):,} businesses where <code>formation_state ≠ primary_address.state</code>
+(incorporated in a different state than where they operate) but no filing in the operating state was found.<br/><br/>
+<strong>Why this matters:</strong> An entity operating in a state without a domestic registration OR foreign qualification
+may be non-compliant with state registration requirements.<br/><br/>
 <strong>Source:</strong> <code>rds_warehouse_public.facts name='sos_filings'</code> · <code>name='primary_address'</code> · <code>name='formation_state'</code>"""))
 
-        # Gap C: Filing found but match not confirmed
-        _found_but_unmatched = {b for b in _rf_funnel_bids if _sos_match_by_bid.get(b,"") != "true"}
-        if _found_but_unmatched:
-            _gaps_s2.append(("🟡", f"Filing Found but Match Unconfirmed — {len(_found_but_unmatched):,} businesses",
-                f"""<strong>Observed:</strong> {len(_found_but_unmatched):,} registry-found businesses where <code>sos_match_boolean ≠ 'true'</code>
+        _found_unmatched = {b for b in _rf_funnel_bids if _sos_match_by_bid.get(b,"") != "true"}
+        if _found_unmatched:
+            _gaps_s2.append(("🟡", f"Filing Found · Entity Match Uncertain — {len(_found_unmatched):,} businesses",
+                f"""<strong>Observed:</strong> {len(_found_unmatched):,} registry-found businesses where <code>sos_match_boolean ≠ 'true'</code>
 — the vendor returned filing data but could NOT confirm it belongs to the submitted business.<br/><br/>
-<strong>Why this matters:</strong> Q1/Q2 may be classified (explicit or proxy) but the entity resolution is uncertain —
-the filing might belong to a different entity with a similar name or address.<br/><br/>
-<strong>Signal:</strong> <code>sos_match_boolean = 'false'</code> with <code>sos_active IS NOT NULL</code> (filings present but match failed).<br/>
+<strong>Why this matters:</strong> Domestic/operating classification may be explicit or proxy, but the underlying entity match
+is uncertain — the filing might belong to a different entity with a similar name or address.<br/><br/>
+<strong>Signal:</strong> <code>sos_match_boolean = 'false'</code> with <code>sos_active IS NOT NULL</code>.<br/>
 <strong>Source:</strong> <code>rds_warehouse_public.facts name='sos_match_boolean'</code> · <code>name='sos_filings'</code>"""))
 
         for _gicon, _gtitle, _gcontent in _gaps_s2:
@@ -8322,66 +8358,83 @@ the filing might belong to a different entity with a similar name or address.<br
               <div style="color:#CBD5E1;font-size:.80rem;line-height:1.6">{_gcontent}</div>
             </div>""", unsafe_allow_html=True)
 
-        # ── BLOCK 4: Registry Confidence Tier ────────────────────────────────
+        # ── BLOCK 4: Registry Confidence Tier (100% portfolio) ────────────────
         st.markdown("---")
         st.markdown("#### 🛡️ Block 4 — Registry Confidence Tier")
         st.caption(
-            "A per-business confidence signal combining Q1/Q2 answers and match confirmation. "
-            "Explicit classification = vendor set `foreign_domestic`. Proxy = inferred from state comparison."
+            f"All {_portfolio_total:,} onboarded businesses assigned a confidence tier. "
+            "**Explicit** = vendor set `foreign_domestic`. **Proxy ⚠️** = inferred from state comparison. "
+            "**No Filing Data** = vendor found nothing — both questions unanswerable."
         )
 
-        _conf_high   = set(); _conf_med = set(); _conf_low = set(); _conf_unver = set()
-        for _bid in _rf_funnel_bids:
-            _has_q1 = _bid in _q1_all
-            _has_q2 = _bid in _q2_all or _bid in _single_state_bids
+        _conf_high = set(); _conf_med = set(); _conf_low = set()
+        _conf_unver_filing = set()   # filing data present but neither confirmed
+        _conf_unver_nofiling = set() # no filing data at all
+
+        for _bid in _all_portfolio_bids:
+            _has_dom = _bid in _dom_all
+            _has_op  = _bid in _op_all or _bid in _single_state_bids
             _matched = _sos_match_by_bid.get(_bid,"") == "true"
-            _explicit= _bid in _q1_bids_explicit or _bid in _q2_bids_explicit
-            if _has_q1 and _has_q2 and _matched:
+            if _bid in _no_filing_data:
+                _conf_unver_nofiling.add(_bid)
+            elif _has_dom and _has_op and _matched:
                 _conf_high.add(_bid)
-            elif (_has_q1 or _has_q2) and _matched:
+            elif (_has_dom or _has_op) and _matched:
                 _conf_med.add(_bid)
-            elif (_has_q1 or _has_q2) and not _matched:
+            elif (_has_dom or _has_op) and not _matched:
                 _conf_low.add(_bid)
             else:
-                _conf_unver.add(_bid)
+                _conf_unver_filing.add(_bid)
 
-        _ct1, _ct2, _ct3, _ct4 = st.columns(4)
+        _ct1, _ct2, _ct3, _ct4, _ct5 = st.columns(5)
         _conf_data = [
-            (_ct1, "HIGH",       _conf_high,  "#22c55e", "Q1+Q2 found AND match confirmed"),
-            (_ct2, "MEDIUM",     _conf_med,   "#f59e0b", "Q1 or Q2 found AND match confirmed"),
-            (_ct3, "LOW",        _conf_low,   "#f97316", "Q1 or Q2 found BUT match unconfirmed"),
-            (_ct4, "UNVERIFIED", _conf_unver, "#ef4444", "Neither Q answered"),
+            (_ct1, "HIGH",              _conf_high,         "#22c55e", "Domestic + Op.Auth confirmed AND match verified"),
+            (_ct2, "MEDIUM",            _conf_med,          "#f59e0b", "One confirmed AND match verified"),
+            (_ct3, "LOW",               _conf_low,          "#f97316", "Filing found BUT match unconfirmed"),
+            (_ct4, "UNVERIFIED",        _conf_unver_filing, "#ef4444", "Filing data present · neither confirmed"),
+            (_ct5, "NO FILING DATA",    _conf_unver_nofiling,"#6366f1","Vendor found nothing"),
         ]
         for _col, _tier, _bids_t, _color, _desc in _conf_data:
-            _n_t = len(_bids_t)
-            _exp_t = len(_bids_t & (_q1_bids_explicit | _q2_bids_explicit))
-            _prx_t = _n_t - _exp_t
+            _n_t   = len(_bids_t)
+            _exp_t = len(_bids_t & (_dom_explicit | _op_explicit))
+            _prx_t = _n_t - _exp_t if _tier not in ("UNVERIFIED","NO FILING DATA") else 0
             with _col:
                 st.markdown(f"""<div style="background:#0f172a;border:1px solid {_color};border-radius:8px;padding:10px 14px">
-  <div style="color:{_color};font-size:.7rem;font-weight:700;text-transform:uppercase">{_tier}</div>
-  <div style="color:#fff;font-size:1.6rem;font-weight:800">{_n_t:,}</div>
-  <div style="color:#6b7280;font-size:.7rem">{round(100*_n_t/max(_rf_total,1))}% of registry-found</div>
-  <div style="color:#94a3b8;font-size:.7rem;margin-top:3px">{_desc}</div>
-  <div style="margin-top:3px;font-size:.7rem">
-    <span style="color:#22c55e">{_exp_t} explicit</span>
-    {"· " if _prx_t > 0 else ""}
-    {"<span style='color:#f59e0b'>" + str(_prx_t) + " proxy ⚠️</span>" if _prx_t > 0 else ""}
+  <div style="color:{_color};font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.03em">{_tier}</div>
+  <div style="color:#fff;font-size:1.5rem;font-weight:800">{_n_t:,}</div>
+  <div style="color:#6b7280;font-size:.68rem">{_pct(_n_t)} of portfolio</div>
+  <div style="color:#94a3b8;font-size:.68rem;margin-top:3px">{_desc}</div>
+  <div style="margin-top:3px;font-size:.68rem">
+    {"<span style='color:#22c55e'>" + str(_exp_t) + " explicit</span>" if _exp_t > 0 else ""}
+    {"<span style='color:#f59e0b'> · " + str(_prx_t) + " proxy ⚠️</span>" if _prx_t > 0 else ""}
   </div>
 </div>""", unsafe_allow_html=True)
 
+        _conf_total = sum(len(b) for _,_,b,_,_ in _conf_data)
+        st.caption(
+            f"✅ {_conf_total:,} businesses across all tiers = {_portfolio_total:,} onboarded. "
+            f"Explicit/proxy breakdown: {len(_dom_explicit|_op_explicit):,} explicit · "
+            f"{len((_dom_proxy|_op_proxy) - (_dom_explicit|_op_explicit)):,} proxy ⚠️ · "
+            f"{_n_nfd:,} no filing data"
+        )
+
         detail_panel(
             "🛡️ Registry Confidence Tier",
-            f"HIGH:{len(_conf_high)} · MED:{len(_conf_med)} · LOW:{len(_conf_low)} · UNVERIFIED:{len(_conf_unver)}",
+            f"HIGH:{len(_conf_high)} · MED:{len(_conf_med)} · LOW:{len(_conf_low)} · "
+            f"UNVERIFIED:{len(_conf_unver_filing)} · NO FILING:{len(_conf_unver_nofiling)}",
             what_it_means=(
-                "**Confidence tiers combine Q1/Q2 and match confirmation:**\n\n"
-                "| Tier | Q1 | Q2 | Match | Note |\n|---|---|---|---|---|\n"
-                "| HIGH | ✓ | ✓ | ✓ | Both registrations confirmed AND vendor confirmed entity match |\n"
-                "| MEDIUM | ✓ or ✓ | — | ✓ | One registration confirmed AND match confirmed |\n"
-                "| LOW | ✓ or ✓ | — | ✗ | Registration data found but vendor could not confirm entity match |\n"
-                "| UNVERIFIED | ✗ | ✗ | — | Registry data present but neither Q1 nor Q2 answered |\n\n"
-                "⚠️ **Proxy classifications are counted but labeled** — businesses where Q1/Q2 is answered by "
-                "state comparison (not `foreign_domestic` field) carry inherent uncertainty. "
-                "The explicit/proxy counts are shown per tier."
+                "**Confidence tiers across 100% of the onboarded portfolio:**\n\n"
+                "| Tier | Domestic Filing | Op. Auth | Match | Note |\n|---|---|---|---|---|\n"
+                "| HIGH | ✓ | ✓ | ✓ | Both confirmed AND vendor confirmed entity match |\n"
+                "| MEDIUM | ✓ or ✓ | — | ✓ | One confirmed AND match confirmed |\n"
+                "| LOW | ✓ or ✓ | — | ✗ | Filing data found but vendor could not confirm entity match |\n"
+                "| UNVERIFIED | ✗ | ✗ | — | Vendor returned filing data, but neither domestic nor operating confirmed |\n"
+                "| NO FILING DATA | ✗ | ✗ | ✗ | `sos_filings[]` is empty — vendor found nothing at all |\n\n"
+                "**Key distinction in UNVERIFIED:**\n"
+                "- UNVERIFIED: vendor returned filing data but classification failed (data quality issue)\n"
+                "- NO FILING DATA: vendor found absolutely nothing (coverage issue)\n\n"
+                "⚠️ **Proxy classifications carry inherent uncertainty** — inferred from state comparisons "
+                "when `sos_filings[].foreign_domestic` is absent. Explicit counts are shown per tier."
             ),
             source_table="rds_warehouse_public.facts name='sos_filings' + 'sos_match_boolean' + 'formation_state' + 'primary_address'",
             sql=(
