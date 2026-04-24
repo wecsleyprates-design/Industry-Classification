@@ -4094,17 +4094,28 @@ if tab=="🏠 Home":
         # ════════════════════════════════════════════════════════════════
 
         # ── sos_match_boolean breakdown ───────────────────────────────────────
-        # _no_reg_mask: sos_match_boolean='false' (vendor returned failure)
-        # Used as the base for filings-empty and filings-present sub-groups.
-        _no_reg_mask   = (_smb == "false")
+        # Registry Found: sos_match_boolean='true' OR sos_active IS NOT NULL
+        #   sos_match_boolean='true'  = vendor confirmed a match (primary path)
+        #   sos_active IS NOT NULL    = filings data arrived even when match='failure'
+        #                              (sos_active is a dependent fact only written when
+        #                               sos_filings.length > 0, per index.ts:1431)
+        #   The OR is required because a vendor can return match='failure' on confidence
+        #   grounds while still writing filing records — YOLANDA DIAZ LLC is a real example:
+        #   sos_match_boolean=false, sos_active=true, sos_filings[]=[{foreign_domestic:'domestic'}]
         _sos_found     = int((_smb == "true").sum())
-
-        # _sos_not_found: STRICTLY businesses with no filing data at all.
-        # = sos_match_boolean='false' AND sos_active IS NULL (filings array empty proxy).
-        # Businesses with sos_match='false' but sos_active present have filing data
-        # and are counted in Registry Found extended — they must NOT be counted here.
-        # This ensures Row 1 cards are mutually exclusive: Registry Found + No Registry Found = total.
         _sa_null_mask  = _sa.isin(["", "none", "nan", "null"])
+
+        # No Registry Found: TRUE LOGICAL OPPOSITE of Registry Found.
+        # NOT (sos_match_boolean='true' OR sos_active IS NOT NULL)
+        # = (sos_match_boolean != 'true') AND sos_active IS NULL
+        # = (sos_match_boolean = 'false' OR sos_match_boolean IS NULL) AND sos_active IS NULL
+        #
+        # The IS NULL arm catches businesses where the SOS vendor was never called at all
+        # (no sos_match_boolean fact exists in rds_warehouse_public.facts) — distinct from
+        # 'false' (vendor called and returned failure). Both mean no filing data exists.
+        # Using only sos_match_boolean='false' was a strict subset and left a gap.
+        _smb_null_mask = _smb.isin(["", "none", "nan", "null"])
+        _no_reg_mask   = (_smb == "false") | _smb_null_mask   # 'false' OR IS NULL
         _sos_not_found = int((_no_reg_mask & _sa_null_mask).sum())
 
         # ── sos_filings EMPTY — within No Registry (sos_match_boolean=false) ──
@@ -5862,20 +5873,100 @@ if tab=="🏠 Home":
     # All signals from rds_warehouse_public.facts and sos_filings[] API JSON.
     _SEG_CALC["sos_found_extended"] = (
         "**What 'Registry Found' means:**\n"
-        "A business has at least one entry in its `sos_filings[]` array — meaning at least one "
-        "vendor returned a SOS filing record. This includes both `sos_match_boolean=true` "
-        "(primary path) and businesses where filings are present even when `sos_match` returned "
-        "'failure'.\n\n"
-        "**Source (rds_ only):** `rds_warehouse_public.facts name='sos_filings'` · "
-        "`name='sos_match_boolean'` · `name='sos_active'`\n\n"
-        "**API JSON fields used:** `sos_filings[].active`, `sos_filings[].foreign_domestic`, "
-        "`sos_filings[].state`, `sos_filings[].jurisdiction`, `sos_filings[].entity_type`\n\n"
-        "**Python rule:** `sos_match_boolean='true'` OR `sos_active` is present in facts "
-        "(proxy: `sos_active` only written when `sos_filings.length > 0`, index.ts:1431)\n\n"
-        "**Winning vendor:** Middesk (pid=16) via `factWithHighestConfidence` rule "
-        "(sources.ts — weight=1, highest confidence wins)\n\n"
-        "**Key file:** `integration-service/lib/facts/kyb/index.ts` lines 717-987 "
-        "(sos_filings fact) · lines 1421-1424 (sos_match_boolean)"
+        "A business has at least one entry in its `sos_filings[]` array — at least one vendor "
+        "returned a SOS filing record, regardless of whether the overall match was confirmed.\n\n"
+        "**Source (rds_ only):** `rds_warehouse_public.facts` · `name='sos_match_boolean'` · `name='sos_active'`\n\n"
+        "**Why we can't check `sos_filings[]` directly in Redshift:**\n"
+        "`JSON_ARRAY_ELEMENTS` is a PostgreSQL-only function — it fails when Redshift executes "
+        "federated queries against `rds_warehouse_public.facts`. Even the positional approach "
+        "`JSON_EXTRACT_PATH_TEXT(value,'value','0','state') IS NOT NULL` has a VARCHAR(65535) "
+        "length problem for large arrays. So we use scalar proxy facts instead.\n\n"
+        "**Why `sos_active IS NOT NULL` is the proxy for non-empty `sos_filings[]`:**\n"
+        "`sos_active` is a **dependent fact** (index.ts:1431) — it is only written to "
+        "`rds_warehouse_public.facts` when `sos_filings.length > 0`. When the array is empty, "
+        "`sos_active` is never created. Therefore:\n"
+        "- `sos_active IS NOT NULL` (true OR false) → `sos_filings[]` had ≥ 1 entry\n"
+        "- `sos_active IS NULL` → `sos_filings[]` was empty when the fact was written\n\n"
+        "**Why the OR condition is required:**\n"
+        "`sos_match_boolean = 'true'` alone is insufficient. A vendor can return `match='failure'` "
+        "on confidence grounds while still writing filing records. Real example from production data:\n"
+        "```json\n// YOLANDA DIAZ LLC — sos_match='failure' but filings exist:\n"
+        "{\n"
+        "  'sos_match_boolean': false,   // Middesk returned 'failure'\n"
+        "  'sos_active': true,           // ← filings data arrived (sos_filings.length > 0)\n"
+        "  'sos_filings': [{ 'foreign_domestic': 'domestic', 'state': 'IN' }]\n"
+        "}\n```\n"
+        "Using only `sos_match_boolean='true'` would have put this business in 'No Registry Found' "
+        "and missed a legitimate domestic filing. The OR captures both paths:\n"
+        "```python\n"
+        "_reg_found_extended_mask = (_smb == 'true') | (~_sa.isin(['','none','nan','null']))\n"
+        "# _smb == 'true'          → vendor confirmed match (primary path)\n"
+        "# sos_active IS NOT NULL  → filings arrived even when match failed (extended path)\n"
+        "```\n\n"
+        "**Diagnostic SQL (facts only):**\n"
+        "```sql\n"
+        "SELECT o.business_id,\n"
+        "  MAX(CASE WHEN f.name='sos_match_boolean' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_match_boolean,\n"
+        "  MAX(CASE WHEN f.name='sos_active'        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_active\n"
+        "FROM rds_cases_public.rel_business_customer_monitoring o\n"
+        "LEFT JOIN rds_warehouse_public.facts f ON f.business_id=o.business_id\n"
+        "  AND LENGTH(f.value)<60000 AND f.name IN ('sos_match_boolean','sos_active')\n"
+        "WHERE DATE(o.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}\n"
+        "GROUP BY o.business_id\n"
+        "HAVING MAX(CASE WHEN f.name='sos_match_boolean' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)='true'\n"
+        "    OR MAX(CASE WHEN f.name='sos_active'        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) IS NOT NULL;\n"
+        "```\n\n"
+        "**Key files:** `integration-service/lib/facts/kyb/index.ts:1431` (sos_active dependent fact) · "
+        "`index.ts:1421-1424` (sos_match_boolean) · `index.ts:717-987` (sos_filings transformer)"
+    )
+
+    _SEG_CALC["no_sos"] = (
+        "**What 'No Registry Found' means:**\n"
+        "The business has NO filing data in `sos_filings[]` — no vendor returned any SOS filing record. "
+        "This is the **true logical opposite** of Registry Found.\n\n"
+        "**Source (rds_ only):** `rds_warehouse_public.facts` · `name='sos_match_boolean'` · `name='sos_active'`\n\n"
+        "**Logical derivation (De Morgan's law):**\n"
+        "```\n"
+        "Registry Found   = sos_match_boolean='true' OR sos_active IS NOT NULL\n"
+        "No Registry Found = NOT (sos_match_boolean='true' OR sos_active IS NOT NULL)\n"
+        "                  = (sos_match_boolean ≠ 'true') AND sos_active IS NULL\n"
+        "                  = (sos_match_boolean='false' OR sos_match_boolean IS NULL)\n"
+        "                    AND sos_active IS NULL\n"
+        "```\n\n"
+        "**Why both 'false' AND 'IS NULL' are needed for sos_match_boolean:**\n"
+        "- `sos_match_boolean = 'false'` → vendor was called and explicitly returned failure\n"
+        "- `sos_match_boolean IS NULL` → vendor was NEVER called (no fact written to `rds_warehouse_public.facts`). "
+        "This happens when the SOS integration pipeline didn't complete for the business. "
+        "Using only `='false'` was a strict subset and left this group uncounted — "
+        "creating a gap where `Registry Found + No Registry Found ≠ total onboarded`.\n\n"
+        "**Why `sos_active IS NULL` confirms no filing data:**\n"
+        "`sos_active` is a dependent fact (index.ts:1431) only written when `sos_filings.length > 0`. "
+        "If `sos_active` is absent from facts, the filings array was empty at pipeline time. "
+        "This is the only Redshift-compatible proxy — `JSON_ARRAY_ELEMENTS` is PostgreSQL-only "
+        "and fails on federated tables.\n\n"
+        "**Python rule:**\n"
+        "```python\n"
+        "_smb_null_mask = _smb.isin(['', 'none', 'nan', 'null'])  # sos_match_boolean IS NULL\n"
+        "_no_reg_mask   = (_smb == 'false') | _smb_null_mask       # 'false' OR IS NULL\n"
+        "_sa_null_mask  = _sa.isin(['', 'none', 'nan', 'null'])    # sos_active IS NULL\n"
+        "_sos_not_found = int((_no_reg_mask & _sa_null_mask).sum())\n"
+        "```\n\n"
+        "**Diagnostic SQL (facts only):**\n"
+        "```sql\n"
+        "SELECT o.business_id,\n"
+        "  MAX(CASE WHEN f.name='sos_match_boolean' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_match_boolean,\n"
+        "  MAX(CASE WHEN f.name='sos_active'        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_active\n"
+        "FROM rds_cases_public.rel_business_customer_monitoring o\n"
+        "LEFT JOIN rds_warehouse_public.facts f ON f.business_id=o.business_id\n"
+        "  AND LENGTH(f.value)<60000 AND f.name IN ('sos_match_boolean','sos_active')\n"
+        "WHERE DATE(o.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}\n"
+        "GROUP BY o.business_id\n"
+        "HAVING (MAX(CASE WHEN f.name='sos_match_boolean' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) = 'false'\n"
+        "     OR MAX(CASE WHEN f.name='sos_match_boolean' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) IS NULL)\n"
+        "   AND MAX(CASE WHEN f.name='sos_active'         THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) IS NULL;\n"
+        "```\n\n"
+        "**Key files:** `integration-service/lib/facts/kyb/index.ts:1431` (sos_active dependent fact) · "
+        "`index.ts:1421-1424` (sos_match_boolean) · `rds_warehouse_public.facts`"
     )
 
     _SEG_CALC["reg_domestic"] = (
@@ -6369,10 +6460,15 @@ if tab=="🏠 Home":
     # Python rule is a simple comparison on funnel_df / stats_df columns.
     _SEG_SQL_RULES = {
         # Section 1 — Registry
-        # No Registry Found: sos_match_boolean='false' AND sos_active IS NULL
-        # (sos_active absent = sos_filings[] empty proxy per index.ts:1431)
-        # Businesses with sos_match='false' but sos_active present are in Registry Found extended.
-        "no_sos":              ("sos_match_boolean = 'false' AND sos_active IS NULL", ""),
+        # No Registry Found: TRUE logical opposite of Registry Found.
+        # NOT (sos_match_boolean='true' OR sos_active IS NOT NULL)
+        # = (sos_match_boolean='false' OR sos_match_boolean IS NULL) AND sos_active IS NULL
+        # IS NULL arm catches businesses where sos vendor was never called (no fact written at all).
+        "no_sos": (
+            "(sos_match_boolean = 'false' OR sos_match_boolean IS NULL)"
+            " AND sos_active IS NULL",
+            ""
+        ),
         "dt_filings_empty":    ("sos_match_boolean = 'false' AND sos_active IS NULL", ""),
         "dt_filings_ne":       ("sos_match_boolean = 'false' AND sos_active IS NOT NULL", ""),
         "dt_ne_false":         ("sos_match_boolean = 'false' AND sos_active IS NOT NULL", ""),
@@ -6865,7 +6961,7 @@ if tab=="🏠 Home":
             "#22c55e")
     with _r1c2:
         kpi("❌ No Registry Found", f"{_sos_not_found:,}",
-            f"{rate(_sos_not_found,total_biz)} of {total_biz:,} · sos_match_boolean=false AND sos_active=null",
+            f"{rate(_sos_not_found,total_biz)} of {total_biz:,} · (sos_match_boolean=false OR null) AND sos_active=null",
             "#ef4444" if _sos_not_found > 0 else "#22c55e")
 
     # ── ROW 2: Domestic Filing (left) | Foreign Filing Only (right) ───────────
@@ -6913,7 +7009,7 @@ if tab=="🏠 Home":
 
     # ── Drilldown expanders — one per visible card ────────────────────────────
     _drilldown_table("sos_found_extended", f"Registry Found — {_sos_found_extended:,} businesses (sos_filings[] non-empty)", _SOS_COLS)
-    _drilldown_table("no_sos",             f"❌ No Registry Found — {_sos_not_found:,} businesses (sos_match_boolean=false AND sos_active=null)", _SOS_COLS)
+    _drilldown_table("no_sos",             f"❌ No Registry Found — {_sos_not_found:,} businesses ((sos_match_boolean=false OR null) AND sos_active=null)", _SOS_COLS)
     _drilldown_table("reg_domestic",       f"↳ Domestic Filing — {_n_reg_domestic:,} businesses (foreign_domestic='domestic')", _SOS_COLS)
     _drilldown_table("reg_foreign",        f"↳ Foreign Filing Only — {_n_reg_foreign:,} businesses (no domestic filing found)", _SOS_COLS)
     _drilldown_table("states_same",        f"↳ Domestic Filing State = Operating State — {_n_states_same:,} businesses", _SOS_COLS)
