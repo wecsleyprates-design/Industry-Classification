@@ -6307,6 +6307,8 @@ if tab=="🏠 Home":
             "    o.business_id,\n"
             "    MAX(CASE WHEN f.name='sos_match_boolean'\n"
             "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS sos_match_boolean,\n"
+            "    MAX(CASE WHEN f.name='sos_match'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END) AS sos_match_status,\n"
             "    MAX(CASE WHEN f.name='sos_active'\n"
             "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS sos_active,\n"
             "    MAX(CASE WHEN f.name='formation_state'\n"
@@ -6634,6 +6636,22 @@ if tab=="🏠 Home":
                 "is_sole_prop":       "Sole Prop",
             }
             _sub = _sub.rename(columns={k: v for k, v in _rename.items() if k in _sub.columns})
+
+            # Enforce exact column order — matches the SQL runner output (18 columns).
+            # Any column not yet in _sub is simply skipped.
+            _DISPLAY_ORDER = [
+                "business_id",
+                "SOS Match", "SOS Match Status", "SOS Active",
+                "Formation State", "Formation Date",
+                "TIN Submitted", "TIN Status", "TIN Match",
+                "IDV Passed", "NAICS", "WL Hits", "Sole Prop",
+                "Dom/Foreign", "Filing State(s)", "Entity Type",
+                "Filing Name", "Registration Date",
+            ]
+            _ordered_cols = [c for c in _DISPLAY_ORDER if c in _sub.columns]
+            _extra_cols_not_in_order = [c for c in _sub.columns if c not in _DISPLAY_ORDER]
+            _sub = _sub[_ordered_cols + _extra_cols_not_in_order]
+
             _col_cfg = {
                 "SOS Match":          st.column_config.TextColumn(help="sos_match_boolean — derived from sos_match.value==='success' (index.ts:1421)"),
                 "SOS Match Status":   st.column_config.TextColumn(help="sos_match.value.status — 'success'|'failure' (Middesk/OC/Trulioo)"),
@@ -6663,10 +6681,11 @@ if tab=="🏠 Home":
             else:
                 st.dataframe(pd.DataFrame({"business_id": bids}), use_container_width=True, hide_index=True)
 
-            # ── Download ─────────────────────────────────────────────────
-            _bid_csv = pd.DataFrame({"business_id": bids}).to_csv(index=False).encode()
+            # ── Download — full table (all columns, same as displayed) ──────
+            _dl_df = _sub if (_sub is not None and not _sub.empty) else pd.DataFrame({"business_id": bids})
+            _dl_csv = _dl_df.to_csv(index=False).encode()
             st.download_button(f"⬇️ Download {len(bids)} IDs (CSV)",
-                               _bid_csv, f"{seg_key}_business_ids.csv", "text/csv",
+                               _dl_csv, f"{seg_key}_business_ids.csv", "text/csv",
                                key=f"dl_{seg_key}")
 
             # ── Investigate rows (full UUID + context + button) ───────────
