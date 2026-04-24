@@ -6018,6 +6018,26 @@ if tab=="🏠 Home":
                     _tbl_df, _tbl_err = run_sql(_tbl_sql_clean)
                     if _tbl_df is not None and not _tbl_df.empty:
                         _sub = _tbl_df.copy()
+                        # Enrich with sos_filings[] parsed fields (Dom/Foreign, Jurisdiction,
+                        # Entity Type, Filing Name, Registration Date, Officers, # Filings)
+                        if _sos_filings_df is not None and not _sos_filings_df.empty:
+                            _sf_ids = set(_sub["business_id"].tolist())
+                            _sf_a = (
+                                _sos_filings_df[_sos_filings_df["business_id"].isin(_sf_ids)]
+                                .groupby("business_id")
+                                .agg(
+                                    foreign_domestic=("foreign_domestic", lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
+                                    jurisdiction=("jurisdiction",     lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
+                                    entity_type=("entity_type",       lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
+                                    filing_name=("filing_name",       "first"),
+                                    registration_date=("registration_date", "min"),
+                                    has_officers=("has_officers",     "max"),
+                                    filing_state=("filing_state",     lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
+                                    n_filings=("filing_state",        "count"),
+                                )
+                                .reset_index()
+                            )
+                            _sub = _sub.merge(_sf_a, on="business_id", how="left")
                 except Exception:
                     _sub = None
 
