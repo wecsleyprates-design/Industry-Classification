@@ -3867,8 +3867,8 @@ if tab=="🏠 Home":
         for _bid_sf, _grp in _sos_filings_df.groupby("business_id"):
             _sfg[_bid_sf] = {
                 # Domestic vs Foreign (sos_filings[].foreign_domestic)
-                "has_domestic_active":   int((_grp["foreign_domestic"]=="domestic") & (_grp["filing_active"]==True)).sum() > 0,
-                "has_domestic_inactive": int((_grp["foreign_domestic"]=="domestic") & (_grp["filing_active"]!=True)).sum() > 0,
+                "has_domestic_active":   (((_grp["foreign_domestic"]=="domestic") & (_grp["filing_active"]==True)).sum() > 0),
+                "has_domestic_inactive": (((_grp["foreign_domestic"]=="domestic") & (_grp["filing_active"]!=True)).sum() > 0),
                 "has_domestic":          (_grp["foreign_domestic"]=="domestic").any(),
                 "has_foreign":           (_grp["foreign_domestic"]=="foreign").any(),
                 "n_filings":             len(_grp),
