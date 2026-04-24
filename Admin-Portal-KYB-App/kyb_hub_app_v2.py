@@ -8241,7 +8241,27 @@ HAVING SUM(CASE WHEN LOWER(JSON_EXTRACT_PATH_TEXT(f.value,'value','0','foreign_d
         # (This would require loading source.platformId from sos_match_boolean fact;
         #  for now we use sos_filings source_vendor_name for registry-found businesses)
 
-        if "source_vendor_name" in _sos_filings_df.columns:
+        if "source_vendor_name" in _sos_filings_df.columns and "source_platform_id" in _sos_filings_df.columns:
+            # Fill missing source_vendor_name from source_platform_id using the _VENDOR_NAMES map.
+            # The sos_filings fact stores source.platformId reliably even when source.name is NULL.
+            # This is why "None / 16 / 22" appears in the SQL runner — the name wasn't stored
+            # but the platformId was. We resolve it here so those businesses are attributed correctly.
+            _sf_for_vendor = _sos_filings_df.copy()
+            _sf_for_vendor["_resolved_vendor"] = _sf_for_vendor.apply(
+                lambda r: (
+                    str(r["source_vendor_name"]).strip()
+                    if str(r.get("source_vendor_name","") or "").strip() not in ("","nan","None","none")
+                    else _VENDOR_NAMES.get(str(r.get("source_platform_id","") or "").strip(), "")
+                ),
+                axis=1,
+            )
+            _vendor_groups = (
+                _sf_for_vendor[_sf_for_vendor["_resolved_vendor"] != ""]
+                .groupby("_resolved_vendor")["business_id"]
+                .apply(set)
+                .to_dict()
+            )
+        elif "source_vendor_name" in _sos_filings_df.columns:
             _vendor_groups = _sos_filings_df.groupby("source_vendor_name")["business_id"].apply(set).to_dict()
         else:
             _vendor_groups = {}
@@ -8267,7 +8287,11 @@ HAVING SUM(CASE WHEN LOWER(JSON_EXTRACT_PATH_TEXT(f.value,'value','0','foreign_d
                 "Tax-Haven Dom. Rate":   f"{round(100*_v_th_dom/max(_v_th,1))}% ({_v_th_dom}/{_v_th})" if _v_th else "n/a",
             })
         # Add unattributed row for No Filing Data businesses not in any vendor group
-        _unattr_bids = _no_filing_data - set().union(*_vendor_groups.values()) if _vendor_groups else _no_filing_data
+        # "No vendor attribution" = businesses where sos_filings[] exists but NEITHER
+        # source.name NOR source.platformId could be resolved to a known vendor.
+        # Businesses with a known platformId are already attributed above via _resolved_vendor.
+        _all_attributed_bids = set().union(*_vendor_groups.values()) if _vendor_groups else set()
+        _unattr_bids = _all_portfolio_bids - _all_attributed_bids - _no_filing_data
         if _unattr_bids:
             _vendor_rows.append({
                 "Vendor":                "⚫ No vendor attribution",
