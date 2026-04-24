@@ -344,12 +344,23 @@ class SOSDirectAgent:
 
         try:
             resp = self._session.get(OC_SEARCH_URL, params=params, timeout=REQUEST_TIMEOUT)
+            if resp.status_code == 401:
+                logger.warning(
+                    "DirectSOS: OpenCorporates returned 401 Unauthorized. "
+                    "An API token is required — provide oc_api_token to SOSDirectAgent. "
+                    "Get a free token at https://opencorporates.com/users/account"
+                )
+                return []   # empty list, not None — means reachable but auth needed
             if resp.status_code == 429:
                 logger.warning("DirectSOS: OpenCorporates rate limit hit — pausing 5s")
                 time.sleep(5)
                 resp = self._session.get(OC_SEARCH_URL, params=params, timeout=REQUEST_TIMEOUT)
             resp.raise_for_status()
             data = resp.json()
+            # Check for error object in response
+            if "error" in data:
+                logger.warning(f"DirectSOS: OpenCorporates API error: {data['error']}")
+                return []
             companies = data.get("results", {}).get("companies", [])
             source_url_base = f"https://opencorporates.com/companies/{jur}/"
             return [
@@ -360,7 +371,7 @@ class SOSDirectAgent:
                     "inactive_reason":  c["company"].get("current_status",""),
                     "formation_date":   (c["company"].get("incorporation_date") or "")[:10],
                     "filing_state":     state,
-                    "foreign_domestic": None,   # OC doesn't always set this
+                    "foreign_domestic": None,
                     "company_number":   c["company"].get("company_number",""),
                     "source_url":       source_url_base + str(c["company"].get("company_number","")),
                     "source_method":    "opencorporates_api",
@@ -373,6 +384,35 @@ class SOSDirectAgent:
         except Exception as e:
             logger.warning(f"DirectSOS: OpenCorporates error for '{name}' in {state}: {e}")
             return None
+
+    def check_connectivity(self) -> dict:
+        """
+        Test whether the agent can reach external APIs.
+        Returns dict with keys: oc_reachable, oc_auth_ok, oc_needs_token, state_apis_reachable.
+        Call this before running batch enrichment to surface the issue in the UI.
+        """
+        result = {"oc_reachable": False, "oc_auth_ok": False, "oc_needs_token": False,
+                  "state_apis_reachable": False, "error": None}
+        try:
+            r = self._session.get(
+                OC_SEARCH_URL,
+                params={"q": "test", "jurisdiction_code": "us_mo", "per_page": 1,
+                        "format": "json", **({"api_token": self.oc_api_token} if self.oc_api_token else {})},
+                timeout=5,
+            )
+            result["oc_reachable"] = True
+            if r.status_code == 401:
+                result["oc_needs_token"] = True
+                result["oc_auth_ok"] = False
+            elif r.status_code == 200:
+                data = r.json()
+                result["oc_auth_ok"] = "error" not in data
+                result["oc_needs_token"] = not result["oc_auth_ok"]
+            else:
+                result["oc_auth_ok"] = False
+        except Exception as e:
+            result["error"] = str(e)
+        return result
 
     # ── State-specific parsers ─────────────────────────────────────────────
     def _parse_mo(self, data: dict, state: str) -> list:
@@ -573,14 +613,14 @@ def should_trigger_lookup(
     os_ = (operating_state or "").upper().strip()
 
     if not q1_found and fs in TAX_HAVEN_STATES:
-        return True, f"Q1 not found — formation state {fs} is a tax-haven state (highest-value gap)"
+        return True, f"Domestic filing not found — formation state {fs} is a tax-haven state; direct lookup needed"
     if not q2_found and fs and os_ and fs != os_:
-        return True, f"Q2 not found — multi-state entity ({fs} → {os_}), operating state authorization unconfirmed"
+        return True, f"Operating authorization not found — multi-state entity ({fs} → {os_}); no filing confirmed in operating state"
     if q1_is_proxy and fs:
-        return True, f"Q1 is proxy only — confirm via direct SOS lookup in {fs}"
+        return True, f"Domestic filing is proxy only ⚠️ — confirm via direct SOS lookup in {fs}"
     if q2_is_proxy and os_:
-        return True, f"Q2 is proxy only — confirm via direct SOS lookup in {os_}"
-    return False, "Q1 and Q2 already confirmed by vendor data — direct lookup not needed"
+        return True, f"Operating authorization is proxy only ⚠️ — confirm via direct SOS lookup in {os_}"
+    return False, "Domestic filing and operating authorization already confirmed by vendor data — no lookup needed"
 
 
 def format_result_badge(result: SOSDirectResult) -> str:

@@ -8620,14 +8620,65 @@ is uncertain — the filing might belong to a different entity with a similar na
                     icon="⚠️"
                 )
 
-        # Session state for results
+        # Session state for results and OC token
         if "direct_sos_results" not in st.session_state:
             st.session_state["direct_sos_results"] = {}
         _stored_results = st.session_state.get("direct_sos_results", {})
+        _oc_token = st.session_state.get("oc_token","") or st.session_state.get("openai_key","")
 
-        # ── STEP 2: Automatic portfolio enrichment ────────────────────────────
+        # ── STEP 2: Connectivity check + Portfolio Enrichment ─────────────────
         st.markdown("---")
-        st.markdown(f"**🏛️ Step 2 — Portfolio Enrichment** (automatic)")
+        st.markdown("**🏛️ Step 2 — Portfolio Enrichment** (automatic)")
+
+        # Run connectivity check once per session to diagnose API access
+        if "sos_connectivity" not in st.session_state:
+            _test_agent = SOSDirectAgent(oc_api_token=_oc_token)
+            st.session_state["sos_connectivity"] = _test_agent.check_connectivity()
+        _conn = st.session_state.get("sos_connectivity", {})
+
+        # Show connectivity status
+        _conn_col1, _conn_col2 = st.columns([3,1])
+        with _conn_col1:
+            if not _conn.get("oc_reachable"):
+                st.warning(
+                    "⚠️ **OpenCorporates API unreachable** from this environment. "
+                    "This is common in cloud/VM environments with restricted outbound access. "
+                    "The enrichment agent cannot perform lookups without API access. "
+                    f"Network error: `{_conn.get('error','unknown')}`",
+                    icon="🌐"
+                )
+            elif _conn.get("oc_needs_token") or not _conn.get("oc_auth_ok"):
+                st.warning(
+                    "⚠️ **OpenCorporates API token required.** "
+                    "The free unauthenticated tier now requires an API token even for basic searches. "
+                    "Get a free token at [opencorporates.com/users/account](https://opencorporates.com/users/account) "
+                    "and enter it below.",
+                    icon="🔑"
+                )
+            else:
+                st.success("✅ OpenCorporates API reachable and authenticated.", icon="🏛️")
+        with _conn_col2:
+            if st.button("🔄 Re-check connectivity", key="sos_recheck"):
+                if "sos_connectivity" in st.session_state:
+                    del st.session_state["sos_connectivity"]
+                st.rerun()
+
+        # OC API token input — always shown so user can provide it
+        _oc_input = st.text_input(
+            "🔑 OpenCorporates API token (required for lookups)",
+            value=st.session_state.get("oc_token",""),
+            type="password",
+            key="oc_token_input",
+            help="Get a free token at https://opencorporates.com/users/account — paste it here, then re-check connectivity.",
+        )
+        if _oc_input and _oc_input != st.session_state.get("oc_token",""):
+            st.session_state["oc_token"] = _oc_input
+            if "sos_connectivity" in st.session_state:
+                del st.session_state["sos_connectivity"]  # force re-check with new token
+            st.rerun()
+
+        _api_ready = _conn.get("oc_reachable") and _conn.get("oc_auth_ok")
+
         if _n_candidates > 0 and _n_with_name > 0:
             _runnable = [c for c in _enrich_candidates if c["has_legal_name"]][:20]
             _already_run = [c for c in _runnable if c["business_id"] in _stored_results]
@@ -8642,15 +8693,21 @@ is uncertain — the filing might belong to a different entity with a similar na
                         f"Results cached until session ends or cleared.",
                         icon="ℹ️"
                     )
+                elif _api_ready:
+                    st.info(
+                        f"**{len(_runnable):,}** businesses ready to enrich via OpenCorporates API. "
+                        f"Rate-limited to ~40 req/min.",
+                        icon="ℹ️"
+                    )
                 else:
                     st.info(
-                        f"**{len(_runnable):,}** businesses ready to enrich. "
-                        f"Rate-limited to ~40 req/min via OpenCorporates API.",
-                        icon="ℹ️"
+                        f"**{len(_runnable):,}** businesses pending — provide a valid OC API token above to run.",
+                        icon="🔑"
                     )
             with _btn_col:
                 _run_label = f"▶ Run {len(_pending_run):,} lookups" if _pending_run else "▶ Re-run all"
-                if st.button(_run_label, key="sos_auto_run", type="primary"):
+                _run_disabled = not _api_ready
+                if st.button(_run_label, key="sos_auto_run", type="primary", disabled=_run_disabled):
                     _targets = _runnable if not _pending_run else _pending_run
                     _agent   = SOSDirectAgent(
                         openai_api_key = st.session_state.get("openai_key",""),
