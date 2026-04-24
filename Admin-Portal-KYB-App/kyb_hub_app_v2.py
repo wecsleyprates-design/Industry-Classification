@@ -4713,36 +4713,62 @@ if tab=="🏠 Home":
             "**Source:** `integration-service/lib/facts/kyb/index.ts` lines 1426-1431\n\n"
             "**Diagnostic SQL — matches the Python computation exactly:**\n"
             "```sql\n"
-            "-- Returns: same businesses as the 'SOS Filings Array Empty' score card.\n"
-            "-- RULE: sos_match_boolean='false' AND sos_active fact row is absent.\n"
-            "-- WHY sos_active=absent → sos_filings=[]: index.ts:1431:\n"
-            "--   const filings = engine.getResolvedFact('sos_filings')?.value;\n"
-            "--   if (!filings || filings.length === 0) return undefined; // sos_active NOT written\n"
-            "-- NOTE: We do NOT check sos_filings directly because:\n"
-            "--   (a) Large arrays (>60KB) are excluded by LENGTH filter → false negatives\n"
-            "--   (b) sos_active=absent is the authoritative proxy (index.ts:1431)\n"
-            "SELECT\n"
-            "  rbcm.business_id,\n"
-            "  JSON_EXTRACT_PATH_TEXT(f_match.value,'value')              AS sos_match_boolean,\n"
-            "  JSON_EXTRACT_PATH_TEXT(f_act.value,'value')                AS sos_active,\n"
-            "  JSON_EXTRACT_PATH_TEXT(f_match.value,'source','platformId') AS winning_vendor_pid\n"
-            "FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
-            "-- sos_match_boolean=false (vendor returned failure)\n"
-            "JOIN rds_warehouse_public.facts f_match\n"
-            "  ON f_match.business_id = rbcm.business_id\n"
-            "  AND f_match.name = 'sos_match_boolean'\n"
-            "  AND JSON_EXTRACT_PATH_TEXT(f_match.value,'value') = 'false'\n"
-            "-- sos_active absent (= sos_filings was empty, index.ts:1431)\n"
-            "LEFT JOIN rds_warehouse_public.facts f_act\n"
-            "  ON f_act.business_id = rbcm.business_id AND f_act.name = 'sos_active'\n"
-            "WHERE f_act.business_id IS NULL  -- sos_active not written → sos_filings[].length === 0\n"
-            "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause};\n```\n\n"
-            "**Why sos_active=absent is the correct proxy (not sos_filings check):**\n"
-            "`sos_active` is a DEPENDENT fact (index.ts:1431). The Fact Engine only writes it when\n"
-            "`sos_filings.length > 0`. If `sos_active` is absent from `rds_warehouse_public.facts`,\n"
-            "it definitively means `sos_filings` was an empty array `[]`. Checking `sos_filings`\n"
-            "directly is unreliable because large arrays (>60KB) are excluded by the `LENGTH < 60000`\n"
-            "filter, causing false negatives."
+            "-- Returns: same 18 businesses as the 'SOS Filings Array Empty' score card.\n"
+            "-- Python rule: _no_reg_mask AND sos_active absent in funnel_df.\n"
+            "--\n"
+            "-- _no_reg_mask = sos_match_boolean = 'false' (from funnel_df GROUP BY MAX)\n"
+            "-- sos_active absent = MAX(CASE WHEN name='sos_active'...) returned NULL\n"
+            "--\n"
+            "-- IMPORTANT: Use LEFT JOIN for sos_match_boolean (not INNER JOIN).\n"
+            "-- The Python funnel_df uses GROUP BY MAX across all fact names — a business\n"
+            "-- with sos_match_boolean='false' appears even if it has other facts.\n"
+            "-- An INNER JOIN on sos_match_boolean would miss businesses where that specific\n"
+            "-- fact is absent (value computed as NULL in the GROUP BY).\n"
+            "--\n"
+            "-- WHY sos_active absent = sos_filings empty (index.ts:1431):\n"
+            "-- const filings = engine.getResolvedFact('sos_filings')?.value;\n"
+            "-- if (!filings || filings.length === 0) return undefined; // NOT written to facts\n"
+            "WITH onboarded AS (\n"
+            "  SELECT business_id\n"
+            "  FROM rds_cases_public.rel_business_customer_monitoring\n"
+            "  WHERE DATE(created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}\n"
+            "),\n"
+            "per_biz AS (\n"
+            "  SELECT\n"
+            "    o.business_id,\n"
+            "    MAX(CASE WHEN f.name='sos_match_boolean'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)   AS sos_match_boolean,\n"
+            "    MAX(CASE WHEN f.name='sos_active'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)   AS sos_active,\n"
+            "    MAX(CASE WHEN f.name='tin_submitted'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)   AS tin_submitted,\n"
+            "    MAX(CASE WHEN f.name='tin_match_boolean'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)   AS tin_match,\n"
+            "    MAX(CASE WHEN f.name='naics_code'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)   AS naics_code,\n"
+            "    MAX(CASE WHEN f.name='is_sole_prop'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)   AS is_sole_prop,\n"
+            "    MAX(CASE WHEN f.name='watchlist_hits'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)   AS watchlist_hits,\n"
+            "    MAX(CASE WHEN f.name='formation_state'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)   AS formation_state,\n"
+            "    MAX(CASE WHEN f.name='formation_date'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)   AS formation_date\n"
+            "  FROM onboarded o\n"
+            "  LEFT JOIN rds_warehouse_public.facts f ON f.business_id = o.business_id\n"
+            "  GROUP BY o.business_id\n"
+            ")\n"
+            "SELECT *\n"
+            "FROM per_biz\n"
+            "WHERE sos_match_boolean = 'false'   -- vendor returned failure\n"
+            "  AND sos_active IS NULL;            -- sos_active not written → sos_filings[]=[] (index.ts:1431)\n"
+            "```\n\n"
+            "**Why this structure matches Python:**\n"
+            "- `WITH onboarded` = the same `_authoritative_bids` list used in Python\n"
+            "- `LEFT JOIN + GROUP BY MAX(CASE WHEN...)` = exactly what `_load_kyb_funnel_for_bids` does\n"
+            "- `sos_match_boolean='false'` = `_no_reg_mask = (_smb == 'false')`\n"
+            "- `sos_active IS NULL` = `_sa.isin(['','none','nan','null'])`\n"
+            "- Count of rows returned = score card count"
         ),
         "dt_filings_ne": (
             "**What 'sos_filings array NOT EMPTY' means:**\n"
@@ -5781,11 +5807,22 @@ if tab=="🏠 Home":
                 "is_sole_prop",
             ]
             if stats_df is not None and not stats_df.empty:
-                # Use all columns that exist in stats_df (superset of _base_cols_all)
+                # Use all columns that exist in stats_df
                 _available = [c for c in _base_cols_all if c in stats_df.columns]
                 _sub = stats_df[stats_df["business_id"].isin(bids)][
                     ["business_id"] + _available
                 ].copy()
+                # Some businesses (e.g. "sos_filings empty" group) may not appear in stats_df
+                # because they have no fact rows at all → only sos_match_boolean=false.
+                # Fill missing businesses from funnel_df which covers all authoritative_bids.
+                _missing_bids = [b for b in bids if b not in set(_sub["business_id"].tolist())]
+                if _missing_bids and funnel_df is not None and not funnel_df.empty:
+                    _funnel_cols = ["sos_match_boolean","sos_active","formation_state"]
+                    _fb_missing = funnel_df[funnel_df["business_id"].isin(_missing_bids)][
+                        ["business_id"] + [c for c in _funnel_cols if c in funnel_df.columns]
+                    ].copy()
+                    if not _fb_missing.empty:
+                        _sub = pd.concat([_sub, _fb_missing], ignore_index=True)
             elif funnel_df is not None and not funnel_df.empty:
                 _funnel_base = ["sos_match_boolean","sos_active","formation_state",
                                 "tin_submitted","tin_match_boolean","operating_state"]
