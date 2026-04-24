@@ -6797,128 +6797,193 @@ if tab=="🏠 Home":
                     json_obj=_age_ct.to_dict("records"),
                     icon="📅", color="#3B82F6")
 
-    # ── Legacy gap panels (foreign_only + domestic_no_state) ──────────────────
+    # ── Gap panels: Foreign-Only + States Differ ──────────────────────────────
     _sos_found_set = set(_seg.get("sos_found",[]))
+
     if _foreign_only_bids:
         _n_fo = len(_foreign_only_bids)
+        # Update _SEG_CALC for foreign_only to use new knowledge
+        _SEG_CALC["foreign_only"] = (
+            "**Registry Found but NO Domestic Registration — from `sos_filings[]` API JSON**\n\n"
+            "**What this means:**\n"
+            "`sos_match_boolean=true` (at least one vendor found a filing) BUT "
+            "`sos_filings[].foreign_domestic='foreign'` for all entries — "
+            "NO filing has `foreign_domestic='domestic'`. The business is incorporated in a "
+            "tax-haven state (DE/NV/WY/SD/MT/NM) and Middesk found only the **foreign qualification** "
+            "filing in the operating state, not the primary domestic incorporation record.\n\n"
+            "**API JSON fields (from sos_filings chunk):**\n"
+            "- `sos_filings[].foreign_domestic = 'foreign'` — every filing is a foreign qualification\n"
+            "- `sos_filings[].active = true` — the foreign qualification IS active\n"
+            "- `sos_filings[].state` — shows the operating state (e.g. 'FL'), NOT the formation state\n\n"
+            "**How foreign_domestic is set (index.ts:767-987):**\n"
+            "- **Middesk (pid=16):** maps `registration.jurisdiction` field — 'foreign'|'domestic'\n"
+            "- **OpenCorporates (pid=23):** `home_jurisdiction_code === jurisdiction_code` → 'domestic', else 'foreign'\n\n"
+            "**The entity resolution gap:**\n"
+            "The domestic filing (in DE/NV/WY) was NOT retrieved because Middesk searches by "
+            "submitted operating address. It finds the foreign qualification in the operating state "
+            "but misses the domestic incorporation in the tax-haven state.\n\n"
+            "**Python rule:** `_sos_found_set - _domestic_set` — in Registry Found but NOT in Domestic Filing segment\n\n"
+            "**Recommended actions:**\n"
+            "1. Verify the domestic filing directly in the formation state's SOS portal (DE/NV/WY/SD/MT/NM)\n"
+            "2. Confirm a foreign qualification exists in the operating state (`primary_address.state`)\n"
+            "3. Check `sos_filings[].jurisdiction` — it will show only the operating state jurisdictions\n\n"
+            "**Source:** `integration-service/lib/facts/kyb/index.ts` lines 767-987 · "
+            "`integration-service/lib/facts/kyb/types.ts:20-32` (SoSRegistration schema) · "
+            "`rds_warehouse_public.facts name='sos_filings'`"
+        )
         st.markdown(f"""<div style="background:#1E293B;border-left:4px solid #f97316;
-            border-radius:8px;padding:10px 14px;margin:6px 0">
-          <div style="color:#f97316;font-weight:700;font-size:.86rem">
-            ⚠️ {_n_fo:,} business{"es" if _n_fo!=1 else ""} with Registry Found but NO Domestic Registration
+            border-radius:8px;padding:12px 16px;margin:8px 0">
+          <div style="color:#f97316;font-weight:700;font-size:.88rem;margin-bottom:6px">
+            ⚠️ {_n_fo:,} business{"es" if _n_fo!=1 else ""} — Registry Found but NO Domestic Registration
           </div>
-          <div style="color:#CBD5E1;font-size:.79rem;margin-top:4px;line-height:1.5">
-            These businesses have a registry match (<code>sos_match_boolean=true</code>) but their
-            <code>formation_state</code> is a tax-haven state (DE/NV/WY/SD/MT/NM) — meaning Middesk
-            found a <strong>foreign qualification</strong> filing, not the primary domestic incorporation record.
-            The domestic (incorporation) filing exists in the tax-haven state but was not retrieved.
-            <br/><strong>Action:</strong> Verify the domestic filing directly in the formation state's SOS portal.
-            Check whether a foreign qualification exists in the operating state.
+          <div style="color:#CBD5E1;font-size:.79rem;line-height:1.6">
+            <strong>Signal:</strong> <code>sos_filings[].foreign_domestic='foreign'</code> for ALL filings
+            — only foreign qualification filings exist, no domestic incorporation record.<br/>
+            <strong>Root cause:</strong> Business incorporated in a tax-haven state (DE/NV/WY/SD/MT/NM).
+            Middesk found the <strong>foreign qualification</strong> in the operating state, not the
+            domestic filing in the tax-haven formation state.<br/>
+            <strong>Source:</strong> <code>sos_filings[].foreign_domestic</code> field (API JSON) ·
+            <code>integration-service/lib/facts/kyb/index.ts:767-987</code><br/>
+            <strong>Action:</strong> (1) Verify domestic filing in formation state SOS portal.
+            (2) Confirm foreign qualification exists in operating state (<code>primary_address.state</code>).
           </div>
         </div>""", unsafe_allow_html=True)
         _drilldown_table("foreign_only",
-            f"Registry Found but No Domestic Reg — {_n_fo:,} businesses (foreign/tax-haven filing only)",
+            f"Registry Found but No Domestic Reg — {_n_fo:,} businesses (sos_filings[].foreign_domestic='foreign' only)",
             _SOS_COLS)
 
     if _domestic_no_state:
         _n_dns = len(_domestic_no_state)
+        # Update _SEG_CALC for domestic_no_state to use new knowledge
+        _SEG_CALC["domestic_no_state"] = (
+            "**Domestic Reg Found but Filing State ≠ Operating State — from `sos_filings[]` API JSON**\n\n"
+            "**What this means:**\n"
+            "`sos_filings[].foreign_domestic='domestic'` exists (domestic filing confirmed) BUT "
+            "`UPPER(sos_filings[].state) ≠ UPPER(primary_address.state)` — the state of the domestic "
+            "SOS filing does NOT match the state the business submitted as their operating address.\n\n"
+            "**API JSON fields compared:**\n"
+            "- `sos_filings[].state` → state from the SOS database (e.g. 'FL') — **verified by vendor**\n"
+            "- `primary_address.value.state` → state from the onboarding form (e.g. 'NY') — **submitted, NOT verified**\n\n"
+            "**Signal derivation:**\n"
+            "```\nState Match  = sos_match_boolean=true\n"
+            "               AND UPPER(formation_state) = UPPER(primary_address.state)\n"
+            "               AND formation_state IS NOT NULL\n"
+            "States Differ = Domestic filing confirmed AND states don't match\n```\n\n"
+            "**3 common reasons (NOT necessarily fraud):**\n"
+            "1. **Multi-state operation:** legitimately incorporated in State A (e.g. FL), operating in State B (e.g. NY). "
+            "Foreign qualification in State B required — check if it exists.\n"
+            "2. **HQ vs formation state:** business entered their HQ city/state on onboarding but is incorporated elsewhere "
+            "(e.g. NYC office but FL incorporation). Very common — difference is intentional.\n"
+            "3. **Data entry error:** business entered wrong state on onboarding form. "
+            "`primary_address.state` reflects what was submitted, not what was verified.\n\n"
+            "**Python rule:** `_domestic_set - _state_match_set` — in Domestic Filing but NOT in States Same\n\n"
+            "**Compliance implication:**\n"
+            "If operating out-of-state without a foreign qualification → compliance issue in the operating state. "
+            "Verify a foreign qualification exists in `primary_address.state`.\n\n"
+            "**Source:** `rds_warehouse_public.facts name='formation_state'` · `name='primary_address'` · "
+            "`integration-service/lib/facts/kyb/index.ts`"
+        )
         st.markdown(f"""<div style="background:#1E293B;border-left:4px solid #f59e0b;
-            border-radius:8px;padding:10px 14px;margin:6px 0">
-          <div style="color:#f59e0b;font-weight:700;font-size:.86rem">
-            ⚠️ {_n_dns:,} business{"es" if _n_dns!=1 else ""} with Domestic Reg Found but State NOT Matched
+            border-radius:8px;padding:12px 16px;margin:8px 0">
+          <div style="color:#f59e0b;font-weight:700;font-size:.88rem;margin-bottom:6px">
+            ⚠️ {_n_dns:,} business{"es" if _n_dns!=1 else ""} — Domestic Filing Found but Filing State ≠ Operating State
           </div>
-          <div style="color:#CBD5E1;font-size:.79rem;margin-top:4px;line-height:1.5">
-            These businesses have a domestic (non-tax-haven) registration, but their
-            <code>formation_state</code> does NOT match the state in their <code>primary_address</code>
-            (the state they told us they operate in). Possible causes:
-            <br/>1. <strong>Multi-state operation:</strong> legitimately incorporated in State A, operating in State B — foreign qualification required.
-            <br/>2. <strong>HQ vs formation state:</strong> business entered HQ state on onboarding but is incorporated elsewhere — common and expected.
-            <br/>3. <strong>Data entry error:</strong> wrong state entered on the onboarding form.
-            <br/><strong>Action:</strong> Verify a foreign qualification exists in the operating state.
-            Absence of foreign qualification when operating out-of-state may be a compliance issue.
+          <div style="color:#CBD5E1;font-size:.79rem;line-height:1.6">
+            <strong>Signal:</strong> <code>sos_filings[].foreign_domestic='domestic'</code> confirmed BUT
+            <code>sos_filings[].state ≠ primary_address.state</code>.<br/>
+            <code>sos_filings[].state</code> = verified by SOS vendor ·
+            <code>primary_address.state</code> = submitted on onboarding form (NOT verified).<br/>
+            <strong>3 reasons:</strong> (1) Multi-state operation — foreign qual needed in operating state;
+            (2) HQ vs formation state — intentional, common;
+            (3) Data entry error — wrong state submitted.<br/>
+            <strong>Action:</strong> Verify a foreign qualification exists in
+            <code>primary_address.state</code>. Absence = compliance issue.
           </div>
         </div>""", unsafe_allow_html=True)
         _drilldown_table("domestic_no_state",
-            f"Domestic Reg Found but State NOT Matched — {_n_dns:,} businesses",
+            f"Domestic Filing but States Differ — {_n_dns:,} businesses (sos_filings[].state ≠ primary_address.state)",
             _SOS_COLS)
 
     _reg_sql = """
--- Section 1 — Business Registry Validation
--- Source: integration-service/lib/facts/kyb/index.ts (lines 1371-1424)
---         warehouse-service/.../verification_results.sql  (lines 36-51)
---         microsites/.../BusinessRegistrationTab.tsx       (line 167-176)
+-- Section 1 — Business Registry Validation (rds_ tables only)
+-- Source: integration-service/lib/facts/kyb/index.ts (lines 1371-1424, 717-987)
+--         rds_warehouse_public.facts (sos_match_boolean, sos_active, sos_filings)
+--         rds_integration_data.business_entity_review_task (domestic/active sublabels)
 --
--- sos_match_boolean = (sos_match.value === 'success') -- computed in integration-service
--- sos_match returns 'success' from any of:
---   Middesk (pid=16): reviewTasks[key='sos_match'].status
---   OpenCorporates (pid=23): company_number present OR sosFilings.length > 0
---   Trulioo (pid=38/42): registrationNumber + formationDate + state all present
+-- sos_match_boolean = (sos_match.value === 'success') — index.ts:1421
+-- sos_active = derived from sos_filings[].some(f => f.active===true) — index.ts:1426
+-- sos_filings[].foreign_domestic = 'domestic'|'foreign' — per-filing in API JSON
 --
--- sos_match_verification (clients.verification_results) = 1 only when sublabel='Submitted Active'
--- sos_domestic_verification = 1 only when key='sos_domestic' AND sublabel='Domestic Active'
--- sos_active_verification   = 1 only when category='sos', key='sos_active', status='Success'
---
--- "No Registry Found" (3-layer definition):
---   sos_match_boolean = false/null  → vendor returned 'failure'
---   sos_filings.value = []          → empty array from vendor
---   sos_match_verification = 0      → no 'Submitted Active' sublabel
--- NOTE: sos_match_verification=0 also occurs for inactive or foreign-only filings
+-- "No Registry Found": sos_match_boolean=false AND sos_active absent (index.ts:1431)
+-- "SOS Filings Empty": sos_active absent → sos_filings.length===0
+-- "Domestic Filing": sos_filings[].foreign_domestic='domestic' exists
+WITH onboarded AS (
+  SELECT rbcm.business_id
+  FROM rds_cases_public.rel_business_customer_monitoring rbcm
+  WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}
+),
+per_biz AS (
+  SELECT o.business_id,
+    MAX(CASE WHEN f.name='sos_match_boolean' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_match_boolean,
+    MAX(CASE WHEN f.name='sos_active'        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_active
+  FROM onboarded o LEFT JOIN rds_warehouse_public.facts f ON f.business_id = o.business_id
+  GROUP BY o.business_id
+)
 SELECT
-    COUNT(DISTINCT rbcm.business_id)                                                               AS total_businesses,
-    SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f_sos.value,'value')='true'  THEN 1 ELSE 0 END)          AS registry_found,
-    SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f_sos.value,'value')!='true'
-          OR f_sos.business_id IS NULL                                THEN 1 ELSE 0 END)           AS no_registry_found,
-    SUM(CASE WHEN vr.sos_domestic_verification = 1                    THEN 1 ELSE 0 END)           AS domestic_reg_found,
-    SUM(CASE WHEN vr.sos_match_verification    = 1                    THEN 1 ELSE 0 END)           AS sos_match_submitted_active,
-    SUM(CASE WHEN vr.sos_active_verification   = 1                    THEN 1 ELSE 0 END)           AS sos_active_success
-FROM rds_cases_public.rel_business_customer_monitoring rbcm
-LEFT JOIN rds_warehouse_public.facts f_sos
-    ON f_sos.business_id = rbcm.business_id AND f_sos.name = 'sos_match_boolean'
-    AND LENGTH(f_sos.value) < 60000
-LEFT JOIN clients.verification_results vr ON vr.business_id = rbcm.business_id
-WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}';"""
+  COUNT(*)                                                              AS total_businesses,
+  SUM(CASE WHEN sos_match_boolean='true'                THEN 1 ELSE 0 END) AS registry_found,
+  SUM(CASE WHEN sos_match_boolean='false'               THEN 1 ELSE 0 END) AS no_registry_found,
+  SUM(CASE WHEN sos_match_boolean='false'
+        AND sos_active IS NULL                          THEN 1 ELSE 0 END) AS filings_empty,
+  SUM(CASE WHEN sos_active='true'                       THEN 1 ELSE 0 END) AS sos_active_true,
+  SUM(CASE WHEN sos_active='false'                      THEN 1 ELSE 0 END) AS sos_inactive
+FROM per_biz;"""
 
     detail_panel("🏛️ Onboarding & Registration Overview",
-        f"{total_biz:,} onboarded · {_sos_found:,} registry found · {_domestic_sos_found:,} domestic · {_sos_not_found:,} no registry",
+        f"{total_biz:,} onboarded · {_sos_found:,} registry found · {_sos_not_found:,} no registry · {_n_fe:,} filings empty",
         what_it_means=(
-            f"**'No Registry Found' — 3-layer definition (from source files):**\n\n"
-            f"| Layer | Signal | Meaning |\n|---|---|---|\n"
-            f"| Facts API | `sos_match_boolean = false/null` | `sos_match.status = 'failure'` — vendor found nothing |\n"
-            f"| Facts API | `sos_filings.value = []` | Empty array — no filings returned |\n"
-            f"| Redshift | `sos_match_verification = 0` | No 'Submitted Active' review task sublabel |\n"
-            f"| UI | 'No Registry Data to Display' | `enhancedSosFilingsDetails.length === 0` |\n\n"
-            f"**⚠️ Critical nuance:** `sos_match_verification = 0` also occurs when:\n"
-            f"- A filing was found but is **inactive** (sublabel ≠ 'Submitted Active')\n"
-            f"- Only **foreign** registrations found (no domestic active filing)\n\n"
+            f"**All signals from rds_warehouse_public.facts (rds_ tables only — no materialized tables):**\n\n"
+            f"| Signal | Source | Rule |\n|---|---|---|\n"
+            f"| Registry Found | `facts name='sos_match_boolean'` | `value='true'` |\n"
+            f"| No Registry Found | `facts name='sos_match_boolean'` | `value='false'` |\n"
+            f"| SOS Filings Empty | `facts name='sos_active'` absent | `sos_active` NOT written when `sos_filings.length===0` (index.ts:1431) |\n"
+            f"| Domestic Filing | `sos_filings[].foreign_domestic='domestic'` | Parsed from `facts name='sos_filings'` JSON array |\n"
+            f"| Foreign Filing Only | `sos_filings[].foreign_domestic='foreign'` | ALL filings are foreign qualifications |\n"
+            f"| Filing State = Operating | `sos_filings[].state` | Compared to `primary_address.value.state` |\n\n"
+            f"**`sos_match_boolean` derivation (index.ts:1421):**\n"
+            f"```typescript\nsos_match_boolean = engine.getResolvedFact('sos_match')?.value === 'success'\n```\n"
+            f"**`sos_match` returns 'success' when ANY vendor succeeds (index.ts:1371-1419):**\n"
+            f"- Middesk (pid=16): `reviewTasks.find(t => t.key==='sos_match').status`\n"
+            f"- OpenCorporates (pid=23): `company_number present OR sosFilings.length > 0`\n"
+            f"- Trulioo (pid=38/42): `registrationNumber + formationDate + state` all present\n\n"
+            f"**`sos_filings[].foreign_domestic` set by transformer (index.ts:767-987):**\n"
+            f"- Middesk: maps `registration.jurisdiction` — 'foreign'|'domestic'\n"
+            f"- OpenCorporates: `home_jurisdiction_code === jurisdiction_code` → 'domestic', else 'foreign'\n\n"
             f"**This period ({period_label}):**\n"
             f"- Onboarded: **{total_biz:,}** · Registry Found: **{_sos_found:,}** ({rate(_sos_found,total_biz)}) · "
             f"No Registry: **{_sos_not_found:,}** ({rate(_sos_not_found,total_biz)})\n"
-            f"- Domestic Reg Found: **{_domestic_sos_found:,}** · State Match: **{_state_match:,}**\n\n"
-            f"**`sos_match_boolean` derivation (index.ts line 1421-1424):**\n"
-            f"```typescript\nsos_match_boolean = engine.getResolvedFact('sos_match')?.value === 'success'\n```\n"
-            f"**`sos_match` returns 'success' when any vendor succeeds:**\n"
-            f"- Middesk (pid=16): `reviewTasks.find(t => t.key === 'sos_match').status`\n"
-            f"- OpenCorporates (pid=23): `company_number present OR sosFilings.length > 0`\n"
-            f"- Trulioo (pid=38/42): `registrationNumber + formationDate + state` all present\n\n"
-            f"**`clients.verification_results` columns (verification_results.sql):**\n"
-            f"- `sos_match_verification` = 1 when `key='sos_match' AND sublabel='Submitted Active'`\n"
-            f"- `sos_domestic_verification` = 1 when `key='sos_domestic' AND sublabel='Domestic Active'`\n"
-            f"- `sos_active_verification` = 1 when `category='sos', key='sos_active', status='Success'`"
+            f"- SOS Filings Empty: **{_n_fe:,}** · Domestic Filing: **{_n_reg_domestic:,}** · "
+            f"Foreign Only: **{_n_reg_foreign:,}** · States Same: **{_n_states_same:,}**"
         ),
-        source_table="rds_warehouse_public.facts (sos_match_boolean) · clients.verification_results (sos_match_verification, sos_domestic_verification)",
+        source_table="rds_warehouse_public.facts (sos_match_boolean, sos_active, sos_filings) — rds_ tables only",
         source_file="integration-service/lib/facts/kyb/index.ts",
-        source_file_line="lines 1371-1424 (sos_match) · lines 1421-1424 (sos_match_boolean) · lines 1426-1435 (sos_active)",
+        source_file_line="lines 717-987 (sos_filings) · 1371-1424 (sos_match) · 1421-1424 (sos_match_boolean) · 1426-1435 (sos_active)",
         json_obj={
             "onboarded": total_biz,
             "registry_found": _sos_found,
-            "domestic_reg": _domestic_sos_found,
-            "state_match": _state_match,
             "no_registry_found": _sos_not_found,
+            "sos_filings_empty": _n_fe,
+            "domestic_filing": _n_reg_domestic,
+            "foreign_filing_only": _n_reg_foreign,
+            "filing_state_same": _n_states_same,
+            "filing_state_differ": _n_states_diff,
             "period": period_label,
+            "data_sources": "rds_warehouse_public.facts only — no clients.* materialized tables",
             "sources": {
-                "sos_match_boolean": "facts API (integration-service/lib/facts/kyb/index.ts:1421)",
-                "sos_domestic_verification": "clients.verification_results (verification_results.sql:36-39)",
-                "sos_match_verification": "clients.verification_results (verification_results.sql:42-45)",
-                "ui_null_state": "microsites/.../BusinessRegistrationTab.tsx:170-176"
+                "sos_match_boolean": "facts name='sos_match_boolean' (index.ts:1421)",
+                "sos_active": "facts name='sos_active' (index.ts:1426 DEPENDENT from sos_filings)",
+                "sos_filings_foreign_domestic": "facts name='sos_filings' JSON array field (index.ts:767-987)",
+                "sos_filings_state": "facts name='sos_filings' JSON array field (types.ts:20-32)",
             }
         },
         sql=_reg_sql, icon="🏛️", color="#3B82F6")
@@ -8465,46 +8530,72 @@ ORDER BY avg_impact_pts ASC;"""
     # ── GROUP 2: SOS/REGISTRY ANOMALIES ─────────────────────────────────────
 
     if not _sdf.empty:
-        # G2-A: Registry Found BUT SOS Inactive — worst registry state
+        # G2-A: Registry Found BUT SOS Inactive
+        # sos_match_boolean=true → sos_filings[] non-empty AND vendor confirmed match
+        # sos_active=false → sos_filings[].every(f => !f.active) — all filings inactive
+        # Source: index.ts:1421 (sos_match_boolean) · index.ts:1426-1434 (sos_active DEPENDENT)
         _mask = (_s("sos_match_boolean")=="true") & (_s("sos_active")=="false")
         _an["g2_found_but_inactive"] = _sdf[_mask]["business_id"].tolist()
         _an_meta["g2_found_but_inactive"] = {
             "severity":"HIGH","group":"SOS/Registry Anomalies",
-            "title":"Registry Found but SOS Inactive",
-            "desc":"sos_match_boolean=true (vendor found a filing) but sos_active=false (all filings inactive — "
-                   "dissolved, suspended, or revoked). The entity has a registry record but is NOT in good standing. "
-                   "check_agent_v2: sos_inactive_tin_ok analogue.",
-            "source":"index.ts:1421 (sos_match_boolean) and 1426-1434 (sos_active)",
-            "action":"Block approval until SOS good standing is reinstated. Check if entity has filed a revival.",
+            "title":"Registry Found but SOS Inactive (all filings inactive)",
+            "desc":"sos_match_boolean=true (vendor found sos_filings[] entries) but sos_active=false "
+                   "(sos_filings[].every(f => f.active===false || f.status!=='active') — index.ts:1434). "
+                   "The entity has SOS filing records but NONE are currently active. "
+                   "Possible states: dissolved, administratively revoked, suspended, or voluntarily wound down. "
+                   "API JSON: sos_filings[].active=false for all entries, sos_filings[].foreign_domestic may be 'domestic' or 'foreign'.",
+            "source":"rds_warehouse_public.facts name='sos_match_boolean' (index.ts:1421) + "
+                     "name='sos_active' (index.ts:1426-1434 DEPENDENT from sos_filings[])",
+            "action":"Block approval until SOS good standing reinstated. "
+                     "Check sos_filings[].active in the sos_filings fact for which jurisdiction is inactive. "
+                     "Request SOS revival/reinstatement documents from the business.",
         }
 
-        # G2-B: sos_domestic_verif=1 but sos_match_verif=0
-        _dv = pd.to_numeric(_sdf.get("sos_domestic_verif",pd.Series([0]*len(_sdf))),errors="coerce").fillna(0)
-        _mv = pd.to_numeric(_sdf.get("sos_match_verif",pd.Series([0]*len(_sdf))),errors="coerce").fillna(0)
-        _mask = (_dv==1) & (_mv==0)
-        _an["g2_domestic_no_submitted"] = _sdf[_mask]["business_id"].tolist()
+        # G2-B: Foreign-Only Filing (sos_filings[].foreign_domestic='foreign' for all entries)
+        # A business with sos_match_boolean=true but ALL filings are foreign qualifications
+        # → entity incorporated in a tax-haven (DE/NV/WY) — domestic filing not retrieved
+        # Source: sos_filings[].foreign_domestic field in the API JSON
+        _reg_dom_bids  = set(_seg.get("reg_domestic",[]))
+        _reg_found_bids = set(_seg.get("sos_found_extended",[]))
+        _foreign_only_s6 = list(_reg_found_bids - _reg_dom_bids)
+        _an["g2_domestic_no_submitted"] = _foreign_only_s6
         _an_meta["g2_domestic_no_submitted"] = {
-            "severity":"MEDIUM","group":"SOS/Registry Anomalies",
-            "title":"sos_domestic_verif=1 but sos_match_verif=0",
-            "desc":"Domestic Active confirmed (key='sos_domestic', sublabel='Domestic Active') but Submitted Active "
-                   "not recorded (key='sos_match', sublabel='Submitted Active'). Logically the domestic active "
-                   "should also produce a submitted active result. Suggests a data quality issue in the "
-                   "verification_results stored procedure or tasks from different verification runs.",
-            "source":"verification_results.sql:36-45 (both derivations in the same stored procedure)",
-            "action":"Query raw business_entity_review_task for both keys. Check if from different verification IDs.",
+            "severity":"NOTICE","group":"SOS/Registry Anomalies",
+            "title":"Registry Found but Foreign Filing Only (no domestic record)",
+            "desc":"sos_match_boolean=true (registry found) but sos_filings[].foreign_domestic='foreign' "
+                   "for ALL entries — no 'domestic' filing exists in the array. "
+                   "Business is incorporated in a tax-haven state (DE/NV/WY/SD/MT/NM) and Middesk found "
+                   "only the foreign qualification in the operating state, not the primary domestic incorporation. "
+                   "API JSON: sos_filings[].foreign_domestic='foreign' · sos_filings[].state = operating state. "
+                   "The domestic filing (in the tax-haven formation state) was NOT retrieved. "
+                   "This is the entity resolution gap — not necessarily fraud.",
+            "source":"rds_warehouse_public.facts name='sos_filings' → foreign_domestic field "
+                     "(integration-service/lib/facts/kyb/index.ts:767-987 transformer) · "
+                     "integration-service/lib/facts/kyb/types.ts:20-32 (SoSRegistration schema)",
+            "action":"(1) Verify the domestic filing in the formation state SOS portal (DE/NV/WY/SD/MT/NM). "
+                     "(2) Confirm a foreign qualification exists in the operating state (primary_address.state). "
+                     "(3) Review sos_filings[].jurisdiction — should include the operating state jurisdiction.",
         }
 
-        # G2-C: sos_match_verif=1 but sos_match_boolean=false — Redshift says active, Facts API says no match
-        _mask = (_mv==1) & (_s("sos_match_boolean")=="false")
+        # G2-C: Registry Found but SOS Active=false (filing exists but all inactive)
+        # Cross-check: sos_match_boolean=false but sos_active has a value (contradiction)
+        # This means sos_filings[] was non-empty (sos_active was written) but sos_match failed
+        _mask = (_s("sos_match_boolean")=="false") & ~(_s("sos_active").isin(["","none","nan","null"]))
         _an["g2_verif_match_false"] = _sdf[_mask]["business_id"].tolist()
         _an_meta["g2_verif_match_false"] = {
             "severity":"MEDIUM","group":"SOS/Registry Anomalies",
-            "title":"sos_match_verif=1 but sos_match_boolean=false",
-            "desc":"clients.verification_results says Submitted Active (sos_match_verif=1) but the Facts API "
-                   "sos_match_boolean=false. These are computed from different data sources at different times. "
-                   "Indicates data freshness gap — verification_results may be stale vs the current fact write.",
-            "source":"verification_results.sql:42-45 vs index.ts:1421",
-            "action":"Check dates of last verification vs last fact write. Re-run Middesk verification if stale.",
+            "title":"sos_match=false but sos_filings[] non-empty (filings exist, match failed)",
+            "desc":"sos_match_boolean=false (vendor returned 'failure' for overall match) BUT "
+                   "sos_active is present in facts (meaning sos_filings.length > 0 — index.ts:1431). "
+                   "This means the vendor had filing data but still returned 'failure' for sos_match. "
+                   "Possible causes: EIN mismatch in filing, name mismatch, filing is for a different entity, "
+                   "or the filing data is incomplete (missing EIN/registration_date). "
+                   "API JSON: sos_filings[] has entries BUT sos_match.value='failure'.",
+            "source":"rds_warehouse_public.facts name='sos_match_boolean' (index.ts:1421) + "
+                     "name='sos_active' (index.ts:1426 — written only when sos_filings.length > 0)",
+            "action":"Inspect sos_filings[] directly from PostgreSQL RDS (too large for Redshift in some cases). "
+                     "Check sos_filings[].filing_name vs submitted business name. "
+                     "Verify sos_filings[].active status and sos_filings[].foreign_domestic.",
         }
 
     # ── GROUP 3: TIN/EIN ANOMALIES ───────────────────────────────────────────
