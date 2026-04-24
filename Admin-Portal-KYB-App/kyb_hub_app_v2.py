@@ -8402,16 +8402,16 @@ is uncertain — the filing might belong to a different entity with a similar na
             _n_t   = len(_bids_t)
             _exp_t = len(_bids_t & (_dom_explicit | _op_explicit))
             _prx_t = _n_t - _exp_t if _tier not in ("UNVERIFIED","NO FILING DATA") else 0
+            # Build badge HTML outside the f-string to avoid quote conflicts
+            _exp_badge = f"<span style='color:#22c55e'>{_exp_t} explicit</span>" if _exp_t > 0 else ""
+            _prx_badge = f"<span style='color:#f59e0b'> &middot; {_prx_t} proxy ⚠️</span>" if _prx_t > 0 else ""
             with _col:
                 st.markdown(f"""<div style="background:#0f172a;border:1px solid {_color};border-radius:8px;padding:10px 14px">
   <div style="color:{_color};font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.03em">{_tier}</div>
   <div style="color:#fff;font-size:1.5rem;font-weight:800">{_n_t:,}</div>
   <div style="color:#6b7280;font-size:.68rem">{_pct(_n_t)} of portfolio</div>
   <div style="color:#94a3b8;font-size:.68rem;margin-top:3px">{_desc}</div>
-  <div style="margin-top:3px;font-size:.68rem">
-    {"<span style='color:#22c55e'>" + str(_exp_t) + " explicit</span>" if _exp_t > 0 else ""}
-    {"<span style='color:#f59e0b'> · " + str(_prx_t) + " proxy ⚠️</span>" if _prx_t > 0 else ""}
-  </div>
+  <div style="margin-top:3px;font-size:.68rem">{_exp_badge}{_prx_badge}</div>
 </div>""", unsafe_allow_html=True)
 
         _conf_total = sum(len(b) for _,_,b,_,_ in _conf_data)
