@@ -5769,13 +5769,15 @@ if tab=="🏠 Home":
         Returns:
             Runnable Redshift SQL string with {date_from}/{date_to}/{customer_clause} placeholders
         """
+        # Build the customer filter using the table alias 'rbcm' defined in the CTE
+        _cust_flt = hub_cust_clause("rbcm")
         return (
             "-- AUTO-GENERATED: matches Python GROUP BY exactly\n"
             "-- Returns the same business IDs as the score card and drilldown table.\n"
             "WITH onboarded AS (\n"
-            "  SELECT business_id\n"
-            "  FROM rds_cases_public.rel_business_customer_monitoring\n"
-            "  WHERE DATE(created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}\n"
+            "  SELECT rbcm.business_id\n"
+            "  FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            f"  WHERE DATE(rbcm.created_at) BETWEEN '{{date_from}}' AND '{{date_to}}'{_cust_flt}\n"
             "),\n"
             "per_biz AS (\n"
             "  SELECT\n"
