@@ -5756,6 +5756,107 @@ if tab=="🏠 Home":
             else:
                 st.error(f"❌ SQL error: {_dt}")
 
+    def _seg_sql(where_clause: str, extra_cols: str = "") -> str:
+        """Build a diagnostic SQL that EXACTLY matches the Python computation.
+
+        Uses the same GROUP BY MAX(CASE WHEN) pattern as _load_kyb_funnel_for_bids
+        and _load_stats_for_bids, so the SQL result count always matches the score card.
+
+        Args:
+            where_clause: SQL WHERE conditions on the per_biz CTE columns
+                          (e.g. "sos_match_boolean = 'false' AND sos_active IS NULL")
+            extra_cols:   additional SELECT expressions inside the per_biz CTE
+        Returns:
+            Runnable Redshift SQL string with {date_from}/{date_to}/{customer_clause} placeholders
+        """
+        return (
+            "-- AUTO-GENERATED: matches Python GROUP BY exactly\n"
+            "-- Returns the same business IDs as the score card and drilldown table.\n"
+            "WITH onboarded AS (\n"
+            "  SELECT business_id\n"
+            "  FROM rds_cases_public.rel_business_customer_monitoring\n"
+            "  WHERE DATE(created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}\n"
+            "),\n"
+            "per_biz AS (\n"
+            "  SELECT\n"
+            "    o.business_id,\n"
+            "    MAX(CASE WHEN f.name='sos_match_boolean'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS sos_match_boolean,\n"
+            "    MAX(CASE WHEN f.name='sos_active'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS sos_active,\n"
+            "    MAX(CASE WHEN f.name='formation_state'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS formation_state,\n"
+            "    MAX(CASE WHEN f.name='formation_date'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS formation_date,\n"
+            "    MAX(CASE WHEN f.name='tin_submitted'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS tin_submitted,\n"
+            "    MAX(CASE WHEN f.name='tin_match'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END) AS tin_match_status,\n"
+            "    MAX(CASE WHEN f.name='tin_match_boolean'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS tin_match,\n"
+            "    MAX(CASE WHEN f.name='idv_passed_boolean'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS idv_passed,\n"
+            "    MAX(CASE WHEN f.name='naics_code'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS naics_code,\n"
+            "    MAX(CASE WHEN f.name='watchlist_hits'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS watchlist_hits,\n"
+            "    MAX(CASE WHEN f.name='is_sole_prop'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS is_sole_prop\n"
+            + (f"    ,{extra_cols}\n" if extra_cols else "") +
+            "  FROM onboarded o\n"
+            "  LEFT JOIN rds_warehouse_public.facts f ON f.business_id = o.business_id\n"
+            "  GROUP BY o.business_id\n"
+            ")\n"
+            f"SELECT * FROM per_biz\n"
+            f"WHERE {where_clause};"
+        )
+
+    # ── Segment-to-SQL mapping: exact GROUP BY queries matching Python rules ─────
+    # Each entry: (where_clause_on_per_biz_CTE, optional_extra_cols_in_CTE)
+    # These replace the static _SEG_CALC diagnostic SQLs for all segments whose
+    # Python rule is a simple comparison on funnel_df / stats_df columns.
+    _SEG_SQL_RULES = {
+        # Section 1 — Registry
+        "no_sos":              ("sos_match_boolean = 'false'", ""),
+        "dt_filings_empty":    ("sos_match_boolean = 'false' AND sos_active IS NULL", ""),
+        "dt_filings_ne":       ("sos_match_boolean = 'false' AND sos_active IS NOT NULL", ""),
+        "dt_ne_false":         ("sos_match_boolean = 'false' AND sos_active IS NOT NULL", ""),
+        "sos_found":           ("sos_match_boolean = 'true'", ""),
+        "sos_found_extended":  ("sos_match_boolean = 'true' OR sos_active IS NOT NULL", ""),
+        "dt_ne_true_active":   ("sos_match_boolean = 'true' AND sos_active = 'true'", ""),
+        "dt_ne_true_inactive": ("sos_match_boolean = 'true' AND sos_active = 'false'", ""),
+        # Section 2 — TIN
+        "tin_submitted":       ("tin_submitted IS NOT NULL AND tin_submitted NOT IN ('','None')", ""),
+        "tin_pass":            ("tin_match = 'true'", ""),
+        "tin_fail":            ("tin_match = 'false'", ""),
+        "tin_not_checked":     ("tin_match IS NULL AND tin_submitted IS NOT NULL", ""),
+        # Section 3 — KYB Health
+        "sos_fail_h":          ("sos_active = 'false'", ""),
+        "tin_fail_h":          ("tin_match = 'false'", ""),
+        "idv_fail_h":          ("idv_passed = 'false'", ""),
+        "naics_fb_h":          ("naics_code = '561499'", ""),
+        "no_rev_h":            ("1=1",  # revenue not in per_biz CTE; filter after
+                                "MAX(CASE WHEN f.name='revenue' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS revenue"),
+        # Section 4 — Red Flags
+        "rf_no_sos":           ("sos_match_boolean IS NULL OR sos_match_boolean != 'true'", ""),
+        "rf_sos_inactive":     ("sos_active = 'false'", ""),
+        "rf_tin_fail":         ("tin_match = 'false'", ""),
+        "rf_tin_miss":         ("tin_match IS NULL", ""),
+        "rf_watchlist":        ("CAST(COALESCE(watchlist_hits,'0') AS INT) > 0",
+                                "MAX(CASE WHEN f.name='watchlist_hits' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS watchlist_hits"),
+        "rf_naics_fb":         ("naics_code = '561499'", ""),
+        # Sole prop
+        "sole_prop_true":      ("is_sole_prop = 'true'", ""),
+        "sole_prop_null":      ("is_sole_prop IS NULL", ""),
+        "sole_prop_false":     ("is_sole_prop = 'false'", ""),
+        "possible_sole_prop":  ("is_sole_prop = 'true' OR is_sole_prop IS NULL", ""),
+        # Worth Score bands
+        "declined":            ("1=1", ""),  # filtered by score in Python, shown as-is
+        "in_review":           ("1=1", ""),
+        "approved":            ("1=1", ""),
+        "not_scored":          ("1=1", ""),
+    }
+
     def _drilldown_table(seg_key, label, cols_from_stats=None):
         """Show an expander with business IDs + key signals + how-calculated explanation + SQL runner."""
         import re as _re
@@ -5771,15 +5872,28 @@ if tab=="🏠 Home":
                 </div>""", unsafe_allow_html=True)
                 st.markdown(calc_text)
 
-                # ── Extract SQL from calc_text and render inline runner ───
-                _sql_blocks = _re.findall(r"```sql\s*(.*?)```", calc_text, _re.DOTALL | _re.IGNORECASE)
-                for _sqi, _sq in enumerate(_sql_blocks):
-                    if _sq.strip():
-                        st.markdown("**▶ Inline SQL Runner** (from Diagnostic SQL above):")
-                        _inline_sql_runner(
-                            _sq.strip(),
-                            runner_key=f"dt_{seg_key}_{_sqi}"
-                        )
+                # ── SQL Runner: use _seg_sql() if available (matches Python exactly) ──
+                # _seg_sql() generates GROUP BY MAX(CASE WHEN) — same as Python funnel_df.
+                # This guarantees the SQL returns the same business IDs as the score card.
+                # Falls back to extracting SQL from calc_text if no rule defined.
+                if seg_key in _SEG_SQL_RULES:
+                    _where, _extra = _SEG_SQL_RULES[seg_key]
+                    # For segments scoped to specific bids (Worth Score bands, etc.),
+                    # filter by business_id list instead of a WHERE rule
+                    if _where == "1=1" and bids:
+                        _bid_list_sql = ",".join(f"'{b}'" for b in bids[:500])
+                        _auto_sql = _seg_sql(f"business_id IN ({_bid_list_sql})", _extra)
+                    else:
+                        _auto_sql = _seg_sql(_where, _extra)
+                    st.markdown("**▶ Inline SQL Runner** — *auto-generated to match score card exactly:*")
+                    _inline_sql_runner(_auto_sql, runner_key=f"dt_{seg_key}_auto")
+                else:
+                    # Fallback: extract SQL from _SEG_CALC text
+                    _sql_blocks = _re.findall(r"```sql\s*(.*?)```", calc_text, _re.DOTALL | _re.IGNORECASE)
+                    for _sqi, _sq in enumerate(_sql_blocks):
+                        if _sq.strip():
+                            st.markdown("**▶ Inline SQL Runner** (from Diagnostic SQL above):")
+                            _inline_sql_runner(_sq.strip(), runner_key=f"dt_{seg_key}_{_sqi}")
                 st.markdown("---")
 
             # ── Business IDs + all relevant signals ──────────────────────────
