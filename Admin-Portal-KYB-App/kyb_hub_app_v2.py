@@ -4305,6 +4305,72 @@ if tab=="🏠 Home":
         ], index=_funnel.index)
         _n_states_same = int(_states_same_mask.sum())
 
+        # ── Formation State Gap — firmographic match WITHOUT a verified domestic filing ──
+        # Gap definition: formation_state == operating_state (firmographic match) BUT
+        # no sos_filings[] entry has (foreign_domestic='domestic' AND state==operating_state).
+        # These businesses appear to be in the right state on paper but lack a verified filing there.
+        #
+        # Source: ALL from rds_warehouse_public.facts:
+        #   formation_state    → name='formation_state'   (firmographic, from Middesk DB)
+        #   operating_state    → name='primary_address'   (submitted onboarding address)
+        #   sos_filings[].state+foreign_domestic → name='sos_filings' (verified filing)
+        #   sos_active         → name='sos_active'        (filing active/inactive)
+        #   is_sole_prop       → name='is_sole_prop'      (sole prop signal)
+        #
+        # Three sub-buckets (mutually exclusive, all from facts):
+        #   (i)  Inactive domestic filing  — sos_filings[dom].state=op_state AND active=false
+        #   (ii) No domestic filing at all — formation_state=op_state but sos_filings[] empty OR
+        #                                    no domestic filing entry for that state
+        #   (iii) Possible Sole Prop       — is_sole_prop=true/null (no formal SOS registration expected)
+        _form_state_col_u = (
+            _funnel["formation_state"].astype(str).str.upper().str.strip().fillna("")
+            if "formation_state" in _funnel.columns
+            else pd.Series([""] * len(_funnel), index=_funnel.index)
+        )
+        _form_eq_op_mask = (
+            _reg_found_extended_mask
+            & (_form_state_col_u != "")
+            & (_op_state_col_u != "")
+            & (_form_state_col_u == _op_state_col_u)
+        )
+        # Gap: firmographic match but no verified domestic filing in that state
+        _gap_mask = _form_eq_op_mask & ~_states_same_mask
+        _n_gap = int(_gap_mask.sum())
+
+        # Sub-bucket (i): inactive domestic filing in the operating state
+        # sos_filings[].foreign_domestic='domestic' AND state=op_state AND active=false
+        if _sos_filings_df is not None and not _sos_filings_df.empty:
+            _sf_dom_inactive_in_op = set(
+                _sf_reg_dom[
+                    (_sf_reg_dom["filing_active"] == False) &  # noqa: E712
+                    (_sf_reg_dom["filing_state"].str.upper().str.strip() ==
+                     _funnel.set_index("business_id")["operating_state"]
+                     .str.upper().str.strip().fillna("")
+                     .reindex(_sf_reg_dom["business_id"]).values)
+                ]["business_id"].unique()
+            )
+        else:
+            _sf_dom_inactive_in_op = set()
+        _gap_inactive_mask = _gap_mask & _funnel["business_id"].isin(_sf_dom_inactive_in_op)
+        _n_gap_inactive = int(_gap_inactive_mask.sum())
+
+        # Sub-bucket (ii): no domestic filing at all for that state
+        # (formation_state=op_state but _domestic_filing_states[bid] doesn't include op_state)
+        _gap_no_filing_mask = _gap_mask & ~_gap_inactive_mask
+        _n_gap_no_filing = int(_gap_no_filing_mask.sum())
+
+        # Sub-bucket (iii): possible sole prop (from is_sole_prop fact — subset of gap)
+        _sp_col_u = (
+            stats_df.set_index("business_id")["is_sole_prop"]
+            if (stats_df is not None and not stats_df.empty and "is_sole_prop" in stats_df.columns)
+            else pd.Series(dtype=str)
+        )
+        def _is_possible_sp(bid):
+            v = str(_sp_col_u.get(bid, "")).lower().strip()
+            return v in ("true", "", "none", "nan", "null")
+        _gap_sole_prop_mask = _gap_mask & _funnel["business_id"].apply(_is_possible_sp)
+        _n_gap_sole_prop = int(_gap_sole_prop_mask.sum())
+
         # Metric (b): Foreign Registration = Operating State
         #   A business that has ONLY foreign filings AND the foreign filing state == operating state.
         #   Meaning: Middesk found the business in the operating state as a foreign qualification,
@@ -4351,6 +4417,7 @@ if tab=="🏠 Home":
         _domestic_active_n = 0; _domestic_inactive_n = 0; _domestic_missing_n = 0
         _sos_found_extended = 0; _n_reg_domestic = 0; _n_reg_foreign = 0
         _n_states_same = 0; _n_states_diff = 0; _n_foreign_eq_op = 0
+        _n_gap = 0; _n_gap_inactive = 0; _n_gap_no_filing = 0; _n_gap_sole_prop = 0
         _sole_prop_mask = pd.Series(dtype=bool)
         _reg_found_extended_mask = pd.Series(dtype=bool)
         _reg_domestic_mask = pd.Series(dtype=bool)
@@ -4358,6 +4425,7 @@ if tab=="🏠 Home":
         _states_same_mask = pd.Series(dtype=bool)
         _states_diff_mask = pd.Series(dtype=bool)
         _foreign_eq_op_mask = pd.Series(dtype=bool)
+        _gap_mask = _gap_inactive_mask = _gap_no_filing_mask = _gap_sole_prop_mask = pd.Series(dtype=bool)
         _filings_empty_mask = pd.Series(dtype=bool)
         _filings_present_in_noreg_mask = pd.Series(dtype=bool)
         _filings_ne_match_false_mask = pd.Series(dtype=bool)
@@ -4390,6 +4458,11 @@ if tab=="🏠 Home":
         _seg["states_same"]            = _funnel[_states_same_mask]["business_id"].tolist()
         _seg["foreign_eq_op"]          = _funnel[_foreign_eq_op_mask]["business_id"].tolist()
         _seg["states_diff"]            = _funnel[_states_diff_mask]["business_id"].tolist()
+        # Formation State Gap — firmographic match without verified domestic filing
+        _seg["gap_formation"]          = _funnel[_gap_mask]["business_id"].tolist()
+        _seg["gap_inactive"]           = _funnel[_gap_inactive_mask]["business_id"].tolist()
+        _seg["gap_no_filing"]          = _funnel[_gap_no_filing_mask]["business_id"].tolist()
+        _seg["gap_sole_prop"]          = _funnel[_gap_sole_prop_mask]["business_id"].tolist()
         # Domestic detail (sub-segments of domestic group)
         _seg["domestic"]               = _funnel[_dom_active_mask]["business_id"].tolist()
         _seg["domestic_active"]        = _funnel[_dom_active_mask]["business_id"].tolist()
@@ -4409,6 +4482,7 @@ if tab=="🏠 Home":
             "no_sos","dt_filings_empty","dt_filings_present_noreg",
             "sos_found","sos_found_extended","dt_ne_true_inactive","dt_ne_true_active","dt_ne_false",
             "reg_domestic","reg_foreign","states_same","foreign_eq_op","states_diff",
+            "gap_formation","gap_inactive","gap_no_filing","gap_sole_prop",
             "domestic","domestic_active","domestic_inactive","domestic_missing","no_domestic",
             "state_match","no_state_match",
             "sole_prop_true","sole_prop_null","sole_prop_false","possible_sole_prop",
@@ -5990,6 +6064,106 @@ if tab=="🏠 Home":
         "`integration-service/lib/facts/kyb/index.ts` lines 717-987"
     )
 
+    _SEG_CALC["gap_formation"] = (
+        "**What 'Formation State Gap' means:**\n"
+        "`formation_state` (firmographic fact) matches the submitted operating state, BUT "
+        "no `sos_filings[]` entry has both `foreign_domestic='domestic'` AND `state=operating_state`. "
+        "The entity appears to be in the right state *on paper* (Middesk's firmographic DB) "
+        "but lacks a **verified active domestic SOS filing** in that state.\n\n"
+        "**Source tables: `rds_warehouse_public.facts` ONLY:**\n"
+        "| Column | Fact `name` | JSON path | Role |\n|---|---|---|---|\n"
+        "| `formation_state` | `'formation_state'` | `JSON_EXTRACT_PATH_TEXT(value,'value')` | Firmographic state — NOT a verified filing |\n"
+        "| `operating_state` | `'primary_address'` | `JSON_EXTRACT_PATH_TEXT(value,'value','state')` | Submitted operating state |\n"
+        "| `sos_filings[].state` | `'sos_filings'` | `value[i].state` | Verified filing state |\n"
+        "| `sos_filings[].foreign_domestic` | `'sos_filings'` | `value[i].foreign_domestic` | `'domestic'` = home jurisdiction |\n"
+        "| `sos_filings[].active` | `'sos_filings'` | `value[i].active` | Filing active status |\n"
+        "| `is_sole_prop` | `'is_sole_prop'` | `JSON_EXTRACT_PATH_TEXT(value,'value')` | Sole prop signal |\n\n"
+        "**Three sub-buckets (all from facts):**\n"
+        "1. **Inactive domestic filing** — `sos_filings[].foreign_domestic='domestic'` AND "
+        "`state=operating_state` BUT `active=false`. Filing exists but is dissolved/revoked.\n"
+        "2. **No domestic filing for that state** — `formation_state=operating_state` but "
+        "`sos_filings[]` either empty OR no domestic entry for that state at all. "
+        "Middesk's firmographic record says the entity is registered there, but no current filing was found.\n"
+        "3. **Possible Sole Prop** — `is_sole_prop=true` or `null` (subset of gap). "
+        "Sole proprietors often have no formal SOS registration despite having a formation state.\n\n"
+        "**Python rule:**\n"
+        "```python\n# formation_state == operating_state (firmographic match)\n"
+        "_form_eq_op_mask = (\n"
+        "    _reg_found_extended_mask\n"
+        "    & (_form_state_col_u != '') & (_op_state_col_u != '')\n"
+        "    & (_form_state_col_u == _op_state_col_u)\n"
+        ")\n"
+        "# Gap: firmographic match but NO verified domestic filing in that state\n"
+        "_gap_mask = _form_eq_op_mask & ~_states_same_mask\n```\n\n"
+        "**Diagnostic SQL (facts only):**\n"
+        "```sql\n-- Formation state gap: firmographic match but no verified domestic filing\n"
+        "WITH base AS (\n"
+        "  SELECT o.business_id,\n"
+        "    MAX(CASE WHEN f.name='formation_state'  THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)        AS formation_state,\n"
+        "    MAX(CASE WHEN f.name='primary_address'  THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','state') END) AS operating_state,\n"
+        "    MAX(CASE WHEN f.name='sos_active'       THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)         AS sos_active,\n"
+        "    MAX(CASE WHEN f.name='is_sole_prop'     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)         AS is_sole_prop\n"
+        "  FROM rds_cases_public.rel_business_customer_monitoring o\n"
+        "  LEFT JOIN rds_warehouse_public.facts f ON f.business_id=o.business_id\n"
+        "    AND LENGTH(f.value)<60000\n"
+        "    AND f.name IN ('formation_state','primary_address','sos_active','is_sole_prop')\n"
+        "  WHERE DATE(o.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}\n"
+        "  GROUP BY o.business_id\n"
+        "),\n"
+        "dom_filings AS (\n"
+        "  SELECT f.business_id, UPPER(filing->>'state') AS dom_filing_state\n"
+        "  FROM rds_warehouse_public.facts f,\n"
+        "       JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing\n"
+        "  WHERE f.name='sos_filings' AND LENGTH(f.value)<60000\n"
+        "    AND LOWER(filing->>'foreign_domestic')='domestic'\n"
+        "    AND (filing->>'active')::bool = true\n"
+        ")\n"
+        "SELECT b.business_id, b.formation_state, b.operating_state, b.is_sole_prop,\n"
+        "  CASE WHEN d.business_id IS NULL THEN 'No domestic filing found'\n"
+        "       ELSE 'Inactive domestic filing in op state' END AS gap_reason\n"
+        "FROM base b\n"
+        "LEFT JOIN dom_filings d\n"
+        "  ON d.business_id=b.business_id AND d.dom_filing_state=UPPER(b.operating_state)\n"
+        "WHERE UPPER(b.formation_state)=UPPER(b.operating_state)\n"
+        "  AND d.business_id IS NULL;\n```\n\n"
+        "**Key files:** `rds_warehouse_public.facts name='formation_state'` · "
+        "`name='sos_filings'` · `name='primary_address'` · `name='is_sole_prop'` · "
+        "`integration-service/lib/facts/kyb/index.ts:640` (formation_state) · `index.ts:717` (sos_filings)"
+    )
+
+    _SEG_CALC["gap_inactive"] = (
+        "**Sub-bucket: Inactive Domestic Filing in Operating State**\n"
+        "Within the Formation State Gap group: a domestic filing (`foreign_domestic='domestic'`) "
+        "EXISTS in `sos_filings[]` for the operating state, BUT `active=false` — the entity is "
+        "dissolved, revoked, or administratively inactive.\n\n"
+        "**Source:** `rds_warehouse_public.facts name='sos_filings'` · "
+        "`value[i].foreign_domestic='domestic'` AND `value[i].state=operating_state` AND `value[i].active=false`\n\n"
+        "**Action:** Re-run Middesk, or manually verify current standing with the state SOS portal."
+    )
+
+    _SEG_CALC["gap_no_filing"] = (
+        "**Sub-bucket: No Domestic Filing Found for This State**\n"
+        "Within the Formation State Gap group: `formation_state=operating_state` (firmographic) "
+        "but `sos_filings[]` has NO domestic filing entry for that state at all. "
+        "Middesk's firmographic record says the entity is registered here, but no current SOS filing was returned.\n\n"
+        "**Source:** `rds_warehouse_public.facts name='formation_state'` (firmographic) AND "
+        "`name='sos_filings'` (verified filings — none match in operating state with `foreign_domestic='domestic'`)\n\n"
+        "**Likely causes:** Business was dissolved with no successor filing · formation state from "
+        "firmographic data only (not verified by SOS lookup) · Middesk data gap for this state."
+    )
+
+    _SEG_CALC["gap_sole_prop"] = (
+        "**Sub-bucket: Possible Sole Proprietorship**\n"
+        "Within the Formation State Gap group: `is_sole_prop=true` or `null` (not enough data to determine). "
+        "Sole proprietors often have a formation state in the vendor's firmographic data but no formal "
+        "SOS registration — the Secretary of State does not require incorporation for sole props.\n\n"
+        "**Source:** `rds_warehouse_public.facts name='is_sole_prop'` · "
+        "`JSON_EXTRACT_PATH_TEXT(value,'value')` = `'true'` or NULL\n\n"
+        "**Derivation (index.ts:552-616):** `true` = single owner + TIN matches IDV SSN. "
+        "`null` = not enough data (no TIN / no owners / no IDV). "
+        "**Note:** this is a subset of the gap — not mutually exclusive with other sub-buckets."
+    )
+
     def _inline_sql_runner(sql_str: str, runner_key: str):
         """Inline SQL runner matching the AI Agent tab UX exactly:
           - Editable st.text_area pre-filled with the SQL
@@ -6231,6 +6405,35 @@ if tab=="🏠 Home":
             " AND operating_state IS NOT NULL AND operating_state != ''"
             " AND UPPER(COALESCE(s.filing_state,'')) != UPPER(COALESCE(operating_state,''))",
             ""
+        ),
+        # Formation State Gap: formation_state = operating_state (firmographic) BUT
+        # no verified domestic filing in that state (SQL proxy: no domestic sos_fil match).
+        # formation_state from name='formation_state' fact; operating_state from name='primary_address'.
+        "gap_formation": (
+            "formation_state IS NOT NULL AND formation_state != ''"
+            " AND operating_state IS NOT NULL AND operating_state != ''"
+            " AND UPPER(formation_state) = UPPER(operating_state)"
+            " AND (s.foreign_domestic IS NULL"
+            "      OR LOWER(s.foreign_domestic) != 'domestic'"
+            "      OR UPPER(COALESCE(s.filing_state,'')) != UPPER(COALESCE(operating_state,'')))",
+            "MAX(CASE WHEN f.name='formation_state' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_state"
+        ),
+        # Sub-bucket: inactive domestic filing in operating state
+        "gap_inactive": (
+            "formation_state IS NOT NULL AND formation_state != ''"
+            " AND operating_state IS NOT NULL AND operating_state != ''"
+            " AND UPPER(formation_state) = UPPER(operating_state)"
+            " AND s.foreign_domestic IS NOT NULL AND LOWER(s.foreign_domestic) = 'domestic'"
+            " AND UPPER(COALESCE(s.filing_state,'')) = UPPER(COALESCE(operating_state,''))",
+            "MAX(CASE WHEN f.name='formation_state' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_state"
+        ),
+        # Sub-bucket: possible sole prop within gap
+        "gap_sole_prop": (
+            "formation_state IS NOT NULL AND formation_state != ''"
+            " AND operating_state IS NOT NULL AND operating_state != ''"
+            " AND UPPER(formation_state) = UPPER(operating_state)"
+            " AND (is_sole_prop = 'true' OR is_sole_prop IS NULL)",
+            "MAX(CASE WHEN f.name='formation_state' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_state"
         ),
         # Section 2 — TIN
         "tin_submitted":       ("tin_submitted IS NOT NULL AND tin_submitted NOT IN ('','None')", ""),
@@ -6673,6 +6876,48 @@ if tab=="🏠 Home":
     _drilldown_table("states_same",        f"↳ Domestic Filing State = Operating State — {_n_states_same:,} businesses", _SOS_COLS)
     _drilldown_table("foreign_eq_op",      f"↳ Foreign Reg = Operating State — {_n_foreign_eq_op:,} businesses", _SOS_COLS)
     _drilldown_table("states_diff",        f"↳ Op. State Differs from All Regs — {_n_states_diff:,} businesses", _SOS_COLS)
+
+    # ── ⚠️ Formation State Gap Warning Card ──────────────────────────────────
+    # Shown only when the gap > 0: formation_state = operating_state (firmographic)
+    # but no verified active domestic SOS filing in that state.
+    # Source: rds_warehouse_public.facts ONLY.
+    if _n_gap > 0:
+        st.markdown(f"""
+<div style="background:#1c1207;border:1px solid #f59e0b;border-left:4px solid #f59e0b;
+     border-radius:8px;padding:12px 16px;margin:12px 0 4px 0">
+  <div style="color:#f59e0b;font-weight:700;font-size:.9rem;margin-bottom:6px">
+    ⚠️ Formation State Gap — {_n_gap:,} {"business" if _n_gap==1 else "businesses"}
+  </div>
+  <div style="color:#d1d5db;font-size:.82rem;line-height:1.6">
+    <code>formation_state = operating_state</code> (firmographic match) BUT no verified
+    active domestic SOS filing found in that state.<br/>
+    <strong>These businesses appear correct on paper but lack a confirmed SOS filing record.</strong>
+    <br/><br/>
+    <span style="color:#94a3b8">Source: <code>rds_warehouse_public.facts</code> ·
+    <code>name='formation_state'</code> vs <code>name='sos_filings'</code> vs <code>name='primary_address'</code></span>
+  </div>
+  <div style="margin-top:10px;display:flex;gap:16px;flex-wrap:wrap">
+    <div style="background:#111827;border-radius:6px;padding:6px 14px;min-width:140px">
+      <div style="color:#94a3b8;font-size:.7rem;text-transform:uppercase;letter-spacing:.05em">Inactive Filing</div>
+      <div style="color:#f87171;font-size:1.3rem;font-weight:700">{_n_gap_inactive:,}</div>
+      <div style="color:#6b7280;font-size:.7rem">sos_filings[dom].active=false in op state</div>
+    </div>
+    <div style="background:#111827;border-radius:6px;padding:6px 14px;min-width:140px">
+      <div style="color:#94a3b8;font-size:.7rem;text-transform:uppercase;letter-spacing:.05em">No Filing Found</div>
+      <div style="color:#fb923c;font-size:1.3rem;font-weight:700">{_n_gap_no_filing:,}</div>
+      <div style="color:#6b7280;font-size:.7rem">formation_state=op_state but no domestic filing</div>
+    </div>
+    <div style="background:#111827;border-radius:6px;padding:6px 14px;min-width:140px">
+      <div style="color:#94a3b8;font-size:.7rem;text-transform:uppercase;letter-spacing:.05em">Possible Sole Prop</div>
+      <div style="color:#a78bfa;font-size:1.3rem;font-weight:700">{_n_gap_sole_prop:,}</div>
+      <div style="color:#6b7280;font-size:.7rem">is_sole_prop=true/null (subset of gap)</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+        _drilldown_table("gap_formation", f"⚠️ Formation State Gap — {_n_gap:,} businesses (firmographic match, no verified filing)", _SOS_COLS)
+        _drilldown_table("gap_inactive",  f"  ↳ Inactive domestic filing — {_n_gap_inactive:,} businesses", _SOS_COLS)
+        _drilldown_table("gap_no_filing", f"  ↳ No domestic filing for that state — {_n_gap_no_filing:,} businesses", _SOS_COLS)
+        _drilldown_table("gap_sole_prop", f"  ↳ Possible Sole Prop (subset) — {_n_gap_sole_prop:,} businesses", _SOS_COLS)
 
     # ═══════════════════════════════════════════════════════════════════════════════
     # REGISTRY FOUND DEEP ANALYSIS — from sos_filings[] JSON (all from facts table)
