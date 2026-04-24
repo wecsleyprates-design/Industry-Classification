@@ -7167,7 +7167,7 @@ if tab=="🏠 Home":
             _et_df = _sf_rf.groupby("entity_type")["business_id"].nunique().reset_index()
             _et_df.columns = ["Entity Type","Businesses"]
             _et_df["Entity Type"] = _et_df["Entity Type"].str.upper().str.strip()
-            _np_n = int((_sf_rf["non_profit"]==1)["business_id"].nunique() if "non_profit" in _sf_rf.columns and _sf_rf["non_profit"].dtype != object else 0)
+            _np_n = int(_sf_rf[_sf_rf["non_profit"]==1]["business_id"].nunique() if "non_profit" in _sf_rf.columns and _sf_rf["non_profit"].dtype != object else 0)
             # Risk scoring per entity type (KYB specialist perspective)
             _ET_RISK = {
                 "LLC":"🟢 Standard","CORPORATION":"🟢 Standard","LLP":"🟡 EDD Required",
