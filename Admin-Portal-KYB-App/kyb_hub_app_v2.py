@@ -5662,6 +5662,100 @@ if tab=="🏠 Home":
         ),
     }
 
+    # ── _SEG_CALC entries for Registry Found sub-segments ───────────────────────
+    # These segments have score cards in Section 1 → Registry Found.
+    # All signals from rds_warehouse_public.facts and sos_filings[] API JSON.
+    _SEG_CALC["sos_found_extended"] = (
+        "**What 'Registry Found' means:**\n"
+        "A business has at least one entry in its `sos_filings[]` array — meaning at least one "
+        "vendor returned a SOS filing record. This includes both `sos_match_boolean=true` "
+        "(primary path) and businesses where filings are present even when `sos_match` returned "
+        "'failure'.\n\n"
+        "**Source (rds_ only):** `rds_warehouse_public.facts name='sos_filings'` · "
+        "`name='sos_match_boolean'` · `name='sos_active'`\n\n"
+        "**API JSON fields used:** `sos_filings[].active`, `sos_filings[].foreign_domestic`, "
+        "`sos_filings[].state`, `sos_filings[].jurisdiction`, `sos_filings[].entity_type`\n\n"
+        "**Python rule:** `sos_match_boolean='true'` OR `sos_active` is present in facts "
+        "(proxy: `sos_active` only written when `sos_filings.length > 0`, index.ts:1431)\n\n"
+        "**Winning vendor:** Middesk (pid=16) via `factWithHighestConfidence` rule "
+        "(sources.ts — weight=1, highest confidence wins)\n\n"
+        "**Key file:** `integration-service/lib/facts/kyb/index.ts` lines 717-987 "
+        "(sos_filings fact) · lines 1421-1424 (sos_match_boolean)"
+    )
+
+    _SEG_CALC["reg_domestic"] = (
+        "**What 'Domestic Filing' means:**\n"
+        "At least one entry in `sos_filings[]` has `foreign_domestic='domestic'` — meaning "
+        "the business has a filing in the state where it was originally incorporated "
+        "(its home jurisdiction).\n\n"
+        "**API JSON field:** `sos_filings[].foreign_domestic`\n"
+        "```json\n// From the API JSON sos_filings chunk:\n"
+        "{\n  'foreign_domestic': 'domestic',  // ← this field\n"
+        "  'active': true,\n  'state': 'FL',\n  'jurisdiction': 'us::fl'\n}\n```\n\n"
+        "**How `foreign_domestic` is set (index.ts:767-987 transformer):**\n"
+        "- **Middesk (pid=16):** maps `registration.jurisdiction` field ('foreign'/'domestic')\n"
+        "- **OpenCorporates (pid=23):** `home_jurisdiction_code === jurisdiction_code` → 'domestic', else 'foreign'\n"
+        "- **Baselayer:** same as Middesk pattern\n\n"
+        "**Python rule:** `_reg_domestic_mask` = `sos_domestic_verif=1` (derived from "
+        "`sos_domestic` review task sublabel='Domestic Active' via `rds_integration_data.business_entity_review_task`)\n\n"
+        "**Key file:** `integration-service/lib/facts/kyb/index.ts` lines 767-987 · "
+        "`integration-service/lib/facts/kyb/types.ts:20-32` (SoSRegistration schema)"
+    )
+
+    _SEG_CALC["reg_foreign"] = (
+        "**What 'Foreign Filing Only' means:**\n"
+        "All entries in `sos_filings[]` have `foreign_domestic='foreign'` — the business "
+        "has NO domestic filing. It may be incorporated in a tax-haven state (DE/NV/WY) "
+        "but operating in another state, so Middesk found only the foreign qualification filing.\n\n"
+        "**API JSON field:** `sos_filings[].foreign_domestic`\n"
+        "```json\n// Foreign qualification filing (not the domestic incorporation):\n"
+        "{'foreign_domestic': 'foreign', 'state': 'FL', 'jurisdiction': 'us::fl'}\n```\n\n"
+        "**KYB implication:** The primary domestic incorporation record (in DE/NV/WY) "
+        "was NOT verified. Entity resolution gap — formation state filing unknown.\n\n"
+        "**Action:** Verify the domestic filing in the formation state's SOS portal. "
+        "Check if a foreign qualification exists in the operating state.\n\n"
+        "**Key file:** `integration-service/lib/facts/kyb/index.ts` lines 767-987 · "
+        "`integration-service/lib/facts/kyb/types.ts:20-32`"
+    )
+
+    _SEG_CALC["states_same"] = (
+        "**What 'Formation = Operating State' means:**\n"
+        "The state of the SOS filing (`sos_filings[].state`) matches the state "
+        "the business submitted as their operating address (`primary_address.state`).\n\n"
+        "**API JSON fields compared:**\n"
+        "- `sos_filings[].state` → from the SOS filing record (e.g. 'FL')\n"
+        "- `primary_address.value.state` → from the `primary_address` fact (onboarding form)\n\n"
+        "**Python rule:** `UPPER(formation_state) == UPPER(operating_state)` where both are non-empty\n\n"
+        "**Why this matters:**\n"
+        "When the filing state matches the submitted operating state, entity verification "
+        "has no geographic gap — the SOS record found is for the correct jurisdiction. "
+        "This is the strongest registry signal for domestic businesses.\n\n"
+        "**Important:** `primary_address.state` is what the business TOLD us (NOT verified by SOS). "
+        "`sos_filings[].state` is what the SOS database confirmed.\n\n"
+        "**Key files:** `rds_warehouse_public.facts name='formation_state'` · "
+        "`name='primary_address'` · `integration-service/lib/facts/kyb/index.ts`"
+    )
+
+    _SEG_CALC["states_diff"] = (
+        "**What 'States Differ' means:**\n"
+        "The state of the SOS filing (`sos_filings[].state`) does NOT match "
+        "the submitted operating address state (`primary_address.state`).\n\n"
+        "**API JSON fields compared:**\n"
+        "- `sos_filings[].state` → from the SOS filing record\n"
+        "- `primary_address.value.state` → from onboarding form submission\n\n"
+        "**Three common reasons (not necessarily fraud):**\n"
+        "1. **Multi-state operation:** incorporated in State A, operating in State B. "
+        "Foreign qualification in operating state required.\n"
+        "2. **HQ vs formation:** submitted HQ city/state, but incorporated elsewhere "
+        "(e.g. NYC office but FL incorporated).\n"
+        "3. **Tax-haven entity:** incorporated in DE/NV/WY, operating elsewhere. "
+        "The filing found may be the domestic DE filing while operating state is different.\n\n"
+        "**Action:** Verify a foreign qualification exists in `primary_address.state`. "
+        "Absence of foreign qualification when operating out-of-state may be a compliance issue.\n\n"
+        "**Key files:** `rds_warehouse_public.facts name='formation_state'` · "
+        "`name='primary_address'` · `integration-service/lib/facts/kyb/index.ts`"
+    )
+
     def _inline_sql_runner(sql_str: str, runner_key: str):
         """Inline SQL runner matching the AI Agent tab UX exactly:
           - Editable st.text_area pre-filled with the SQL
