@@ -5696,8 +5696,15 @@ if tab=="🏠 Home":
         "- **Middesk (pid=16):** maps `registration.jurisdiction` field ('foreign'/'domestic')\n"
         "- **OpenCorporates (pid=23):** `home_jurisdiction_code === jurisdiction_code` → 'domestic', else 'foreign'\n"
         "- **Baselayer:** same as Middesk pattern\n\n"
-        "**Python rule:** `_reg_domestic_mask` = `sos_domestic_verif=1` (derived from "
-        "`sos_domestic` review task sublabel='Domestic Active' via `rds_integration_data.business_entity_review_task`)\n\n"
+        "**Python rule:** `_reg_domestic_mask` = `sos_domestic_verif=1` derived from "
+        "`sos_domestic` review task sublabel='Domestic Active' via `rds_integration_data.business_entity_review_task`.\n\n"
+        "**Source tables:**\n"
+        "- `rds_warehouse_public.facts` name=`'sos_filings'` — raw API JSON array\n"
+        "- `rds_integration_data.business_entity_review_task` — review task sublabel='Domestic Active'\n\n"
+        "**⚠️ SQL proxy note:** Redshift cannot run `JSON_ARRAY_ELEMENTS` on federated facts tables "
+        "(VARCHAR limit). The diagnostic SQL below uses `JSON_EXTRACT_PATH_TEXT(value,'value',0,'foreign_domestic')` "
+        "— the **first** filing element only. Python checks ALL filings via `_sos_filings_df`. "
+        "For businesses with multiple filings, counts may differ slightly.\n\n"
         "**Key file:** `integration-service/lib/facts/kyb/index.ts` lines 767-987 · "
         "`integration-service/lib/facts/kyb/types.ts:20-32` (SoSRegistration schema)"
     )
@@ -5714,42 +5721,56 @@ if tab=="🏠 Home":
         "was NOT verified. Entity resolution gap — formation state filing unknown.\n\n"
         "**Action:** Verify the domestic filing in the formation state's SOS portal. "
         "Check if a foreign qualification exists in the operating state.\n\n"
+        "**Source tables:**\n"
+        "- `rds_warehouse_public.facts` name=`'sos_filings'` — raw API JSON array\n"
+        "- `rds_integration_data.business_entity_review_task` — review task: NOT sublabel='Domestic Active'\n\n"
+        "**⚠️ SQL proxy note:** Redshift cannot run `JSON_ARRAY_ELEMENTS` on federated facts tables "
+        "(VARCHAR limit). The diagnostic SQL below uses `JSON_EXTRACT_PATH_TEXT(value,'value',0,'foreign_domestic')` "
+        "— the **first** filing element only. Python checks ALL filings via `_sos_filings_df`. "
+        "For businesses with multiple filings, counts may differ slightly.\n\n"
         "**Key file:** `integration-service/lib/facts/kyb/index.ts` lines 767-987 · "
         "`integration-service/lib/facts/kyb/types.ts:20-32`"
     )
 
     _SEG_CALC["states_same"] = (
         "**What 'Formation = Operating State' means:**\n"
-        "The state of the SOS filing (`sos_filings[].state`) matches the state "
-        "the business submitted as their operating address (`primary_address.state`).\n\n"
-        "**API JSON fields compared:**\n"
-        "- `sos_filings[].state` → from the SOS filing record (e.g. 'FL')\n"
-        "- `primary_address.value.state` → from the `primary_address` fact (onboarding form)\n\n"
-        "**Python rule:** `UPPER(formation_state) == UPPER(operating_state)` where both are non-empty\n\n"
+        "The `formation_state` fact matches the state the business submitted as their "
+        "operating address (`primary_address.value.state`).\n\n"
+        "**Source tables (both from `rds_warehouse_public.facts`):**\n"
+        "| Column | Fact name | JSON path | Source |\n"
+        "|---|---|---|---|\n"
+        "| `formation_state` | `name='formation_state'` | `JSON_EXTRACT_PATH_TEXT(value,'value')` | Middesk `businessEntityVerification.formation_state` |\n"
+        "| `operating_state` | `name='primary_address'` | `JSON_EXTRACT_PATH_TEXT(value,'value','state')` | Onboarding form submission (`primary_address.value.state`) |\n\n"
+        "**Python rule:** `UPPER(formation_state) == UPPER(operating_state)` AND both non-empty, "
+        "within the Registry Found extended group.\n\n"
         "**Why this matters:**\n"
-        "When the filing state matches the submitted operating state, entity verification "
+        "When the formation state matches the submitted operating state, entity verification "
         "has no geographic gap — the SOS record found is for the correct jurisdiction. "
         "This is the strongest registry signal for domestic businesses.\n\n"
         "**Important:** `primary_address.state` is what the business TOLD us (NOT verified by SOS). "
-        "`sos_filings[].state` is what the SOS database confirmed.\n\n"
+        "`formation_state` is what Middesk returned from their SOS database lookup.\n\n"
         "**Key files:** `rds_warehouse_public.facts name='formation_state'` · "
         "`name='primary_address'` · `integration-service/lib/facts/kyb/index.ts`"
     )
 
     _SEG_CALC["states_diff"] = (
         "**What 'States Differ' means:**\n"
-        "The state of the SOS filing (`sos_filings[].state`) does NOT match "
-        "the submitted operating address state (`primary_address.state`).\n\n"
-        "**API JSON fields compared:**\n"
-        "- `sos_filings[].state` → from the SOS filing record\n"
-        "- `primary_address.value.state` → from onboarding form submission\n\n"
+        "The `formation_state` fact does NOT match the submitted operating address "
+        "state (`primary_address.value.state`).\n\n"
+        "**Source tables (both from `rds_warehouse_public.facts`):**\n"
+        "| Column | Fact name | JSON path | Source |\n"
+        "|---|---|---|---|\n"
+        "| `formation_state` | `name='formation_state'` | `JSON_EXTRACT_PATH_TEXT(value,'value')` | Middesk `businessEntityVerification.formation_state` |\n"
+        "| `operating_state` | `name='primary_address'` | `JSON_EXTRACT_PATH_TEXT(value,'value','state')` | Onboarding form submission (`primary_address.value.state`) |\n\n"
+        "**Python rule:** `UPPER(formation_state) != UPPER(operating_state)` AND `formation_state` non-empty, "
+        "within the Registry Found extended group.\n\n"
         "**Three common reasons (not necessarily fraud):**\n"
-        "1. **Multi-state operation:** incorporated in State A, operating in State B. "
-        "Foreign qualification in operating state required.\n"
+        "1. **Multi-state operation:** incorporated in State A, operating in State B — "
+        "foreign qualification in operating state required.\n"
         "2. **HQ vs formation:** submitted HQ city/state, but incorporated elsewhere "
         "(e.g. NYC office but FL incorporated).\n"
-        "3. **Tax-haven entity:** incorporated in DE/NV/WY, operating elsewhere. "
-        "The filing found may be the domestic DE filing while operating state is different.\n\n"
+        "3. **Tax-haven entity:** incorporated in DE/NV/WY, operating elsewhere — "
+        "the filing found may be the domestic DE filing while operating state is different.\n\n"
         "**Action:** Verify a foreign qualification exists in `primary_address.state`. "
         "Absence of foreign qualification when operating out-of-state may be a compliance issue.\n\n"
         "**Key files:** `rds_warehouse_public.facts name='formation_state'` · "
@@ -5897,7 +5918,9 @@ if tab=="🏠 Home":
             "    MAX(CASE WHEN f.name='watchlist_hits'\n"
             "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS watchlist_hits,\n"
             "    MAX(CASE WHEN f.name='is_sole_prop'\n"
-            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS is_sole_prop\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)  AS is_sole_prop,\n"
+            "    MAX(CASE WHEN f.name='primary_address'\n"
+            "        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','state') END) AS operating_state\n"
             + (f"    ,{extra_cols}\n" if extra_cols else "") +
             "  FROM onboarded o\n"
             "  LEFT JOIN rds_warehouse_public.facts f ON f.business_id = o.business_id\n"
@@ -5906,7 +5929,8 @@ if tab=="🏠 Home":
             "      'sos_match_boolean','sos_match','sos_active',\n"
             "      'formation_state','formation_date',\n"
             "      'tin_submitted','tin_match','tin_match_boolean',\n"
-            "      'idv_passed_boolean','naics_code','watchlist_hits','is_sole_prop'\n"
+            "      'idv_passed_boolean','naics_code','watchlist_hits','is_sole_prop',\n"
+            "      'primary_address'\n"
             "    )\n"
             "  GROUP BY o.business_id\n"
             "),\n"
@@ -5943,6 +5967,42 @@ if tab=="🏠 Home":
         "sos_found_extended":  ("sos_match_boolean = 'true' OR sos_active IS NOT NULL", ""),
         "dt_ne_true_active":   ("sos_match_boolean = 'true' AND sos_active = 'true'", ""),
         "dt_ne_true_inactive": ("sos_match_boolean = 'true' AND sos_active = 'false'", ""),
+        # Domestic vs Foreign: sos_filings[].foreign_domestic field parsed from API JSON.
+        # Redshift cannot run JSON_ARRAY_ELEMENTS on federated facts (VARCHAR limit).
+        # Proxy: foreign_domestic from sos_fil CTE (first filing element) — same source as _sos_filings_df.
+        # 'domestic' = first filing element has foreign_domestic='domestic'.
+        # 'foreign'  = first filing element has foreign_domestic='foreign' (IS NOT NULL ensures sos_filings row exists).
+        # Python uses sos_domestic_verif from rds_integration_data.business_entity_review_task
+        # (checks ALL filings); SQL proxy uses only first element — minor count differences are expected.
+        "reg_domestic": (
+            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
+            " AND s.foreign_domestic IS NOT NULL"
+            " AND LOWER(s.foreign_domestic) = 'domestic'",
+            ""
+        ),
+        "reg_foreign": (
+            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
+            " AND s.foreign_domestic IS NOT NULL"
+            " AND LOWER(s.foreign_domestic) != 'domestic'",
+            ""
+        ),
+        # Formation = Operating State: formation_state fact vs primary_address.value.state fact.
+        # Source tables: rds_warehouse_public.facts name='formation_state' (Middesk)
+        #                rds_warehouse_public.facts name='primary_address' (onboarding form).
+        # Python: UPPER(formation_state) == UPPER(operating_state) AND both non-empty.
+        "states_same": (
+            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
+            " AND formation_state IS NOT NULL AND formation_state != ''"
+            " AND operating_state IS NOT NULL AND operating_state != ''"
+            " AND UPPER(formation_state) = UPPER(operating_state)",
+            ""
+        ),
+        "states_diff": (
+            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
+            " AND formation_state IS NOT NULL AND formation_state != ''"
+            " AND UPPER(COALESCE(formation_state,'')) != UPPER(COALESCE(operating_state,''))",
+            ""
+        ),
         # Section 2 — TIN
         "tin_submitted":       ("tin_submitted IS NOT NULL AND tin_submitted NOT IN ('','None')", ""),
         "tin_pass":            ("tin_match = 'true'", ""),
