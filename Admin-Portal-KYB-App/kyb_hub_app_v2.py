@@ -4261,24 +4261,48 @@ if tab=="🏠 Home":
         _n_reg_foreign     = int(_reg_foreign_mask.sum())
 
         # ── Row 3 — Three state-comparison metrics (all from rds_warehouse_public.facts) ──
-        # Source A: formation_state fact  → name='formation_state', JSON_EXTRACT_PATH_TEXT(value,'value')
-        #           Middesk businessEntityVerification.formation_state (domestic incorporation state)
-        # Source B: sos_filings[].state   → name='sos_filings', parsed via _sos_filings_df
-        #           The state of each SOS filing (e.g. 'FL', 'DE')
-        # Source C: primary_address fact  → name='primary_address', JSON_EXTRACT_PATH_TEXT(value,'value','state')
-        #           State the business submitted as their operating address (onboarding form)
+        # ALL three use sos_filings[].state from _sos_filings_df (rds_warehouse_public.facts name='sos_filings')
+        # and operating_state from primary_address fact (rds_warehouse_public.facts name='primary_address').
+        # formation_state is NOT used here: it is a firmographic fact from Middesk's database record
+        # and does NOT confirm that a SOS filing was found or verified in that state.
+        # (A business can have formation_state='DE' but have dissolved/inactive filings, no filings at all,
+        #  or only foreign qualifications — sos_domestic_verification would be 0 in all those cases.)
         #
-        # Metric (a): Formation State = Operating State
-        #   formation_state (fact) == operating_state (primary_address fact)
-        #   BOTH from rds_warehouse_public.facts
-        _form_state_col = _formation_states if "formation_state" in _funnel.columns \
-            else pd.Series([""] * len(_funnel))
-        _states_same_mask  = (
-            _reg_found_extended_mask
-            & (_form_state_col != "")
-            & (_op_state_col_u != "")
-            & (_form_state_col == _op_state_col_u)
-        )
+        # Source for ALL Row 3 metrics:
+        #   sos_filings[].state   → rds_warehouse_public.facts name='sos_filings' (per-filing verified state)
+        #   primary_address.state → rds_warehouse_public.facts name='primary_address' (submitted operating state)
+        #
+        # Build per-business maps from _sos_filings_df:
+        #   _sf_states         = {bid: set(ALL filing states)}       (already built above)
+        #   _domestic_states   = {bid: set(domestic filing states)}  (sos_filings[].state where foreign_domestic='domestic')
+        if _sos_filings_df is not None and not _sos_filings_df.empty:
+            _sf_reg_dom = _sf_reg[_sf_reg["foreign_domestic"].str.lower().eq("domestic")]
+            _domestic_filing_states = (
+                _sf_reg_dom.groupby("business_id")["filing_state"]
+                .apply(lambda x: set(s.upper().strip() for s in x.dropna() if str(s).strip()))
+                .to_dict()
+            )
+        else:
+            _domestic_filing_states = {}
+
+        # Metric (a): Domestic Filing State = Operating State
+        #   At least one sos_filings[] entry has foreign_domestic='domestic' AND
+        #   that filing's state matches the submitted operating state.
+        #   Rule: op_state ∈ _domestic_filing_states[bid]
+        #   This is a STRICT SUBSET of Domestic Filing (15 businesses).
+        #   formation_state is NOT used — it is firmographic, not a verified SOS filing state.
+        def _domestic_filing_matches_op(bid, op_st):
+            """True if any domestic filing state matches the operating state."""
+            dom_states = _domestic_filing_states.get(bid, set())
+            return bool(op_st) and op_st in dom_states
+
+        _states_same_mask = _reg_found_extended_mask & pd.Series([
+            _domestic_filing_matches_op(
+                _funnel["business_id"].iloc[i],
+                _op_state_col_u.iloc[i]
+            )
+            for i in range(len(_funnel))
+        ], index=_funnel.index)
         _n_states_same = int(_states_same_mask.sum())
 
         # Metric (b): Foreign Registration = Operating State
@@ -5829,36 +5853,49 @@ if tab=="🏠 Home":
     )
 
     _SEG_CALC["states_same"] = (
-        "**What 'Formation = Operating State' means:**\n"
-        "The `formation_state` fact (state where the entity was incorporated per Middesk) "
-        "equals the state the business submitted as their operating address (`primary_address.value.state`).\n\n"
+        "**What 'Domestic Filing State = Operating State' means:**\n"
+        "At least one `sos_filings[]` entry has `foreign_domestic='domestic'` AND that filing's "
+        "`state` field matches the submitted operating address state (`primary_address.value.state`).\n\n"
+        "**This is a strict subset of 'Domestic Filing'** — it answers: did Middesk find and verify "
+        "a domestic SOS filing specifically in the state the business said they operate from?\n\n"
+        "**Why NOT `formation_state`:**\n"
+        "`formation_state` is a **firmographic fact** from Middesk's database record "
+        "(`businessEntityVerification.formation_state`). It answers 'in what state was this entity "
+        "created?' — but does NOT confirm a SOS filing was found or verified there. A business can have "
+        "`formation_state='DE'` and still have: a dissolved DE filing, only foreign qualifications, "
+        "or no SOS data returned at all.\n\n"
         "**Source tables: `rds_warehouse_public.facts` ONLY:**\n"
-        "| Column | Fact `name` | JSON path |\n|---|---|---|\n"
-        "| `formation_state` | `'formation_state'` | `JSON_EXTRACT_PATH_TEXT(value,'value')` |\n"
-        "| `operating_state` | `'primary_address'` | `JSON_EXTRACT_PATH_TEXT(value,'value','state')` |\n\n"
-        "**Python rule:**\n"
-        "```python\n# Both columns from rds_warehouse_public.facts via _load_kyb_funnel_for_bids()\n"
-        "# formation_state: name='formation_state' (Middesk businessEntityVerification.formation_state)\n"
-        "# operating_state: name='primary_address' value.state (submitted onboarding address)\n"
-        "_states_same_mask = (\n"
-        "    _reg_found_extended_mask\n"
-        "    & (_form_state_col != '')\n"
-        "    & (_op_state_col_u != '')\n"
-        "    & (_form_state_col == _op_state_col_u)  # UPPER comparison\n)\n```\n\n"
+        "| Column | Fact `name` | JSON path | What it means |\n|---|---|---|---|\n"
+        "| `sos_filings[].state` | `'sos_filings'` | `value[i].state` (per filing) | State where the SOS filing is registered (verified) |\n"
+        "| `sos_filings[].foreign_domestic` | `'sos_filings'` | `value[i].foreign_domestic` | `'domestic'` = home jurisdiction filing |\n"
+        "| `operating_state` | `'primary_address'` | `JSON_EXTRACT_PATH_TEXT(value,'value','state')` | State submitted by business during onboarding |\n\n"
+        "**Python rule (facts only):**\n"
+        "```python\n# Source: _sos_filings_df from rds_warehouse_public.facts name='sos_filings'\n"
+        "# _domestic_filing_states = {bid: set(filing states where foreign_domestic='domestic')}\n"
+        "def _domestic_filing_matches_op(bid, op_st):\n"
+        "    dom_states = _domestic_filing_states.get(bid, set())\n"
+        "    return bool(op_st) and op_st in dom_states\n\n"
+        "# Result: subset of Domestic Filing (15) where domestic filing state == operating state\n```\n\n"
         "**Diagnostic SQL (facts only):**\n"
-        "```sql\nSELECT o.business_id,\n"
-        "  MAX(CASE WHEN f.name='formation_state' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)        AS formation_state,\n"
-        "  MAX(CASE WHEN f.name='primary_address' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','state') END) AS operating_state\n"
-        "FROM rds_cases_public.rel_business_customer_monitoring o\n"
-        "LEFT JOIN rds_warehouse_public.facts f ON f.business_id=o.business_id\n"
-        "  AND LENGTH(f.value)<60000\n"
-        "  AND f.name IN ('formation_state','primary_address')\n"
-        "WHERE DATE(o.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}\n"
-        "GROUP BY o.business_id\n"
-        "HAVING UPPER(MAX(CASE WHEN f.name='formation_state' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END))\n"
-        "     = UPPER(MAX(CASE WHEN f.name='primary_address' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','state') END));\n```\n\n"
-        "**Key files:** `integration-service/lib/facts/kyb/index.ts` (formation_state fact: line 640) · "
-        "`rds_warehouse_public.facts name='formation_state'` · `name='primary_address'`"
+        "```sql\n-- Businesses with a domestic filing (foreign_domestic='domestic') in their operating state\n"
+        "WITH op_states AS (\n"
+        "  SELECT o.business_id,\n"
+        "    UPPER(JSON_EXTRACT_PATH_TEXT(f.value,'value','state')) AS operating_state\n"
+        "  FROM rds_cases_public.rel_business_customer_monitoring o\n"
+        "  LEFT JOIN rds_warehouse_public.facts f\n"
+        "    ON f.business_id=o.business_id AND f.name='primary_address' AND LENGTH(f.value)<60000\n"
+        "  WHERE DATE(o.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}\n"
+        ")\n"
+        "SELECT DISTINCT f.business_id, o.operating_state,\n"
+        "  UPPER(filing->>'state') AS domestic_filing_state\n"
+        "FROM rds_warehouse_public.facts f,\n"
+        "     JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing\n"
+        "JOIN op_states o ON o.business_id = f.business_id\n"
+        "WHERE f.name = 'sos_filings' AND LENGTH(f.value) < 60000\n"
+        "  AND LOWER(filing->>'foreign_domestic') = 'domestic'\n"
+        "  AND UPPER(filing->>'state') = o.operating_state;\n```\n\n"
+        "**Key file:** `integration-service/lib/facts/kyb/index.ts:717-987` (sos_filings transformer) · "
+        "`rds_warehouse_public.facts name='sos_filings'` · `name='primary_address'`"
     )
 
     _SEG_CALC["foreign_eq_op"] = (
@@ -6160,14 +6197,18 @@ if tab=="🏠 Home":
             " AND LOWER(s.foreign_domestic) != 'domestic'",
             ""
         ),
-        # Formation = Operating State: both columns from rds_warehouse_public.facts ONLY.
-        # formation_state → name='formation_state', JSON_EXTRACT_PATH_TEXT(value,'value')
-        # operating_state → name='primary_address', JSON_EXTRACT_PATH_TEXT(value,'value','state')
+        # Domestic Filing State = Operating State:
+        # sos_filings[].state (where foreign_domestic='domestic') == primary_address.value.state
+        # Both from rds_warehouse_public.facts.
+        # sos_fil CTE in _seg_sql() uses first filing element as proxy.
+        # This is a subset of Domestic Filing — formation_state is NOT used.
         "states_same": (
             "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
-            " AND formation_state IS NOT NULL AND formation_state != ''"
+            " AND s.foreign_domestic IS NOT NULL"
+            " AND LOWER(s.foreign_domestic) = 'domestic'"
+            " AND s.filing_state IS NOT NULL AND s.filing_state != ''"
             " AND operating_state IS NOT NULL AND operating_state != ''"
-            " AND UPPER(formation_state) = UPPER(operating_state)",
+            " AND UPPER(s.filing_state) = UPPER(operating_state)",
             ""
         ),
         # Foreign Reg = Operating State: first filing state (from sos_fil CTE) == operating_state
@@ -6539,7 +6580,7 @@ if tab=="🏠 Home":
         "| No Registry Found | `sos_match_boolean` = `'false'` AND `sos_active` IS NULL | — | `index.ts:1431` |\n"
         "| Domestic Filing | `sos_filings` | `value[].foreign_domestic = 'domestic'` | `index.ts:717-987` |\n"
         "| Foreign Filing Only | `sos_filings` | NO element with `foreign_domestic='domestic'` | `index.ts:799-883` |\n"
-        "| Formation = Operating State | `formation_state` + `primary_address` | `value` vs `value.state` | `index.ts:640` |\n"
+        "| Domestic Filing State = Op. State | `sos_filings` + `primary_address` | `value[dom].state` vs `primary_address.value.state` | `index.ts:717` |\n"
         "| Foreign Reg = Operating State | `sos_filings` + `primary_address` | `value[].state` vs `primary_address.value.state` | `index.ts:717` |\n"
         "| Op. State Differs from All Regs | `sos_filings` + `primary_address` | operating state ∉ any filing state | `index.ts:717` |\n\n"
         "```sql\n-- Source query for all Section 1 metrics:\n"
@@ -6611,8 +6652,8 @@ if tab=="🏠 Home":
     st.markdown("<div style='margin-top:8px'>", unsafe_allow_html=True)
     _r3c1, _r3c2, _r3c3 = st.columns(3)
     with _r3c1:
-        kpi("↳ 📍 Formation = Operating State", f"{_n_states_same:,}",
-            f"{rate(_n_states_same,_sos_found_extended)} · formation_state = primary_address.state",
+        kpi("↳ 📍 Domestic Filing State = Operating State", f"{_n_states_same:,}",
+            f"{rate(_n_states_same,_n_reg_domestic)} of domestic-filed · sos_filings[dom].state = primary_address.state",
             "#22c55e" if _n_states_same > 0 else "#64748b")
     with _r3c2:
         kpi("↳ 🌐 Foreign Reg = Operating State", f"{_n_foreign_eq_op:,}",
@@ -6629,7 +6670,7 @@ if tab=="🏠 Home":
     _drilldown_table("no_sos",             f"❌ No Registry Found — {_sos_not_found:,} businesses (sos_match_boolean=false AND sos_active=null)", _SOS_COLS)
     _drilldown_table("reg_domestic",       f"↳ Domestic Filing — {_n_reg_domestic:,} businesses (foreign_domestic='domestic')", _SOS_COLS)
     _drilldown_table("reg_foreign",        f"↳ Foreign Filing Only — {_n_reg_foreign:,} businesses (no domestic filing found)", _SOS_COLS)
-    _drilldown_table("states_same",        f"↳ Formation = Operating State — {_n_states_same:,} businesses", _SOS_COLS)
+    _drilldown_table("states_same",        f"↳ Domestic Filing State = Operating State — {_n_states_same:,} businesses", _SOS_COLS)
     _drilldown_table("foreign_eq_op",      f"↳ Foreign Reg = Operating State — {_n_foreign_eq_op:,} businesses", _SOS_COLS)
     _drilldown_table("states_diff",        f"↳ Op. State Differs from All Regs — {_n_states_diff:,} businesses", _SOS_COLS)
 
