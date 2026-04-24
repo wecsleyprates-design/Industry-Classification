@@ -5901,6 +5901,13 @@ if tab=="🏠 Home":
             + (f"    ,{extra_cols}\n" if extra_cols else "") +
             "  FROM onboarded o\n"
             "  LEFT JOIN rds_warehouse_public.facts f ON f.business_id = o.business_id\n"
+            "    AND LENGTH(f.value) < 60000\n"
+            "    AND f.name IN (\n"
+            "      'sos_match_boolean','sos_match','sos_active',\n"
+            "      'formation_state','formation_date',\n"
+            "      'tin_submitted','tin_match','tin_match_boolean',\n"
+            "      'idv_passed_boolean','naics_code','watchlist_hits','is_sole_prop'\n"
+            "    )\n"
             "  GROUP BY o.business_id\n"
             ")\n"
             f"SELECT * FROM per_biz\n"
@@ -6926,7 +6933,10 @@ per_biz AS (
   SELECT o.business_id,
     MAX(CASE WHEN f.name='sos_match_boolean' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_match_boolean,
     MAX(CASE WHEN f.name='sos_active'        THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_active
-  FROM onboarded o LEFT JOIN rds_warehouse_public.facts f ON f.business_id = o.business_id
+  FROM onboarded o
+  LEFT JOIN rds_warehouse_public.facts f ON f.business_id = o.business_id
+    AND LENGTH(f.value) < 60000
+    AND f.name IN ('sos_match_boolean','sos_active')
   GROUP BY o.business_id
 )
 SELECT
