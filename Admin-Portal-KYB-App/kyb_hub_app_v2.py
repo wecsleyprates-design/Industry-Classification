@@ -4094,9 +4094,18 @@ if tab=="🏠 Home":
         # ════════════════════════════════════════════════════════════════
 
         # ── sos_match_boolean breakdown ───────────────────────────────────────
-        _no_reg_mask   = (_smb == "false")          # sos_match returned 'failure'
+        # _no_reg_mask: sos_match_boolean='false' (vendor returned failure)
+        # Used as the base for filings-empty and filings-present sub-groups.
+        _no_reg_mask   = (_smb == "false")
         _sos_found     = int((_smb == "true").sum())
-        _sos_not_found = int(_no_reg_mask.sum())
+
+        # _sos_not_found: STRICTLY businesses with no filing data at all.
+        # = sos_match_boolean='false' AND sos_active IS NULL (filings array empty proxy).
+        # Businesses with sos_match='false' but sos_active present have filing data
+        # and are counted in Registry Found extended — they must NOT be counted here.
+        # This ensures Row 1 cards are mutually exclusive: Registry Found + No Registry Found = total.
+        _sa_null_mask  = _sa.isin(["", "none", "nan", "null"])
+        _sos_not_found = int((_no_reg_mask & _sa_null_mask).sum())
 
         # ── sos_filings EMPTY — within No Registry (sos_match_boolean=false) ──
         # SINGLE reliable check: sos_active is null/missing in funnel_df
@@ -4451,8 +4460,9 @@ if tab=="🏠 Home":
     # ── Build business-ID segment maps from funnel_df for drilldowns ─────────
     _seg = {}
     if not _funnel.empty:
-        # No Registry Found — strictly sos_match=false AND sos_filings empty
-        _seg["no_sos"]                 = _funnel[_no_reg_mask]["business_id"].tolist()
+        # No Registry Found — strictly sos_match=false AND sos_active=null (filings array empty)
+        # Matches the card count exactly: _sos_not_found = (_no_reg_mask & _sa_null_mask).sum()
+        _seg["no_sos"]                 = _funnel[_no_reg_mask & _sa_null_mask]["business_id"].tolist()
         _seg["dt_filings_empty"]       = _funnel[_filings_empty_mask]["business_id"].tolist()
         # Filings present in no-reg group → moved to Registry Found extended
         _seg["dt_filings_present_noreg"] = _funnel[_filings_present_in_noreg_mask]["business_id"].tolist()
@@ -6357,7 +6367,10 @@ if tab=="🏠 Home":
     # Python rule is a simple comparison on funnel_df / stats_df columns.
     _SEG_SQL_RULES = {
         # Section 1 — Registry
-        "no_sos":              ("sos_match_boolean = 'false'", ""),
+        # No Registry Found: sos_match_boolean='false' AND sos_active IS NULL
+        # (sos_active absent = sos_filings[] empty proxy per index.ts:1431)
+        # Businesses with sos_match='false' but sos_active present are in Registry Found extended.
+        "no_sos":              ("sos_match_boolean = 'false' AND sos_active IS NULL", ""),
         "dt_filings_empty":    ("sos_match_boolean = 'false' AND sos_active IS NULL", ""),
         "dt_filings_ne":       ("sos_match_boolean = 'false' AND sos_active IS NOT NULL", ""),
         "dt_ne_false":         ("sos_match_boolean = 'false' AND sos_active IS NOT NULL", ""),
