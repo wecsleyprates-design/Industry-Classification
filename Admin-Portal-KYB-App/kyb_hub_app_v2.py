@@ -5898,75 +5898,60 @@ if tab=="🏠 Home":
                             _inline_sql_runner(_sq.strip(), runner_key=f"dt_{seg_key}_{_sqi}")
                 st.markdown("---")
 
-            # ── Business IDs + all relevant signals ──────────────────────────
-            # Columns: sos_filings[] fields + TIN + IDV + NAICS + Watchlist + is_sole_prop
-            # Source: stats_df (rds_warehouse_public.facts) +
-            #         _sos_filings_df (JSON_ARRAY_ELEMENTS parse of sos_filings[])
-            # EXCLUDED: sos_match_verif/sos_domestic_verif/sos_active_verif (clients.* materialized)
+            # ── Business IDs table: use _seg_sql() result when available ────────
+            # Strategy: if a _SEG_SQL_RULES entry exists for this segment, execute
+            # the canonical GROUP BY SQL and use its result as the table — this is
+            # guaranteed to show all columns AND match the score card business IDs.
+            # Falls back to stats_df filtering when no rule exists.
+            _sub = None
 
-            # Build base table: all facts-table columns — always use full set regardless of cols_from_stats
-            # cols_from_stats parameter is kept for API compatibility but ignored here;
-            # we always show the complete column set described in the user documentation.
-            _base_cols_all = [
-                # sos_filings-derived facts (rds_warehouse_public.facts)
-                "sos_match_boolean","sos_match_status","sos_active",
-                "formation_state","formation_date",
-                # TIN facts (index.ts:399-491)
-                "tin_submitted","tin_match_status","tin_match",
-                # IDV fact (index.ts:528-550)
-                "idv_passed",
-                # Classification fact (aiNaicsEnrichment.ts:63)
-                "naics_code",
-                # Risk fact
-                "watchlist_hits",
-                # Sole prop derived fact (index.ts:552-616)
-                "is_sole_prop",
-            ]
-            if stats_df is not None and not stats_df.empty:
-                # Use all columns that exist in stats_df
-                _available = [c for c in _base_cols_all if c in stats_df.columns]
-                _sub = stats_df[stats_df["business_id"].isin(bids)][
-                    ["business_id"] + _available
-                ].copy()
-                # Some businesses (e.g. "sos_filings empty" group) may not appear in stats_df
-                # because they have no fact rows at all → only sos_match_boolean=false.
-                # Fill missing businesses from funnel_df which covers all authoritative_bids.
-                _missing_bids = [b for b in bids if b not in set(_sub["business_id"].tolist())]
-                if _missing_bids and funnel_df is not None and not funnel_df.empty:
-                    _funnel_cols = ["sos_match_boolean","sos_active","formation_state"]
-                    _fb_missing = funnel_df[funnel_df["business_id"].isin(_missing_bids)][
-                        ["business_id"] + [c for c in _funnel_cols if c in funnel_df.columns]
+            if seg_key in _SEG_SQL_RULES and is_live:
+                _where_t, _extra_t = _SEG_SQL_RULES[seg_key]
+                if _where_t == "1=1" and bids:
+                    _bid_list_t = ",".join(f"'{b}'" for b in bids[:500])
+                    _tbl_sql = _seg_sql(f"business_id IN ({_bid_list_t})", _extra_t)
+                else:
+                    _tbl_sql = _seg_sql(_where_t, _extra_t)
+                _tbl_sql_clean = _clean_sql(_tbl_sql)
+                try:
+                    _tbl_df, _tbl_err = run_sql(_tbl_sql_clean)
+                    if _tbl_df is not None and not _tbl_df.empty:
+                        _sub = _tbl_df.copy()
+                except Exception:
+                    _sub = None
+
+            if _sub is None:
+                # Fallback: filter stats_df + enrich from funnel_df
+                _base_cols_all = [
+                    "sos_match_boolean","sos_match_status","sos_active",
+                    "formation_state","formation_date",
+                    "tin_submitted","tin_match_status","tin_match",
+                    "idv_passed","naics_code","watchlist_hits","is_sole_prop",
+                ]
+                if stats_df is not None and not stats_df.empty:
+                    _available = [c for c in _base_cols_all if c in stats_df.columns]
+                    _sub = stats_df[stats_df["business_id"].isin(bids)][
+                        ["business_id"] + _available
                     ].copy()
-                    if not _fb_missing.empty:
-                        _sub = pd.concat([_sub, _fb_missing], ignore_index=True)
-            elif funnel_df is not None and not funnel_df.empty:
-                _funnel_base = ["sos_match_boolean","sos_active","formation_state",
-                                "tin_submitted","tin_match_boolean","operating_state"]
-                _sub = funnel_df[funnel_df["business_id"].isin(bids)][
-                    ["business_id"] + [c for c in _funnel_base if c in funnel_df.columns]
-                ].copy()
-            else:
-                _sub = pd.DataFrame({"business_id": bids})
+                    _missing_bids = [b for b in bids if b not in set(_sub["business_id"].tolist())]
+                    if _missing_bids and funnel_df is not None and not funnel_df.empty:
+                        _funnel_cols = ["sos_match_boolean","sos_active","formation_state"]
+                        _fb_missing = funnel_df[funnel_df["business_id"].isin(_missing_bids)][
+                            ["business_id"] + [c for c in _funnel_cols if c in funnel_df.columns]
+                        ].copy()
+                        if not _fb_missing.empty:
+                            _sub = pd.concat([_sub, _fb_missing], ignore_index=True)
+                elif funnel_df is not None and not funnel_df.empty:
+                    _funnel_base = ["sos_match_boolean","sos_active","formation_state",
+                                    "tin_submitted","tin_match_boolean","operating_state"]
+                    _sub = funnel_df[funnel_df["business_id"].isin(bids)][
+                        ["business_id"] + [c for c in _funnel_base if c in funnel_df.columns]
+                    ].copy()
+                else:
+                    _sub = pd.DataFrame({"business_id": bids})
 
-            # Enrich with sos_filings[] parsed fields (aggregate per business)
-            if _sos_filings_df is not None and not _sos_filings_df.empty:
-                _sf_agg = (
-                    _sos_filings_df[_sos_filings_df["business_id"].isin(bids)]
-                    .sort_values("business_id")
-                    .groupby("business_id")
-                    .agg(
-                        foreign_domestic=("foreign_domestic", lambda x: " / ".join(sorted(set(x.dropna())))),
-                        jurisdiction=("jurisdiction",    lambda x: " / ".join(sorted(set(x.dropna())))),
-                        entity_type=("entity_type",      lambda x: " / ".join(sorted(set(x.dropna())))),
-                        filing_name=("filing_name",      "first"),
-                        registration_date=("registration_date","min"),
-                        has_officers=("has_officers",    "max"),
-                        filing_state=("filing_state",    lambda x: " / ".join(sorted(set(str(s) for s in x.dropna())))),
-                        n_filings=("filing_state",       "count"),
-                    )
-                    .reset_index()
-                )
-                _sub = _sub.merge(_sf_agg, on="business_id", how="left")
+            if _sub is None:
+                _sub = pd.DataFrame({"business_id": bids})
 
             _rename = {
                 # sos_filings-derived
