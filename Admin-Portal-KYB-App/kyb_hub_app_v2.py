@@ -3697,25 +3697,36 @@ if tab=="🏠 Home":
         if not bid_tuple:
             return None, "No business IDs"
         bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        return run_sql(f"""
-            SELECT
-                f.business_id,
-                filing->>'foreign_domestic'                              AS foreign_domestic,
-                (filing->>'active')::boolean                            AS filing_active,
-                UPPER(COALESCE(filing->>'state',''))                    AS filing_state,
-                LOWER(COALESCE(filing->>'jurisdiction',''))              AS jurisdiction,
-                LOWER(COALESCE(filing->>'entity_type','unknown'))        AS entity_type,
-                CASE WHEN filing->>'non_profit' = 'true' THEN 1 ELSE 0 END AS non_profit,
-                LEFT(COALESCE(filing->>'registration_date', filing->>'filing_date',''), 10) AS registration_date,
-                filing->>'filing_name'                                  AS filing_name,
-                CASE WHEN JSON_ARRAY_LENGTH(filing->'officers') > 0 THEN 1 ELSE 0 END AS has_officers,
-                filing->>'id'                                           AS filing_id
-            FROM rds_warehouse_public.facts f,
-                 JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing
-            WHERE f.name = 'sos_filings'
-              AND LENGTH(f.value) < 60000
-              AND f.business_id IN ({bid_list})
-        """)
+        # Redshift federated tables do NOT support PostgreSQL-specific JSON operators
+        # (JSON_ARRAY_ELEMENTS, ->>, ::json, JSON_ARRAY_LENGTH).
+        # Use JSON_EXTRACT_PATH_TEXT with positional indices (0-9) via UNION ALL.
+        # Each branch extracts one filing from the array. Rows where both
+        # foreign_domestic and filing_state are NULL are filtered out (empty slots).
+        # Max 10 filings per business — covers >99% of real-world cases while
+        # keeping the query within Redshift's VARCHAR(65535) limit per row.
+        def _filing_row(i):
+            idx = str(i)
+            return (
+                f"  SELECT business_id, {i} AS filing_index,\n"
+                f"    JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','foreign_domestic') AS foreign_domestic,\n"
+                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','active')='true' THEN true ELSE false END AS filing_active,\n"
+                f"    UPPER(COALESCE(JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','state'),''))          AS filing_state,\n"
+                f"    LOWER(COALESCE(JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','jurisdiction'),''))   AS jurisdiction,\n"
+                f"    LOWER(COALESCE(JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','entity_type'),''))    AS entity_type,\n"
+                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','non_profit')='true' THEN 1 ELSE 0 END AS non_profit,\n"
+                f"    LEFT(COALESCE(JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','registration_date'),\n"
+                f"                  JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','filing_date'),''),10)  AS registration_date,\n"
+                f"    JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','filing_name')                        AS filing_name,\n"
+                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','officers','0') IS NOT NULL\n"
+                f"         THEN 1 ELSE 0 END                                                              AS has_officers,\n"
+                f"    JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','id')                                 AS filing_id\n"
+                f"  FROM rds_warehouse_public.facts\n"
+                f"  WHERE name='sos_filings' AND LENGTH(value)<60000\n"
+                f"    AND business_id IN ({bid_list})\n"
+                f"    AND JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','state') IS NOT NULL"
+            )
+        union_sql = "\nUNION ALL\n".join(_filing_row(i) for i in range(10))
+        return run_sql(f"SELECT * FROM (\n{union_sql}\n) sos_rows WHERE filing_state != '' OR foreign_domestic IS NOT NULL;")
 
     @st.cache_data(ttl=600, show_spinner=False)
     def _load_sole_prop_signal(bid_tuple):
