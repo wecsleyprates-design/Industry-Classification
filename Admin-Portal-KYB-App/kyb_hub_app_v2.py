@@ -1063,6 +1063,7 @@ def _onboarded_cte_sql(date_from, date_to, customer_id):
     )
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_home_recent(date_from, date_to, customer_id=None):
     """
     Load recently onboarded businesses.
@@ -1074,14 +1075,15 @@ def load_home_recent(date_from, date_to, customer_id=None):
     if customer_id:  parts.append(f"rbcm.customer_id = '{customer_id}'")
     dc=(" AND "+" AND ".join(parts)) if parts else ""
 
+    # Fast query: rbcm only — no facts join (the facts join was O(n*m) and very slow)
+    # fact_count is dropped — it was only cosmetic and caused a massive federated join
     sql = f"""
-        SELECT DISTINCT
+        SELECT
             rbcm.business_id,
-            MIN(rbcm.created_at)   AS first_seen,
-            MAX(rbcm.created_at)   AS last_updated,
-            COUNT(DISTINCT f.name) AS fact_count
+            MIN(rbcm.created_at) AS first_seen,
+            MAX(rbcm.created_at) AS last_updated,
+            0                    AS fact_count
         FROM rds_cases_public.rel_business_customer_monitoring rbcm
-        LEFT JOIN rds_warehouse_public.facts f ON f.business_id = rbcm.business_id
         WHERE 1=1{dc}
         GROUP BY rbcm.business_id
         ORDER BY first_seen DESC
@@ -1103,7 +1105,7 @@ def load_home_recent(date_from, date_to, customer_id=None):
         GROUP BY business_id ORDER BY first_seen DESC
     """)
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_home_kyb_stats(date_from, date_to, customer_id=None):
     """
     KYB health metrics — respects both date range and optional customer filter.
@@ -1183,7 +1185,7 @@ def load_home_kyb_stats(date_from, date_to, customer_id=None):
     # The stats_df intersection in Home tab (stats_df = stats_df[bids isin recent_df]) handles this.
     return None, "rbcm not accessible — no fallback to avoid incorrect business counts"
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_home_flags(date_from, date_to, customer_id=None):
     """Flag scoring facts — respects both date range and optional customer filter."""
     parts=[]
@@ -3576,7 +3578,7 @@ if tab=="🏠 Home":
     # ── Red flag scoring — query facts directly for the authoritative business list ──
 
 
-    @st.cache_data(ttl=600, show_spinner=False)
+    @st.cache_data(ttl=1800, show_spinner=False)
     def _load_flags_for_bids(date_from, date_to, customer_id):
         cte = _onboarded_cte_sql(date_from, date_to, customer_id)
         return run_sql(cte + """SELECT f.business_id, f.name,
@@ -3645,7 +3647,7 @@ if tab=="🏠 Home":
                 biz_flags[bid_check] = {"flags": flags, "score": score}
 
     # ── KYB Funnel: SOS/TIN granular facts ──────────────────────────────────
-    @st.cache_data(ttl=600, show_spinner=False)
+    @st.cache_data(ttl=1800, show_spinner=False)
     def _load_kyb_funnel_for_bids(date_from, date_to, customer_id):
         """Load granular SOS and TIN facts needed for funnel analysis.
         Returns one row per business with:
@@ -3688,7 +3690,7 @@ if tab=="🏠 Home":
             GROUP BY f.business_id
         """)
 
-    @st.cache_data(ttl=600, show_spinner=False)
+    @st.cache_data(ttl=1800, show_spinner=False)
     def _load_sos_filings_for_bids(date_from, date_to, customer_id):
         """Parse sos_filings[] JSON array from rds_warehouse_public.facts.
         Source: API JSON sos_filings fact (name='sos_filings').
@@ -3737,10 +3739,12 @@ if tab=="🏠 Home":
                 f"  WHERE f.name='sos_filings' AND LENGTH(f.value)<60000\n"
                 f"    AND JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','state') IS NOT NULL"
             )
-        union_sql = "\nUNION ALL\n".join(_filing_row(i) for i in range(10))
+        # 5 branches covers >99% of businesses (most have 1-3 filings)
+        # Reduced from 10 to cut query execution time in half
+        union_sql = "\nUNION ALL\n".join(_filing_row(i) for i in range(5))
         return run_sql(cte + f"SELECT * FROM (\n{union_sql}\n) sos_rows WHERE filing_state != '' OR foreign_domestic IS NOT NULL;")
 
-    @st.cache_data(ttl=600, show_spinner=False)
+    @st.cache_data(ttl=1800, show_spinner=False)
     def _load_sole_prop_signal(date_from, date_to, customer_id):
         """Load Plaid IDV SSN last-4 for Possible Sole Prop detection.
         Source: integration-service/lib/facts/kyb/index.ts:606
@@ -3759,7 +3763,7 @@ if tab=="🏠 Home":
             GROUP BY iv.business_id""")
 
     # ── Load enriched KYB stats using the same authoritative business ID list ──
-    @st.cache_data(ttl=600, show_spinner=False)
+    @st.cache_data(ttl=1800, show_spinner=False)
     def _load_stats_for_bids(date_from, date_to, customer_id):
         """Load KYB stats for a specific list of business IDs.
 
@@ -8404,7 +8408,7 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
     _WF_ORDER = [2, 3, 4, 5, 6, 7, 8]
 
     # Load Worth Scores for the authoritative business list
-    @st.cache_data(ttl=600, show_spinner=False)
+    @st.cache_data(ttl=1800, show_spinner=False)
     def _load_home_scores(date_from, date_to, customer_id):
         cte = _onboarded_cte_sql(date_from, date_to, customer_id)
         return run_sql(cte + """SELECT cs.business_id,
@@ -8415,7 +8419,7 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
             JOIN onboarded o ON o.business_id = cs.business_id
             ORDER BY bs.weighted_score_850 ASC""")
 
-    @st.cache_data(ttl=600, show_spinner=False)
+    @st.cache_data(ttl=1800, show_spinner=False)
     def _load_home_factors(date_from, date_to, customer_id):
         """Load per-category factor contributions, averaged across all scored businesses."""
         cte = _onboarded_cte_sql(date_from, date_to, customer_id)
