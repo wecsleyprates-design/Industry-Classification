@@ -6704,8 +6704,11 @@ if tab=="🏠 Home":
                     _sub = pd.DataFrame({"business_id": bids})
 
             if _sub is None:
-                # SQL did not run (offline/demo mode) — build from in-memory DataFrames
+                # SQL did not run — build all 19 columns from in-memory DataFrames.
+                # Same column set as _seg_sql() output so the table is always complete.
                 _base = pd.DataFrame({"business_id": bids})
+
+                # per_biz columns from stats_df
                 if stats_df is not None and not stats_df.empty:
                     _avail = [c for c in [
                         "sos_match_boolean","sos_match_status","sos_active",
@@ -6714,8 +6717,34 @@ if tab=="🏠 Home":
                         "watchlist_hits","is_sole_prop",
                     ] if c in stats_df.columns]
                     _base = stats_df[stats_df["business_id"].isin(bids)][["business_id"]+_avail].copy()
+
+                # operating_state from funnel_df (primary_address fact)
                 if funnel_df is not None and not funnel_df.empty and "operating_state" in funnel_df.columns:
-                    _base = _base.merge(funnel_df[["business_id","operating_state"]], on="business_id", how="left")
+                    _os_map = funnel_df[funnel_df["business_id"].isin(bids)][["business_id","operating_state"]]
+                    _base = _base.merge(_os_map, on="business_id", how="left")
+                elif "operating_state" not in _base.columns:
+                    _base["operating_state"] = None
+
+                # sos_filings fields from _sos_filings_df (first filing per business as proxy)
+                # foreign_domestic will be NULL for businesses where the vendor didn't set it
+                for _col19 in ["foreign_domestic","filing_state","entity_type","filing_name","registration_date"]:
+                    _base[_col19] = None
+                if _sos_filings_df is not None and not _sos_filings_df.empty:
+                    _sf_sub = (
+                        _sos_filings_df[_sos_filings_df["business_id"].isin(bids)]
+                        .sort_values("filing_index") if "filing_index" in _sos_filings_df.columns
+                        else _sos_filings_df[_sos_filings_df["business_id"].isin(bids)]
+                    )
+                    _sf_first = _sf_sub.groupby("business_id").first().reset_index()[
+                        ["business_id"] + [c for c in
+                         ["foreign_domestic","filing_state","entity_type","filing_name","registration_date"]
+                         if c in _sf_sub.columns]
+                    ]
+                    # Drop the placeholder None columns before merging to avoid duplicates
+                    _cols_to_drop = [c for c in _sf_first.columns if c != "business_id" and c in _base.columns]
+                    _base = _base.drop(columns=_cols_to_drop)
+                    _base = _base.merge(_sf_first, on="business_id", how="left")
+
                 _sub = _base
 
             # Clean timestamps to YYYY-MM-DD only
