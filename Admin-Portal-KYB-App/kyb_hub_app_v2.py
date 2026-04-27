@@ -6713,77 +6713,38 @@ if tab=="🏠 Home":
             if _sub is None:
                 _sub = pd.DataFrame({"business_id": bids})
 
-            _rename = {
-                # sos_filings-derived
-                "sos_match_boolean":  "SOS Match",
-                "sos_match_status":   "SOS Match Status",
-                "sos_active":         "SOS Active",
-                "formation_state":    "Formation State",
-                "formation_date":     "Formation Date",
-                "foreign_domestic":   "Dom/Foreign",
-                "jurisdiction":       "Jurisdiction(s)",
-                "entity_type":        "Entity Type",
-                "filing_name":        "Filing Name",
-                "registration_date":  "Registration Date",
-                "has_officers":       "Officers",
-                "filing_state":       "Filing State(s)",
-                "n_filings":          "# Filings",
-                # TIN facts
-                "tin_submitted":      "TIN Submitted",
-                "tin_match_status":   "TIN Status",
-                "tin_match":          "TIN Match",
-                # IDV
-                "idv_passed":         "IDV Passed",
-                # Classification
-                "naics_code":         "NAICS",
-                # Risk
-                "watchlist_hits":     "WL Hits",
-                # Sole prop
-                "is_sole_prop":       "Sole Prop",
-            }
-            _sub = _sub.rename(columns={k: v for k, v in _rename.items() if k in _sub.columns})
+            # Display the table with EXACT SQL column names in EXACT SQL column order.
+            # The SQL query (_seg_sql) returns columns in this fixed order:
+            #   business_id, sos_match_boolean, sos_match_status, sos_active,
+            #   formation_state, formation_date, tin_submitted, tin_match_status,
+            #   tin_match, idv_passed, naics_code, watchlist_hits, is_sole_prop,
+            #   operating_state, [n_filings], [jurisdiction], [has_officers],
+            #   foreign_domestic, filing_state, entity_type, filing_name, registration_date
+            # No renaming — column names shown exactly as in the SQL query.
+            # formation_date timestamps are cleaned to date-only for readability.
+            if "formation_date" in _sub.columns:
+                _sub["formation_date"] = _sub["formation_date"].astype(str).str[:10].replace("nan","")
+            if "registration_date" in _sub.columns:
+                _sub["registration_date"] = _sub["registration_date"].astype(str).str[:10].replace("nan","")
 
-            # Enforce exact column order — matches the SQL runner output (18 columns).
-            # Any column not yet in _sub is simply skipped.
-            _DISPLAY_ORDER = [
+            # Column order: SQL columns first (in SQL order), then any extra merged columns
+            _SQL_COL_ORDER = [
                 "business_id",
-                "SOS Match", "SOS Match Status", "SOS Active",
-                "Formation State", "Formation Date",
-                "TIN Submitted", "TIN Status", "TIN Match",
-                "IDV Passed", "NAICS", "WL Hits", "Sole Prop",
-                "Dom/Foreign", "Filing State(s)", "Entity Type",
-                "Filing Name", "Registration Date",
+                "sos_match_boolean", "sos_match_status", "sos_active",
+                "formation_state", "formation_date",
+                "tin_submitted", "tin_match_status", "tin_match",
+                "idv_passed", "naics_code", "watchlist_hits", "is_sole_prop",
+                "operating_state",
+                "foreign_domestic", "filing_state", "entity_type",
+                "filing_name", "registration_date",
+                "n_filings", "jurisdiction", "has_officers",
             ]
-            _ordered_cols = [c for c in _DISPLAY_ORDER if c in _sub.columns]
-            _extra_cols_not_in_order = [c for c in _sub.columns if c not in _DISPLAY_ORDER]
-            _sub = _sub[_ordered_cols + _extra_cols_not_in_order]
+            _ordered = [c for c in _SQL_COL_ORDER if c in _sub.columns]
+            _extra   = [c for c in _sub.columns if c not in _SQL_COL_ORDER]
+            _sub = _sub[_ordered + _extra]
 
-            _col_cfg = {
-                "SOS Match":          st.column_config.TextColumn(help="sos_match_boolean — derived from sos_match.value==='success' (index.ts:1421)"),
-                "SOS Match Status":   st.column_config.TextColumn(help="sos_match.value.status — 'success'|'failure' (Middesk/OC/Trulioo)"),
-                "SOS Active":         st.column_config.TextColumn(help="sos_active — from sos_filings[].some(f=>f.active===true) (index.ts:1426)"),
-                "Formation State":    st.column_config.TextColumn(help="formation_state fact — from sos_filings[].state via Middesk"),
-                "Formation Date":     st.column_config.TextColumn(help="formation_date fact — from sos_filings[].filing_date via Middesk"),
-                "Dom/Foreign":        st.column_config.TextColumn(help="sos_filings[].foreign_domestic = 'domestic'|'foreign'"),
-                "Jurisdiction(s)":    st.column_config.TextColumn(help="sos_filings[].jurisdiction = 'us::fl','us::de',etc."),
-                "Entity Type":        st.column_config.TextColumn(help="sos_filings[].entity_type = 'llc'|'corporation'|'lp'|'llp' (types.ts:20-32)"),
-                "Filing Name":        st.column_config.TextColumn(help="sos_filings[].filing_name — legal name on the SOS filing"),
-                "Registration Date":  st.column_config.TextColumn(help="sos_filings[].registration_date — incorporation date"),
-                "Officers":           st.column_config.NumberColumn(help="1 = sos_filings[].officers non-empty (index.ts:767-987)"),
-                "Filing State(s)":    st.column_config.TextColumn(help="sos_filings[].state — filing jurisdiction state(s)"),
-                "# Filings":          st.column_config.NumberColumn(help="Count of entries in sos_filings[] array"),
-                "TIN Submitted":      st.column_config.TextColumn(help="tin_submitted fact — EIN provided at onboarding, masked (index.ts:399)"),
-                "TIN Status":         st.column_config.TextColumn(help="tin_match.value.status — 'success'=IRS confirmed | 'failure'=mismatch (index.ts:429)"),
-                "TIN Match":          st.column_config.TextColumn(help="tin_match_boolean — true=IRS confirmed EIN matches legal name (index.ts:482)"),
-                "IDV Passed":         st.column_config.TextColumn(help="idv_passed_boolean — Plaid biometric IDV result (index.ts:541)"),
-                "NAICS":              st.column_config.TextColumn(help="naics_code fact — '561499'=last resort fallback (aiNaicsEnrichment.ts:63)"),
-                "WL Hits":            st.column_config.NumberColumn(help="watchlist_hits — PEP/OFAC/sanctions hits (Middesk+Trulioo combined)"),
-                "Sole Prop":          st.column_config.TextColumn(help="is_sole_prop — true|false|null. null=not enough data (index.ts:552-616)"),
-                "# Filings":              st.column_config.NumberColumn(help="Count of entries in sos_filings[] array"),
-            }
             if not _sub.empty:
-                st.dataframe(_sub, use_container_width=True, hide_index=True,
-                             column_config={k: v for k, v in _col_cfg.items() if k in _sub.columns})
+                st.dataframe(_sub, use_container_width=True, hide_index=True)
             else:
                 st.dataframe(pd.DataFrame({"business_id": bids}), use_container_width=True, hide_index=True)
 
