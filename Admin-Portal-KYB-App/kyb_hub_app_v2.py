@@ -6656,26 +6656,27 @@ if tab=="🏠 Home":
                     _tbl_df, _tbl_err = run_sql(_tbl_sql_clean)
                     if _tbl_df is not None and not _tbl_df.empty:
                         _sub = _tbl_df.copy()
-                        # Enrich with sos_filings[] parsed fields (Dom/Foreign, Jurisdiction,
-                        # Entity Type, Filing Name, Registration Date, Officers, # Filings)
+                        # _seg_sql() already returns foreign_domestic, filing_state, entity_type,
+                        # filing_name, registration_date from the sos_fil CTE directly.
+                        # Only merge columns that _seg_sql() does NOT provide to avoid
+                        # pandas merge creating _x/_y suffix duplicates that break _rename.
                         if _sos_filings_df is not None and not _sos_filings_df.empty:
                             _sf_ids = set(_sub["business_id"].tolist())
-                            _sf_a = (
-                                _sos_filings_df[_sos_filings_df["business_id"].isin(_sf_ids)]
-                                .groupby("business_id")
-                                .agg(
-                                    foreign_domestic=("foreign_domestic", lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
-                                    jurisdiction=("jurisdiction",     lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
-                                    entity_type=("entity_type",       lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
-                                    filing_name=("filing_name",       "first"),
-                                    registration_date=("registration_date", "min"),
-                                    has_officers=("has_officers",     "max"),
-                                    filing_state=("filing_state",     lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
-                                    n_filings=("filing_state",        "count"),
+                            _agg_spec = {}
+                            if "jurisdiction" not in _sub.columns:
+                                _agg_spec["jurisdiction"] = ("jurisdiction", lambda x: " / ".join(sorted(set(str(v) for v in x.dropna()))))
+                            if "has_officers" not in _sub.columns:
+                                _agg_spec["has_officers"] = ("has_officers", "max")
+                            # n_filings always useful (count of ALL filings, not just first element)
+                            _agg_spec["n_filings"] = ("filing_state", "count")
+                            if _agg_spec:
+                                _sf_extra = (
+                                    _sos_filings_df[_sos_filings_df["business_id"].isin(_sf_ids)]
+                                    .groupby("business_id")
+                                    .agg(**_agg_spec)
+                                    .reset_index()
                                 )
-                                .reset_index()
-                            )
-                            _sub = _sub.merge(_sf_a, on="business_id", how="left")
+                                _sub = _sub.merge(_sf_extra, on="business_id", how="left")
                 except Exception:
                     _sub = None
 
@@ -9418,305 +9419,10 @@ ORDER BY avg_impact_pts ASC;"""
     _n_crit   = len(_an.get("g1_tin_status_bool_mismatch",[])) + len(_an.get("g7_approve_sos_inactive",[]))
 
     # ════════════════════════════════════════════════════════════════════════
-    # 6.0  PORTFOLIO HEALTH SCORECARD
-    # ════════════════════════════════════════════════════════════════════════
-    st.markdown("#### 6.0  Portfolio Health Scorecard")
-    _h1,_h2,_h3,_h4,_h5 = st.columns(5)
-    with _h1: kpi("✅ 0 Anomalies",   f"{_n_clean:,}",  f"{_n_clean/max(total_biz,1)*100:.0f}% structurally clean", "#22c55e")
-    with _h2: kpi("⚠️ 1 Anomaly",    f"{_n_1:,}",      f"{_n_1/max(total_biz,1)*100:.0f}% isolated issue",         "#f59e0b")
-    with _h3: kpi("🔴 2–3 Anomalies",f"{_n_2_3:,}",    f"{_n_2_3/max(total_biz,1)*100:.0f}% compounded risk",      "#f97316")
-    with _h4: kpi("🔴 4+ Anomalies", f"{_n_4plus:,}",  f"{_n_4plus/max(total_biz,1)*100:.0f}% systematic failure", "#ef4444")
-    with _h5: kpi("⚡ CRITICAL",      f"{_n_crit:,}",   "highest-severity combos",                                  "#8B5CF6")
-
-    # Severity distribution bar
-    if total_biz > 0:
-        _pct_clean = _n_clean/total_biz*100
-        _pct_1     = _n_1/total_biz*100
-        _pct_23    = _n_2_3/total_biz*100
-        _pct_4p    = _n_4plus/total_biz*100
-        st.markdown(f"""<div style="margin:8px 0 16px 0">
-          <div style="display:flex;gap:0;border-radius:6px;overflow:hidden;height:18px">
-            <div style="width:{_pct_clean:.1f}%;background:#22c55e;title='Clean'" title="Clean: {_n_clean:,}"></div>
-            <div style="width:{_pct_1:.1f}%;background:#f59e0b" title="1 anomaly: {_n_1:,}"></div>
-            <div style="width:{_pct_23:.1f}%;background:#f97316" title="2-3 anomalies: {_n_2_3:,}"></div>
-            <div style="width:{_pct_4p:.1f}%;background:#ef4444" title="4+ anomalies: {_n_4plus:,}"></div>
-          </div>
-          <div style="display:flex;gap:16px;margin-top:4px;font-size:.72rem;color:#94A3B8">
-            <span>🟢 Clean: {_n_clean:,} ({_pct_clean:.0f}%)</span>
-            <span>🟡 1: {_n_1:,} ({_pct_1:.0f}%)</span>
-            <span>🟠 2-3: {_n_2_3:,} ({_pct_23:.0f}%)</span>
-            <span>🔴 4+: {_n_4plus:,} ({_pct_4p:.0f}%)</span>
-          </div>
-        </div>""", unsafe_allow_html=True)
-
-    _SOS_AN_COLS = ["sos_match_boolean","sos_match_status","sos_active","sos_match_verif","sos_domestic_verif","formation_state","tin_submitted","tin_match_status","tin_match","idv_passed","naics_code","watchlist_hits","num_bankruptcies"]
-
-    def _investigate_rows(bids: list, score_map: dict = None, flags_map: dict = None,
-                          context_label: str = "", key_prefix: str = "inv"):
-        """
-        Render one row per business ID with:
-          - Full UUID in monospace
-          - Weighted score + anomaly flags (if available)
-          - 🔍 Investigate button that sets the business ID and triggers a success toast
-        Replaces the old st.columns(4) truncated-UUID pattern used throughout Section 6.
-        """
-        if not bids:
-            return
-        for _idx, _bid in enumerate(bids):
-            _sc  = int(score_map.get(_bid, 0)) if score_map else 0
-            _flg = flags_map.get(_bid, []) if flags_map else []
-            _sev_icons = " ".join(
-                _SEV_ICON.get(_an_meta.get(k,{}).get("severity","LOW"),"⚪")
-                + " " + _an_meta.get(k,{}).get("title","")[:28]
-                for k in _flg[:3]
-            ) if _flg else context_label
-            _row_l, _row_r = st.columns([5, 1])
-            with _row_l:
-                st.markdown(
-                    f"<div style='background:#0f172a;border-left:3px solid #3B82F6;"
-                    f"border-radius:5px;padding:5px 12px;font-size:.75rem;color:#CBD5E1;margin:2px 0'>"
-                    f"<code style='color:#60A5FA;font-size:.82rem'>{_bid}</code>"
-                    + (f"&nbsp;&nbsp;<span style='color:#f59e0b'>⚡ {_sc}pts</span>" if _sc else "")
-                    + (f"&nbsp;·&nbsp;<span style='color:#94A3B8'>{_sev_icons}</span>" if _sev_icons else "")
-                    + "</div>",
-                    unsafe_allow_html=True
-                )
-            with _row_r:
-                if st.button("🔍 Investigate", key=f"{key_prefix}_{_bid[:16]}_{_idx}",
-                             help=f"Set Business ID to {_bid} and navigate to any entity tab"):
-                    st.session_state["_pending_bid"] = _bid
-                    st.session_state["_bid_just_set"] = _bid
-                    st.rerun()
-
-    # ── 6.0 Scorecard: scoring formula explanation ──────────────────────────
-    detail_panel(
-        "📊 6.0 Portfolio Health Scorecard — How Weighted Score is Calculated",
-        f"{total_biz:,} businesses · {_n_clean:,} clean · {_n_1+_n_2_3+_n_4plus:,} with anomalies",
-        what_it_means=(
-            "**What 'Weighted Score' means in the table:**\n\n"
-            "Each business gets a weighted score computed as the sum of severity points "
-            "for every deterministic rule it triggers:\n\n"
-            "| Severity | Points | Example rules |\n|---|---|---|\n"
-            "| CRITICAL | 4 pts | tin_match_status=success AND tin_match_boolean=false (data integrity bug) |\n"
-            "| HIGH | 3 pts | SOS Inactive + TIN Verified; Watchlist Hit + No Registry |\n"
-            "| MEDIUM | 2 pts | SOS Active + TIN Failed; Registry Active but Inactive per verif_results |\n"
-            "| LOW / NOTICE | 1 pt | NAICS Fallback 561499; Adverse Media + No Watchlist |\n\n"
-            "**Example:** A business that triggers 'SOS Inactive + TIN Verified' (HIGH=3pts) "
-            "AND 'NAICS Fallback 561499' (LOW=1pt) gets Weighted Score = 4, # Anomalies = 2.\n\n"
-            "**# Anomalies** = raw count of rules triggered (unweighted).\n"
-            "**Weighted Score** = sum of severity points (weighted).\n\n"
-            "**This scoring is independent of the Section 4 Red Flag score.** "
-            "Red Flags measure risk signal intensity (watchlist hits, bankruptcies, etc.). "
-            "The anomaly score measures structural KYB data *consistency failures* — "
-            "contradictions between signals that should agree with each other.\n\n"
-            "**20 rules evaluated across 7 groups (check_agent_v2.DETERMINISTIC_CHECKS):**\n"
-            "- G1 (Data Integrity): 3 impossible-state rules\n"
-            "- G2 (SOS/Registry): 3 registry inconsistency rules\n"
-            "- G3 (TIN/EIN): 1 EIN gap rule\n"
-            "- G4 (Cross-Section S1×S2): 3 Registry×TIN contradiction rules\n"
-            "- G5 (NAICS): 2 classification anomaly rules\n"
-            "- G6 (Risk Signals): 5 risk combination rules\n"
-            "- G7 (Worth Score): 3 score vs KYB consistency rules"
-        ),
-        source_table="stats_df · funnel_df (already in memory — zero new Redshift queries)",
-        source_file="check_agent_v2.py (DETERMINISTIC_CHECKS) — 20 rules across 7 groups",
-        json_obj={
-            "scoring_formula": {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "NOTICE": 1},
-            "portfolio_summary": {
-                "clean_0_anomalies": _n_clean,
-                "1_anomaly": _n_1,
-                "2_3_anomalies": _n_2_3,
-                "4plus_anomalies": _n_4plus,
-                "critical_combos": _n_crit,
-            }
-        },
-        icon="📊", color="#3B82F6"
-    )
-
-    # ── 6.0 Scorecard: per-band drilldowns (business IDs + key signals + investigate) ──
-    _scorecard_bands = [
-        ("✅ 0 Anomalies — Structurally Clean",   lambda df: df[df["anomaly_count"]==0],                     "#22c55e",
-         "No cross-field contradictions. All 20 deterministic rules pass. Weighted score = 0."),
-        ("⚠️ 1 Anomaly — Isolated Issue",          lambda df: df[df["anomaly_count"]==1],                     "#f59e0b",
-         "Exactly 1 contradiction rule triggered. Usually resolvable with one targeted action. Weighted score = 1–4pts."),
-        ("🟠 2–3 Anomalies — Compounded Risk",     lambda df: df[df["anomaly_count"].between(2,3)],           "#f97316",
-         "2–3 rules triggered simultaneously. Anomalies often share a root cause. Weighted score = 2–12pts."),
-        ("🔴 4+ Anomalies — Systematic Failure",   lambda df: df[df["anomaly_count"]>=4],                     "#ef4444",
-         "4 or more rules triggered. Systematic KYB data breakdown. Full manual review required. Weighted score = 4–80pts."),
-    ]
-    for _sc_label, _sc_fn, _sc_col, _sc_desc in _scorecard_bands:
-        _sc_sub = _sc_fn(_biz_score_df)
-        _sc_bids = _sc_sub["business_id"].tolist()
-        if not _sc_bids:
-            continue
-        with st.expander(f"👁️ Show {len(_sc_bids):,} businesses — {_sc_label}", expanded=False):
-            st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_sc_col};
-                border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
-              <span style="color:#a78bfa;font-weight:700">⚙️ Band definition · Scoring formula</span>
-            </div>""", unsafe_allow_html=True)
-            st.markdown(
-                f"{_sc_desc}\n\n"
-                f"**Weighted Score formula:** CRITICAL=4pts · HIGH=3pts · MEDIUM=2pts · LOW/NOTICE=1pt per rule triggered."
-            )
-            st.markdown("---")
-            # Table: business_id, weighted score, # anomalies, which rules triggered
-            _sc_tbl = _sc_sub[["business_id","anomaly_score","anomaly_count"]].copy()
-            _sc_tbl["Anomalies Triggered"] = _sc_tbl["business_id"].map(
-                lambda b: " · ".join(
-                    _SEV_ICON.get(_an_meta.get(k,{}).get("severity","LOW"),"⚪")
-                    + " " + _an_meta.get(k,{}).get("title","")[:30]
-                    for k in _biz_flags_s6.get(b,[])
-                ) or "None"
-            )
-            _sc_tbl = _sc_tbl.rename(columns={
-                "anomaly_score": "Weighted Score (pts)",
-                "anomaly_count": "# Anomalies"
-            })
-            st.dataframe(_sc_tbl, use_container_width=True, hide_index=True,
-                         column_config={
-                             "Weighted Score (pts)": st.column_config.NumberColumn(
-                                 help="Sum of severity points: CRITICAL=4 · HIGH=3 · MEDIUM=2 · LOW/NOTICE=1"),
-                             "# Anomalies": st.column_config.NumberColumn(
-                                 help="Raw count of contradiction rules triggered (unweighted)"),
-                         })
-            # Key KYB signals
-            if stats_df is not None and not stats_df.empty:
-                _sc_sig = stats_df[stats_df["business_id"].isin(_sc_bids)][
-                    ["business_id"] + [c for c in _SOS_AN_COLS if c in stats_df.columns]
-                ].copy().rename(columns={
-                    "sos_match_boolean":"SOS Match Bool","sos_active":"SOS Active",
-                    "tin_match":"TIN Match Bool","tin_match_status":"TIN Match Status",
-                    "naics_code":"NAICS","watchlist_hits":"WL Hits","num_bankruptcies":"BK",
-                    "formation_state":"Formation State","tin_submitted":"TIN Submitted",
-                })
-                if not _sc_sig.empty:
-                    st.markdown("**Key KYB signals for these businesses:**")
-                    st.dataframe(_sc_sig, use_container_width=True, hide_index=True)
-            # Download + investigate
-            _sc_dl = pd.DataFrame({"business_id":_sc_bids}).to_csv(index=False).encode()
-            st.download_button(f"⬇️ Download {len(_sc_bids)} IDs (CSV)", _sc_dl,
-                               f"scorecard_{_sc_label[:15].replace(' ','_')}.csv","text/csv",
-                               key=f"dl_sc_{_sc_label[:12]}")
-            st.caption("Click 🔍 Investigate to set a business ID in the filter bar, then switch to any entity tab.")
-            _investigate_rows(_sc_bids, _biz_score, _biz_flags_s6, key_prefix=f"sc_{_sc_label[:8]}")
-
-    # Helper: build summary bar chart + per-rule drilldown expanders for a group
-    def _group_chart_and_drilldowns(group_keys, group_title, cols_for_table, prefix="gc"):
-        """Horizontal bar chart of all rules in a group, then per-rule drilldown expanders."""
-        _rows = [{"Rule": _an_meta[k]["title"][:38],
-                  "Count": len(_an.get(k,[])),
-                  "Severity": _an_meta[k]["severity"],
-                  "Color": _SEV_COLOR.get(_an_meta[k]["severity"],"#64748b"),
-                  "key": k}
-                 for k in group_keys if k in _an_meta]
-        if not _rows:
-            return
-        _gdf = pd.DataFrame(_rows).sort_values("Count", ascending=True)
-        _active = _gdf[_gdf["Count"]>0]
-        if _active.empty:
-            return
-        _cmap = dict(zip(_active["Rule"], _active["Color"]))
-        _fig = px.bar(_active, x="Count", y="Rule", orientation="h",
-                      color="Rule", color_discrete_map=_cmap,
-                      text="Count", title=group_title)
-        _fig.update_traces(textposition="outside")
-        _fig.update_layout(height=max(160, len(_active)*52), showlegend=False,
-                           margin=dict(t=40,b=10,l=10,r=60))
-        st.plotly_chart(dark_chart(_fig), use_container_width=True)
-
-        # Per-rule drilldown expanders — one per bar in the chart
-        for _, _row in _active.iterrows():
-            _rk  = _row["key"]
-            _rt  = _row["Rule"]
-            _rc  = _row["Color"]
-            _rsev= _row["Severity"]
-            _rbids = _an.get(_rk, [])
-            if not _rbids:
-                continue
-            with st.expander(
-                f"👁️ {_SEV_ICON.get(_rsev,'⚪')} Show {len(_rbids):,} businesses — {_rt}",
-                expanded=False
-            ):
-                _m2 = _an_meta.get(_rk, {})
-                st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_rc};
-                    border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
-                  <span style="color:#a78bfa;font-weight:700">⚙️ How this rule is defined · Why it matters</span>
-                </div>""", unsafe_allow_html=True)
-                st.markdown(
-                    f"**{_m2.get('title','')}** ({_rsev})\n\n"
-                    f"{_m2.get('desc','')}\n\n"
-                    f"**Action:** {_m2.get('action','')}\n\n"
-                    f"**Source:** `{_m2.get('source','')}`"
-                )
-                # ── Diagnostic SQL runner for this rule ───────────────────
-                _rule_sql = _m2.get("sql","")
-                if _rule_sql:
-                    st.markdown("**▶ Inline SQL Runner** (diagnostic SQL for this rule):")
-                    _inline_sql_runner(_rule_sql, runner_key=f"{prefix}_{_rk}_rule")
-                # Also extract any SQL from _SEG_CALC for this key
-                _seg_calc_text = _SEG_CALC.get(_rk, "")
-                if _seg_calc_text:
-                    import re as _re2
-                    _extra_sqls = _re2.findall(r"```sql\s*(.*?)```", _seg_calc_text, _re2.DOTALL | _re2.IGNORECASE)
-                    for _esqi, _esq in enumerate(_extra_sqls):
-                        if _esq.strip() and _esq.strip() != _rule_sql.strip():
-                            st.markdown(f"**▶ Inline SQL Runner** (from ⚙️ explanation):")
-                            _inline_sql_runner(_esq.strip(), runner_key=f"{prefix}_{_rk}_calc_{_esqi}")
-                st.markdown("---")
-                # Business ID table with key KYB signals
-                if stats_df is not None and not stats_df.empty:
-                    _rt_sig = stats_df[stats_df["business_id"].isin(_rbids)][
-                        ["business_id"] + [c for c in cols_for_table if c in stats_df.columns]
-                    ].copy().rename(columns={
-                        "sos_match_boolean":"SOS Match Bool","sos_match_status":"SOS Match Status",
-                        "sos_active":"SOS Active","sos_match_verif":"sos_match_verif(0/1)",
-                        "sos_domestic_verif":"sos_domestic_verif(0/1)",
-                        "formation_state":"Formation State","tin_submitted":"TIN Submitted",
-                        "tin_match_status":"TIN Match Status","tin_match":"TIN Match Bool",
-                        "idv_passed":"IDV Passed","naics_code":"NAICS",
-                        "watchlist_hits":"WL Hits","num_bankruptcies":"BK",
-                        "num_judgements":"Judgements","num_liens":"Liens","adverse_media":"Adverse Media",
-                        "revenue":"Revenue",
-                    })
-                    if not _rt_sig.empty:
-                        st.dataframe(_rt_sig, use_container_width=True, hide_index=True)
-                    else:
-                        st.dataframe(pd.DataFrame({"business_id": _rbids}),
-                                     use_container_width=True, hide_index=True)
-                else:
-                    st.dataframe(pd.DataFrame({"business_id": _rbids}),
-                                 use_container_width=True, hide_index=True)
-                _dl_r = pd.DataFrame({"business_id": _rbids}).to_csv(index=False).encode()
-                st.download_button(f"⬇️ Download {len(_rbids)} IDs (CSV)", _dl_r,
-                                   f"{_rk}_bids.csv","text/csv", key=f"dl_{prefix}_{_rk}")
-                st.caption("Click 🔍 Investigate to set a business ID, then switch to any entity tab.")
-                _investigate_rows(_rbids, _biz_score, _biz_flags_s6,
-                                  context_label=_m2.get("title",""), key_prefix=f"{prefix}_{_rk}")
-
-    # (kept for backward compat — now delegates to _group_chart_and_drilldowns)
-    def _group_summary_chart(group_keys, group_title):
-        _rows = [{"Rule": _an_meta[k]["title"][:38],
-                  "Count": len(_an.get(k,[])),
-                  "Severity": _an_meta[k]["severity"],
-                  "Color": _SEV_COLOR.get(_an_meta[k]["severity"],"#64748b")}
-                 for k in group_keys if k in _an_meta]
-        if not _rows or all(r["Count"]==0 for r in _rows):
-            return None
-        _gdf = pd.DataFrame(_rows).sort_values("Count", ascending=True)
-        _cmap = dict(zip(_gdf["Rule"], _gdf["Color"]))
-        _fig = px.bar(_gdf, x="Count", y="Rule", orientation="h",
-                      color="Rule", color_discrete_map=_cmap,
-                      text="Count", title=group_title)
-        _fig.update_traces(textposition="outside")
-        _fig.update_layout(height=max(160, len(_rows)*52), showlegend=False,
-                           margin=dict(t=40,b=10,l=10,r=60))
-        return _fig
-
-    # ════════════════════════════════════════════════════════════════════════
-    # 6.4  GROUP 4: CROSS-SECTION CONTRADICTIONS (S1 × S2)
+    # 6.1  CROSS-SECTION CONTRADICTIONS — Registry × TIN
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("#### 6.4  Cross-Section Contradictions — Registry × TIN")
+    st.markdown("#### 6.1  Cross-Section Contradictions — Registry × TIN")
     st.caption("Where SOS verification (Section 1) and TIN verification (Section 2) signals diverge — "
                "the two independent KYB verification paths producing inconsistent results.")
 
@@ -9894,10 +9600,10 @@ ORDER BY avg_impact_pts ASC;"""
         st.success("✅ No Registry × TIN contradictions detected.", icon="✅")
 
     # ════════════════════════════════════════════════════════════════════════
-    # 6.5  GROUP 5: NAICS & CLASSIFICATION ANOMALIES
+    # 6.2  NAICS CLASSIFICATION ANOMALIES
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("#### 6.5  NAICS Classification Anomalies")
+    st.markdown("#### 6.2  NAICS Classification Anomalies")
     st.caption("Industry classification gaps that affect Worth Score accuracy and MCC code validity. "
                "NAICS=561499 is the hardcoded NAICS_OF_LAST_RESORT (aiNaicsEnrichment.ts:63).")
 
@@ -9960,10 +9666,10 @@ ORDER BY avg_impact_pts ASC;"""
         st.success("✅ No NAICS classification anomalies detected.", icon="✅")
 
     # ════════════════════════════════════════════════════════════════════════
-    # 6.6  GROUP 6: RISK SIGNAL COMBINATIONS
+    # 6.3  RISK SIGNAL COMBINATIONS
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("#### 6.6  Risk Signal Combinations")
+    st.markdown("#### 6.3  Risk Signal Combinations")
     st.caption("Cross-signal risk combinations where two or more adverse signals co-occur — "
                "the severity of each signal amplifies the other.")
 
