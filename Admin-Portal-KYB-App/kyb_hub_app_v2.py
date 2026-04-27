@@ -6704,48 +6704,54 @@ if tab=="🏠 Home":
                     _sub = pd.DataFrame({"business_id": bids})
 
             if _sub is None:
-                # SQL did not run — build all 19 columns from in-memory DataFrames.
-                # Same column set as _seg_sql() output so the table is always complete.
-                _base = pd.DataFrame({"business_id": bids})
+                # SQL did not run — build all 19 SQL columns from in-memory DataFrames.
+                # Column names are EXACT SQL names (no renaming).
+                try:
+                    _base = pd.DataFrame({"business_id": bids})
 
-                # per_biz columns from stats_df
-                if stats_df is not None and not stats_df.empty:
-                    _avail = [c for c in [
+                    # 13 per_biz columns — exact SQL column names from _seg_sql() per_biz CTE
+                    _PB_COLS = [
                         "sos_match_boolean","sos_match_status","sos_active",
                         "formation_state","formation_date","tin_submitted",
-                        "tin_match_status","tin_match","idv_passed","naics_code",
-                        "watchlist_hits","is_sole_prop",
-                    ] if c in stats_df.columns]
-                    _base = stats_df[stats_df["business_id"].isin(bids)][["business_id"]+_avail].copy()
-
-                # operating_state from funnel_df (primary_address fact)
-                if funnel_df is not None and not funnel_df.empty and "operating_state" in funnel_df.columns:
-                    _os_map = funnel_df[funnel_df["business_id"].isin(bids)][["business_id","operating_state"]]
-                    _base = _base.merge(_os_map, on="business_id", how="left")
-                elif "operating_state" not in _base.columns:
-                    _base["operating_state"] = None
-
-                # sos_filings fields from _sos_filings_df (first filing per business as proxy)
-                # foreign_domestic will be NULL for businesses where the vendor didn't set it
-                for _col19 in ["foreign_domestic","filing_state","entity_type","filing_name","registration_date"]:
-                    _base[_col19] = None
-                if _sos_filings_df is not None and not _sos_filings_df.empty:
-                    _sf_sub = (
-                        _sos_filings_df[_sos_filings_df["business_id"].isin(bids)]
-                        .sort_values("filing_index") if "filing_index" in _sos_filings_df.columns
-                        else _sos_filings_df[_sos_filings_df["business_id"].isin(bids)]
-                    )
-                    _sf_first = _sf_sub.groupby("business_id").first().reset_index()[
-                        ["business_id"] + [c for c in
-                         ["foreign_domestic","filing_state","entity_type","filing_name","registration_date"]
-                         if c in _sf_sub.columns]
+                        "tin_match_status","tin_match","idv_passed",
+                        "naics_code","watchlist_hits","is_sole_prop",
                     ]
-                    # Drop the placeholder None columns before merging to avoid duplicates
-                    _cols_to_drop = [c for c in _sf_first.columns if c != "business_id" and c in _base.columns]
-                    _base = _base.drop(columns=_cols_to_drop)
-                    _base = _base.merge(_sf_first, on="business_id", how="left")
+                    if stats_df is not None and not stats_df.empty:
+                        _avail = [c for c in _PB_COLS if c in stats_df.columns]
+                        _base = stats_df[stats_df["business_id"].isin(bids)][["business_id"]+_avail].copy()
 
-                _sub = _base
+                    # operating_state — exact SQL column name (from primary_address fact)
+                    if funnel_df is not None and not funnel_df.empty and "operating_state" in funnel_df.columns:
+                        _os_map = funnel_df[funnel_df["business_id"].isin(bids)][["business_id","operating_state"]].drop_duplicates("business_id")
+                        _base = _base.merge(_os_map, on="business_id", how="left")
+                    if "operating_state" not in _base.columns:
+                        _base["operating_state"] = None
+
+                    # sos_filings columns — exact SQL column names from sos_fil CTE
+                    # foreign_domestic = NULL where the vendor did not set the field (correct)
+                    _SF_COLS = ["foreign_domestic","filing_state","entity_type","filing_name","registration_date"]
+                    for _c in _SF_COLS:
+                        _base[_c] = None   # default all to NULL
+
+                    if _sos_filings_df is not None and not _sos_filings_df.empty:
+                        _bid_set = set(bids)
+                        _sf_filt = _sos_filings_df[_sos_filings_df["business_id"].isin(_bid_set)].copy()
+                        if "filing_index" in _sf_filt.columns:
+                            _sf_filt = _sf_filt.sort_values("filing_index")
+                        _sf_first = (
+                            _sf_filt.groupby("business_id")
+                            .first()
+                            .reset_index()
+                            [["business_id"] + [c for c in _SF_COLS if c in _sf_filt.columns]]
+                        )
+                        # Remove placeholder cols then merge
+                        _base = _base.drop(columns=[c for c in _SF_COLS if c in _base.columns], errors="ignore")
+                        _base = _base.merge(_sf_first, on="business_id", how="left")
+
+                    _sub = _base
+                except Exception as _fb_ex:
+                    # Last resort: show at minimum the business_id list
+                    _sub = pd.DataFrame({"business_id": bids})
 
             # Clean timestamps to YYYY-MM-DD only
             for _tc in ("formation_date","registration_date"):
@@ -8950,6 +8956,27 @@ ORDER BY avg_impact_pts ASC;"""
     _SEV_COLOR = {"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b","LOW":"#22c55e","NOTICE":"#3B82F6"}
     _SEV_ICON  = {"CRITICAL":"🔴","HIGH":"🟠","MEDIUM":"🟡","LOW":"🟢","NOTICE":"🔵"}
     _SEV_PTS   = {"CRITICAL":4,"HIGH":3,"MEDIUM":2,"LOW":1,"NOTICE":1}
+
+    def _investigate_rows(bids, score_dict, flags_dict, context_label="", key_prefix="inv"):
+        """Render Investigate buttons for a list of business IDs."""
+        if not bids:
+            return
+        for _ii, _ib in enumerate(bids[:50]):
+            _il, _ir = st.columns([5, 1])
+            with _il:
+                _score_val = (score_dict or {}).get(_ib, 0)
+                _flags_val = (flags_dict or {}).get(_ib, [])
+                _ctx = context_label[:40] if context_label else ""
+                _ctx_extra = f" · score={_score_val}" if _score_val else ""
+                st.markdown(
+                    f"<span style='font-family:monospace;font-size:.78rem'>{_ib}</span>"
+                    f"<span style='color:#94a3b8;font-size:.72rem'> {_ctx}{_ctx_extra}</span>",
+                    unsafe_allow_html=True
+                )
+            with _ir:
+                if st.button("🔍", key=f"{key_prefix}_{_ii}"):
+                    st.session_state["_pending_bid"] = _ib
+                    st.rerun()
 
     def _anomaly_card(title, count, total, severity, short_desc, seg_key, cols_for_table=None, meta=None):
         """Render one anomaly finding: severity badge + business ID drilldown + detail_panel."""
