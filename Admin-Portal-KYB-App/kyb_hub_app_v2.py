@@ -1046,6 +1046,23 @@ def load_customer_names(date_from, date_to):
     return run_sql(sql_ids)
 
 @st.cache_data(ttl=600, show_spinner=False)
+def _onboarded_cte_sql(date_from, date_to, customer_id):
+    """Module-level helper: build 'WITH onboarded AS (...)' CTE string.
+    Used by all _load_* functions. No [:N] cap — Redshift handles scale via JOIN."""
+    parts = []
+    if date_from:   parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
+    if date_to:     parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
+    if customer_id: parts.append(f"rbcm.customer_id = '{customer_id}'")
+    where = (" AND " + " AND ".join(parts)) if parts else ""
+    return (
+        "WITH onboarded AS (\n"
+        "  SELECT DISTINCT rbcm.business_id\n"
+        "  FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+        f"  WHERE 1=1{where}\n"
+        ")\n"
+    )
+
+
 def load_home_recent(date_from, date_to, customer_id=None):
     """
     Load recently onboarded businesses.
@@ -3556,27 +3573,10 @@ if tab=="🏠 Home":
 
     # ── Red flag scoring — query facts directly for the authoritative business list ──
 
-    def _onboarded_cte(date_from, date_to, customer_id):
-        """Build the onboarded CTE clause used by all _load_* functions.
-        Returns the SQL CTE string with proper date/customer filtering.
-        No [:2000] cap — works for any portfolio size."""
-        parts = []
-        if date_from: parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
-        if date_to:   parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
-        if customer_id: parts.append(f"rbcm.customer_id = '{customer_id}'")
-        where = (" AND " + " AND ".join(parts)) if parts else ""
-        return (
-            "WITH onboarded AS (\n"
-            "  SELECT DISTINCT rbcm.business_id\n"
-            "  FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
-            f"  WHERE 1=1{where}\n"
-            ")\n"
-        )
-
 
     @st.cache_data(ttl=600, show_spinner=False)
     def _load_flags_for_bids(date_from, date_to, customer_id):
-        cte = _onboarded_cte(date_from, date_to, customer_id)
+        cte = _onboarded_cte_sql(date_from, date_to, customer_id)
         return run_sql(cte + """SELECT f.business_id, f.name,
                    JSON_EXTRACT_PATH_TEXT(f.value,'value') AS val,
                    f.received_at
@@ -3657,7 +3657,7 @@ if tab=="🏠 Home":
         entire query to fail and return an empty DataFrame, making all Section 1
         counts 0 and all drilldown tables empty.
         """
-        cte = _onboarded_cte(date_from, date_to, customer_id)
+        cte = _onboarded_cte_sql(date_from, date_to, customer_id)
         return run_sql(cte + """
             SELECT f.business_id,
                 MAX(CASE WHEN f.name='tin_submitted'
@@ -3707,7 +3707,7 @@ if tab=="🏠 Home":
                 integration-service/lib/facts/kyb/types.ts lines 20-32 (SoSRegistration schema)
                 warehouse-service/datapooler/adapters/db/models/facts.py (storage)
         """
-        cte = _onboarded_cte(date_from, date_to, customer_id)
+        cte = _onboarded_cte_sql(date_from, date_to, customer_id)
         # Redshift federated tables do NOT support PostgreSQL-specific JSON operators.
         # Use JSON_EXTRACT_PATH_TEXT with positional indices (0-9) via UNION ALL.
         def _filing_row(i):
@@ -3746,7 +3746,7 @@ if tab=="🏠 Home":
         rds_integration_data.identity_verification table (federated from PostgreSQL RDS).
         Returns: business_id, idv_last4_ssn (the SSN last-4 from Plaid IDV meta)
         """
-        cte = _onboarded_cte(date_from, date_to, customer_id)
+        cte = _onboarded_cte_sql(date_from, date_to, customer_id)
         return run_sql(cte + """SELECT iv.business_id,
                 MAX(JSON_EXTRACT_PATH_TEXT(iv.meta, 'user', 'id_number', 'value')) AS idv_last4_ssn
             FROM rds_integration_data.identity_verification iv
@@ -3765,7 +3765,7 @@ if tab=="🏠 Home":
           - TIN signals: tin_submitted, tin_match_status, tin_match (boolean)
           - IDV, NAICS, risk, firmographic columns
         """
-        cte = _onboarded_cte(date_from, date_to, customer_id)
+        cte = _onboarded_cte_sql(date_from, date_to, customer_id)
         return run_sql(cte + """
             SELECT f.business_id,
                 -- Registry / SOS — Facts API (integration-service/lib/facts/kyb/index.ts)
@@ -8435,7 +8435,7 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
     # Load Worth Scores for the authoritative business list
     @st.cache_data(ttl=600, show_spinner=False)
     def _load_home_scores(date_from, date_to, customer_id):
-        cte = _onboarded_cte(date_from, date_to, customer_id)
+        cte = _onboarded_cte_sql(date_from, date_to, customer_id)
         return run_sql(cte + """SELECT cs.business_id,
                    bs.weighted_score_850, bs.weighted_score_100,
                    bs.risk_level, bs.score_decision, bs.created_at AS scored_at
@@ -8447,7 +8447,7 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
     @st.cache_data(ttl=600, show_spinner=False)
     def _load_home_factors(date_from, date_to, customer_id):
         """Load per-category factor contributions, averaged across all scored businesses."""
-        cte = _onboarded_cte(date_from, date_to, customer_id)
+        cte = _onboarded_cte_sql(date_from, date_to, customer_id)
         return run_sql(cte + """SELECT bsf.category_id,
                    AVG(bsf.score_100)          AS avg_score_100,
                    AVG(bsf.weighted_score_850)  AS avg_impact_pts,
@@ -8964,6 +8964,25 @@ ORDER BY avg_impact_pts ASC;"""
                 if st.button("🔍", key=f"{key_prefix}_{_ii}"):
                     st.session_state["_pending_bid"] = _ib
                     st.rerun()
+
+    def _group_chart_and_drilldowns(keys, title, cols, prefix):
+        """Render a bar chart of business counts per anomaly rule + drilldown expanders."""
+        _rows = [(k, len(_an.get(k,[])), _an_meta.get(k,{}).get("title",k), _an_meta.get(k,{}).get("severity","MEDIUM"))
+                 for k in keys if _an.get(k)]
+        if not _rows:
+            return
+        import plotly.express as px
+        _df = pd.DataFrame(_rows, columns=["key","count","label","severity"])
+        _color_map = {"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b","LOW":"#22c55e","NOTICE":"#3B82F6"}
+        _df["color"] = _df["severity"].map(_color_map).fillna("#64748b")
+        _fig = px.bar(_df, x="count", y="label", orientation="h",
+                      text="count", color="severity",
+                      color_discrete_map=_color_map,
+                      title=title)
+        _fig.update_traces(textposition="outside")
+        _fig.update_layout(height=max(160, len(_rows)*52), showlegend=False,
+                           margin=dict(t=40,b=10,l=10,r=60))
+        st.plotly_chart(dark_chart(_fig), use_container_width=True)
 
     def _anomaly_card(title, count, total, severity, short_desc, seg_key, cols_for_table=None, meta=None):
         """Render one anomaly finding: severity badge + business ID drilldown + detail_panel."""
