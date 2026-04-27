@@ -1158,6 +1158,7 @@ def load_home_kyb_stats(date_from, date_to, customer_id=None):
             COUNT(DISTINCT f.name) AS fact_count
         FROM rds_warehouse_public.facts f
         JOIN onboarded o ON o.business_id = f.business_id
+          AND LENGTH(f.value) < 60000
         LEFT JOIN rds_integration_data.business_entity_verification bev
             ON bev.business_id = f.business_id
         LEFT JOIN rds_integration_data.business_entity_review_task bert
@@ -1201,7 +1202,8 @@ def load_home_flags(date_from, date_to, customer_id=None):
                f.received_at
         FROM rds_warehouse_public.facts f
         JOIN onboarded o ON o.business_id = f.business_id
-        WHERE f.name IN (
+        WHERE LENGTH(f.value) < 60000
+          AND f.name IN (
             'sos_active','tin_match_boolean','watchlist_hits',
             'naics_code','idv_passed_boolean','num_bankruptcies',
             'num_judgements','num_liens','sos_match_boolean'
@@ -3582,7 +3584,8 @@ if tab=="🏠 Home":
                    f.received_at
             FROM rds_warehouse_public.facts f
             JOIN onboarded o ON o.business_id = f.business_id
-            WHERE f.name IN (
+            WHERE LENGTH(f.value) < 60000
+              AND f.name IN (
                   'sos_active','tin_match_boolean','watchlist_hits',
                   'naics_code','idv_passed_boolean','num_bankruptcies',
                   'num_judgements','num_liens','sos_match_boolean'
@@ -3678,7 +3681,8 @@ if tab=="🏠 Home":
                     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS middesk_confidence
             FROM rds_warehouse_public.facts f
             JOIN onboarded o ON o.business_id = f.business_id
-            WHERE f.name IN ('tin_submitted','tin_match','tin_match_boolean',
+            WHERE LENGTH(f.value) < 60000
+              AND f.name IN ('tin_submitted','tin_match','tin_match_boolean',
                              'sos_match_boolean','sos_active','formation_state',
                              'primary_address','middesk_confidence')
             GROUP BY f.business_id
@@ -3823,6 +3827,7 @@ if tab=="🏠 Home":
                 COUNT(DISTINCT f.name) AS fact_count
             FROM rds_warehouse_public.facts f
             JOIN onboarded o ON o.business_id = f.business_id
+              AND LENGTH(f.value) < 60000
             LEFT JOIN rds_integration_data.business_entity_verification bev
                 ON bev.business_id = f.business_id
             LEFT JOIN rds_integration_data.business_entity_review_task bert
@@ -9762,159 +9767,6 @@ ORDER BY avg_impact_pts ASC;"""
         # Per-business investigate rows — full UUID + score + anomaly names + button
         st.caption("Each row: full UUID · weighted score · triggered anomalies · 🔍 Investigate button")
         _investigate_rows(_top10["business_id"].tolist(), _biz_score, _biz_flags_s6, key_prefix="top10_s6")
-
-        # ── Co-occurrence heatmap + per-cell drilldowns ───────────────────────
-        st.markdown("---")
-        st.markdown("##### 🔥 Anomaly Co-Occurrence Heatmap")
-        st.caption(
-            "Diagonal = individual anomaly count (businesses triggering that anomaly). "
-            "Off-diagonal = businesses triggering BOTH anomalies simultaneously. "
-            "Expand any combination below the heatmap to see which businesses and why."
-        )
-
-        _active_keys = [k for k in _ALL_AN_KEYS if _an.get(k)]
-        if len(_active_keys) >= 2:
-            _biz_set = {k: set(_an.get(k,[])) for k in _active_keys}
-            _cooc_data = {}
-            for _k1 in _active_keys:
-                for _k2 in _active_keys:
-                    _cooc_data[(_k1,_k2)] = _biz_set[_k1] & _biz_set[_k2]
-
-            _cooc = pd.DataFrame(
-                {_k2: [len(_cooc_data[(_k1,_k2)]) for _k1 in _active_keys] for _k2 in _active_keys},
-                index=_active_keys
-            )
-            _short_labels = {k: _an_meta[k]["title"][:22] for k in _active_keys}
-            _cooc.index   = [_short_labels[k] for k in _active_keys]
-            _cooc.columns = [_short_labels[k] for k in _active_keys]
-
-            fig_cooc = px.imshow(
-                _cooc.astype(float),
-                title="Anomaly Co-Occurrence (businesses triggering both)",
-                color_continuous_scale=["#0f172a","#1e3a5f","#2563eb","#ef4444"],
-                text_auto=True, aspect="auto"
-            )
-            fig_cooc.update_layout(
-                height=max(350, len(_active_keys)*42),
-                margin=dict(t=50,b=30,l=10,r=10)
-            )
-            st.plotly_chart(dark_chart(fig_cooc), use_container_width=True)
-
-            # ── Per-cell drilldown expanders (only non-zero off-diagonal) ─────
-            st.markdown("**🔍 Drilldown by Co-Occurrence Pair — click to see which businesses trigger both:**")
-
-            _shown_pairs = set()
-            _pair_idx = 0  # global counter to guarantee unique widget keys
-            for _k1 in _active_keys:
-                for _k2 in _active_keys:
-                    if _k1 == _k2:
-                        continue  # diagonal — already shown in the anomaly cards above
-                    _pair_key = tuple(sorted([_k1, _k2]))
-                    if _pair_key in _shown_pairs:
-                        continue
-                    _shown_pairs.add(_pair_key)
-                    _pair_idx += 1
-                    _both_bids = list(_cooc_data[(_k1, _k2)])
-                    if not _both_bids:
-                        continue
-
-                    _t1 = _an_meta[_k1]["title"]
-                    _t2 = _an_meta[_k2]["title"]
-                    _s1 = _an_meta[_k1]["severity"]
-                    _s2 = _an_meta[_k2]["severity"]
-                    _sev_pair = "CRITICAL" if "CRITICAL" in (_s1,_s2) else "HIGH" if "HIGH" in (_s1,_s2) else "MEDIUM"
-                    _col_pair = _SEV_COLOR.get(_sev_pair,"#64748b")
-
-                    # Use global _pair_idx to guarantee unique widget keys regardless of key truncation
-                    _pair_seg_key = f"cooc_{_pair_idx:03d}_{_pair_key[0][:8]}_{_pair_key[1][:8]}"
-                    _seg[_pair_seg_key] = _both_bids
-                    _SEG_CALC[_pair_seg_key] = (
-                        f"**Co-occurrence: '{_t1}' AND '{_t2}'**\n\n"
-                        f"These {len(_both_bids):,} businesses simultaneously trigger BOTH anomalies:\n\n"
-                        f"**Anomaly 1 — {_SEV_ICON.get(_s1,'⚪')} {_s1}: {_t1}**\n"
-                        f"{_an_meta[_k1].get('desc','')}\n\n"
-                        f"**Anomaly 2 — {_SEV_ICON.get(_s2,'⚪')} {_s2}: {_t2}**\n"
-                        f"{_an_meta[_k2].get('desc','')}\n\n"
-                        f"**Why co-occurrence matters:** When two anomalies appear simultaneously, "
-                        f"they often share a root cause (e.g. a vendor integration failure that leaves "
-                        f"multiple fact fields empty) or represent compounded risk (e.g. dissolved entity "
-                        f"with valid EIN — the combination is more concerning than either signal alone).\n\n"
-                        f"**Source:** `{_an_meta[_k1].get('source','')}` · `{_an_meta[_k2].get('source','')}`"
-                    )
-
-                    with st.expander(
-                        f"👁️ {len(_both_bids):,} businesses with BOTH: '{_t1[:30]}' AND '{_t2[:30]}'",
-                        expanded=False
-                    ):
-                        st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_col_pair};
-                            border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
-                          <span style="color:#a78bfa;font-weight:700">⚙️ Why these two anomalies co-occur</span>
-                        </div>""", unsafe_allow_html=True)
-                        st.markdown(_SEG_CALC[_pair_seg_key])
-                        st.markdown("---")
-
-                        # Business IDs table with their anomaly flags and key signals
-                        _pair_tbl = pd.DataFrame({"business_id": _both_bids})
-                        _pair_tbl["Weighted Score"] = _pair_tbl["business_id"].map(
-                            lambda b: _biz_score.get(b, 0)
-                        )
-                        _pair_tbl["# Anomalies"] = _pair_tbl["business_id"].map(
-                            lambda b: len(_biz_flags_s6.get(b, []))
-                        )
-                        _pair_tbl["All Anomalies"] = _pair_tbl["business_id"].map(
-                            lambda b: " · ".join(
-                                _an_meta.get(k,{}).get("title","")[:20]
-                                for k in _biz_flags_s6.get(b,[])
-                            )
-                        )
-                        st.dataframe(_pair_tbl, use_container_width=True, hide_index=True)
-
-                        # Key KYB signals from stats_df
-                        if stats_df is not None and not stats_df.empty:
-                            _psig = stats_df[stats_df["business_id"].isin(_both_bids)][
-                                ["business_id"] + [c for c in _S6_COLS if c in stats_df.columns]
-                            ].rename(columns={
-                                "sos_match_boolean":"SOS Match Bool","sos_match_status":"SOS Match Status",
-                                "sos_active":"SOS Active","sos_match_verif":"sos_match_verif(0/1)",
-                                "sos_domestic_verif":"sos_domestic_verif(0/1)",
-                                "formation_state":"Formation State","tin_submitted":"TIN Submitted",
-                                "tin_match_status":"TIN Match Status","tin_match":"TIN Match Bool",
-                                "idv_passed":"IDV Passed","naics_code":"NAICS","watchlist_hits":"WL Hits",
-                                "num_bankruptcies":"BK","num_judgements":"Judgements","num_liens":"Liens",
-                            })
-                            if not _psig.empty:
-                                st.dataframe(_psig, use_container_width=True, hide_index=True)
-
-                        # Download + investigate buttons
-                        _dl_pair = pd.DataFrame({"business_id":_both_bids}).to_csv(index=False).encode()
-                        st.download_button(
-                            f"⬇️ Download {len(_both_bids)} IDs (CSV)",
-                            _dl_pair,
-                            f"cooc_{_k1[:8]}_{_k2[:8]}.csv", "text/csv",
-                            key=f"dl_cooc_{_pair_seg_key}"
-                        )
-                        st.caption("Click 🔍 Investigate to set a business ID, then switch to any entity tab.")
-                        _investigate_rows(_both_bids, _biz_score, _biz_flags_s6,
-                                          context_label=f"{_t1[:20]} × {_t2[:20]}",
-                                          key_prefix=f"cooc_{_pair_seg_key}")
-
-                    # detail_panel OUTSIDE expander — Streamlit forbids nested expanders
-                    detail_panel(
-                        f"🔥 Co-Occurrence: {_t1[:25]} × {_t2[:25]}",
-                        f"{len(_both_bids):,} businesses trigger both · Pair severity: {_sev_pair}",
-                        what_it_means=_SEG_CALC[_pair_seg_key],
-                        source_table="stats_df · funnel_df (in memory)",
-                        source_file=f"{_an_meta[_k1].get('source','')} · {_an_meta[_k2].get('source','')}",
-                        json_obj={
-                            "anomaly_1": _t1, "source_1": _an_meta[_k1].get("source",""),
-                            "anomaly_2": _t2, "source_2": _an_meta[_k2].get("source",""),
-                            "co_occurring_businesses": len(_both_bids),
-                            "business_ids_sample": _both_bids[:5],
-                            "pair_severity": _sev_pair,
-                            "action": f"{_an_meta[_k1].get('action','')} | {_an_meta[_k2].get('action','')}",
-                        },
-                        icon="🔥", color=_col_pair
-                    )
 
         detail_panel("🔬 Portfolio Anomaly Triage — Section 6.8",
             f"{len(_biz_score_df[_biz_score_df['anomaly_score']>0]):,} businesses with ≥1 anomaly · "
