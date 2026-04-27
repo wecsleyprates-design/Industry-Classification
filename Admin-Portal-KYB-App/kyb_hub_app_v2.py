@@ -4344,38 +4344,38 @@ if tab=="🏠 Home":
         _n_reg_unknown_dom = int(_reg_unknown_mask.sum())
 
         # ── Row 3 — Three state-comparison metrics (all from rds_warehouse_public.facts) ──
-        # ALL three use sos_filings[].state from _sos_filings_df (rds_warehouse_public.facts name='sos_filings')
-        # and operating_state from primary_address fact (rds_warehouse_public.facts name='primary_address').
-        # formation_state is NOT used here: it is a firmographic fact from Middesk's database record
-        # and does NOT confirm that a SOS filing was found or verified in that state.
-        # (A business can have formation_state='DE' but have dissolved/inactive filings, no filings at all,
-        #  or only foreign qualifications — sos_domestic_verification would be 0 in all those cases.)
-        #
-        # Source for ALL Row 3 metrics:
-        #   sos_filings[].state   → rds_warehouse_public.facts name='sos_filings' (per-filing verified state)
-        #   primary_address.state → rds_warehouse_public.facts name='primary_address' (submitted operating state)
-        #
-        # Build per-business maps from _sos_filings_df:
-        #   _sf_states         = {bid: set(ALL filing states)}       (already built above)
-        #   _domestic_states   = {bid: set(domestic filing states)}  (sos_filings[].state where foreign_domestic='domestic')
+        # Uses the SAME decision tree as Domestic/Foreign card classification.
+        # _domestic_filing_states: per-business set of filing states classified as DOMESTIC
+        # by the decision tree (Rule 1 explicit OR Rule 3a proxy).
+        # A filing is "domestic" if:
+        #   Rule 1: foreign_domestic = 'domestic'
+        #   Rule 3a: foreign_domestic absent AND filing.state = formation_state
         if _sos_filings_df is not None and not _sos_filings_df.empty:
+            # Build domestic-classified filing states using the full decision tree
+            _domestic_filing_states = {}
+            for _bid_r3, _grp_r3 in _sf_reg.groupby("business_id"):
+                _fs_r3 = _form_state_by_bid.get(_bid_r3, "")
+                _dom_states_r3 = set()
+                for _, _fr_r3 in _grp_r3.iterrows():
+                    _fd_r3  = str(_fr_r3.get("foreign_domestic","") or "").lower().strip()
+                    _fst_r3 = str(_fr_r3.get("filing_state","") or "").upper().strip()
+                    if _fd_r3 == "domestic":
+                        _dom_states_r3.add(_fst_r3)           # Rule 1
+                    elif _fd_r3 in ("","nan","none","null") and _fs_r3 and _fst_r3 and _fst_r3 == _fs_r3:
+                        _dom_states_r3.add(_fst_r3)           # Rule 3a proxy
+                if _dom_states_r3:
+                    _domestic_filing_states[_bid_r3] = _dom_states_r3
+            # Also keep _sf_reg_dom for gap analysis sub-buckets (Rule 1 explicit only — for active check)
             _sf_reg_dom = _sf_reg[_sf_reg["foreign_domestic"].str.lower().eq("domestic")]
-            _domestic_filing_states = (
-                _sf_reg_dom.groupby("business_id")["filing_state"]
-                .apply(lambda x: set(s.upper().strip() for s in x.dropna() if str(s).strip()))
-                .to_dict()
-            )
         else:
             _domestic_filing_states = {}
+            _sf_reg_dom = pd.DataFrame()
 
         # Metric (a): Domestic Filing State = Operating State
-        #   At least one sos_filings[] entry has foreign_domestic='domestic' AND
-        #   that filing's state matches the submitted operating state.
-        #   Rule: op_state ∈ _domestic_filing_states[bid]
-        #   This is a STRICT SUBSET of Domestic Filing (15 businesses).
-        #   formation_state is NOT used — it is firmographic, not a verified SOS filing state.
+        #   A filing classified as DOMESTIC (Rule 1 or 3a) has state = submitted operating state.
+        #   This is a strict subset of Domestic Filing.
         def _domestic_filing_matches_op(bid, op_st):
-            """True if any domestic filing state matches the operating state."""
+            """True if any domestic-classified filing state matches the operating state."""
             dom_states = _domestic_filing_states.get(bid, set())
             return bool(op_st) and op_st in dom_states
 
@@ -4498,13 +4498,14 @@ if tab=="🏠 Home":
         _no_domestic_found = 0; _state_match = 0; _no_state_match = 0
         _sos_found_verified = 0
         _domestic_active_n = 0; _domestic_inactive_n = 0; _domestic_missing_n = 0
-        _sos_found_extended = 0; _n_reg_domestic = 0; _n_reg_foreign = 0
+        _sos_found_extended = 0; _n_reg_domestic = 0; _n_reg_foreign = 0; _n_reg_unknown_dom = 0
         _n_states_same = 0; _n_states_diff = 0; _n_foreign_eq_op = 0
         _n_gap = 0; _n_gap_inactive = 0; _n_gap_no_filing = 0; _n_gap_sole_prop = 0
         _sole_prop_mask = pd.Series(dtype=bool)
         _reg_found_extended_mask = pd.Series(dtype=bool)
         _reg_domestic_mask = pd.Series(dtype=bool)
         _reg_foreign_mask = pd.Series(dtype=bool)
+        _reg_unknown_mask = pd.Series(dtype=bool)
         _states_same_mask = pd.Series(dtype=bool)
         _states_diff_mask = pd.Series(dtype=bool)
         _foreign_eq_op_mask = pd.Series(dtype=bool)
