@@ -6712,28 +6712,18 @@ if tab=="🏠 Home":
                 try:
                     _tbl_df, _tbl_err = run_sql(_tbl_sql_clean)
                     if _tbl_df is not None and not _tbl_df.empty:
+                        # Use SQL result EXACTLY as returned — no merge, no rename, no reorder.
+                        # _seg_sql() already selects all required columns:
+                        #   per_biz CTE: business_id, sos_match_boolean, sos_match_status,
+                        #     sos_active, formation_state, formation_date, tin_submitted,
+                        #     tin_match_status, tin_match, idv_passed, naics_code,
+                        #     watchlist_hits, is_sole_prop, operating_state
+                        #   sos_fil CTE (LEFT JOIN): foreign_domestic, filing_state,
+                        #     entity_type, filing_name, registration_date
+                        # foreign_domestic will be NULL for businesses where the vendor
+                        # did not set it (e.g. OpenCorporates lacking home_jurisdiction_code).
+                        # Those NULL values appear as empty cells — exactly what the user wants.
                         _sub = _tbl_df.copy()
-                        # _seg_sql() already returns foreign_domestic, filing_state, entity_type,
-                        # filing_name, registration_date from the sos_fil CTE directly.
-                        # Only merge columns that _seg_sql() does NOT provide to avoid
-                        # pandas merge creating _x/_y suffix duplicates that break _rename.
-                        if _sos_filings_df is not None and not _sos_filings_df.empty:
-                            _sf_ids = set(_sub["business_id"].tolist())
-                            _agg_spec = {}
-                            if "jurisdiction" not in _sub.columns:
-                                _agg_spec["jurisdiction"] = ("jurisdiction", lambda x: " / ".join(sorted(set(str(v) for v in x.dropna()))))
-                            if "has_officers" not in _sub.columns:
-                                _agg_spec["has_officers"] = ("has_officers", "max")
-                            # n_filings always useful (count of ALL filings, not just first element)
-                            _agg_spec["n_filings"] = ("filing_state", "count")
-                            if _agg_spec:
-                                _sf_extra = (
-                                    _sos_filings_df[_sos_filings_df["business_id"].isin(_sf_ids)]
-                                    .groupby("business_id")
-                                    .agg(**_agg_spec)
-                                    .reset_index()
-                                )
-                                _sub = _sub.merge(_sf_extra, on="business_id", how="left")
                 except Exception:
                     _sub = None
 
@@ -6768,36 +6758,40 @@ if tab=="🏠 Home":
                     _sub = pd.DataFrame({"business_id": bids})
 
             if _sub is None:
-                _sub = pd.DataFrame({"business_id": bids})
+                # SQL did not run (offline/demo mode) — build from in-memory DataFrames
+                _base = pd.DataFrame({"business_id": bids})
+                if stats_df is not None and not stats_df.empty:
+                    _avail = [c for c in [
+                        "sos_match_boolean","sos_match_status","sos_active",
+                        "formation_state","formation_date","tin_submitted",
+                        "tin_match_status","tin_match","idv_passed","naics_code",
+                        "watchlist_hits","is_sole_prop",
+                    ] if c in stats_df.columns]
+                    _base = stats_df[stats_df["business_id"].isin(bids)][["business_id"]+_avail].copy()
+                if funnel_df is not None and not funnel_df.empty and "operating_state" in funnel_df.columns:
+                    _base = _base.merge(funnel_df[["business_id","operating_state"]], on="business_id", how="left")
+                _sub = _base
 
-            # Display the table with EXACT SQL column names in EXACT SQL column order.
-            # The SQL query (_seg_sql) returns columns in this fixed order:
-            #   business_id, sos_match_boolean, sos_match_status, sos_active,
-            #   formation_state, formation_date, tin_submitted, tin_match_status,
-            #   tin_match, idv_passed, naics_code, watchlist_hits, is_sole_prop,
-            #   operating_state, [n_filings], [jurisdiction], [has_officers],
-            #   foreign_domestic, filing_state, entity_type, filing_name, registration_date
-            # No renaming — column names shown exactly as in the SQL query.
-            # formation_date timestamps are cleaned to date-only for readability.
-            if "formation_date" in _sub.columns:
-                _sub["formation_date"] = _sub["formation_date"].astype(str).str[:10].replace("nan","")
-            if "registration_date" in _sub.columns:
-                _sub["registration_date"] = _sub["registration_date"].astype(str).str[:10].replace("nan","")
+            # Clean timestamps to YYYY-MM-DD only
+            for _tc in ("formation_date","registration_date"):
+                if _tc in _sub.columns:
+                    _sub[_tc] = _sub[_tc].astype(str).str[:10].str.replace("nan","", regex=False)
 
-            # Column order: SQL columns first (in SQL order), then any extra merged columns
-            _SQL_COL_ORDER = [
+            # Enforce the exact SQL column order — same as _seg_sql() SELECT output.
+            # foreign_domestic will be NULL (empty) for businesses where the vendor
+            # did not set it — this is correct and expected per the data.
+            _SQL_ORDER = [
                 "business_id",
-                "sos_match_boolean", "sos_match_status", "sos_active",
-                "formation_state", "formation_date",
-                "tin_submitted", "tin_match_status", "tin_match",
-                "idv_passed", "naics_code", "watchlist_hits", "is_sole_prop",
+                "sos_match_boolean","sos_match_status","sos_active",
+                "formation_state","formation_date",
+                "tin_submitted","tin_match_status","tin_match",
+                "idv_passed","naics_code","watchlist_hits","is_sole_prop",
                 "operating_state",
-                "foreign_domestic", "filing_state", "entity_type",
-                "filing_name", "registration_date",
-                "n_filings", "jurisdiction", "has_officers",
+                "foreign_domestic","filing_state","entity_type",
+                "filing_name","registration_date",
             ]
-            _ordered = [c for c in _SQL_COL_ORDER if c in _sub.columns]
-            _extra   = [c for c in _sub.columns if c not in _SQL_COL_ORDER]
+            _ordered = [c for c in _SQL_ORDER if c in _sub.columns]
+            _extra   = [c for c in _sub.columns if c not in _SQL_ORDER]
             _sub = _sub[_ordered + _extra]
 
             if not _sub.empty:
