@@ -6669,42 +6669,12 @@ if tab=="🏠 Home":
                     _sub = None
 
             if _sub is None:
-                # Fallback: filter stats_df + enrich from funnel_df
-                _base_cols_all = [
-                    "sos_match_boolean","sos_match_status","sos_active",
-                    "formation_state","formation_date",
-                    "tin_submitted","tin_match_status","tin_match",
-                    "idv_passed","naics_code","watchlist_hits","is_sole_prop",
-                ]
-                if stats_df is not None and not stats_df.empty:
-                    _available = [c for c in _base_cols_all if c in stats_df.columns]
-                    _sub = stats_df[stats_df["business_id"].isin(bids)][
-                        ["business_id"] + _available
-                    ].copy()
-                    _missing_bids = [b for b in bids if b not in set(_sub["business_id"].tolist())]
-                    if _missing_bids and funnel_df is not None and not funnel_df.empty:
-                        _funnel_cols = ["sos_match_boolean","sos_active","formation_state"]
-                        _fb_missing = funnel_df[funnel_df["business_id"].isin(_missing_bids)][
-                            ["business_id"] + [c for c in _funnel_cols if c in funnel_df.columns]
-                        ].copy()
-                        if not _fb_missing.empty:
-                            _sub = pd.concat([_sub, _fb_missing], ignore_index=True)
-                elif funnel_df is not None and not funnel_df.empty:
-                    _funnel_base = ["sos_match_boolean","sos_active","formation_state",
-                                    "tin_submitted","tin_match_boolean","operating_state"]
-                    _sub = funnel_df[funnel_df["business_id"].isin(bids)][
-                        ["business_id"] + [c for c in _funnel_base if c in funnel_df.columns]
-                    ].copy()
-                else:
-                    _sub = pd.DataFrame({"business_id": bids})
-
-            if _sub is None:
-                # SQL did not run — build all 19 SQL columns from in-memory DataFrames.
-                # Column names are EXACT SQL names (no renaming).
+                # SQL did not run — build ALL 19 columns from in-memory DataFrames.
+                # Same column names and order as _seg_sql() SELECT output.
                 try:
                     _base = pd.DataFrame({"business_id": bids})
 
-                    # 13 per_biz columns — exact SQL column names from _seg_sql() per_biz CTE
+                    # Columns 1-13: per_biz CTE columns from stats_df
                     _PB_COLS = [
                         "sos_match_boolean","sos_match_status","sos_active",
                         "formation_state","formation_date","tin_submitted",
@@ -6715,37 +6685,31 @@ if tab=="🏠 Home":
                         _avail = [c for c in _PB_COLS if c in stats_df.columns]
                         _base = stats_df[stats_df["business_id"].isin(bids)][["business_id"]+_avail].copy()
 
-                    # operating_state — exact SQL column name (from primary_address fact)
+                    # Column 14: operating_state from funnel_df
                     if funnel_df is not None and not funnel_df.empty and "operating_state" in funnel_df.columns:
                         _os_map = funnel_df[funnel_df["business_id"].isin(bids)][["business_id","operating_state"]].drop_duplicates("business_id")
                         _base = _base.merge(_os_map, on="business_id", how="left")
                     if "operating_state" not in _base.columns:
                         _base["operating_state"] = None
 
-                    # sos_filings columns — exact SQL column names from sos_fil CTE
-                    # foreign_domestic = NULL where the vendor did not set the field (correct)
+                    # Columns 15-19: sos_fil CTE columns from _sos_filings_df
+                    # foreign_domestic = NULL where vendor did not set it (correct — show as empty)
                     _SF_COLS = ["foreign_domestic","filing_state","entity_type","filing_name","registration_date"]
                     for _c in _SF_COLS:
-                        _base[_c] = None   # default all to NULL
-
+                        _base[_c] = None
                     if _sos_filings_df is not None and not _sos_filings_df.empty:
-                        _bid_set = set(bids)
-                        _sf_filt = _sos_filings_df[_sos_filings_df["business_id"].isin(_bid_set)].copy()
+                        _sf_filt = _sos_filings_df[_sos_filings_df["business_id"].isin(set(bids))].copy()
                         if "filing_index" in _sf_filt.columns:
                             _sf_filt = _sf_filt.sort_values("filing_index")
                         _sf_first = (
-                            _sf_filt.groupby("business_id")
-                            .first()
-                            .reset_index()
+                            _sf_filt.groupby("business_id").first().reset_index()
                             [["business_id"] + [c for c in _SF_COLS if c in _sf_filt.columns]]
                         )
-                        # Remove placeholder cols then merge
                         _base = _base.drop(columns=[c for c in _SF_COLS if c in _base.columns], errors="ignore")
                         _base = _base.merge(_sf_first, on="business_id", how="left")
 
                     _sub = _base
-                except Exception as _fb_ex:
-                    # Last resort: show at minimum the business_id list
+                except Exception:
                     _sub = pd.DataFrame({"business_id": bids})
 
             # Clean timestamps to YYYY-MM-DD only
