@@ -6518,82 +6518,27 @@ if tab=="🏠 Home":
         "sos_found_extended":  ("sos_match_boolean = 'true' OR sos_active IS NOT NULL", ""),
         "dt_ne_true_active":   ("sos_match_boolean = 'true' AND sos_active = 'true'", ""),
         "dt_ne_true_inactive": ("sos_match_boolean = 'true' AND sos_active = 'false'", ""),
-        # Domestic Filing: decision tree (Rule 1 explicit + Rule 3a proxy via formation_state).
-        # SQL uses first filing element (sos_fil CTE). Python applies tree to ALL filings.
-        # Rule 1: foreign_domestic='domestic' (explicit)
-        # Rule 3a: foreign_domestic absent AND filing_state = formation_state (proxy)
-        "reg_domestic": (
-            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
-            " AND ("
-            "  LOWER(COALESCE(s.foreign_domestic,'')) = 'domestic'"           # Rule 1
-            "  OR (s.foreign_domestic IS NULL AND s.filing_state IS NOT NULL"  # Rule 3a
-            "      AND formation_state IS NOT NULL"
-            "      AND UPPER(s.filing_state) = UPPER(formation_state))"
-            ")",
-            ""
-        ),
-        # Foreign Filing Only: decision tree (Rule 2 explicit + Rule 3b proxy).
-        # Rule 2: foreign_domestic='foreign' (explicit)
-        # Rule 3b: foreign_domestic absent AND filing_state ≠ formation_state (proxy)
-        # Excludes UNKNOWN (Rule 4): foreign_domestic absent AND formation_state null
-        "reg_foreign": (
-            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
-            " AND ("
-            "  LOWER(COALESCE(s.foreign_domestic,'')) = 'foreign'"            # Rule 2
-            "  OR (s.foreign_domestic IS NULL AND s.filing_state IS NOT NULL"  # Rule 3b
-            "      AND formation_state IS NOT NULL"
-            "      AND UPPER(s.filing_state) != UPPER(formation_state))"
-            ")"
-            " AND NOT ("                                                        # exclude if ANY domestic
-            "  LOWER(COALESCE(s.foreign_domestic,'')) = 'domestic'"
-            "  OR (s.foreign_domestic IS NULL AND s.filing_state IS NOT NULL"
-            "      AND formation_state IS NOT NULL"
-            "      AND UPPER(s.filing_state) = UPPER(formation_state))"
-            ")",
-            ""
-        ),
-        # Unknown: foreign_domestic absent AND formation_state null — cannot classify
-        "reg_unknown_dom": (
-            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
-            " AND s.foreign_domestic IS NULL"
-            " AND (formation_state IS NULL OR formation_state = '')",
-            ""
-        ),
+        # Domestic / Foreign / Unknown — use "1=1" + business_id list, NOT WHERE on s.foreign_domestic.
+        #
+        # REASON: sos_fil CTE reads only index 0 (first filing element). Python classifies using ALL
+        # filings. A business classified as "foreign" by Python (because filing[1] is foreign) would
+        # have filing[0] = NULL in the CTE, so any WHERE on s.foreign_domestic fails and returns 0 rows.
+        # The SQL result would then be empty → fallback to stats_df → wrong columns shown.
+        #
+        # Solution: Python already computed the correct business_id sets. Pass them as an IN list.
+        # _drilldown_table() handles "1=1" segments by substituting business_id IN (...) automatically.
+        # This guarantees: (1) correct business IDs, (2) all 19 SQL columns including foreign_domestic
+        # as NULL where absent, (3) no WHERE clause fighting with the Python decision tree.
+        "reg_domestic":    ("1=1", ""),   # filtered by business_id IN (Python set)
+        "reg_foreign":     ("1=1", ""),   # filtered by business_id IN (Python set)
+        "reg_unknown_dom": ("1=1", ""),   # filtered by business_id IN (Python set)
         # Domestic Filing State = Operating State:
-        # sos_filings[].state (where foreign_domestic='domestic') == primary_address.value.state
-        # Both from rds_warehouse_public.facts.
-        # sos_fil CTE in _seg_sql() uses first filing element as proxy.
-        # This is a subset of Domestic Filing — formation_state is NOT used.
-        "states_same": (
-            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
-            " AND s.foreign_domestic IS NOT NULL"
-            " AND LOWER(s.foreign_domestic) = 'domestic'"
-            " AND s.filing_state IS NOT NULL AND s.filing_state != ''"
-            " AND operating_state IS NOT NULL AND operating_state != ''"
-            " AND UPPER(s.filing_state) = UPPER(operating_state)",
-            ""
-        ),
-        # Foreign Reg = Operating State: first filing state (from sos_fil CTE) == operating_state
-        # AND first filing is foreign (not domestic).
-        # Full check in Python uses all filing states; SQL uses first filing as proxy.
-        "foreign_eq_op": (
-            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
-            " AND s.foreign_domestic IS NOT NULL"
-            " AND LOWER(s.foreign_domestic) != 'domestic'"
-            " AND UPPER(COALESCE(s.filing_state,'')) = UPPER(COALESCE(operating_state,''))"
-            " AND operating_state IS NOT NULL AND operating_state != ''",
-            ""
-        ),
-        # Op. State Differs from All Regs: operating_state NOT IN any filing state.
-        # SQL proxy: operating_state != first filing state AND both non-null.
-        # Python checks all filing states via _sf_states dict built from _sos_filings_df.
-        "states_diff": (
-            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
-            " AND s.filing_state IS NOT NULL AND s.filing_state != ''"
-            " AND operating_state IS NOT NULL AND operating_state != ''"
-            " AND UPPER(COALESCE(s.filing_state,'')) != UPPER(COALESCE(operating_state,''))",
-            ""
-        ),
+        # All Row 2/3 segments use "1=1" + business_id IN list (same reason as reg_domestic/foreign):
+        # sos_fil CTE only reads index 0. Python checks ALL filings. WHERE on s.* would miss
+        # businesses where the matching filing is not at index 0.
+        "states_same":   ("1=1", ""),   # Python: domestic filing state == operating_state
+        "foreign_eq_op": ("1=1", ""),   # Python: foreign filing state == operating_state
+        "states_diff":   ("1=1", ""),   # Python: operating_state ∉ any filing state
         # Formation State Gap: formation_state = operating_state (firmographic) BUT
         # no verified domestic filing in that state (SQL proxy: no domestic sos_fil match).
         # formation_state from name='formation_state' fact; operating_state from name='primary_address'.
