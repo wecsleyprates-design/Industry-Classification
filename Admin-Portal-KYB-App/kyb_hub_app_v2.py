@@ -8123,6 +8123,8 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
     st.markdown("---")
     st.markdown("### 🩺 Section 3 — KYB Health Rates")
 
+    if stats_df is None or stats_df.empty:
+        st.warning(f"⚠️ KYB Health data unavailable. {stats_err or ''}", icon="⚠️")
     if stats_df is not None and not stats_df.empty:
         HEALTH_META = {
             "SOS Active":      ("sos_active","true","false","Middesk SOS active filing","#22c55e","#ef4444"),
@@ -8948,6 +8950,19 @@ ORDER BY avg_impact_pts ASC;"""
                            margin=dict(t=40,b=10,l=10,r=60))
         st.plotly_chart(dark_chart(_fig), use_container_width=True)
 
+    def _group_chart_and_drilldowns(keys, title, cols, prefix):
+        """Bar chart of business counts per anomaly rule."""
+        _rows = [(k, len(_an.get(k,[])), _an_meta.get(k,{}).get("title",k),
+                  _an_meta.get(k,{}).get("severity","MEDIUM")) for k in keys if _an.get(k)]
+        if not _rows: return
+        _df = pd.DataFrame(_rows, columns=["key","count","label","severity"])
+        _color_map = {"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b","LOW":"#22c55e","NOTICE":"#3B82F6"}
+        _fig = px.bar(_df, x="count", y="label", orientation="h", text="count",
+                      color="severity", color_discrete_map=_color_map, title=title)
+        _fig.update_traces(textposition="outside")
+        _fig.update_layout(height=max(160, len(_rows)*52), showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
+        st.plotly_chart(dark_chart(_fig), use_container_width=True)
+
     def _anomaly_card(title, count, total, severity, short_desc, seg_key, cols_for_table=None, meta=None):
         """Render one anomaly finding: severity badge + business ID drilldown + detail_panel."""
         if count == 0:
@@ -9717,13 +9732,16 @@ ORDER BY avg_impact_pts ASC;"""
     if not any(_an.get(k) for k in _G6_KEYS):
         st.success("✅ No high-severity risk signal combinations detected.", icon="✅")
 
-    # ════════════════════════════════════════════════════════════════════════
-        # ── Top 10 most anomalous businesses ──────────────────────────────────
-        st.markdown("---")
-        st.markdown("##### 🔴 Top 10 Highest-Anomaly Businesses (by weighted score)")
-        st.caption("Ranked by weighted anomaly score (CRITICAL=4, HIGH=3, MEDIUM=2, LOW/NOTICE=1). "
-                   "Distinct from Section 4 Red Flag ranking — this reflects structural KYB data inconsistencies.")
+    # _ALL_AN_KEYS: all anomaly keys across G4+G5+G6 registered in _an_meta above
+    _ALL_AN_KEYS = list(_an_meta.keys())
 
+    # ── Top 10 most anomalous businesses ──────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 🔴 Top 10 Highest-Anomaly Businesses (by weighted score)")
+    st.caption("Ranked by weighted anomaly score (CRITICAL=4, HIGH=3, MEDIUM=2, LOW/NOTICE=1). "
+               "Distinct from Section 4 Red Flag ranking — this reflects structural KYB data inconsistencies.")
+
+    if not _biz_score_df.empty:
         _top10 = _biz_score_df[_biz_score_df["anomaly_score"]>0].head(10).copy()
         for _ak in _ALL_AN_KEYS:
             _top10[_ak] = _top10["business_id"].isin(_an.get(_ak,[])).map({True:"✅",False:""})
