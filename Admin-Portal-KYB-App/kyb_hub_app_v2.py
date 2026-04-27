@@ -4257,48 +4257,91 @@ if tab=="🏠 Home":
         _reg_found_extended_mask = _registry_found_mask | _filings_present_in_noreg_mask
         _sos_found_extended = int(_reg_found_extended_mask.sum())
 
-        # ── Domestic vs Foreign — SOURCE: rds_warehouse_public.facts name='sos_filings' ──
-        # Field: sos_filings[].foreign_domestic = 'domestic' | 'foreign'
-        # Derivation (integration-service/lib/facts/kyb/index.ts:717-987):
-        #   Middesk: registration.jurisdiction field ('foreign'/'domestic') → foreign_domestic
-        #   OpenCorporates: home_jurisdiction_code === jurisdiction_code → 'domestic', else 'foreign'
-        # We use _sos_filings_df which is loaded directly from rds_warehouse_public.facts
-        # via _load_sos_filings_for_bids() — NO review task tables involved.
+        # ── Domestic vs Foreign — Full Decision Tree (rds_warehouse_public.facts ONLY) ──
+        # Source: sos_filings[] JSON (name='sos_filings') + formation_state fact (name='formation_state')
+        #
+        # Decision tree (applied per-filing, per-business):
+        #   1. foreign_domestic = 'domestic'                       → DOMESTIC (explicit, authoritative)
+        #   2. foreign_domestic = 'foreign'                        → FOREIGN  (explicit, authoritative)
+        #   3. foreign_domestic absent/null + formation_state known:
+        #      a. sos_filings[].state = formation_state            → DOMESTIC (proxy)
+        #         (filing in same state as Middesk's entity-level formation record)
+        #      b. sos_filings[].state ≠ formation_state            → FOREIGN  (proxy)
+        #         (filing in a different state than incorporation state)
+        #   4. foreign_domestic absent + formation_state null      → UNKNOWN  (flag with warning)
+        #      Cannot classify without either foreign_domestic field or a formation state to compare.
+        #      Example: PORFIRIO AUTO REPAIR LLC (OpenCorporates, pid=23) — OC did not set
+        #      foreign_domestic because home_jurisdiction_code was unavailable; formation_state=null.
+        #
+        # A business is DOMESTIC  if ANY filing classifies as domestic via rules 1 or 3a.
+        # A business is FOREIGN   if ALL filings classify as foreign  via rules 2 or 3b (and no domestic).
+        # A business is UNKNOWN   if NO filing can be classified (all have null fd + null formation_state).
+
         _ref_bids_set = set(_funnel[_reg_found_extended_mask]["business_id"].tolist())
+        _op_state_col   = _funnel.get("operating_state", pd.Series([""] * len(_funnel)))
+        _op_state_col_u = _op_state_col.astype(str).str.upper().str.strip().fillna("")
+        _form_state_by_bid = {}
+        if "formation_state" in _funnel.columns:
+            _form_state_by_bid = _funnel.set_index("business_id")["formation_state"] \
+                .astype(str).str.upper().str.strip().fillna("").to_dict()
+
+        _domestic_bids     = set()   # confirmed domestic (explicit or proxy)
+        _foreign_only_bids_set = set()  # confirmed foreign only (no domestic filing)
+        _unknown_dom_bids  = set()   # cannot classify — flag with warning
+
         if _sos_filings_df is not None and not _sos_filings_df.empty:
-            # Per-business: does ANY filing have foreign_domestic='domestic'?
             _sf_reg = _sos_filings_df[_sos_filings_df["business_id"].isin(_ref_bids_set)]
-            _domestic_bids = set(
-                _sf_reg[_sf_reg["foreign_domestic"].str.lower().eq("domestic")]["business_id"].unique()
-            )
-            _foreign_only_bids_set = set(
-                _sf_reg[~_sf_reg["business_id"].isin(_domestic_bids)]["business_id"].unique()
-            )
-            # Also classify operating state vs filing states for each business
-            # operating_state from primary_address fact (rds_warehouse_public.facts name='primary_address')
-            _op_state_col   = _funnel.get("operating_state", pd.Series([""] * len(_funnel)))
-            _op_state_col_u = _op_state_col.astype(str).str.upper().str.strip().fillna("")
-            # For each registry-found business, get ALL filing states from _sos_filings_df
+
+            for _bid, _grp in _sf_reg.groupby("business_id"):
+                _fs_bid = _form_state_by_bid.get(_bid, "")  # formation_state for this business
+                _classification_per_filing = []  # 'domestic', 'foreign', 'unknown' per filing
+
+                for _, _fr in _grp.iterrows():
+                    _fd  = str(_fr.get("foreign_domestic", "") or "").lower().strip()
+                    _fst = str(_fr.get("filing_state", "") or "").upper().strip()
+
+                    if _fd == "domestic":
+                        _classification_per_filing.append("domestic")   # Rule 1
+                    elif _fd == "foreign":
+                        _classification_per_filing.append("foreign")    # Rule 2
+                    elif _fd in ("", "nan", "none", "null"):
+                        # foreign_domestic absent — apply state comparison
+                        if _fs_bid and _fst:
+                            if _fst == _fs_bid:
+                                _classification_per_filing.append("domestic")   # Rule 3a
+                            else:
+                                _classification_per_filing.append("foreign")    # Rule 3b
+                        else:
+                            _classification_per_filing.append("unknown")        # Rule 4
+
+                # Determine business-level classification from filing-level results
+                if "domestic" in _classification_per_filing:
+                    _domestic_bids.add(_bid)     # ANY domestic filing → business is domestic
+                elif "foreign" in _classification_per_filing:
+                    _foreign_only_bids_set.add(_bid)  # all classifiable → foreign only
+                else:
+                    _unknown_dom_bids.add(_bid)  # all unknown → cannot classify
+
+            # Build filing-state maps for Row 3 metrics
             _sf_states = (
                 _sf_reg.groupby("business_id")["filing_state"]
                 .apply(lambda x: set(s.upper().strip() for s in x.dropna() if str(s).strip()))
                 .to_dict()
             )
-            # (a) Domestic filing state = operating state  (formation ≡ operating)
             _formation_states = _funnel["formation_state"].astype(str).str.upper().str.strip().fillna("") \
                 if "formation_state" in _funnel.columns else pd.Series([""] * len(_funnel))
         else:
-            _domestic_bids = set()
-            _foreign_only_bids_set = set()
+            _sf_reg = pd.DataFrame()
+            _domestic_bids = set(); _foreign_only_bids_set = set(); _unknown_dom_bids = set()
             _sf_states = {}
-            _op_state_col   = _funnel.get("operating_state", pd.Series([""] * len(_funnel)))
-            _op_state_col_u = _op_state_col.astype(str).str.upper().str.strip().fillna("")
             _formation_states = pd.Series([""] * len(_funnel))
 
         _reg_domestic_mask = _reg_found_extended_mask & _funnel["business_id"].isin(_domestic_bids)
         _reg_foreign_mask  = _reg_found_extended_mask & _funnel["business_id"].isin(_foreign_only_bids_set)
+        _reg_unknown_mask  = _reg_found_extended_mask & _funnel["business_id"].isin(_unknown_dom_bids)
         _n_reg_domestic    = int(_reg_domestic_mask.sum())
         _n_reg_foreign     = int(_reg_foreign_mask.sum())
+        _n_reg_unknown_dom = int(_reg_unknown_mask.sum())
 
         # ── Row 3 — Three state-comparison metrics (all from rds_warehouse_public.facts) ──
         # ALL three use sos_filings[].state from _sos_filings_df (rds_warehouse_public.facts name='sos_filings')
@@ -4492,9 +4535,10 @@ if tab=="🏠 Home":
         _seg["dt_ne_true_inactive"]    = _funnel[_filings_ne_true_inactive_mask]["business_id"].tolist()
         _seg["dt_ne_true_active"]      = _funnel[_filings_ne_true_active_mask]["business_id"].tolist()
         _seg["dt_ne_false"]            = _funnel[_filings_ne_match_false_mask]["business_id"].tolist()
-        # Registry Found: Domestic vs Foreign (from sos_filings[].foreign_domestic)
+        # Registry Found: Domestic vs Foreign (decision tree applied per-filing)
         _seg["reg_domestic"]           = _funnel[_reg_domestic_mask]["business_id"].tolist()
         _seg["reg_foreign"]            = _funnel[_reg_foreign_mask]["business_id"].tolist()
+        _seg["reg_unknown_dom"]        = _funnel[_reg_unknown_mask]["business_id"].tolist()
         # Row 3 — three state-comparison metrics (all from rds_warehouse_public.facts)
         _seg["states_same"]            = _funnel[_states_same_mask]["business_id"].tolist()
         _seg["foreign_eq_op"]          = _funnel[_foreign_eq_op_mask]["business_id"].tolist()
@@ -4522,7 +4566,7 @@ if tab=="🏠 Home":
         _seg = {k: [] for k in [
             "no_sos","dt_filings_empty","dt_filings_present_noreg",
             "sos_found","sos_found_extended","dt_ne_true_inactive","dt_ne_true_active","dt_ne_false",
-            "reg_domestic","reg_foreign","states_same","foreign_eq_op","states_diff",
+            "reg_domestic","reg_foreign","reg_unknown_dom","states_same","foreign_eq_op","states_diff",
             "gap_formation","gap_inactive","gap_no_filing","gap_sole_prop",
             "domestic","domestic_active","domestic_inactive","domestic_missing","no_domestic",
             "state_match","no_state_match",
@@ -5978,73 +6022,86 @@ if tab=="🏠 Home":
         "`index.ts:1421-1424` (sos_match_boolean) · `rds_warehouse_public.facts`"
     )
 
+    _DT_EXPLAIN = (
+        "**Decision Tree — how each filing is classified (per filing, per business):**\n\n"
+        "```\nFor each entry in sos_filings[]:\n\n"
+        "1. foreign_domestic = 'domestic'                        → DOMESTIC ✅ (explicit — authoritative)\n"
+        "   Middesk:  registration.jurisdiction = 'domestic'\n"
+        "   OC (pid=23): home_jurisdiction_code === jurisdiction_code\n\n"
+        "2. foreign_domestic = 'foreign'                         → FOREIGN  ✅ (explicit — authoritative)\n"
+        "   Middesk:  registration.jurisdiction = 'foreign'\n"
+        "   OC (pid=23): home_jurisdiction_code ≠ jurisdiction_code\n\n"
+        "3. foreign_domestic absent / null  (e.g. OpenCorporates lacked home_jurisdiction_code):\n"
+        "   │\n"
+        "   ├── formation_state fact IS NOT NULL (rds_warehouse_public.facts name='formation_state')\n"
+        "   │   ├── filing.state = formation_state   → DOMESTIC (proxy) — same state as incorporation\n"
+        "   │   └── filing.state ≠ formation_state   → FOREIGN  (proxy) — different state\n"
+        "   │\n"
+        "   └── formation_state IS NULL              → UNKNOWN ⚠️ — cannot classify\n"
+        "       Both foreign_domestic and formation_state unavailable.\n"
+        "       Example: PORFIRIO AUTO REPAIR LLC (OC, pid=23) — OC lacked home_jurisdiction_code;\n"
+        "                formation_state=null; filing.state='MO', primary_address.state='MO'.\n"
+        "                Cannot confirm domestic vs foreign without one of those facts.\n```\n\n"
+        "**Business-level result:**\n"
+        "- **DOMESTIC**: ANY filing classified as domestic (explicit or proxy)\n"
+        "- **FOREIGN**: all classifiable filings are foreign (no domestic found)\n"
+        "- **UNKNOWN**: all filings are unclassifiable (null foreign_domestic + null formation_state)\n\n"
+        "**Source:** `rds_warehouse_public.facts name='sos_filings'` · `name='formation_state'`\n"
+        "**Key file:** `integration-service/lib/facts/kyb/index.ts:717-987`"
+    )
+
     _SEG_CALC["reg_domestic"] = (
         "**What 'Domestic Filing' means:**\n"
-        "At least one entry in `sos_filings[]` has `foreign_domestic='domestic'` — meaning "
-        "a filing exists in the state where the entity was originally incorporated (its home jurisdiction).\n\n"
-        "**Source table: `rds_warehouse_public.facts` ONLY** · `name='sos_filings'`\n"
-        "No review task tables, no materialized tables.\n\n"
-        "**API JSON field:** `sos_filings[].foreign_domestic`\n"
-        "```json\n// From the sos_filings fact (rds_warehouse_public.facts name='sos_filings'):\n"
-        "{\n  'foreign_domestic': 'domestic',  // ← 'domestic' = home jurisdiction filing\n"
-        "  'active': true,\n  'state': 'FL',\n  'jurisdiction': 'us::fl'\n}\n```\n\n"
-        "**How `foreign_domestic` is set (index.ts:767-987 transformer):**\n"
-        "- **Middesk (pid=16):** `registration.jurisdiction` field from Middesk API → `'foreign'` or `'domestic'`\n"
-        "- **OpenCorporates (pid=23):** `home_jurisdiction_code === jurisdiction_code` → `'domestic'`, else `'foreign'`\n\n"
-        "**Python rule (facts only):**\n"
-        "```python\n# Source: _sos_filings_df loaded from rds_warehouse_public.facts name='sos_filings'\n"
-        "# Any filing with foreign_domestic='domestic' → business is in Domestic Filing group\n"
-        "_domestic_bids = set(\n"
-        "    _sos_filings_df[_sos_filings_df['foreign_domestic'].str.lower() == 'domestic']\n"
-        "    ['business_id'].unique()\n)\n"
-        "_reg_domestic_mask = _reg_found_extended_mask & _funnel['business_id'].isin(_domestic_bids)\n```\n\n"
-        "**Diagnostic SQL (facts only):**\n"
-        "```sql\n-- Returns businesses with at least one domestic filing in sos_filings[]\n"
-        "SELECT DISTINCT f.business_id\n"
-        "FROM rds_warehouse_public.facts f,\n"
-        "     JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing\n"
-        "WHERE f.name = 'sos_filings'\n"
-        "  AND LENGTH(f.value) < 60000\n"
-        "  AND LOWER(filing->>'foreign_domestic') = 'domestic'\n"
-        "  AND f.business_id IN (\n"
-        "    SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring\n"
-        "    WHERE DATE(created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause});\n```\n\n"
-        "**Key file:** `integration-service/lib/facts/kyb/index.ts` lines 717-987 · "
-        "`integration-service/lib/facts/kyb/types.ts:20-32` (SoSRegistration schema)"
+        "At least one `sos_filings[]` filing is classified as **domestic** using the decision tree below.\n\n"
+        + _DT_EXPLAIN +
+        "\n\n**Python rule:**\n"
+        "```python\n# A business is DOMESTIC if ANY filing resolves to 'domestic' via the decision tree.\n"
+        "# Explicit: foreign_domestic='domestic'\n"
+        "# Proxy:    foreign_domestic absent AND filing.state = formation_state\n"
+        "if _fd == 'domestic': result = 'domestic'              # Rule 1\n"
+        "elif _fd == 'foreign': result = 'foreign'              # Rule 2\n"
+        "elif _fs_bid and _fst and _fst == _fs_bid: result='domestic'  # Rule 3a\n"
+        "elif _fs_bid and _fst and _fst != _fs_bid: result='foreign'   # Rule 3b\n"
+        "else: result = 'unknown'                               # Rule 4\n"
+        "# Business is DOMESTIC if 'domestic' in any filing result.\n```"
     )
 
     _SEG_CALC["reg_foreign"] = (
         "**What 'Foreign Filing Only' means:**\n"
-        "The business has at least one SOS filing in `sos_filings[]` (registry found), but "
-        "NO entry has `foreign_domestic='domestic'` — only foreign qualification filings exist. "
-        "The domestic incorporation record (in the formation state) was NOT verified.\n\n"
-        "**Source table: `rds_warehouse_public.facts` ONLY** · `name='sos_filings'`\n"
-        "No review task tables, no materialized tables.\n\n"
+        "All classifiable `sos_filings[]` entries resolve to **foreign** using the decision tree — "
+        "no filing could be confirmed as domestic. The domestic incorporation record is NOT verified.\n\n"
         "**KYB implication:** Entity resolution gap — the business is incorporated somewhere "
-        "(typically a tax-haven state: DE/NV/WY/SD/MT/NM) but Middesk only found the foreign "
+        "(typically a tax-haven state: DE/NV/WY/SD/MT/NM) but the vendor only found the foreign "
         "qualification filing in the operating state, not the domestic incorporation.\n\n"
-        "**API JSON field:** `sos_filings[].foreign_domestic = 'foreign'`\n"
-        "```json\n// All filings have foreign_domestic='foreign' — no domestic found:\n"
-        "{'foreign_domestic': 'foreign', 'state': 'FL', 'jurisdiction': 'us::fl'}\n```\n\n"
-        "**Python rule (facts only):**\n"
-        "```python\n# Source: _sos_filings_df from rds_warehouse_public.facts name='sos_filings'\n"
-        "# Business is in Foreign Only if it has filings BUT none with foreign_domestic='domestic'\n"
-        "_foreign_only_bids_set = (\n"
-        "    set(_sf_reg['business_id'].unique()) - _domestic_bids\n)\n"
-        "_reg_foreign_mask = _reg_found_extended_mask & _funnel['business_id'].isin(_foreign_only_bids_set)\n```\n\n"
-        "**Diagnostic SQL (facts only):**\n"
-        "```sql\n-- Businesses with sos_filings BUT no domestic filing found\n"
-        "SELECT f.business_id\n"
-        "FROM rds_warehouse_public.facts f,\n"
-        "     JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing\n"
-        "WHERE f.name = 'sos_filings' AND LENGTH(f.value) < 60000\n"
-        "  AND f.business_id IN (\n"
-        "    SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring\n"
-        "    WHERE DATE(created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause})\n"
-        "GROUP BY f.business_id\n"
-        "HAVING SUM(CASE WHEN LOWER(filing->>'foreign_domestic')='domestic' THEN 1 ELSE 0 END) = 0;\n```\n\n"
-        "**Key file:** `integration-service/lib/facts/kyb/index.ts` lines 799-883 · "
-        "`integration-service/lib/facts/kyb/types.ts:20-32`"
+        + _DT_EXPLAIN +
+        "\n\n**Python rule:**\n"
+        "```python\n# A business is FOREIGN ONLY if:\n"
+        "# - No filing resolved to 'domestic' (neither explicit nor proxy)\n"
+        "# - At least one filing resolved to 'foreign' (so not UNKNOWN)\n"
+        "if 'domestic' in _classification_per_filing: bucket = 'domestic'\n"
+        "elif 'foreign' in _classification_per_filing: bucket = 'foreign'  # ← this group\n"
+        "else: bucket = 'unknown'\n```"
+    )
+
+    _SEG_CALC["reg_unknown_dom"] = (
+        "**What 'Unknown Filing Type' means:**\n"
+        "All `sos_filings[]` entries for this business have:\n"
+        "- `foreign_domestic` field **absent** (vendor did not set it)\n"
+        "- `formation_state` fact **null** (no independent state-of-incorporation reference)\n\n"
+        "Without either signal, the decision tree cannot classify the filing as domestic or foreign.\n\n"
+        "**Common cause:** OpenCorporates (pid=23) only sets `foreign_domestic` when it has "
+        "`home_jurisdiction_code` to compare against `jurisdiction_code`. When OC lacks the home "
+        "jurisdiction (e.g. the company was found via address search, not a registered entity lookup), "
+        "it omits the field entirely. If Middesk (pid=16) also has no `formation_state`, both signals "
+        "are absent.\n\n"
+        "**Real example:** PORFIRIO AUTO REPAIR LLC (79aa7723)\n"
+        "```json\n// sos_filings[0] — foreign_domestic field completely absent:\n"
+        "{ 'entity_type': 'llc', 'state': 'MO', 'jurisdiction': 'us::mo', 'active': true }\n"
+        "// source: { 'platformId': 23, 'name': 'opencorporates' }\n"
+        "// formation_state: { 'value': null }\n"
+        "// primary_address: { 'state': 'MO' }\n```\n\n"
+        "**Action:** Run Direct SOS Enrichment (Block 5) or manually verify on the state SOS portal.\n\n"
+        + _DT_EXPLAIN
     )
 
     _SEG_CALC["states_same"] = (
@@ -6095,48 +6152,24 @@ if tab=="🏠 Home":
 
     _SEG_CALC["foreign_eq_op"] = (
         "**What 'Foreign Reg = Operating State' means:**\n"
-        "The business has only foreign qualification filings in `sos_filings[]` AND "
-        "the foreign filing state matches the submitted operating state (`primary_address.value.state`). "
-        "This means Middesk found the business in the operating state as a foreign qualification, "
+        "The business is classified as **FOREIGN** by the decision tree (Rule 2 explicit or Rule 3b proxy) "
+        "AND the foreign filing state matches the submitted operating state (`primary_address.value.state`). "
+        "This means the vendor found the entity in the operating state as a foreign qualification, "
         "but the domestic (formation state) incorporation record is NOT verified.\n\n"
-        "**Source tables: `rds_warehouse_public.facts` ONLY:**\n"
-        "| Column | Fact `name` | JSON path |\n|---|---|---|\n"
-        "| Filing state | `'sos_filings'` | `value[].state` (per filing) |\n"
-        "| Operating state | `'primary_address'` | `JSON_EXTRACT_PATH_TEXT(value,'value','state')` |\n\n"
+        "**How 'foreign' is determined — same decision tree as Foreign Filing Only:**\n"
+        + _DT_EXPLAIN +
+        "\n\n**Additional condition for this group:** filing state == operating state\n"
+        "(the foreign qualification was found specifically in the state the business submitted)\n\n"
         "**Python rule:**\n"
-        "```python\n# Source: _sos_filings_df from rds_warehouse_public.facts name='sos_filings'\n"
-        "# _sf_states = {business_id: set(filing_states)} for each registry-found business\n"
-        "# A business qualifies if: has NO domestic filing AND its foreign filing state == operating state\n"
+        "```python\n# Business is in foreign_eq_op if:\n"
+        "# 1. Classified as FOREIGN by decision tree (no domestic filing found)\n"
+        "# 2. AND any filing state matches the submitted operating state\n"
         "def _foreign_filing_matches_op(bid, op_st):\n"
         "    filing_states = _sf_states.get(bid, set())\n"
         "    return bool(op_st) and op_st in filing_states and bid not in _domestic_bids\n```\n\n"
-        "**KYB implication:** Middesk verified the entity exists in the operating state but as a "
-        "foreign qualification. The domestic incorporation (typically DE/NV/WY/SD/MT/NM) was NOT "
-        "searched or found. This is a meaningful entity resolution gap.\n\n"
-        "**Diagnostic SQL (facts only):**\n"
-        "```sql\n-- Businesses with a foreign filing in their operating state (no domestic filing)\n"
-        "WITH op_states AS (\n"
-        "  SELECT o.business_id,\n"
-        "    UPPER(JSON_EXTRACT_PATH_TEXT(f.value,'value','state')) AS operating_state\n"
-        "  FROM rds_cases_public.rel_business_customer_monitoring o\n"
-        "  LEFT JOIN rds_warehouse_public.facts f\n"
-        "    ON f.business_id=o.business_id AND f.name='primary_address' AND LENGTH(f.value)<60000\n"
-        "  WHERE DATE(o.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}\n"
-        "),\n"
-        "filings AS (\n"
-        "  SELECT f.business_id,\n"
-        "    UPPER(filing->>'state')            AS filing_state,\n"
-        "    filing->>'foreign_domestic'        AS fd\n"
-        "  FROM rds_warehouse_public.facts f,\n"
-        "       JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing\n"
-        "  WHERE f.name='sos_filings' AND LENGTH(f.value)<60000\n"
-        ")\n"
-        "SELECT o.business_id, o.operating_state\n"
-        "FROM op_states o\n"
-        "JOIN filings fi ON fi.business_id=o.business_id AND fi.filing_state=o.operating_state AND fi.fd='foreign'\n"
-        "WHERE o.business_id NOT IN (\n"
-        "  SELECT business_id FROM filings WHERE LOWER(fd)='domestic'\n);\n```\n\n"
-        "**Key file:** `integration-service/lib/facts/kyb/index.ts` lines 717-987 (sos_filings transformer)"
+        "**KYB implication:** Vendor verified entity exists in operating state as foreign qualification. "
+        "Domestic (formation state) incorporation was NOT found. High entity resolution gap risk.\n\n"
+        "**Key file:** `integration-service/lib/facts/kyb/index.ts` lines 717-987"
     )
 
     _SEG_CALC["states_diff"] = (
@@ -6485,21 +6518,45 @@ if tab=="🏠 Home":
         "sos_found_extended":  ("sos_match_boolean = 'true' OR sos_active IS NOT NULL", ""),
         "dt_ne_true_active":   ("sos_match_boolean = 'true' AND sos_active = 'true'", ""),
         "dt_ne_true_inactive": ("sos_match_boolean = 'true' AND sos_active = 'false'", ""),
-        # Domestic vs Foreign: from rds_warehouse_public.facts name='sos_filings' ONLY.
-        # sos_fil CTE in _seg_sql() uses JSON_EXTRACT_PATH_TEXT(value,'value',0,'foreign_domestic')
-        # = first element of the sos_filings[] array. Python checks ALL elements via _sos_filings_df.
-        # For businesses with ONLY one filing this is exact; for multi-filing businesses
-        # where domestic filing is NOT the first element, counts may differ slightly.
+        # Domestic Filing: decision tree (Rule 1 explicit + Rule 3a proxy via formation_state).
+        # SQL uses first filing element (sos_fil CTE). Python applies tree to ALL filings.
+        # Rule 1: foreign_domestic='domestic' (explicit)
+        # Rule 3a: foreign_domestic absent AND filing_state = formation_state (proxy)
         "reg_domestic": (
             "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
-            " AND s.foreign_domestic IS NOT NULL"
-            " AND LOWER(s.foreign_domestic) = 'domestic'",
+            " AND ("
+            "  LOWER(COALESCE(s.foreign_domestic,'')) = 'domestic'"           # Rule 1
+            "  OR (s.foreign_domestic IS NULL AND s.filing_state IS NOT NULL"  # Rule 3a
+            "      AND formation_state IS NOT NULL"
+            "      AND UPPER(s.filing_state) = UPPER(formation_state))"
+            ")",
             ""
         ),
+        # Foreign Filing Only: decision tree (Rule 2 explicit + Rule 3b proxy).
+        # Rule 2: foreign_domestic='foreign' (explicit)
+        # Rule 3b: foreign_domestic absent AND filing_state ≠ formation_state (proxy)
+        # Excludes UNKNOWN (Rule 4): foreign_domestic absent AND formation_state null
         "reg_foreign": (
             "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
-            " AND s.foreign_domestic IS NOT NULL"
-            " AND LOWER(s.foreign_domestic) != 'domestic'",
+            " AND ("
+            "  LOWER(COALESCE(s.foreign_domestic,'')) = 'foreign'"            # Rule 2
+            "  OR (s.foreign_domestic IS NULL AND s.filing_state IS NOT NULL"  # Rule 3b
+            "      AND formation_state IS NOT NULL"
+            "      AND UPPER(s.filing_state) != UPPER(formation_state))"
+            ")"
+            " AND NOT ("                                                        # exclude if ANY domestic
+            "  LOWER(COALESCE(s.foreign_domestic,'')) = 'domestic'"
+            "  OR (s.foreign_domestic IS NULL AND s.filing_state IS NOT NULL"
+            "      AND formation_state IS NOT NULL"
+            "      AND UPPER(s.filing_state) = UPPER(formation_state))"
+            ")",
+            ""
+        ),
+        # Unknown: foreign_domestic absent AND formation_state null — cannot classify
+        "reg_unknown_dom": (
+            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
+            " AND s.foreign_domestic IS NULL"
+            " AND (formation_state IS NULL OR formation_state = '')",
             ""
         ),
         # Domestic Filing State = Operating State:
@@ -6945,13 +7002,31 @@ if tab=="🏠 Home":
     _r2c1, _r2c2 = st.columns(2)
     with _r2c1:
         kpi("↳ 🏠 Domestic Filing", f"{_n_reg_domestic:,}",
-            f"{rate(_n_reg_domestic,_sos_found_extended)} of reg-found · sos_filings[].foreign_domestic='domestic'",
+            f"{rate(_n_reg_domestic,_sos_found_extended)} of reg-found · foreign_domestic='domestic' OR filing.state=formation_state",
             "#22c55e" if _n_reg_domestic > 0 else "#64748b")
     with _r2c2:
         kpi("↳ 🌍 Foreign Filing Only", f"{_n_reg_foreign:,}",
-            f"{rate(_n_reg_foreign,_sos_found_extended)} of reg-found · no filing with foreign_domestic='domestic'",
+            f"{rate(_n_reg_foreign,_sos_found_extended)} of reg-found · foreign_domestic='foreign' OR filing.state≠formation_state",
             "#f59e0b" if _n_reg_foreign > 0 else "#64748b")
     st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── Unknown filing type warning card ──────────────────────────────────────
+    if _n_reg_unknown_dom > 0:
+        st.markdown(f"""<div style="background:#1c1205;border:1px solid #f59e0b;border-left:4px solid #f59e0b;
+             border-radius:8px;padding:10px 16px;margin:8px 0 4px 0">
+  <div style="color:#f59e0b;font-weight:700;font-size:.85rem">
+    ⚠️ {_n_reg_unknown_dom:,} {"business" if _n_reg_unknown_dom==1 else "businesses"} — Filing Type Unknown
+  </div>
+  <div style="color:#d1d5db;font-size:.79rem;margin-top:4px">
+    These businesses have SOS filings but <code>foreign_domestic</code> is <strong>absent from the JSON</strong>
+    AND <code>formation_state</code> is <strong>null</strong> — the decision tree cannot classify the filing
+    as domestic or foreign without at least one of these signals.<br/>
+    <strong>Common cause:</strong> OpenCorporates (pid=23) did not set <code>foreign_domestic</code>
+    because <code>home_jurisdiction_code</code> was unavailable, and Middesk returned no
+    <code>formation_state</code>.<br/>
+    <strong>Action:</strong> Use Block 5 — Direct SOS Enrichment or manually verify on the state SOS portal.
+  </div>
+</div>""", unsafe_allow_html=True)
 
     # ── ROW 3: Three state-comparison metrics (all from rds_warehouse_public.facts) ─
     # (a) Formation State = Operating State
@@ -6981,8 +7056,9 @@ if tab=="🏠 Home":
     # ── Drilldown expanders — one per visible card ────────────────────────────
     _drilldown_table("sos_found_extended", f"Registry Found — {_sos_found_extended:,} businesses (sos_filings[] non-empty)", _SOS_COLS)
     _drilldown_table("no_sos",             f"❌ No Registry Found — {_sos_not_found:,} businesses ((sos_match_boolean=false OR null) AND sos_active=null)", _SOS_COLS)
-    _drilldown_table("reg_domestic",       f"↳ Domestic Filing — {_n_reg_domestic:,} businesses (foreign_domestic='domestic')", _SOS_COLS)
-    _drilldown_table("reg_foreign",        f"↳ Foreign Filing Only — {_n_reg_foreign:,} businesses (no domestic filing found)", _SOS_COLS)
+    _drilldown_table("reg_domestic",       f"↳ Domestic Filing — {_n_reg_domestic:,} businesses (decision tree: domestic)", _SOS_COLS)
+    _drilldown_table("reg_foreign",        f"↳ Foreign Filing Only — {_n_reg_foreign:,} businesses (decision tree: foreign)", _SOS_COLS)
+    _drilldown_table("reg_unknown_dom",    f"⚠️ Filing Type Unknown — {_n_reg_unknown_dom:,} businesses (foreign_domestic absent + formation_state null)", _SOS_COLS)
     _drilldown_table("states_same",        f"↳ Domestic Filing State = Operating State — {_n_states_same:,} businesses", _SOS_COLS)
     _drilldown_table("foreign_eq_op",      f"↳ Foreign Reg = Operating State — {_n_foreign_eq_op:,} businesses", _SOS_COLS)
     _drilldown_table("states_diff",        f"↳ Op. State Differs from All Regs — {_n_states_diff:,} businesses", _SOS_COLS)
