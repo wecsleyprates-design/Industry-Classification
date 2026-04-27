@@ -3555,27 +3555,42 @@ if tab=="🏠 Home":
     _authoritative_bids = recent_df["business_id"].tolist()
 
     # ── Red flag scoring — query facts directly for the authoritative business list ──
+
+    def _onboarded_cte(date_from, date_to, customer_id):
+        """Build the onboarded CTE clause used by all _load_* functions.
+        Returns the SQL CTE string with proper date/customer filtering.
+        No [:2000] cap — works for any portfolio size."""
+        parts = []
+        if date_from: parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
+        if date_to:   parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
+        if customer_id: parts.append(f"rbcm.customer_id = '{customer_id}'")
+        where = (" AND " + " AND ".join(parts)) if parts else ""
+        return (
+            "WITH onboarded AS (\n"
+            "  SELECT DISTINCT rbcm.business_id\n"
+            "  FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+            f"  WHERE 1=1{where}\n"
+            ")\n"
+        )
+
+
     @st.cache_data(ttl=600, show_spinner=False)
-    def _load_flags_for_bids(bid_tuple):
-        if not bid_tuple:
-            return None, "No business IDs"
-        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        return run_sql(f"""
-            SELECT business_id, name,
-                   JSON_EXTRACT_PATH_TEXT(value,'value') AS val,
-                   received_at
-            FROM rds_warehouse_public.facts
-            WHERE business_id IN ({bid_list})
-              AND name IN (
+    def _load_flags_for_bids(date_from, date_to, customer_id):
+        cte = _onboarded_cte(date_from, date_to, customer_id)
+        return run_sql(cte + """SELECT f.business_id, f.name,
+                   JSON_EXTRACT_PATH_TEXT(f.value,'value') AS val,
+                   f.received_at
+            FROM rds_warehouse_public.facts f
+            JOIN onboarded o ON o.business_id = f.business_id
+            WHERE f.name IN (
                   'sos_active','tin_match_boolean','watchlist_hits',
                   'naics_code','idv_passed_boolean','num_bankruptcies',
                   'num_judgements','num_liens','sos_match_boolean'
               )
-            ORDER BY business_id, name, received_at DESC
-        """)
+            ORDER BY f.business_id, f.name, f.received_at DESC""")
 
     with st.spinner("Scoring red flags…"):
-        flag_df, flag_err = _load_flags_for_bids(tuple(_authoritative_bids))
+        flag_df, flag_err = _load_flags_for_bids(hub_date_from, hub_date_to, hub_customer_id)
 
     # Build per-business red flag summary
     biz_flags = {}  # business_id → {flags:[...], score:int}
@@ -3628,7 +3643,7 @@ if tab=="🏠 Home":
 
     # ── KYB Funnel: SOS/TIN granular facts ──────────────────────────────────
     @st.cache_data(ttl=600, show_spinner=False)
-    def _load_kyb_funnel_for_bids(bid_tuple):
+    def _load_kyb_funnel_for_bids(date_from, date_to, customer_id):
         """Load granular SOS and TIN facts needed for funnel analysis.
         Returns one row per business with:
           - tin_submitted, tin_status (from tin_match.value.status), tin_match_boolean
@@ -3642,12 +3657,9 @@ if tab=="🏠 Home":
         entire query to fail and return an empty DataFrame, making all Section 1
         counts 0 and all drilldown tables empty.
         """
-        if not bid_tuple:
-            return None, "No business IDs"
-        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        return run_sql(f"""
-            SELECT
-                f.business_id,
+        cte = _onboarded_cte(date_from, date_to, customer_id)
+        return run_sql(cte + """
+            SELECT f.business_id,
                 MAX(CASE WHEN f.name='tin_submitted'
                     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_submitted,
                 MAX(CASE WHEN f.name='tin_match'
@@ -3665,15 +3677,15 @@ if tab=="🏠 Home":
                 MAX(CASE WHEN f.name='middesk_confidence'
                     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS middesk_confidence
             FROM rds_warehouse_public.facts f
-            WHERE f.business_id IN ({bid_list})
-              AND f.name IN ('tin_submitted','tin_match','tin_match_boolean',
+            JOIN onboarded o ON o.business_id = f.business_id
+            WHERE f.name IN ('tin_submitted','tin_match','tin_match_boolean',
                              'sos_match_boolean','sos_active','formation_state',
                              'primary_address','middesk_confidence')
             GROUP BY f.business_id
         """)
 
     @st.cache_data(ttl=600, show_spinner=False)
-    def _load_sos_filings_for_bids(bid_tuple):
+    def _load_sos_filings_for_bids(date_from, date_to, customer_id):
         """Parse sos_filings[] JSON array from rds_warehouse_public.facts.
         Source: API JSON sos_filings fact (name='sos_filings').
         ALL signals derived from the sos_filings JSON array — no review tasks, no materialized tables.
@@ -3695,46 +3707,37 @@ if tab=="🏠 Home":
                 integration-service/lib/facts/kyb/types.ts lines 20-32 (SoSRegistration schema)
                 warehouse-service/datapooler/adapters/db/models/facts.py (storage)
         """
-        if not bid_tuple:
-            return None, "No business IDs"
-        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        # Redshift federated tables do NOT support PostgreSQL-specific JSON operators
-        # (JSON_ARRAY_ELEMENTS, ->>, ::json, JSON_ARRAY_LENGTH).
+        cte = _onboarded_cte(date_from, date_to, customer_id)
+        # Redshift federated tables do NOT support PostgreSQL-specific JSON operators.
         # Use JSON_EXTRACT_PATH_TEXT with positional indices (0-9) via UNION ALL.
-        # Each branch extracts one filing from the array. Rows where both
-        # foreign_domestic and filing_state are NULL are filtered out (empty slots).
-        # Max 10 filings per business — covers >99% of real-world cases while
-        # keeping the query within Redshift's VARCHAR(65535) limit per row.
         def _filing_row(i):
             idx = str(i)
             return (
-                f"  SELECT business_id, {i} AS filing_index,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','foreign_domestic') AS foreign_domestic,\n"
-                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','active')='true' THEN true ELSE false END AS filing_active,\n"
-                f"    UPPER(COALESCE(JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','state'),''))          AS filing_state,\n"
-                f"    LOWER(COALESCE(JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','jurisdiction'),''))   AS jurisdiction,\n"
-                f"    LOWER(COALESCE(JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','entity_type'),''))    AS entity_type,\n"
-                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','non_profit')='true' THEN 1 ELSE 0 END AS non_profit,\n"
-                f"    LEFT(COALESCE(JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','registration_date'),\n"
-                f"                  JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','filing_date'),''),10)  AS registration_date,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','filing_name')                        AS filing_name,\n"
-                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','officers','0') IS NOT NULL\n"
+                f"  SELECT f.business_id, {i} AS filing_index,\n"
+                f"    JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','foreign_domestic') AS foreign_domestic,\n"
+                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','active')='true' THEN true ELSE false END AS filing_active,\n"
+                f"    UPPER(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','state'),''))          AS filing_state,\n"
+                f"    LOWER(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','jurisdiction'),''))   AS jurisdiction,\n"
+                f"    LOWER(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','entity_type'),''))    AS entity_type,\n"
+                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','non_profit')='true' THEN 1 ELSE 0 END AS non_profit,\n"
+                f"    LEFT(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','registration_date'),\n"
+                f"                  JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','filing_date'),''),10)  AS registration_date,\n"
+                f"    JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','filing_name')                        AS filing_name,\n"
+                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','officers','0') IS NOT NULL\n"
                 f"         THEN 1 ELSE 0 END                                                              AS has_officers,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','id')                                 AS filing_id,\n"
-                f"    -- Winning vendor who provided this sos_filings fact (factWithHighestConfidence)\n"
-                f"    -- Source: index.ts factWithHighestConfidence rule selects one vendor per business\n"
-                f"    JSON_EXTRACT_PATH_TEXT(value,'source','platformId')                                AS source_platform_id,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(value,'source','name')                                      AS source_vendor_name\n"
-                f"  FROM rds_warehouse_public.facts\n"
-                f"  WHERE name='sos_filings' AND LENGTH(value)<60000\n"
-                f"    AND business_id IN ({bid_list})\n"
-                f"    AND JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','state') IS NOT NULL"
+                f"    JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','id')                                 AS filing_id,\n"
+                f"    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')                                AS source_platform_id,\n"
+                f"    JSON_EXTRACT_PATH_TEXT(f.value,'source','name')                                      AS source_vendor_name\n"
+                f"  FROM rds_warehouse_public.facts f\n"
+                f"  JOIN onboarded o ON o.business_id = f.business_id\n"
+                f"  WHERE f.name='sos_filings' AND LENGTH(f.value)<60000\n"
+                f"    AND JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','state') IS NOT NULL"
             )
         union_sql = "\nUNION ALL\n".join(_filing_row(i) for i in range(10))
-        return run_sql(f"SELECT * FROM (\n{union_sql}\n) sos_rows WHERE filing_state != '' OR foreign_domestic IS NOT NULL;")
+        return run_sql(cte + f"SELECT * FROM (\n{union_sql}\n) sos_rows WHERE filing_state != '' OR foreign_domestic IS NOT NULL;")
 
     @st.cache_data(ttl=600, show_spinner=False)
-    def _load_sole_prop_signal(bid_tuple):
+    def _load_sole_prop_signal(date_from, date_to, customer_id):
         """Load Plaid IDV SSN last-4 for Possible Sole Prop detection.
         Source: integration-service/lib/facts/kyb/index.ts:606
           type === IDNumberType.UsSsnLast4 && value === tin.slice(-4) → is_sole_prop=true
@@ -3743,22 +3746,17 @@ if tab=="🏠 Home":
         rds_integration_data.identity_verification table (federated from PostgreSQL RDS).
         Returns: business_id, idv_last4_ssn (the SSN last-4 from Plaid IDV meta)
         """
-        if not bid_tuple:
-            return None, "No business IDs"
-        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        return run_sql(f"""
-            SELECT
-                business_id,
-                MAX(JSON_EXTRACT_PATH_TEXT(meta, 'user', 'id_number', 'value')) AS idv_last4_ssn
-            FROM rds_integration_data.identity_verification
-            WHERE business_id IN ({bid_list})
-              AND JSON_EXTRACT_PATH_TEXT(meta, 'user', 'id_number', 'type') = 'us_ssn_last_4'
-            GROUP BY business_id
-        """)
+        cte = _onboarded_cte(date_from, date_to, customer_id)
+        return run_sql(cte + """SELECT iv.business_id,
+                MAX(JSON_EXTRACT_PATH_TEXT(iv.meta, 'user', 'id_number', 'value')) AS idv_last4_ssn
+            FROM rds_integration_data.identity_verification iv
+            JOIN onboarded o ON o.business_id = iv.business_id
+            WHERE JSON_EXTRACT_PATH_TEXT(iv.meta, 'user', 'id_number', 'type') = 'us_ssn_last_4'
+            GROUP BY iv.business_id""")
 
     # ── Load enriched KYB stats using the same authoritative business ID list ──
     @st.cache_data(ttl=600, show_spinner=False)
-    def _load_stats_for_bids(bid_tuple):
+    def _load_stats_for_bids(date_from, date_to, customer_id):
         """Load KYB stats for a specific list of business IDs.
 
         Includes all columns shown in drilldown tables:
@@ -3767,12 +3765,9 @@ if tab=="🏠 Home":
           - TIN signals: tin_submitted, tin_match_status, tin_match (boolean)
           - IDV, NAICS, risk, firmographic columns
         """
-        if not bid_tuple:
-            return None, "No business IDs"
-        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        return run_sql(f"""
-            SELECT
-                f.business_id,
+        cte = _onboarded_cte(date_from, date_to, customer_id)
+        return run_sql(cte + """
+            SELECT f.business_id,
                 -- Registry / SOS — Facts API (integration-service/lib/facts/kyb/index.ts)
                 MAX(CASE WHEN f.name='sos_match_boolean'
                     THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_match_boolean,
@@ -3827,13 +3822,13 @@ if tab=="🏠 Home":
                 MIN(f.received_at) AS first_seen,
                 COUNT(DISTINCT f.name) AS fact_count
             FROM rds_warehouse_public.facts f
+            JOIN onboarded o ON o.business_id = f.business_id
             LEFT JOIN rds_integration_data.business_entity_verification bev
                 ON bev.business_id = f.business_id
             LEFT JOIN rds_integration_data.business_entity_review_task bert
                 ON bert.business_entity_verification_id = bev.id
                 AND bert.key IN ('sos_match','sos_domestic','sos_active')
-            WHERE f.business_id IN ({bid_list})
-              AND f.name IN (
+            WHERE f.name IN (
                   'sos_match_boolean','sos_match','sos_active',
                   'tin_submitted','tin_match','tin_match_boolean',
                   'idv_passed_boolean','is_sole_prop','naics_code',
@@ -3845,15 +3840,15 @@ if tab=="🏠 Home":
         """)
 
     with st.spinner("Loading KYB metrics…"):
-        stats_df, stats_err = _load_stats_for_bids(tuple(_authoritative_bids))
+        stats_df, stats_err = _load_stats_for_bids(hub_date_from, hub_date_to, hub_customer_id)
 
     with st.spinner("Loading SOS/TIN funnel data…"):
-        funnel_df, funnel_err = _load_kyb_funnel_for_bids(tuple(_authoritative_bids))
+        funnel_df, funnel_err = _load_kyb_funnel_for_bids(hub_date_from, hub_date_to, hub_customer_id)
 
     # Load Plaid IDV SSN last-4 separately (Redshift-safe — no ::json-> operator)
     # Used only for Possible Sole Prop detection (index.ts:606 comparison)
     with st.spinner(""):
-        _sole_prop_df, _sole_prop_err = _load_sole_prop_signal(tuple(_authoritative_bids))
+        _sole_prop_df, _sole_prop_err = _load_sole_prop_signal(hub_date_from, hub_date_to, hub_customer_id)
     # Merge idv_last4_ssn into funnel_df so the sole-prop mask can use it
     if funnel_df is not None and not funnel_df.empty:
         if _sole_prop_df is not None and not _sole_prop_df.empty and "idv_last4_ssn" in _sole_prop_df.columns:
@@ -3868,7 +3863,7 @@ if tab=="🏠 Home":
     # Source: rds_warehouse_public.facts name='sos_filings' — ALL signals from API JSON
     # Replaces _load_sos_review_tasks_for_bids (review tasks are NOT facts, NOT in API JSON)
     with st.spinner(""):
-        _sos_filings_df, _sos_filings_err = _load_sos_filings_for_bids(tuple(_authoritative_bids))
+        _sos_filings_df, _sos_filings_err = _load_sos_filings_for_bids(hub_date_from, hub_date_to, hub_customer_id)
     # Build per-business aggregated signals from sos_filings[]
     # These are the correct derivations — all from rds_warehouse_public.facts
     _sfg = {}   # business_id → aggregated filing signals
@@ -8439,49 +8434,41 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
 
     # Load Worth Scores for the authoritative business list
     @st.cache_data(ttl=600, show_spinner=False)
-    def _load_home_scores(bid_tuple):
-        if not bid_tuple: return None, "No business IDs"
-        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        return run_sql(f"""
-            SELECT cs.business_id,
+    def _load_home_scores(date_from, date_to, customer_id):
+        cte = _onboarded_cte(date_from, date_to, customer_id)
+        return run_sql(cte + """SELECT cs.business_id,
                    bs.weighted_score_850, bs.weighted_score_100,
                    bs.risk_level, bs.score_decision, bs.created_at AS scored_at
             FROM rds_manual_score_public.data_current_scores cs
             JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
-            WHERE cs.business_id IN ({bid_list})
-            ORDER BY bs.weighted_score_850 ASC;
-        """)
+            JOIN onboarded o ON o.business_id = cs.business_id
+            ORDER BY bs.weighted_score_850 ASC""")
 
     @st.cache_data(ttl=600, show_spinner=False)
-    def _load_home_factors(bid_tuple):
-        """Load per-category factor contributions, averaged across all scored businesses.
-        category_id is an INTEGER in business_score_factors — map via _CAT_META above.
-        """
-        if not bid_tuple: return None, "No business IDs"
-        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        return run_sql(f"""
-            SELECT bsf.category_id,
+    def _load_home_factors(date_from, date_to, customer_id):
+        """Load per-category factor contributions, averaged across all scored businesses."""
+        cte = _onboarded_cte(date_from, date_to, customer_id)
+        return run_sql(cte + """SELECT bsf.category_id,
                    AVG(bsf.score_100)          AS avg_score_100,
                    AVG(bsf.weighted_score_850)  AS avg_impact_pts,
                    COUNT(DISTINCT cs.business_id) AS businesses
             FROM rds_manual_score_public.data_current_scores cs
             JOIN rds_manual_score_public.business_score_factors bsf ON bsf.score_id=cs.score_id
-            WHERE cs.business_id IN ({bid_list})
+            JOIN onboarded o ON o.business_id = cs.business_id
             GROUP BY bsf.category_id
-            ORDER BY bsf.category_id;
-        """)
+            ORDER BY bsf.category_id""")
 
     with st.spinner("Loading Worth Score distribution…"):
-        _home_ws, _home_ws_err = _load_home_scores(tuple(_authoritative_bids))
-        _home_factors, _home_factors_err = _load_home_factors(tuple(_authoritative_bids))
+        _home_ws, _home_ws_err = _load_home_scores(hub_date_from, hub_date_to, hub_customer_id)
+        _home_factors, _home_factors_err = _load_home_factors(hub_date_from, hub_date_to, hub_customer_id)
 
     if _home_ws is not None and not _home_ws.empty:
         _home_ws["weighted_score_850"] = pd.to_numeric(_home_ws["weighted_score_850"], errors="coerce")
         _home_ws_clean = _home_ws.dropna(subset=["weighted_score_850"])
         _ws_n        = len(_home_ws_clean)
-        _ws_avg      = float(_home_ws_clean["weighted_score_850"].mean())
-        _ws_med      = float(_home_ws_clean["weighted_score_850"].median())
-        _ws_prob_avg = round((_ws_avg - 300) / 550, 4)   # reverse-compute avg probability
+        _ws_avg      = float(_home_ws_clean["weighted_score_850"].mean()) if _ws_n > 0 else float("nan")
+        _ws_med      = float(_home_ws_clean["weighted_score_850"].median()) if _ws_n > 0 else float("nan")
+        _ws_prob_avg = round((_ws_avg - 300) / 550, 4) if _ws_n > 0 else float("nan")
         _ws_approve  = int((_home_ws_clean["score_decision"]=="APPROVE").sum())
         _ws_review   = int((_home_ws_clean["score_decision"]=="FURTHER_REVIEW_NEEDED").sum())
         _ws_decline  = int((_home_ws_clean["score_decision"]=="DECLINE").sum())
@@ -8531,7 +8518,7 @@ Factor contributions → rds_manual_score_public.business_score_factors (one row
         with _wk7: kpi("❌ DECLINE",       f"{_ws_decline:,}",    rate(_ws_decline,_ws_n)+" <550",   "#ef4444")
 
         # ── Portfolio score gauge (mirrors per-business gauge bar) ─────────
-        _ws_pct = int((_ws_avg - 300) / 550 * 100)
+        _ws_pct = int((_ws_avg - 300) / 550 * 100) if _ws_n > 0 and not (isinstance(_ws_avg, float) and _ws_avg != _ws_avg) else 0
         st.markdown(f"""<div style="margin:12px 0">
           <div style="display:flex;justify-content:space-between;font-size:.75rem;color:#94A3B8">
             <span>300 (min)</span><span>DECLINE &lt;550</span><span>REVIEW 550–699</span><span>APPROVE ≥700</span><span>850 (max)</span>
