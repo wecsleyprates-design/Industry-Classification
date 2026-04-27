@@ -6494,7 +6494,7 @@ if tab=="🏠 Home":
             f"       s.filing_name, s.registration_date\n"
             f"FROM per_biz p\n"
             f"LEFT JOIN sos_fil s ON s.business_id = p.business_id\n"
-            f"WHERE {where_clause};"
+            f"WHERE {where_clause.replace('business_id', 'p.business_id')};"
         )
 
     # ── Segment-to-SQL mapping: exact GROUP BY queries matching Python rules ─────
