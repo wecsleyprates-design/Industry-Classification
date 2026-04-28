@@ -4300,23 +4300,39 @@ if tab=="🏠 Home":
                 _fs_bid = _form_state_by_bid.get(_bid, "")  # formation_state for this business
                 _classification_per_filing = []  # 'domestic', 'foreign', 'unknown' per filing
 
+                # Operating state for Step 2 (filing.state = operating_state when formation_state null)
+                _op_bid = _bid_to_op.get(_bid, "")  # _bid_to_op built before this loop
+
                 for _, _fr in _grp.iterrows():
                     _fd  = str(_fr.get("foreign_domestic", "") or "").lower().strip()
                     _fst = str(_fr.get("filing_state", "") or "").upper().strip()
 
                     if _fd == "domestic":
-                        _classification_per_filing.append("domestic")   # Rule 1
+                        _classification_per_filing.append("domestic")   # Rule 1: explicit
                     elif _fd == "foreign":
-                        _classification_per_filing.append("foreign")    # Rule 2
+                        _classification_per_filing.append("foreign")    # Rule 2: explicit
                     elif _fd in ("", "nan", "none", "null"):
-                        # foreign_domestic absent — apply state comparison
+                        # foreign_domestic absent — apply decision tree
                         if _fs_bid and _fst:
+                            # Step 1: compare filing.state to formation_state (independent facts)
                             if _fst == _fs_bid:
-                                _classification_per_filing.append("domestic")   # Rule 3a
+                                _classification_per_filing.append("domestic")   # Rule 3a: proxy
                             else:
-                                _classification_per_filing.append("foreign")    # Rule 3b
+                                _classification_per_filing.append("foreign")    # Rule 3b: proxy
+                        elif _fst and _op_bid:
+                            # Step 2: formation_state null — compare filing.state to operating_state
+                            # Decision tree Step 2: filing.state = primary_address.state → DOMESTIC proxy
+                            # Example: PORFIRIO AUTO REPAIR LLC (OC won factWithHighestConfidence):
+                            #   OC filing has state=MO, no foreign_domestic field
+                            #   Middesk filing with foreign_domestic='domestic' is in alternatives[]
+                            #   formation_state=MO comes from Middesk BUT may be null if OC won
+                            #   filing.state=MO = operating_state=MO → DOMESTIC proxy
+                            if _fst == _op_bid:
+                                _classification_per_filing.append("domestic")   # Step 2 proxy
+                            else:
+                                _classification_per_filing.append("unknown")    # Step 2 uncertain
                         else:
-                            _classification_per_filing.append("unknown")        # Rule 4
+                            _classification_per_filing.append("unknown")        # Rule 4: no signals
 
                 # Determine business-level classification from filing-level results
                 if "domestic" in _classification_per_filing:
@@ -4363,10 +4379,13 @@ if tab=="🏠 Home":
                 for _, _fr_r3 in _grp_r3.iterrows():
                     _fd_r3  = str(_fr_r3.get("foreign_domestic","") or "").lower().strip()
                     _fst_r3 = str(_fr_r3.get("filing_state","") or "").upper().strip()
+                    _op_r3 = _bid_to_op.get(_bid_r3, "")
                     if _fd_r3 == "domestic":
-                        _dom_states_r3.add(_fst_r3)           # Rule 1
+                        _dom_states_r3.add(_fst_r3)           # Rule 1: explicit
                     elif _fd_r3 in ("","nan","none","null") and _fs_r3 and _fst_r3 and _fst_r3 == _fs_r3:
-                        _dom_states_r3.add(_fst_r3)           # Rule 3a proxy
+                        _dom_states_r3.add(_fst_r3)           # Rule 3a proxy: filing.state = formation_state
+                    elif _fd_r3 in ("","nan","none","null") and not _fs_r3 and _fst_r3 and _op_r3 and _fst_r3 == _op_r3:
+                        _dom_states_r3.add(_fst_r3)           # Step 2 proxy: filing.state = operating_state
                 if _dom_states_r3:
                     _domestic_filing_states[_bid_r3] = _dom_states_r3
             # Also keep _sf_reg_dom for gap analysis sub-buckets (Rule 1 explicit only — for active check)
@@ -6031,28 +6050,43 @@ if tab=="🏠 Home":
         "**Decision Tree — how each filing is classified (per filing, per business):**\n\n"
         "```\nFor each entry in sos_filings[]:\n\n"
         "1. foreign_domestic = 'domestic'                        → DOMESTIC ✅ (explicit — authoritative)\n"
-        "   Middesk:  registration.jurisdiction = 'domestic'\n"
-        "   OC (pid=23): home_jurisdiction_code === jurisdiction_code\n\n"
+        "   Set by Middesk (pid=16): registration.jurisdiction = 'domestic'\n"
+        "   Set by OC (pid=23): home_jurisdiction_code === jurisdiction_code\n\n"
         "2. foreign_domestic = 'foreign'                         → FOREIGN  ✅ (explicit — authoritative)\n"
-        "   Middesk:  registration.jurisdiction = 'foreign'\n"
-        "   OC (pid=23): home_jurisdiction_code ≠ jurisdiction_code\n\n"
-        "3. foreign_domestic absent / null  (e.g. OpenCorporates lacked home_jurisdiction_code):\n"
+        "   Set by Middesk: registration.jurisdiction = 'foreign'\n"
+        "   Set by OC: home_jurisdiction_code ≠ jurisdiction_code\n\n"
+        "3. foreign_domestic absent / null:\n"
+        "   │   (OpenCorporates lacked home_jurisdiction_code, or vendor didn't set the field)\n"
         "   │\n"
-        "   ├── formation_state fact IS NOT NULL (rds_warehouse_public.facts name='formation_state')\n"
-        "   │   ├── filing.state = formation_state   → DOMESTIC (proxy) — same state as incorporation\n"
-        "   │   └── filing.state ≠ formation_state   → FOREIGN  (proxy) — different state\n"
+        "   ├── Step 1 — formation_state fact IS NOT NULL\n"
+        "   │   (rds_warehouse_public.facts name='formation_state' from Middesk businessEntityVerification)\n"
+        "   │   ├── filing.state = formation_state   → DOMESTIC (proxy) — filing in incorporation state\n"
+        "   │   └── filing.state ≠ formation_state   → FOREIGN  (proxy) — different state = foreign qual\n"
         "   │\n"
-        "   └── formation_state IS NULL              → UNKNOWN ⚠️ — cannot classify\n"
-        "       Both foreign_domestic and formation_state unavailable.\n"
-        "       Example: PORFIRIO AUTO REPAIR LLC (OC, pid=23) — OC lacked home_jurisdiction_code;\n"
-        "                formation_state=null; filing.state='MO', primary_address.state='MO'.\n"
-        "                Cannot confirm domestic vs foreign without one of those facts.\n```\n\n"
+        "   └── Step 2 — formation_state IS NULL (OC won fact, Middesk data in alternatives[])\n"
+        "       Compare filing.state to primary_address.state (operating state)\n"
+        "       ├── filing.state = operating_state   → DOMESTIC (proxy) — filing in same state as operations\n"
+        "       │   Real example: PORFIRIO AUTO REPAIR LLC (79aa7723)\n"
+        "       │     OC won sos_filings (no foreign_domestic field)\n"
+        "       │     Middesk filing (foreign_domestic='domestic') is in alternatives[] — NOT in value[]\n"
+        "       │     formation_state=MO (from Middesk) but may be null if OC won\n"
+        "       │     filing.state=MO = operating_state=MO → DOMESTIC proxy\n"
+        "       └── filing.state ≠ operating_state   → UNKNOWN ⚠️ — cannot safely classify\n"
+        "           Neither foreign_domestic nor state comparisons give a confident answer.\n```\n\n"
+        "**⚠️ Important: `factWithHighestConfidence` affects what Redshift stores**\n"
+        "When OpenCorporates (pid=23) wins `factWithHighestConfidence` for `sos_filings`, "
+        "Middesk's filing data (which includes `foreign_domestic='domestic'`) is stored in `alternatives[]` "
+        "and is NOT accessible via `JSON_EXTRACT_PATH_TEXT(value,'value',0,...)`. "
+        "The winning vendor's data (OC, no `foreign_domestic` field) is what the SQL reads. "
+        "This is why Step 2 exists — to recover the classification from state comparison when the "
+        "explicit `foreign_domestic` field is unavailable due to vendor selection.\n\n"
         "**Business-level result:**\n"
-        "- **DOMESTIC**: ANY filing classified as domestic (explicit or proxy)\n"
+        "- **DOMESTIC**: ANY filing classified as domestic (Rules 1, 3a proxy, or Step 2 proxy)\n"
         "- **FOREIGN**: all classifiable filings are foreign (no domestic found)\n"
-        "- **UNKNOWN**: all filings are unclassifiable (null foreign_domestic + null formation_state)\n\n"
-        "**Source:** `rds_warehouse_public.facts name='sos_filings'` · `name='formation_state'`\n"
-        "**Key file:** `integration-service/lib/facts/kyb/index.ts:717-987`"
+        "- **UNKNOWN**: all filings unclassifiable (null foreign_domestic + null formation_state + state mismatch)\n\n"
+        "**Source:** `rds_warehouse_public.facts name='sos_filings'` · `name='formation_state'` · `name='primary_address'`\n"
+        "**Key file:** `integration-service/lib/facts/kyb/index.ts:717-987` · "
+        "`integration-service/lib/facts/sources.ts` (factWithHighestConfidence rule)"
     )
 
     _SEG_CALC["reg_domestic"] = (
