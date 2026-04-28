@@ -3527,6 +3527,256 @@ _search_q = ""  # search bar removed from filter bar
 # HOME — Live Dashboard
 # ════════════════════════════════════════════════════════════════════════════════
 
+# ── Cached data loaders — module-level so @st.cache_data works correctly ──
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_flags_for_bids(date_from, date_to, customer_id):
+    cte = _onboarded_cte_sql(date_from, date_to, customer_id)
+    return run_sql(cte + """SELECT f.business_id, f.name,
+               JSON_EXTRACT_PATH_TEXT(f.value,'value') AS val,
+               f.received_at
+        FROM rds_warehouse_public.facts f
+        JOIN onboarded o ON o.business_id = f.business_id
+        WHERE LENGTH(f.value) < 60000
+          AND f.name IN (
+              'sos_active','tin_match_boolean','watchlist_hits',
+              'naics_code','idv_passed_boolean','num_bankruptcies',
+              'num_judgements','num_liens','sos_match_boolean'
+          )
+        ORDER BY f.business_id, f.name, f.received_at DESC""")
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_kyb_funnel_for_bids(date_from, date_to, customer_id):
+    """Load granular SOS and TIN facts needed for funnel analysis.
+    Returns one row per business with:
+      - tin_submitted, tin_status (from tin_match.value.status), tin_match_boolean
+      - sos_match_boolean, sos_active, formation_state, operating_state
+      - middesk_confidence
+
+    NOTE: idv_last4_ssn (Plaid IDV SSN last-4) is loaded separately in
+    _load_sole_prop_signal() using JSON_EXTRACT_PATH_TEXT (Redshift-safe).
+    The identity_verification.meta join is NOT done here because Redshift
+    does NOT support the PostgreSQL ::json-> operator — that caused this
+    entire query to fail and return an empty DataFrame, making all Section 1
+    counts 0 and all drilldown tables empty.
+    """
+    cte = _onboarded_cte_sql(date_from, date_to, customer_id)
+    return run_sql(cte + """
+        SELECT f.business_id,
+            MAX(CASE WHEN f.name='tin_submitted'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_submitted,
+            MAX(CASE WHEN f.name='tin_match'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS tin_status,
+            MAX(CASE WHEN f.name='tin_match_boolean'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_match_boolean,
+            MAX(CASE WHEN f.name='sos_match_boolean'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_match_boolean,
+            MAX(CASE WHEN f.name='sos_active'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_active,
+            MAX(CASE WHEN f.name='formation_state'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_state,
+            MAX(CASE WHEN f.name='primary_address'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','state') END)       AS operating_state,
+            MAX(CASE WHEN f.name='middesk_confidence'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS middesk_confidence
+        FROM rds_warehouse_public.facts f
+        JOIN onboarded o ON o.business_id = f.business_id
+        WHERE LENGTH(f.value) < 60000
+          AND f.name IN ('tin_submitted','tin_match','tin_match_boolean',
+                         'sos_match_boolean','sos_active','formation_state',
+                         'primary_address','middesk_confidence')
+        GROUP BY f.business_id
+    """)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_sos_filings_for_bids(date_from, date_to, customer_id):
+    """Parse sos_filings[] JSON array from rds_warehouse_public.facts.
+    Source: API JSON sos_filings fact (name='sos_filings').
+    ALL signals derived from the sos_filings JSON array — no review tasks, no materialized tables.
+
+    Returns one row per FILING (multiple rows per business if multiple filings):
+      - business_id
+      - foreign_domestic  : 'domestic' | 'foreign'   (sos_filings[].foreign_domestic)
+      - filing_active     : true | false               (sos_filings[].active)
+      - filing_state      : 'FL','DE',etc.             (sos_filings[].state)
+      - jurisdiction      : 'us::fl', 'us::de', etc.  (sos_filings[].jurisdiction)
+      - entity_type       : 'llc','corporation',etc.   (sos_filings[].entity_type)
+      - non_profit        : true | false               (sos_filings[].non_profit)
+      - registration_date : date string                (sos_filings[].registration_date)
+      - filing_name       : business name on filing    (sos_filings[].filing_name)
+      - has_officers      : 1 if officers[] non-empty  (sos_filings[].officers)
+      - filing_index      : 0-based index in array
+
+    Source: integration-service/lib/facts/kyb/index.ts lines 767-987 (transformer)
+            integration-service/lib/facts/kyb/types.ts lines 20-32 (SoSRegistration schema)
+            warehouse-service/datapooler/adapters/db/models/facts.py (storage)
+    """
+    cte = _onboarded_cte_sql(date_from, date_to, customer_id)
+    # Redshift federated tables do NOT support PostgreSQL-specific JSON operators.
+    # Use JSON_EXTRACT_PATH_TEXT with positional indices (0-9) via UNION ALL.
+    def _filing_row(i):
+        idx = str(i)
+        return (
+            f"  SELECT f.business_id, {i} AS filing_index,\n"
+            f"    JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','foreign_domestic') AS foreign_domestic,\n"
+            f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','active')='true' THEN true ELSE false END AS filing_active,\n"
+            f"    UPPER(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','state'),''))          AS filing_state,\n"
+            f"    LOWER(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','jurisdiction'),''))   AS jurisdiction,\n"
+            f"    LOWER(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','entity_type'),''))    AS entity_type,\n"
+            f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','non_profit')='true' THEN 1 ELSE 0 END AS non_profit,\n"
+            f"    LEFT(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','registration_date'),\n"
+            f"                  JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','filing_date'),''),10)  AS registration_date,\n"
+            f"    JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','filing_name')                        AS filing_name,\n"
+            f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','officers','0') IS NOT NULL\n"
+            f"         THEN 1 ELSE 0 END                                                              AS has_officers,\n"
+            f"    JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','id')                                 AS filing_id,\n"
+            f"    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')                                AS source_platform_id,\n"
+            f"    JSON_EXTRACT_PATH_TEXT(f.value,'source','name')                                      AS source_vendor_name\n"
+            f"  FROM rds_warehouse_public.facts f\n"
+            f"  JOIN onboarded o ON o.business_id = f.business_id\n"
+            f"  WHERE f.name='sos_filings' AND LENGTH(f.value)<60000\n"
+            f"    AND JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','state') IS NOT NULL"
+        )
+    # 5 branches covers >99% of businesses (most have 1-3 filings)
+    # Reduced from 10 to cut query execution time in half
+    union_sql = "\nUNION ALL\n".join(_filing_row(i) for i in range(5))
+    return run_sql(cte + f"SELECT * FROM (\n{union_sql}\n) sos_rows WHERE filing_state != '' OR foreign_domestic IS NOT NULL;")
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_sole_prop_signal(date_from, date_to, customer_id):
+    """Load Plaid IDV SSN last-4 for Possible Sole Prop detection.
+    Source: integration-service/lib/facts/kyb/index.ts:606
+      type === IDNumberType.UsSsnLast4 && value === tin.slice(-4) → is_sole_prop=true
+
+    Uses JSON_EXTRACT_PATH_TEXT (Redshift-compatible) on the
+    rds_integration_data.identity_verification table (federated from PostgreSQL RDS).
+    Returns: business_id, idv_last4_ssn (the SSN last-4 from Plaid IDV meta)
+    """
+    cte = _onboarded_cte_sql(date_from, date_to, customer_id)
+    return run_sql(cte + """SELECT iv.business_id,
+            MAX(JSON_EXTRACT_PATH_TEXT(iv.meta, 'user', 'id_number', 'value')) AS idv_last4_ssn
+        FROM rds_integration_data.identity_verification iv
+        JOIN onboarded o ON o.business_id = iv.business_id
+        WHERE JSON_EXTRACT_PATH_TEXT(iv.meta, 'user', 'id_number', 'type') = 'us_ssn_last_4'
+        GROUP BY iv.business_id""")
+
+# ── Load enriched KYB stats using the same authoritative business ID list ──
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_stats_for_bids(date_from, date_to, customer_id):
+    """Load KYB stats for a specific list of business IDs.
+
+    Includes all columns shown in drilldown tables:
+      - Facts API registry signals: sos_match_boolean, sos_match_status, sos_active
+      - clients.verification_results flags: sos_match_verif, sos_domestic_verif, sos_active_verif
+      - TIN signals: tin_submitted, tin_match_status, tin_match (boolean)
+      - IDV, NAICS, risk, firmographic columns
+    """
+    cte = _onboarded_cte_sql(date_from, date_to, customer_id)
+    return run_sql(cte + """
+        SELECT f.business_id,
+            -- Registry / SOS — Facts API (integration-service/lib/facts/kyb/index.ts)
+            MAX(CASE WHEN f.name='sos_match_boolean'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_match_boolean,
+            MAX(CASE WHEN f.name='sos_match'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS sos_match_status,
+            MAX(CASE WHEN f.name='sos_active'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_active,
+            MAX(CASE WHEN f.name='formation_state'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_state,
+            MAX(CASE WHEN f.name='formation_date'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_date,
+            -- SOS verification flags derived from rds_integration_data.business_entity_review_task
+            -- (rds_ tables only — no clients.verification_results materialized table)
+            MAX(CASE WHEN bert.key='sos_match'    AND bert.sublabel='Submitted Active' THEN 1 ELSE 0 END) AS sos_match_verif,
+            MAX(CASE WHEN bert.key='sos_domestic' AND bert.sublabel='Domestic Active'  THEN 1 ELSE 0 END) AS sos_domestic_verif,
+            MAX(CASE WHEN bert.key='sos_active'   AND bert.status='Success'             THEN 1 ELSE 0 END) AS sos_active_verif,
+            -- TIN / EIN (index.ts lines 399-491)
+            MAX(CASE WHEN f.name='tin_submitted'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_submitted,
+            MAX(CASE WHEN f.name='tin_match'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS tin_match_status,
+            MAX(CASE WHEN f.name='tin_match_boolean'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_match,
+            -- IDV
+            MAX(CASE WHEN f.name='idv_passed_boolean'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS idv_passed,
+            -- Sole Prop (index.ts:552-616 — true|false|null)
+            -- null = not enough data; true = confirmed; false = multiple owners or SSN mismatch
+            MAX(CASE WHEN f.name='is_sole_prop'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS is_sole_prop,
+            -- Classification
+            MAX(CASE WHEN f.name='naics_code'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS naics_code,
+            -- Risk
+            MAX(CASE WHEN f.name='watchlist_hits'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS watchlist_hits,
+            MAX(CASE WHEN f.name='num_bankruptcies'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_bankruptcies,
+            MAX(CASE WHEN f.name='num_judgements'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_judgements,
+            MAX(CASE WHEN f.name='num_liens'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_liens,
+            MAX(CASE WHEN f.name='adverse_media_hits'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS adverse_media,
+            -- Firmographic
+            MAX(CASE WHEN f.name='revenue'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS revenue,
+            -- Legal name — used by DirectSOS enrichment agent for entity matching
+            MAX(CASE WHEN f.name='legal_name'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS legal_name,
+            MAX(f.received_at) AS last_seen,
+            MIN(f.received_at) AS first_seen,
+            COUNT(DISTINCT f.name) AS fact_count
+        FROM rds_warehouse_public.facts f
+        JOIN onboarded o ON o.business_id = f.business_id
+          AND LENGTH(f.value) < 60000
+        LEFT JOIN rds_integration_data.business_entity_verification bev
+            ON bev.business_id = f.business_id
+        LEFT JOIN rds_integration_data.business_entity_review_task bert
+            ON bert.business_entity_verification_id = bev.id
+            AND bert.key IN ('sos_match','sos_domestic','sos_active')
+        WHERE f.name IN (
+              'sos_match_boolean','sos_match','sos_active',
+              'tin_submitted','tin_match','tin_match_boolean',
+              'idv_passed_boolean','is_sole_prop','naics_code',
+              'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
+              'adverse_media_hits','revenue','formation_date','formation_state',
+              'legal_name'
+          )
+        GROUP BY f.business_id
+    """)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_home_scores(date_from, date_to, customer_id):
+    cte = _onboarded_cte_sql(date_from, date_to, customer_id)
+    return run_sql(cte + """SELECT cs.business_id,
+               bs.weighted_score_850, bs.weighted_score_100,
+               bs.risk_level, bs.score_decision, bs.created_at AS scored_at
+        FROM rds_manual_score_public.data_current_scores cs
+        JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+        JOIN onboarded o ON o.business_id = cs.business_id
+        ORDER BY bs.weighted_score_850 ASC""")
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_home_factors(date_from, date_to, customer_id):
+    """Load per-category factor contributions, averaged across all scored businesses."""
+    cte = _onboarded_cte_sql(date_from, date_to, customer_id)
+    return run_sql(cte + """SELECT bsf.category_id,
+               AVG(bsf.score_100)          AS avg_score_100,
+               AVG(bsf.weighted_score_850)  AS avg_impact_pts,
+               COUNT(DISTINCT cs.business_id) AS businesses
+        FROM rds_manual_score_public.data_current_scores cs
+        JOIN rds_manual_score_public.business_score_factors bsf ON bsf.score_id=cs.score_id
+        JOIN onboarded o ON o.business_id = cs.business_id
+        GROUP BY bsf.category_id
+        ORDER BY bsf.category_id""")
+
+
 if tab=="🏠 Home":
     st.markdown("# 🔬 KYB Intelligence Hub")
 
@@ -3577,22 +3827,6 @@ if tab=="🏠 Home":
 
     # ── Red flag scoring — query facts directly for the authoritative business list ──
 
-
-    @st.cache_data(ttl=1800, show_spinner=False)
-    def _load_flags_for_bids(date_from, date_to, customer_id):
-        cte = _onboarded_cte_sql(date_from, date_to, customer_id)
-        return run_sql(cte + """SELECT f.business_id, f.name,
-                   JSON_EXTRACT_PATH_TEXT(f.value,'value') AS val,
-                   f.received_at
-            FROM rds_warehouse_public.facts f
-            JOIN onboarded o ON o.business_id = f.business_id
-            WHERE LENGTH(f.value) < 60000
-              AND f.name IN (
-                  'sos_active','tin_match_boolean','watchlist_hits',
-                  'naics_code','idv_passed_boolean','num_bankruptcies',
-                  'num_judgements','num_liens','sos_match_boolean'
-              )
-            ORDER BY f.business_id, f.name, f.received_at DESC""")
 
     with st.spinner("Scoring red flags…"):
         flag_df, flag_err = _load_flags_for_bids(hub_date_from, hub_date_to, hub_customer_id)
@@ -3647,207 +3881,6 @@ if tab=="🏠 Home":
                 biz_flags[bid_check] = {"flags": flags, "score": score}
 
     # ── KYB Funnel: SOS/TIN granular facts ──────────────────────────────────
-    @st.cache_data(ttl=1800, show_spinner=False)
-    def _load_kyb_funnel_for_bids(date_from, date_to, customer_id):
-        """Load granular SOS and TIN facts needed for funnel analysis.
-        Returns one row per business with:
-          - tin_submitted, tin_status (from tin_match.value.status), tin_match_boolean
-          - sos_match_boolean, sos_active, formation_state, operating_state
-          - middesk_confidence
-
-        NOTE: idv_last4_ssn (Plaid IDV SSN last-4) is loaded separately in
-        _load_sole_prop_signal() using JSON_EXTRACT_PATH_TEXT (Redshift-safe).
-        The identity_verification.meta join is NOT done here because Redshift
-        does NOT support the PostgreSQL ::json-> operator — that caused this
-        entire query to fail and return an empty DataFrame, making all Section 1
-        counts 0 and all drilldown tables empty.
-        """
-        cte = _onboarded_cte_sql(date_from, date_to, customer_id)
-        return run_sql(cte + """
-            SELECT f.business_id,
-                MAX(CASE WHEN f.name='tin_submitted'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_submitted,
-                MAX(CASE WHEN f.name='tin_match'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS tin_status,
-                MAX(CASE WHEN f.name='tin_match_boolean'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_match_boolean,
-                MAX(CASE WHEN f.name='sos_match_boolean'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_match_boolean,
-                MAX(CASE WHEN f.name='sos_active'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_active,
-                MAX(CASE WHEN f.name='formation_state'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_state,
-                MAX(CASE WHEN f.name='primary_address'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','state') END)       AS operating_state,
-                MAX(CASE WHEN f.name='middesk_confidence'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS middesk_confidence
-            FROM rds_warehouse_public.facts f
-            JOIN onboarded o ON o.business_id = f.business_id
-            WHERE LENGTH(f.value) < 60000
-              AND f.name IN ('tin_submitted','tin_match','tin_match_boolean',
-                             'sos_match_boolean','sos_active','formation_state',
-                             'primary_address','middesk_confidence')
-            GROUP BY f.business_id
-        """)
-
-    @st.cache_data(ttl=1800, show_spinner=False)
-    def _load_sos_filings_for_bids(date_from, date_to, customer_id):
-        """Parse sos_filings[] JSON array from rds_warehouse_public.facts.
-        Source: API JSON sos_filings fact (name='sos_filings').
-        ALL signals derived from the sos_filings JSON array — no review tasks, no materialized tables.
-
-        Returns one row per FILING (multiple rows per business if multiple filings):
-          - business_id
-          - foreign_domestic  : 'domestic' | 'foreign'   (sos_filings[].foreign_domestic)
-          - filing_active     : true | false               (sos_filings[].active)
-          - filing_state      : 'FL','DE',etc.             (sos_filings[].state)
-          - jurisdiction      : 'us::fl', 'us::de', etc.  (sos_filings[].jurisdiction)
-          - entity_type       : 'llc','corporation',etc.   (sos_filings[].entity_type)
-          - non_profit        : true | false               (sos_filings[].non_profit)
-          - registration_date : date string                (sos_filings[].registration_date)
-          - filing_name       : business name on filing    (sos_filings[].filing_name)
-          - has_officers      : 1 if officers[] non-empty  (sos_filings[].officers)
-          - filing_index      : 0-based index in array
-
-        Source: integration-service/lib/facts/kyb/index.ts lines 767-987 (transformer)
-                integration-service/lib/facts/kyb/types.ts lines 20-32 (SoSRegistration schema)
-                warehouse-service/datapooler/adapters/db/models/facts.py (storage)
-        """
-        cte = _onboarded_cte_sql(date_from, date_to, customer_id)
-        # Redshift federated tables do NOT support PostgreSQL-specific JSON operators.
-        # Use JSON_EXTRACT_PATH_TEXT with positional indices (0-9) via UNION ALL.
-        def _filing_row(i):
-            idx = str(i)
-            return (
-                f"  SELECT f.business_id, {i} AS filing_index,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','foreign_domestic') AS foreign_domestic,\n"
-                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','active')='true' THEN true ELSE false END AS filing_active,\n"
-                f"    UPPER(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','state'),''))          AS filing_state,\n"
-                f"    LOWER(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','jurisdiction'),''))   AS jurisdiction,\n"
-                f"    LOWER(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','entity_type'),''))    AS entity_type,\n"
-                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','non_profit')='true' THEN 1 ELSE 0 END AS non_profit,\n"
-                f"    LEFT(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','registration_date'),\n"
-                f"                  JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','filing_date'),''),10)  AS registration_date,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','filing_name')                        AS filing_name,\n"
-                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','officers','0') IS NOT NULL\n"
-                f"         THEN 1 ELSE 0 END                                                              AS has_officers,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','id')                                 AS filing_id,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')                                AS source_platform_id,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(f.value,'source','name')                                      AS source_vendor_name\n"
-                f"  FROM rds_warehouse_public.facts f\n"
-                f"  JOIN onboarded o ON o.business_id = f.business_id\n"
-                f"  WHERE f.name='sos_filings' AND LENGTH(f.value)<60000\n"
-                f"    AND JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','state') IS NOT NULL"
-            )
-        # 5 branches covers >99% of businesses (most have 1-3 filings)
-        # Reduced from 10 to cut query execution time in half
-        union_sql = "\nUNION ALL\n".join(_filing_row(i) for i in range(5))
-        return run_sql(cte + f"SELECT * FROM (\n{union_sql}\n) sos_rows WHERE filing_state != '' OR foreign_domestic IS NOT NULL;")
-
-    @st.cache_data(ttl=1800, show_spinner=False)
-    def _load_sole_prop_signal(date_from, date_to, customer_id):
-        """Load Plaid IDV SSN last-4 for Possible Sole Prop detection.
-        Source: integration-service/lib/facts/kyb/index.ts:606
-          type === IDNumberType.UsSsnLast4 && value === tin.slice(-4) → is_sole_prop=true
-
-        Uses JSON_EXTRACT_PATH_TEXT (Redshift-compatible) on the
-        rds_integration_data.identity_verification table (federated from PostgreSQL RDS).
-        Returns: business_id, idv_last4_ssn (the SSN last-4 from Plaid IDV meta)
-        """
-        cte = _onboarded_cte_sql(date_from, date_to, customer_id)
-        return run_sql(cte + """SELECT iv.business_id,
-                MAX(JSON_EXTRACT_PATH_TEXT(iv.meta, 'user', 'id_number', 'value')) AS idv_last4_ssn
-            FROM rds_integration_data.identity_verification iv
-            JOIN onboarded o ON o.business_id = iv.business_id
-            WHERE JSON_EXTRACT_PATH_TEXT(iv.meta, 'user', 'id_number', 'type') = 'us_ssn_last_4'
-            GROUP BY iv.business_id""")
-
-    # ── Load enriched KYB stats using the same authoritative business ID list ──
-    @st.cache_data(ttl=1800, show_spinner=False)
-    def _load_stats_for_bids(date_from, date_to, customer_id):
-        """Load KYB stats for a specific list of business IDs.
-
-        Includes all columns shown in drilldown tables:
-          - Facts API registry signals: sos_match_boolean, sos_match_status, sos_active
-          - clients.verification_results flags: sos_match_verif, sos_domestic_verif, sos_active_verif
-          - TIN signals: tin_submitted, tin_match_status, tin_match (boolean)
-          - IDV, NAICS, risk, firmographic columns
-        """
-        cte = _onboarded_cte_sql(date_from, date_to, customer_id)
-        return run_sql(cte + """
-            SELECT f.business_id,
-                -- Registry / SOS — Facts API (integration-service/lib/facts/kyb/index.ts)
-                MAX(CASE WHEN f.name='sos_match_boolean'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_match_boolean,
-                MAX(CASE WHEN f.name='sos_match'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS sos_match_status,
-                MAX(CASE WHEN f.name='sos_active'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_active,
-                MAX(CASE WHEN f.name='formation_state'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_state,
-                MAX(CASE WHEN f.name='formation_date'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_date,
-                -- SOS verification flags derived from rds_integration_data.business_entity_review_task
-                -- (rds_ tables only — no clients.verification_results materialized table)
-                MAX(CASE WHEN bert.key='sos_match'    AND bert.sublabel='Submitted Active' THEN 1 ELSE 0 END) AS sos_match_verif,
-                MAX(CASE WHEN bert.key='sos_domestic' AND bert.sublabel='Domestic Active'  THEN 1 ELSE 0 END) AS sos_domestic_verif,
-                MAX(CASE WHEN bert.key='sos_active'   AND bert.status='Success'             THEN 1 ELSE 0 END) AS sos_active_verif,
-                -- TIN / EIN (index.ts lines 399-491)
-                MAX(CASE WHEN f.name='tin_submitted'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_submitted,
-                MAX(CASE WHEN f.name='tin_match'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS tin_match_status,
-                MAX(CASE WHEN f.name='tin_match_boolean'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_match,
-                -- IDV
-                MAX(CASE WHEN f.name='idv_passed_boolean'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS idv_passed,
-                -- Sole Prop (index.ts:552-616 — true|false|null)
-                -- null = not enough data; true = confirmed; false = multiple owners or SSN mismatch
-                MAX(CASE WHEN f.name='is_sole_prop'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS is_sole_prop,
-                -- Classification
-                MAX(CASE WHEN f.name='naics_code'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS naics_code,
-                -- Risk
-                MAX(CASE WHEN f.name='watchlist_hits'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS watchlist_hits,
-                MAX(CASE WHEN f.name='num_bankruptcies'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_bankruptcies,
-                MAX(CASE WHEN f.name='num_judgements'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_judgements,
-                MAX(CASE WHEN f.name='num_liens'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_liens,
-                MAX(CASE WHEN f.name='adverse_media_hits'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS adverse_media,
-                -- Firmographic
-                MAX(CASE WHEN f.name='revenue'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS revenue,
-                -- Legal name — used by DirectSOS enrichment agent for entity matching
-                MAX(CASE WHEN f.name='legal_name'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS legal_name,
-                MAX(f.received_at) AS last_seen,
-                MIN(f.received_at) AS first_seen,
-                COUNT(DISTINCT f.name) AS fact_count
-            FROM rds_warehouse_public.facts f
-            JOIN onboarded o ON o.business_id = f.business_id
-              AND LENGTH(f.value) < 60000
-            LEFT JOIN rds_integration_data.business_entity_verification bev
-                ON bev.business_id = f.business_id
-            LEFT JOIN rds_integration_data.business_entity_review_task bert
-                ON bert.business_entity_verification_id = bev.id
-                AND bert.key IN ('sos_match','sos_domestic','sos_active')
-            WHERE f.name IN (
-                  'sos_match_boolean','sos_match','sos_active',
-                  'tin_submitted','tin_match','tin_match_boolean',
-                  'idv_passed_boolean','is_sole_prop','naics_code',
-                  'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
-                  'adverse_media_hits','revenue','formation_date','formation_state',
-                  'legal_name'
-              )
-            GROUP BY f.business_id
-        """)
-
     with st.spinner("Loading KYB metrics…"):
         stats_df, stats_err = _load_stats_for_bids(hub_date_from, hub_date_to, hub_customer_id)
 
@@ -8442,31 +8475,6 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
     _WF_ORDER = [2, 3, 4, 5, 6, 7, 8]
 
     # Load Worth Scores for the authoritative business list
-    @st.cache_data(ttl=1800, show_spinner=False)
-    def _load_home_scores(date_from, date_to, customer_id):
-        cte = _onboarded_cte_sql(date_from, date_to, customer_id)
-        return run_sql(cte + """SELECT cs.business_id,
-                   bs.weighted_score_850, bs.weighted_score_100,
-                   bs.risk_level, bs.score_decision, bs.created_at AS scored_at
-            FROM rds_manual_score_public.data_current_scores cs
-            JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
-            JOIN onboarded o ON o.business_id = cs.business_id
-            ORDER BY bs.weighted_score_850 ASC""")
-
-    @st.cache_data(ttl=1800, show_spinner=False)
-    def _load_home_factors(date_from, date_to, customer_id):
-        """Load per-category factor contributions, averaged across all scored businesses."""
-        cte = _onboarded_cte_sql(date_from, date_to, customer_id)
-        return run_sql(cte + """SELECT bsf.category_id,
-                   AVG(bsf.score_100)          AS avg_score_100,
-                   AVG(bsf.weighted_score_850)  AS avg_impact_pts,
-                   COUNT(DISTINCT cs.business_id) AS businesses
-            FROM rds_manual_score_public.data_current_scores cs
-            JOIN rds_manual_score_public.business_score_factors bsf ON bsf.score_id=cs.score_id
-            JOIN onboarded o ON o.business_id = cs.business_id
-            GROUP BY bsf.category_id
-            ORDER BY bsf.category_id""")
-
     with st.spinner("Loading Worth Score distribution…"):
         _home_ws, _home_ws_err = _load_home_scores(hub_date_from, hub_date_to, hub_customer_id)
         _home_factors, _home_factors_err = _load_home_factors(hub_date_from, hub_date_to, hub_customer_id)
