@@ -151,6 +151,10 @@ Per the production root-cause analysis, 5,349 businesses (7.7% of the analyzed p
 | C: All vendor NAICS signals missing (zero coverage) | 5,348 | 99.98% |
 | E: AI not triggered / winner had no NAICS | 1 | 0.02% |
 
+> **⚠️ Note:** The counts above (5,348 and 1) reflect a production snapshot analyzed in **early April 2026**. These numbers are expected to change as the portfolio grows and as vendor coverage improves. They should not be treated as static benchmarks. Always re-run the root-cause analysis against the current production data before making decisions based on these figures.
+>
+> **Source:** `AI-Powered-NAICS-Industry-Classification-Agent/naics_mcc_classifier/NAICS_MCC_Fallback_RootCause_Analysis.ipynb`
+
 ### 5.3 Two Distinct Paths to 561499
 
 The document previously combined these. They are structurally different:
