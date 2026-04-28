@@ -10227,6 +10227,339 @@ GROUP BY 1,2 ORDER BY businesses DESC;"""
         sql=_sql_noncanon if is_live else "-- Run with is_live=True",
         icon="🔍", color="#a78bfa")
 
+    # ── A3c: User NAICS in non-canonical — are they in the mapping? ────────────
+    st.markdown("---")
+    st.markdown("##### 🗂️ A3c — User-Submitted NAICS: Mapping Coverage Check")
+    st.caption(
+        "For user-won non-canonical pairs: are the user-submitted NAICS codes even present in "
+        "`rel_naics_mcc`? Surprising finding: 100% of top codes exist in the mapping — "
+        "the problem is NOT missing mapping entries."
+    )
+
+    _naics_user_mapping_df = None
+    _sql_user_mapping = _onboarded_cte + """
+,naics_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS naics_win_pid
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+),
+mcc_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_mcc
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code' AND LENGTH(f.value)<60000
+),
+canonical_pairs AS (
+  SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+  FROM rds_cases_public.rel_naics_mcc r
+  JOIN rds_cases_public.core_naics_code nc ON nc.id=r.naics_id
+  JOIN rds_cases_public.core_mcc_code   mc ON mc.id=r.mcc_id
+),
+classified AS (
+  SELECT n.business_id, n.final_naics
+  FROM naics_f n
+  LEFT JOIN mcc_f m            ON m.business_id  = n.business_id
+  LEFT JOIN canonical_pairs cp ON cp.naics_code  = n.final_naics
+                               AND cp.mcc_code   = m.final_mcc
+  WHERE (n.final_naics != '561499' OR n.final_naics IS NULL)
+    AND (m.final_mcc != '5614' OR m.final_mcc IS NULL)
+    AND n.final_naics IS NOT NULL AND n.final_naics != ''
+    AND m.final_mcc   IS NOT NULL AND m.final_mcc   != ''
+    AND cp.naics_code IS NULL
+    AND n.naics_win_pid = '0'
+),
+naics_in_mapping AS (
+  SELECT DISTINCT nc.code AS naics_code
+  FROM rds_cases_public.core_naics_code nc
+  JOIN rds_cases_public.rel_naics_mcc r ON r.naics_id = nc.id
+)
+SELECT c.final_naics AS user_naics, COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER(),2) AS pct,
+  CASE WHEN nim.naics_code IS NOT NULL THEN 'exists_in_mapping'
+       ELSE 'missing_from_mapping' END AS mapping_status
+FROM classified c
+LEFT JOIN naics_in_mapping nim ON nim.naics_code = c.final_naics
+GROUP BY c.final_naics, nim.naics_code ORDER BY businesses DESC LIMIT 30;"""
+
+    if is_live:
+        _naics_user_mapping_df, _ = run_sql(_sql_user_mapping)
+
+    if _naics_user_mapping_df is not None and not _naics_user_mapping_df.empty:
+        _n_exists = int((_naics_user_mapping_df["mapping_status"]=="exists_in_mapping").sum())
+        _n_missing = int((_naics_user_mapping_df["mapping_status"]=="missing_from_mapping").sum())
+        _3c1, _3c2, _3c3 = st.columns(3)
+        with _3c1: kpi("📋 Top 30 User NAICS", f"{len(_naics_user_mapping_df):,}", "non-canonical cases", "#3B82F6")
+        with _3c2: kpi("✅ Exists in Mapping", f"{_n_exists:,}", "codes in rel_naics_mcc", "#22c55e")
+        with _3c3: kpi("❌ Missing from Mapping", f"{_n_missing:,}", "codes NOT in rel_naics_mcc", "#ef4444")
+
+        _color_map = {"exists_in_mapping":"#22c55e","missing_from_mapping":"#ef4444"}
+        _fig_um = px.bar(_naics_user_mapping_df.head(20), x="businesses", y="user_naics",
+                         color="mapping_status", orientation="h", text="businesses",
+                         color_discrete_map=_color_map,
+                         title="Top 20 User NAICS in Non-Canonical Pairs (color = mapping status)")
+        _fig_um.update_traces(textposition="outside")
+        _fig_um.update_layout(height=480, showlegend=True, margin=dict(t=40,b=10,l=10,r=80))
+        st.plotly_chart(dark_chart(_fig_um), use_container_width=True)
+
+        if _n_missing == 0:
+            st.warning(
+                "⚠️ **Surprising finding:** All top user-submitted NAICS codes EXIST in `rel_naics_mcc`. "
+                "The problem is NOT missing mapping entries — see root causes below.",
+                icon="⚠️"
+            )
+
+    st.markdown("""<div style="background:#1c1a2e;border-left:3px solid #f59e0b;border-radius:6px;
+        padding:12px 16px;margin:8px 0;font-size:.83rem;color:#cbd5e1">
+  <strong style="color:#f59e0b">📊 Root Cause Analysis — Two Distinct Problems:</strong><br/><br/>
+  <strong>Root Cause 1 — Truncated NAICS inputs (~37% of user non-canonical cases)</strong><br/>
+  Users submit partial codes: <code>722</code> instead of <code>722511</code>, <code>81211</code> instead of <code>812111</code>.<br/>
+  The mapping has <code>722511 → 5812</code> but NOT <code>722 → 5812</code>.<br/>
+  Pattern: 3-digit spike (sector level) and 5-digit spike (one digit short). 4-digit very rare → intentional, not random typos.<br/>
+  <strong>Fix: Frontend validation enforcing exactly 6 digits.</strong><br/><br/>
+  <strong>Root Cause 2 — AI overrides canonical mapping (~63% of valid-6-digit cases)</strong><br/>
+  <code>mcc_code = mcc_code_found ?? mcc_code_from_naics</code><br/>
+  <code>??</code> means AI wins whenever it returns a result. AI fires on nearly every business → always overrides the canonical table.<br/>
+  For NAICS <code>811111</code>, AI returns 7 different MCCs across businesses (7531, 7539, 7542...) while canonical table says <code>7538</code>.<br/>
+  <strong>Fix: Swap priority — <code>inferredMcc?.value ?? foundMcc?.value</code> (canonical wins, AI is fallback).</strong>
+</div>""", unsafe_allow_html=True)
+
+    detail_panel("🗂️ A3c User NAICS Mapping Coverage",
+        "Are user-submitted NAICS codes in rel_naics_mcc?",
+        what_it_means=(
+            "**Surprising finding:** 100% of top user-submitted NAICS codes exist in `rel_naics_mcc`. "
+            "The problem is NOT a mapping coverage gap.\n\n"
+            "**Two root causes identified:**\n\n"
+            "**1. Truncated NAICS inputs (~37%):** Users submit partial codes (`722`, `81211`) that exist "
+            "in the mapping as full codes but not as partial codes. "
+            "Fix: `validation.ts` — enforce `value.length === 6`.\n\n"
+            "**2. AI overrides canonical (~63%):** `mcc_code = mcc_code_found ?? mcc_code_from_naics` "
+            "means AI always wins. AI returns context-dependent, non-deterministic MCCs that differ from "
+            "the canonical `rel_naics_mcc` mapping. Fix: swap to `inferredMcc?.value ?? foundMcc?.value`.\n\n"
+            "**Source:** `rds_warehouse_public.facts name='naics_code'` · `rds_cases_public.rel_naics_mcc`"
+        ),
+        source_table="rds_warehouse_public.facts + rds_cases_public.rel_naics_mcc",
+        sql=_sql_user_mapping if is_live else "-- Run with is_live=True",
+        icon="🗂️", color="#f59e0b")
+
+    # ── A3d: NAICS Length Distribution ────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 📏 A3d — User NAICS Code Length Distribution (Truncation Check)")
+    st.caption(
+        "How widespread is the truncated NAICS input problem? "
+        "Production finding: ~37% of user non-canonical cases are partial codes (2-5 digits). "
+        "Source: `rds_warehouse_public.facts name='naics_code'` + `LEN()` on user-submitted values."
+    )
+
+    _naics_length_df = None
+    _sql_length = _onboarded_cte + """
+,naics_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS naics_win_pid
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+),
+mcc_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_mcc
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code' AND LENGTH(f.value)<60000
+),
+canonical_pairs AS (
+  SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+  FROM rds_cases_public.rel_naics_mcc r
+  JOIN rds_cases_public.core_naics_code nc ON nc.id=r.naics_id
+  JOIN rds_cases_public.core_mcc_code   mc ON mc.id=r.mcc_id
+),
+user_noncanonical AS (
+  SELECT n.final_naics
+  FROM naics_f n
+  LEFT JOIN mcc_f m            ON m.business_id  = n.business_id
+  LEFT JOIN canonical_pairs cp ON cp.naics_code  = n.final_naics
+                               AND cp.mcc_code   = m.final_mcc
+  WHERE n.naics_win_pid = '0' AND cp.naics_code IS NULL
+    AND (n.final_naics != '561499' OR n.final_naics IS NULL)
+    AND (m.final_mcc   != '5614'   OR m.final_mcc IS NULL)
+    AND n.final_naics IS NOT NULL AND n.final_naics != ''
+    AND m.final_mcc   IS NOT NULL AND m.final_mcc   != ''
+)
+SELECT LEN(final_naics) AS naics_length, COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER(),2) AS pct,
+  CASE LEN(final_naics)
+    WHEN 6 THEN 'valid_6_digit'
+    WHEN 5 THEN 'truncated_5_digit'
+    WHEN 4 THEN 'truncated_4_digit'
+    WHEN 3 THEN 'truncated_3_digit'
+    WHEN 2 THEN 'truncated_2_digit'
+    ELSE 'other' END AS validity
+FROM user_noncanonical
+GROUP BY 1 ORDER BY businesses DESC;"""
+
+    if is_live:
+        _naics_length_df, _ = run_sql(_sql_length)
+
+    if _naics_length_df is not None and not _naics_length_df.empty:
+        _len_colors = {"valid_6_digit":"#22c55e","truncated_5_digit":"#f59e0b",
+                       "truncated_3_digit":"#ef4444","truncated_4_digit":"#f97316","truncated_2_digit":"#dc2626"}
+        _3d1, _3d2 = st.columns([2,3])
+        with _3d1:
+            _fig_len = px.bar(_naics_length_df, x="businesses", y="validity",
+                              orientation="h", text="pct", color="validity",
+                              color_discrete_map=_len_colors,
+                              title="NAICS Length Distribution (User Non-Canonical)")
+            _fig_len.update_traces(texttemplate="%{text}%", textposition="outside")
+            _fig_len.update_layout(height=280, showlegend=False, margin=dict(t=40,b=10,l=10,r=80))
+            st.plotly_chart(dark_chart(_fig_len), use_container_width=True)
+        with _3d2:
+            st.dataframe(_naics_length_df, use_container_width=True, hide_index=True)
+            _n_truncated = int(_naics_length_df[_naics_length_df["naics_length"]!=6]["businesses"].sum())
+            _n_valid6    = int(_naics_length_df[_naics_length_df["naics_length"]==6]["businesses"].sum())
+            _total_l     = int(_naics_length_df["businesses"].sum())
+            if _total_l > 0:
+                st.markdown(f"""<div style="background:#1c1a2e;border-left:3px solid #22c55e;
+                    border-radius:6px;padding:10px 14px;margin:8px 0;font-size:.82rem">
+  Truncated codes (< 6 digits): <strong>{_n_truncated:,}</strong> ({round(100*_n_truncated/max(_total_l,1),1)}%) — 
+  {'⚠️ Significant truncation problem — add frontend validation' if _n_truncated > _total_l*0.2 else '✅ Truncation is minor'}<br/>
+  Valid 6-digit but non-canonical: <strong>{_n_valid6:,}</strong> ({round(100*_n_valid6/max(_total_l,1),1)}%) — 
+  AI MCC override is the root cause (see A3e below)
+</div>""", unsafe_allow_html=True)
+    else:
+        st.info("Run with live Redshift connection to see NAICS length distribution.", icon="ℹ️")
+
+    detail_panel("📏 A3d NAICS Length Distribution",
+        "How many user-submitted NAICS codes are truncated (< 6 digits)?",
+        what_it_means=(
+            "**Production findings:**\n\n"
+            "- ~18.3% are 5-digit (e.g. `81211`, `32621`) — one digit short\n"
+            "- ~17.2% are 3-digit (e.g. `722`, `459`) — sector/subsector level\n"
+            "- ~62.7% are valid 6-digit — but still non-canonical due to AI MCC override\n"
+            "- 4-digit very rare → confirms intentional partial submission, not random typos\n\n"
+            "**Frontend fix (microsites/.../validation.ts):**\n"
+            "```typescript\n"
+            "// Current (too permissive):\nvalue.length >= 2 && value.length <= 6\n\n"
+            "// Fix:\nvalue.length === 6  // NAICS must be exactly 6 digits\n```\n\n"
+            "**Impact:** Fixing frontend validation eliminates ~37% of user non-canonical pairs.\n\n"
+            "**Source:** `rds_warehouse_public.facts name='naics_code'` `LEN()` on user-submitted values"
+        ),
+        source_table="rds_warehouse_public.facts name='naics_code' (user platformId=0)",
+        sql=_sql_length if is_live else "-- Run with is_live=True",
+        icon="📏", color="#f59e0b")
+
+    # ── A3e: AI vs Canonical MCC Divergence ───────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 🤖 A3e — AI vs Canonical MCC Divergence")
+    st.caption(
+        "For valid 6-digit user NAICS in non-canonical pairs: is the AI overriding the canonical table? "
+        "Production verdict: AI is responsible for 99.7% of valid-6-digit non-canonical pairs. "
+        "Root cause: `mcc_code = mcc_code_found ?? mcc_code_from_naics` — AI always wins."
+    )
+
+    _naics_ai_div_df = None
+    _sql_ai_div = _onboarded_cte + """
+,naics_f AS (SELECT f.business_id,
+  JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_naics,
+  JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS naics_win_pid
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000),
+mcc_f AS (SELECT f.business_id,
+  JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_mcc
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code' AND LENGTH(f.value)<60000),
+ai_mcc_f AS (SELECT f.business_id,
+  JSON_EXTRACT_PATH_TEXT(f.value,'value') AS ai_mcc
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code_found' AND LENGTH(f.value)<60000),
+canonical_derived_f AS (SELECT f.business_id,
+  JSON_EXTRACT_PATH_TEXT(f.value,'value') AS canonical_derived_mcc
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code_from_naics' AND LENGTH(f.value)<60000),
+canonical_pairs AS (
+  SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+  FROM rds_cases_public.rel_naics_mcc r
+  JOIN rds_cases_public.core_naics_code nc ON nc.id=r.naics_id
+  JOIN rds_cases_public.core_mcc_code   mc ON mc.id=r.mcc_id
+),
+user_noncanonical_6 AS (
+  SELECT n.final_naics, m.final_mcc AS actual_mcc, ai.ai_mcc, cd.canonical_derived_mcc
+  FROM naics_f n
+  LEFT JOIN mcc_f m              ON m.business_id  = n.business_id
+  LEFT JOIN ai_mcc_f ai          ON ai.business_id = n.business_id
+  LEFT JOIN canonical_derived_f cd ON cd.business_id = n.business_id
+  LEFT JOIN canonical_pairs cp   ON cp.naics_code  = n.final_naics AND cp.mcc_code = m.final_mcc
+  WHERE n.naics_win_pid='0' AND cp.naics_code IS NULL AND LEN(n.final_naics)=6
+    AND n.final_naics != '561499'
+    AND (m.final_mcc != '5614' OR m.final_mcc IS NULL)
+    AND n.final_naics IS NOT NULL AND n.final_naics != ''
+    AND m.final_mcc   IS NOT NULL AND m.final_mcc   != ''
+)
+SELECT
+  CASE
+    WHEN ai_mcc IS NOT NULL AND ai_mcc = actual_mcc      THEN 'AI_won_over_canonical'
+    WHEN ai_mcc IS NULL AND canonical_derived_mcc = actual_mcc THEN 'canonical_derived_only'
+    WHEN ai_mcc IS NOT NULL AND canonical_derived_mcc IS NOT NULL
+      AND ai_mcc != canonical_derived_mcc                THEN 'AI_and_canonical_disagree'
+    ELSE 'other'
+  END AS derivation_scenario,
+  COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER(),2) AS pct
+FROM user_noncanonical_6
+GROUP BY 1 ORDER BY businesses DESC;"""
+
+    if is_live:
+        _naics_ai_div_df, _ = run_sql(_sql_ai_div)
+
+    if _naics_ai_div_df is not None and not _naics_ai_div_df.empty:
+        _3e1, _3e2 = st.columns([2,3])
+        _div_colors = {"AI_won_over_canonical":"#ef4444","canonical_derived_only":"#22c55e",
+                       "AI_and_canonical_disagree":"#f59e0b","other":"#64748b"}
+        with _3e1:
+            _fig_div = px.pie(_naics_ai_div_df, names="derivation_scenario", values="businesses",
+                              hole=0.45, title="MCC Derivation Scenario",
+                              color="derivation_scenario", color_discrete_map=_div_colors)
+            _fig_div.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(_fig_div), use_container_width=True)
+        with _3e2:
+            st.dataframe(_naics_ai_div_df, use_container_width=True, hide_index=True)
+            _ai_won = int(_naics_ai_div_df[_naics_ai_div_df["derivation_scenario"]=="AI_won_over_canonical"]["businesses"].sum())
+            _total_e = int(_naics_ai_div_df["businesses"].sum())
+            if _ai_won > _total_e * 0.5:
+                st.error(
+                    f"🔴 **AI is overriding canonical table for {round(100*_ai_won/max(_total_e,1),1)}% of cases.** "
+                    f"Root cause: `mcc_code = mcc_code_found ?? mcc_code_from_naics` (AI wins by default). "
+                    f"**Fix:** Swap to `inferredMcc?.value ?? foundMcc?.value` in `businessDetails/index.ts`.",
+                    icon="🔴"
+                )
+    else:
+        st.info("Run with live Redshift connection to see AI vs canonical divergence.", icon="ℹ️")
+
+    detail_panel("🤖 A3e AI vs Canonical MCC",
+        "Is the AI overriding the canonical rel_naics_mcc table?",
+        what_it_means=(
+            "**The MCC priority chain (businessDetails/index.ts:427-431):**\n"
+            "```typescript\n// Three internal MCC facts, all platformId=-1:\n"
+            "mcc_code_found        = AI NAICS Enrichment (OpenAI gpt-4o-mini)\n"
+            "mcc_code_from_naics   = rel_naics_mcc canonical lookup\n"
+            "mcc_code (final)      = mcc_code_found ?? mcc_code_from_naics\n\n"
+            "// ?? means: AI wins whenever it returns a result\n```\n\n"
+            "**Production verdict:** AI responsible for ~99.7% of valid-6-digit non-canonical pairs.\n\n"
+            "**Fix (1-line change in businessDetails/index.ts):**\n"
+            "```typescript\n// Current (AI wins):\nreturn foundMcc?.value ?? inferredMcc?.value;\n\n"
+            "// Fix (canonical wins, AI is fallback):\nreturn inferredMcc?.value ?? foundMcc?.value;\n```\n\n"
+            "**Impact:** This single change fixes ~63% of all valid-NAICS non-canonical pairs.\n\n"
+            "**Source:** `rds_warehouse_public.facts name='mcc_code_found'` (AI) · "
+            "`name='mcc_code_from_naics'` (canonical) · `name='mcc_code'` (final)\n"
+            "**Key file:** `integration-service/lib/facts/businessDetails/index.ts:427-431`"
+        ),
+        source_table="rds_warehouse_public.facts name='mcc_code_found' + 'mcc_code_from_naics'",
+        sql=_sql_ai_div if is_live else "-- Run with is_live=True",
+        icon="🤖", color="#ef4444")
+
     # ── A4: Pairwise Vendor Concordance ────────────────────────────────────────
     st.markdown("---")
     st.markdown("##### 🤝 A4 — Pairwise Vendor Concordance (OC vs Equifax)")

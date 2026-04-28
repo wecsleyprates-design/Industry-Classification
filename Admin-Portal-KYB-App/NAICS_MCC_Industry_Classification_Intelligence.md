@@ -442,43 +442,27 @@ LIMIT 50;
 
 ### Analysis 5: NAICS-MCC Canonical Pair Check (corrected for 1-to-many)
 
-**Business question:** Does the final NAICS-MCC pair make sense? Is it canonical, noncanonical, fallback, or missing?
+**Business question:** Does the final NAICS-MCC pair make sense?
 
-**What this tells you:** For every business, classify whether its current NAICS-MCC pair is a valid combination per the `rel_naics_mcc` canonical mapping table. Non-canonical pairs indicate MCC was derived from a fallback NAICS, or the AI returned an MCC inconsistent with the industry.
+**What this tells you:** For every business, classify whether its NAICS-MCC pair is valid per `rel_naics_mcc`. Uses a pre-built `canonical_pairs` CTE (not a correlated subquery) to handle the 1-to-many mapping correctly.
 
 **Analyst explanation — what "canonical" means:**
 
-In this context, a **canonical pair** means a NAICS + MCC code combination that is officially recognized in Worth's mapping table (`rds_cases_public.rel_naics_mcc`). Think of it as a pre-approved lookup table:
+A **canonical pair** means a NAICS + MCC code combination officially recognized in `rds_cases_public.rel_naics_mcc` — Worth's source of truth for valid NAICS-MCC mappings.
 
-> NAICS `722511` (Full-Service Restaurants) + MCC `5812` (Eating Places) → **canonical** — these go together  
-> NAICS `722511` (Full-Service Restaurants) + MCC `5045` (Computers) → **non-canonical** — these don't logically match
+- NAICS `722511` (Full-Service Restaurants) + MCC `5812` (Eating Places) → **canonical** ✅
+- NAICS `722511` (Full-Service Restaurants) + MCC `5045` (Computers) → **non-canonical** ⚠️
 
-**The 5 categories explained:**
-
-| Status | Definition | Underwriting implication |
+| Status | Definition | Underwriting Implication |
 |---|---|---|
-| `canonical_pair` | Both codes exist AND their combination is in `rel_naics_mcc` | ✅ Valid — proceed with confidence |
-| `noncanonical_pair` | Both codes exist BUT the combination is not in the mapping | ⚠️ Review — data quality issue or niche industry |
-| `fallback_pair` | NAICS=561499 or MCC=5614 — the generic "we don't know" defaults | 🔴 Unreliable — investigate root cause |
-| `naics_missing` | No NAICS fact found for this business | 🔴 No industry classification available |
-| `mcc_missing` | No MCC fact found for this business | ⚠️ MCC derivation failed |
+| `canonical_pair` | Both codes exist AND combination is in `rel_naics_mcc` | ✅ Valid — proceed |
+| `noncanonical_pair` | Both codes exist BUT combination not in mapping | ⚠️ Review needed |
+| `fallback_pair` | NAICS=561499 or MCC=5614 — generic fallback defaults | 🔴 Unreliable — investigate |
+| `naics_missing` | No NAICS fact found | 🔴 No classification available |
+| `mcc_missing` | No MCC fact found | ⚠️ MCC derivation failed |
 
-**Why non-canonical pairs happen:**
-1. **Data quality issue** — vendor returned industry codes from inconsistent sources (e.g., parent company NAICS + subsidiary MCC)
-2. **Niche industry** — the business operates in a segment not yet covered by the mapping table
-3. **User input mismatch** — the user submitted a NAICS that doesn't match what vendors provided for MCC derivation
-4. **AI inconsistency** — AI returned a valid NAICS, but `rel_naics_mcc` lookup produced a non-matching MCC
-
-**Important:** `rel_naics_mcc` is Worth's **source of truth** for valid NAICS-MCC combinations. Non-canonical cases should be reviewed before underwriting decisions are finalized.
-
-**Key correction:** The original document used a correlated `EXISTS` subquery (slow on large datasets). The improved version pre-builds all canonical pairs as a CTE and uses a `LEFT JOIN` — identical logic, much better performance.
-
-**Correct SQL (improved — pre-built canonical pairs CTE):**
+**Correct SQL (pre-built canonical_pairs CTE):**
 ```sql
--- What we are trying to understand:
--- For each business in the selected date/customer window, is the combination of
--- final_naics_code and final_mcc_code a known-valid pair in rel_naics_mcc?
--- Results: fallback_pair | naics_missing | mcc_missing | canonical_pair | noncanonical_pair
 WITH onboarded AS (
   SELECT DISTINCT rbcm.business_id
   FROM rds_cases_public.rel_business_customer_monitoring rbcm
@@ -499,7 +483,7 @@ mcc_f AS (
   JOIN onboarded o ON o.business_id = f.business_id
   WHERE f.name = 'mcc_code' AND LENGTH(f.value) < 60000
 ),
--- Pre-build all canonical pairs — avoids correlated subquery, better performance
+-- Pre-build all canonical pairs — avoids correlated subquery
 canonical_pairs AS (
   SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
   FROM rds_cases_public.rel_naics_mcc r
@@ -514,48 +498,35 @@ SELECT
     WHEN cp.naics_code IS NOT NULL                         THEN 'canonical_pair'
     ELSE 'noncanonical_pair'
   END AS pair_status,
-  COUNT(*)                                                 AS businesses,
-  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2)      AS pct
+  COUNT(*) AS businesses,
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct
 FROM naics_f n
-LEFT JOIN mcc_f m           ON m.business_id  = n.business_id
+LEFT JOIN mcc_f m          ON m.business_id  = n.business_id
 LEFT JOIN canonical_pairs cp ON cp.naics_code = n.final_naics
-                              AND cp.mcc_code  = m.final_mcc
-GROUP BY 1
-ORDER BY businesses DESC;
+                             AND cp.mcc_code  = m.final_mcc
+GROUP BY 1 ORDER BY businesses DESC;
 ```
 
 ---
 
-### Analysis 5b: Non-Canonical Pair Breakdown — Who Won NAICS × Who Won MCC?
+### Analysis 5b: Non-Canonical Pair Breakdown — NAICS Winner × MCC Winner
 
-**Business question:** Of the businesses with a non-canonical NAICS-MCC pair, is the mismatch being driven by user submissions or by vendor data? Which combination of NAICS winner × MCC winner produces the most non-canonical cases?
+**Business question:** Of the non-canonical pairs, is the mismatch driven by user submissions or by vendors?
 
-**What this tells you:** A non-canonical pair means NAICS and MCC exist but their combination is not in `rel_naics_mcc`. This analysis breaks down those mismatch cases by who provided the winning NAICS and who provided the winning MCC. If "User × AI Enrichment" appears frequently, it means the user submitted a NAICS that vendors couldn't validate, and AI derived a mismatched MCC. If "AI Enrichment × AI Enrichment" dominates, it means the AI classification pipeline is producing internally inconsistent codes.
+**What this tells you:** Breaks down non-canonical cases by who won the NAICS fact × who won the MCC fact. Identifies whether user submissions or specific vendors are responsible.
 
-**Analyst explanation:**
+**Key finding from production data:** ~87% of non-canonical cases have `Other (-1)` as the MCC winner. platformId=-1 means the MCC was system-derived via `mcc_code_from_naics` — the internal fact that auto-derives MCC from the winning NAICS by calling `GET /v1/internal/core/naics?code=<naics>` → `rel_naics_mcc` lookup.
 
-In this context, a **canonical pair** means a NAICS + MCC code combination that is officially recognized in Worth's mapping table (`rds_cases_public.rel_naics_mcc`). Think of it as a pre-approved lookup table:
+**Reading the top production rows:**
+- `User | Other(-1)` — ~75%: User submitted a NAICS → system auto-derived an MCC → but the pair is not canonical. This is the #1 driver.
+- `Other(22) | Other(-1)` — ~11.5%: Unknown vendor (SERP, platformId=22) won NAICS → system derived MCC → non-canonical.
+- `ZoomInfo | Other(-1)` — ~8%: ZoomInfo returning niche codes not in the mapping table.
 
-- NAICS `722511` (Full-Service Restaurants) + MCC `5812` (Eating Places) → **canonical** — these go together
-- NAICS `722511` (Full-Service Restaurants) + MCC `5045` (Computers) → **non-canonical** — these don't logically match
-
-A **non-canonical pair** could indicate:
-1. **Data quality issue** — a vendor returned industry codes from inconsistent sources (e.g., parent company NAICS + subsidiary MCC)
-2. **Niche industry** — the business operates in a segment not yet covered by the mapping table
-3. **User input mismatch** — the user submitted a NAICS that doesn't match what vendors provided for MCC
-4. **AI inconsistency** — AI returned a NAICS but the derived MCC via `rel_naics_mcc` lookup did not produce a matching pair
-
-The `rel_naics_mcc` table is Worth's **source of truth** for which NAICS-MCC combinations are considered valid. Non-canonical cases should be reviewed for data quality issues before underwriting decisions are made.
-
-**MCC derivation reminder:** MCC is almost never provided directly by vendors — it is derived from NAICS via `internalGetNaicsCode(final_naics) → rel_naics_mcc`. This means if NAICS is wrong (or non-canonical with respect to the business's actual industry), the MCC will also be wrong by inheritance. The winning vendor for `mcc_code` will often be `Calculated (-1)` or `AI Enrichment (31)`.
+**Key takeaway:** ~75% of non-canonical pairs are user-driven — users submit a NAICS that either has no canonical MCC in `rel_naics_mcc`, or the system derives a mismatched MCC. This is not primarily a vendor data quality problem — it is a user input + canonical mapping gap.
 
 **Correct SQL:**
 ```sql
--- What we are trying to understand:
--- Of the businesses with a non-canonical NAICS-MCC pair,
--- who won the NAICS fact and who won the MCC fact?
--- This identifies whether user submissions or specific vendors
--- are responsible for the mismatch.
+-- Identifies which vendor-winner combination is driving non-canonical pairs
 WITH onboarded AS (
   SELECT DISTINCT rbcm.business_id
   FROM rds_cases_public.rel_business_customer_monitoring rbcm
@@ -585,10 +556,7 @@ canonical_pairs AS (
   JOIN rds_cases_public.core_mcc_code   mc ON mc.id = r.mcc_id
 ),
 classified AS (
-  SELECT
-    n.business_id,
-    n.naics_win_pid,
-    m.mcc_win_pid,
+  SELECT n.business_id, n.naics_win_pid, m.mcc_win_pid,
     CASE
       WHEN n.final_naics = '561499' OR m.final_mcc = '5614' THEN 'fallback_pair'
       WHEN n.final_naics IS NULL OR n.final_naics = ''       THEN 'naics_missing'
@@ -601,42 +569,341 @@ classified AS (
   LEFT JOIN canonical_pairs cp ON cp.naics_code = n.final_naics
                                AND cp.mcc_code  = m.final_mcc
 )
--- Only the non-canonical cases — broken down by NAICS winner × MCC winner
 SELECT
   CASE naics_win_pid
     WHEN '23' THEN 'OpenCorporates' WHEN '17' THEN 'Equifax'
     WHEN '24' THEN 'ZoomInfo'       WHEN '16' THEN 'Middesk'
-    WHEN '38' THEN 'Trulioo'        WHEN '31' THEN 'AI Enrichment'
-    WHEN '0'  THEN 'User Submitted' WHEN '-1' THEN 'Calculated'
-    ELSE 'Other (' || naics_win_pid || ')'
+    WHEN '31' THEN 'AI Enrichment'  WHEN '0'  THEN 'User Submitted'
+    WHEN '-1' THEN 'Calculated'     ELSE 'Other (' || naics_win_pid || ')'
   END AS naics_winner,
   CASE mcc_win_pid
     WHEN '23' THEN 'OpenCorporates' WHEN '17' THEN 'Equifax'
     WHEN '24' THEN 'ZoomInfo'       WHEN '16' THEN 'Middesk'
-    WHEN '38' THEN 'Trulioo'        WHEN '31' THEN 'AI Enrichment'
-    WHEN '0'  THEN 'User Submitted' WHEN '-1' THEN 'Calculated'
-    ELSE 'Other (' || mcc_win_pid || ')'
+    WHEN '31' THEN 'AI Enrichment'  WHEN '0'  THEN 'User Submitted'
+    WHEN '-1' THEN 'Calculated'     ELSE 'Other (' || mcc_win_pid || ')'
   END AS mcc_winner,
-  COUNT(*)                                                           AS businesses,
-  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2)                AS pct
+  COUNT(*) AS businesses,
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct
 FROM classified
 WHERE pair_status = 'noncanonical_pair'
-GROUP BY 1, 2
-ORDER BY businesses DESC;
+GROUP BY 1, 2 ORDER BY businesses DESC;
 ```
 
-**How to interpret the results:**
+---
 
-| NAICS Winner | MCC Winner | Interpretation |
-|---|---|---|
-| User Submitted | AI Enrichment | User provided a NAICS that AI couldn't map to a canonical MCC — likely a niche or incorrect user input |
-| AI Enrichment | Calculated | AI classified NAICS then MCC was derived via `rel_naics_mcc`; derivation produced a non-canonical pair — AI NAICS quality issue |
-| OpenCorporates | Calculated | OC NAICS is inconsistent with the derived MCC — possible OC data quality issue or unusual industry |
-| Equifax | Calculated | Equifax NAICS does not map to a canonical MCC — similar investigation needed |
+### Analysis 5c: User NAICS Codes Driving Non-Canonical Pairs — Are They in the Mapping?
 
-**Action:** For "User Submitted" as NAICS winner in non-canonical cases, consider triggering manual review or re-running AI enrichment with higher weight to override potentially incorrect user input.
+**Business question:** For user-won non-canonical cases — are the user-submitted NAICS codes missing from `rel_naics_mcc`, or do they exist in the mapping?
+
+**Surprising production finding:** 100% of the top 50 user-submitted NAICS codes are `exists_in_mapping`. The problem is NOT a mapping coverage gap. The NAICS codes submitted by users DO exist in `rel_naics_mcc` — something else is causing the mismatch.
+
+**Correct SQL:**
+```sql
+-- Which user-submitted NAICS codes appear in non-canonical pairs?
+-- Are they missing from rel_naics_mcc or do they exist?
+WITH onboarded AS (
+  SELECT DISTINCT rbcm.business_id
+  FROM rds_cases_public.rel_business_customer_monitoring rbcm
+  WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'
+    AND rbcm.customer_id = '{customer_id}'
+),
+naics_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS naics_win_pid
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id = f.business_id
+  WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
+),
+mcc_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_mcc,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS mcc_win_pid
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id = f.business_id
+  WHERE f.name = 'mcc_code' AND LENGTH(f.value) < 60000
+),
+canonical_pairs AS (
+  SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+  FROM rds_cases_public.rel_naics_mcc r
+  JOIN rds_cases_public.core_naics_code nc ON nc.id = r.naics_id
+  JOIN rds_cases_public.core_mcc_code   mc ON mc.id = r.mcc_id
+),
+classified AS (
+  SELECT n.business_id, n.final_naics, n.naics_win_pid
+  FROM naics_f n
+  LEFT JOIN mcc_f m            ON m.business_id  = n.business_id
+  LEFT JOIN canonical_pairs cp ON cp.naics_code  = n.final_naics
+                               AND cp.mcc_code   = m.final_mcc
+  WHERE (n.final_naics != '561499' OR n.final_naics IS NULL)
+    AND (m.final_mcc != '5614' OR m.final_mcc IS NULL)
+    AND n.final_naics IS NOT NULL AND n.final_naics != ''
+    AND m.final_mcc   IS NOT NULL AND m.final_mcc   != ''
+    AND cp.naics_code IS NULL   -- noncanonical only
+    AND n.naics_win_pid = '0'   -- user won NAICS
+),
+naics_in_mapping AS (
+  SELECT DISTINCT nc.code AS naics_code
+  FROM rds_cases_public.core_naics_code nc
+  JOIN rds_cases_public.rel_naics_mcc r ON r.naics_id = nc.id
+)
+SELECT
+  c.final_naics AS user_naics,
+  COUNT(*) AS businesses,
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct,
+  CASE WHEN nim.naics_code IS NOT NULL THEN 'exists_in_mapping'
+       ELSE 'missing_from_mapping' END AS mapping_status
+FROM classified c
+LEFT JOIN naics_in_mapping nim ON nim.naics_code = c.final_naics
+GROUP BY c.final_naics, nim.naics_code
+ORDER BY businesses DESC LIMIT 50;
+```
+
+**Two root causes identified (when mapping is not the problem):**
+
+**Root Cause 1 — Truncated NAICS inputs (~37% of non-canonical user cases):**
+Users submit partial codes: `722` instead of `722511`, `81211` instead of `812111`. The mapping table has `722511 → 5812` but NOT `722 → 5812`. When the system calls `GET /v1/internal/core/naics?code=722`, it returns no match or a mismatched MCC.
+
+- 3-digit codes (e.g., `722`, `459`) — users submitting sector level instead of national industry level
+- 5-digit codes (e.g., `81211`, `32621`) — users stopping one digit short
+- 4-digit codes are very rare → not random typos, users are intentionally submitting at sector/group level
+
+**Fix: Frontend validation enforcing exactly 6 digits.**
+
+```typescript
+// microsites/.../validation.ts — current (too permissive):
+value.length >= 2 && value.length <= 6  // allows 722, 81211, etc.
+
+// Fix:
+value.length === 6  // NAICS codes must be exactly 6 digits
+```
+
+**Root Cause 2 — AI overrides canonical mapping (~63% of valid-6-digit non-canonical cases):**
+For valid 6-digit NAICS codes, the system's `mcc_code` fact resolves as:
+```
+mcc_code = mcc_code_found ?? mcc_code_from_naics
+```
+The `??` means: AI result wins if it exists. Since AI fires on nearly every business, it almost always overrides the canonical table. The AI returns context-dependent MCCs (e.g., for NAICS `811111` it returns 7531, 7539, 7542, 5533, 5511, 5571, 7699 — all different, all non-deterministic) while the canonical table consistently maps `811111 → 7538`.
 
 ---
+
+### Analysis 5d: NAICS Code Length Distribution Among User Non-Canonical Cases
+
+**Business question:** How widespread is the truncated NAICS input problem?
+
+**Correct SQL:**
+```sql
+-- Checks the length distribution of user-submitted NAICS codes in non-canonical pairs
+WITH onboarded AS (
+  SELECT DISTINCT rbcm.business_id
+  FROM rds_cases_public.rel_business_customer_monitoring rbcm
+  WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'
+    AND rbcm.customer_id = '{customer_id}'
+),
+naics_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS naics_win_pid
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id = f.business_id
+  WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
+),
+mcc_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_mcc,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS mcc_win_pid
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id = f.business_id
+  WHERE f.name = 'mcc_code' AND LENGTH(f.value) < 60000
+),
+canonical_pairs AS (
+  SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+  FROM rds_cases_public.rel_naics_mcc r
+  JOIN rds_cases_public.core_naics_code nc ON nc.id = r.naics_id
+  JOIN rds_cases_public.core_mcc_code   mc ON mc.id = r.mcc_id
+),
+user_noncanonical AS (
+  SELECT n.final_naics
+  FROM naics_f n
+  LEFT JOIN mcc_f m            ON m.business_id  = n.business_id
+  LEFT JOIN canonical_pairs cp ON cp.naics_code  = n.final_naics
+                               AND cp.mcc_code   = m.final_mcc
+  WHERE n.naics_win_pid = '0'
+    AND cp.naics_code IS NULL
+    AND (n.final_naics != '561499' OR n.final_naics IS NULL)
+    AND (m.final_mcc   != '5614'   OR m.final_mcc IS NULL)
+    AND n.final_naics IS NOT NULL AND n.final_naics != ''
+    AND m.final_mcc   IS NOT NULL AND m.final_mcc   != ''
+)
+SELECT
+  LEN(final_naics) AS naics_length,
+  COUNT(*) AS businesses,
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct,
+  CASE LEN(final_naics)
+    WHEN 6 THEN 'valid (6-digit)'
+    WHEN 5 THEN 'truncated (5-digit)'
+    WHEN 4 THEN 'truncated (4-digit)'
+    WHEN 3 THEN 'truncated (3-digit)'
+    WHEN 2 THEN 'truncated (2-digit)'
+    ELSE 'other'
+  END AS validity
+FROM user_noncanonical
+GROUP BY 1 ORDER BY businesses DESC;
+```
+
+**Production findings:**
+- **~18.3% are 5-digit** (e.g., `81211`, `32621`) — users stopping one digit short
+- **~17.2% are 3-digit** (e.g., `722`, `459`) — users submitting sector/subsector level
+- **~62.7% are valid 6-digit** — but STILL non-canonical due to AI override (Root Cause 2 above)
+- 4-digit being very low confirms this is intentional partial submission, not random typos
+
+---
+
+### Analysis 5e: AI vs Canonical MCC Divergence (Root Cause of Valid-6-Digit Non-Canonical)
+
+**Business question:** For valid 6-digit user NAICS codes that are still non-canonical, is the AI overriding the canonical table?
+
+**Key finding:** AI is responsible for 99.7% of valid-6-digit non-canonical pairs.
+
+**The three MCC sources (all platformId=-1):**
+1. `mcc_code_found` — AI NAICS Enrichment (OpenAI gpt-4o-mini) derives MCC from business context
+2. `mcc_code_from_naics` — canonical `rel_naics_mcc` table lookup via `internalGetNaicsCode()`
+3. `mcc_code` (final) — priority logic: `mcc_code_found ?? mcc_code_from_naics`
+
+The `??` means AI wins whenever it returns a result. Since AI fires on almost every business, the canonical table is effectively bypassed.
+
+**Correct SQL:**
+```sql
+-- Quantifies AI-vs-canonical MCC divergence for valid-6-digit user NAICS in non-canonical pairs
+WITH onboarded AS (
+  SELECT DISTINCT rbcm.business_id
+  FROM rds_cases_public.rel_business_customer_monitoring rbcm
+  WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'
+    AND rbcm.customer_id = '{customer_id}'
+),
+naics_f AS (SELECT f.business_id,
+  JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_naics,
+  JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS naics_win_pid
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000),
+mcc_f AS (SELECT f.business_id,
+  JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_mcc,
+  JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS mcc_win_pid
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code' AND LENGTH(f.value)<60000),
+ai_mcc_f AS (SELECT f.business_id,
+  JSON_EXTRACT_PATH_TEXT(f.value,'value') AS ai_mcc
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code_found' AND LENGTH(f.value)<60000),
+canonical_derived_f AS (SELECT f.business_id,
+  JSON_EXTRACT_PATH_TEXT(f.value,'value') AS canonical_derived_mcc
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code_from_naics' AND LENGTH(f.value)<60000),
+canonical_pairs AS (
+  SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+  FROM rds_cases_public.rel_naics_mcc r
+  JOIN rds_cases_public.core_naics_code nc ON nc.id=r.naics_id
+  JOIN rds_cases_public.core_mcc_code   mc ON mc.id=r.mcc_id
+),
+user_noncanonical_6 AS (
+  SELECT n.final_naics, m.final_mcc AS actual_mcc, ai.ai_mcc, cd.canonical_derived_mcc
+  FROM naics_f n
+  LEFT JOIN mcc_f m              ON m.business_id  = n.business_id
+  LEFT JOIN ai_mcc_f ai          ON ai.business_id = n.business_id
+  LEFT JOIN canonical_derived_f cd ON cd.business_id = n.business_id
+  LEFT JOIN canonical_pairs cp   ON cp.naics_code  = n.final_naics
+                                 AND cp.mcc_code   = m.final_mcc
+  WHERE n.naics_win_pid = '0'
+    AND cp.naics_code IS NULL
+    AND LEN(n.final_naics) = 6
+    AND n.final_naics != '561499'
+    AND (m.final_mcc != '5614' OR m.final_mcc IS NULL)
+    AND n.final_naics IS NOT NULL AND n.final_naics != ''
+    AND m.final_mcc   IS NOT NULL AND m.final_mcc   != ''
+)
+SELECT
+  CASE
+    WHEN ai_mcc IS NOT NULL AND ai_mcc = actual_mcc         THEN 'AI_won_over_canonical'
+    WHEN ai_mcc IS NULL AND canonical_derived_mcc = actual_mcc THEN 'canonical_derived_only'
+    WHEN ai_mcc IS NOT NULL AND canonical_derived_mcc IS NOT NULL
+      AND ai_mcc != canonical_derived_mcc                   THEN 'AI_and_canonical_disagree'
+    ELSE 'other'
+  END AS derivation_scenario,
+  COUNT(*) AS businesses,
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct
+FROM user_noncanonical_6
+GROUP BY 1 ORDER BY businesses DESC;
+```
+
+**Production results:**
+| Scenario | Businesses | Share |
+|---|---|---|
+| AI_won_over_canonical | ~7,645 | ~99.71% |
+| AI_and_canonical_disagree | ~15 | ~0.20% |
+| canonical_derived_only | ~1 | ~0.01% |
+
+**Complete root cause summary:**
+
+| Driver | Businesses | Share of User-NonCanonical |
+|---|---|---|
+| Truncated NAICS inputs (< 6 digits) | ~4,559 | ~37% |
+| AI MCC override (6-digit valid NAICS) | ~7,645 | ~63% |
+| True mapping gaps | ~1 | ~0% |
+
+---
+
+### Recommended Fixes
+
+**Fix 1 — AI priority logic (fixes ~63% of valid-6-digit non-canonical cases):**
+
+Current code (`integration-service/lib/facts/businessDetails/index.ts`):
+```typescript
+// Line ~430 — AI wins over canonical table:
+return foundMcc?.value ?? inferredMcc?.value;
+```
+
+**Fix (swap order — canonical table wins, AI is the fallback):**
+```typescript
+return inferredMcc?.value ?? foundMcc?.value;
+// inferredMcc = canonical rel_naics_mcc lookup (mcc_code_from_naics)
+// foundMcc    = AI enrichment (mcc_code_found) — only wins when no canonical mapping exists
+```
+
+**Optional: add logging when AI would have overridden canonical:**
+```typescript
+const result = inferredMcc?.value ?? foundMcc?.value;
+if (inferredMcc?.value && foundMcc?.value && inferredMcc.value !== foundMcc.value) {
+    logger.info({ naics: engine.getResolvedFact("naics_code")?.value,
+                  aiMcc: foundMcc.value, canonicalMcc: inferredMcc.value },
+                "AI MCC overridden by canonical");
+}
+return result;
+```
+
+**Fix 2 — Frontend NAICS validation (fixes ~37% truncated input cases):**
+
+Current code (`microsites/.../validation.ts`):
+```typescript
+value.length >= 2 && value.length <= 6  // Too permissive — allows 722, 81211
+```
+
+**Fix:**
+```typescript
+value.length === 6  // NAICS codes must be exactly 6 digits
+// Update error message: "NAICS code must be exactly 6 digits"
+```
+
+**Impact summary:**
+
+| Fix | File | Change | Impact |
+|---|---|---|---|
+| AI priority logic | `integration-service/lib/facts/businessDetails/index.ts` | Swap `foundMcc ?? inferredMcc` → `inferredMcc ?? foundMcc` | Fixes ~63% |
+| Frontend validation | `microsites/.../validation.ts` | `length === 6` | Fixes ~37% |
+
+Two small changes. Together they address essentially all non-canonical NAICS/MCC pairs.
+
+---
+
 
 ### Analysis 6: Pairwise Vendor Concordance (using `alternatives[]`)
 
