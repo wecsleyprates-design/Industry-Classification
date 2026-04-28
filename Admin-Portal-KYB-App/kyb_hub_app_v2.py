@@ -10063,16 +10063,26 @@ GROUP BY 1,2 ORDER BY override_status, businesses DESC;"""
     detail_panel("🔗 A3 NAICS-MCC Canonical Pair",
         "Is the NAICS-MCC combination valid per rel_naics_mcc?",
         what_it_means=(
+            "**What 'canonical' means:**\n\n"
+            "A canonical pair is a NAICS + MCC combination officially recognized in "
+            "`rds_cases_public.rel_naics_mcc` — Worth's source of truth for valid NAICS-MCC mappings.\n\n"
+            "- NAICS `722511` (Full-Service Restaurants) + MCC `5812` (Eating Places) → **canonical** ✅\n"
+            "- NAICS `722511` (Full-Service Restaurants) + MCC `5045` (Computers) → **non-canonical** ⚠️\n\n"
             "**Five pair statuses:**\n\n"
-            "| Status | Meaning |\n|---|---|\n"
-            "| Canonical Pair | NAICS-MCC is in `rel_naics_mcc` — valid combination |\n"
-            "| Fallback Pair | NAICS=561499 or MCC=5614 — last-resort defaults |\n"
-            "| Non-Canonical Pair | Both exist but not mapped — review needed |\n"
-            "| NAICS Missing | No NAICS fact found |\n"
-            "| MCC Missing | No MCC fact found |\n\n"
-            "**Critical insight:** MCC is derived from NAICS via `mcc_code_from_naics` which calls "
-            "`internalGetNaicsCode(final_naics)` → `rel_naics_mcc` lookup. If NAICS is wrong, "
-            "MCC will be wrong. Fix NAICS → fix MCC downstream.\n\n"
+            "| Status | Definition | Underwriting Implication |\n|---|---|---|\n"
+            "| Canonical Pair | Both codes exist AND combination is in `rel_naics_mcc` | ✅ Valid — proceed |\n"
+            "| Fallback Pair | NAICS=561499 or MCC=5614 — generic fallback defaults | 🔴 Unreliable — investigate |\n"
+            "| Non-Canonical Pair | Both exist but combination not in mapping | ⚠️ Review needed |\n"
+            "| NAICS Missing | No NAICS fact found | 🔴 No classification available |\n"
+            "| MCC Missing | No MCC fact found | ⚠️ MCC derivation failed |\n\n"
+            "**Why non-canonical pairs happen:**\n"
+            "1. Vendor returned codes from inconsistent sources (parent vs operating entity)\n"
+            "2. Niche industry not yet in the mapping table\n"
+            "3. User submitted a NAICS that doesn't match vendor-derived MCC\n"
+            "4. AI NAICS did not produce a matching MCC via `rel_naics_mcc` lookup\n\n"
+            "**Critical insight:** MCC is derived from NAICS via `mcc_code_from_naics` → "
+            "`internalGetNaicsCode(final_naics)` → `rel_naics_mcc` lookup. "
+            "If NAICS is wrong, MCC will also be wrong. Fix NAICS → fix MCC downstream.\n\n"
             "**Source:** `rds_warehouse_public.facts name='naics_code'` + `name='mcc_code'` · "
             "`rds_cases_public.rel_naics_mcc` · `rds_cases_public.core_naics_code` · `rds_cases_public.core_mcc_code`\n"
             "**Key file:** `integration-service-main/lib/facts/businessDetails/index.ts:351-387`"
@@ -10080,6 +10090,142 @@ GROUP BY 1,2 ORDER BY override_status, businesses DESC;"""
         source_table="rds_warehouse_public.facts + rds_cases_public.rel_naics_mcc",
         sql=_sql_pair if is_live else "-- Run with is_live=True",
         icon="🔗", color="#3B82F6")
+
+    # ── A3b: Non-Canonical Breakdown by Winner ─────────────────────────────────
+    st.markdown("##### 🔍 A3b — Non-Canonical Pairs: Who Won NAICS × Who Won MCC?")
+    st.caption(
+        "For businesses with a non-canonical NAICS-MCC pair: which vendor won the NAICS fact "
+        "AND which vendor won the MCC fact? Identifies whether user submissions or specific vendors "
+        "are driving the mismatch. Source: `source.platformId` from both `naics_code` and `mcc_code` facts."
+    )
+
+    _naics_noncanon_df = None
+    _sql_noncanon = _onboarded_cte + """
+,naics_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS naics_win_pid
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+),
+mcc_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_mcc,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS mcc_win_pid
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code' AND LENGTH(f.value)<60000
+),
+canonical_pairs AS (
+  SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+  FROM rds_cases_public.rel_naics_mcc r
+  JOIN rds_cases_public.core_naics_code nc ON nc.id=r.naics_id
+  JOIN rds_cases_public.core_mcc_code   mc ON mc.id=r.mcc_id
+),
+classified AS (
+  SELECT n.business_id, n.naics_win_pid, m.mcc_win_pid,
+    CASE
+      WHEN n.final_naics='561499' OR m.final_mcc='5614' THEN 'fallback_pair'
+      WHEN n.final_naics IS NULL OR n.final_naics=''     THEN 'naics_missing'
+      WHEN m.final_mcc   IS NULL OR m.final_mcc=''      THEN 'mcc_missing'
+      WHEN cp.naics_code IS NOT NULL                     THEN 'canonical_pair'
+      ELSE 'noncanonical_pair'
+    END AS pair_status
+  FROM naics_f n
+  LEFT JOIN mcc_f m           ON m.business_id  = n.business_id
+  LEFT JOIN canonical_pairs cp ON cp.naics_code = n.final_naics
+                               AND cp.mcc_code  = m.final_mcc
+)
+SELECT
+  CASE naics_win_pid
+    WHEN '23' THEN 'OpenCorporates' WHEN '17' THEN 'Equifax'
+    WHEN '24' THEN 'ZoomInfo'       WHEN '16' THEN 'Middesk'
+    WHEN '38' THEN 'Trulioo'        WHEN '31' THEN 'AI Enrichment'
+    WHEN '0'  THEN 'User Submitted' WHEN '-1' THEN 'Calculated'
+    ELSE 'Other (' || naics_win_pid || ')'
+  END AS naics_winner,
+  CASE mcc_win_pid
+    WHEN '23' THEN 'OpenCorporates' WHEN '17' THEN 'Equifax'
+    WHEN '24' THEN 'ZoomInfo'       WHEN '16' THEN 'Middesk'
+    WHEN '38' THEN 'Trulioo'        WHEN '31' THEN 'AI Enrichment'
+    WHEN '0'  THEN 'User Submitted' WHEN '-1' THEN 'Calculated'
+    ELSE 'Other (' || mcc_win_pid || ')'
+  END AS mcc_winner,
+  COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER (),2) AS pct
+FROM classified
+WHERE pair_status='noncanonical_pair'
+GROUP BY 1,2 ORDER BY businesses DESC;"""
+
+    if is_live:
+        _naics_noncanon_df, _ = run_sql(_sql_noncanon)
+
+    if _naics_noncanon_df is not None and not _naics_noncanon_df.empty:
+        _a3b_c1, _a3b_c2 = st.columns([3, 2])
+        with _a3b_c1:
+            # Heatmap-style: NAICS winner on Y, MCC winner as color label
+            _fig_nc = px.bar(_naics_noncanon_df, x="businesses", y="naics_winner",
+                             color="mcc_winner", text="businesses", orientation="h",
+                             title=f"Non-Canonical Pairs — NAICS Winner × MCC Winner ({_naics_noncanon_df['businesses'].sum():,} total)",
+                             barmode="stack")
+            _fig_nc.update_traces(textposition="inside")
+            _fig_nc.update_layout(height=320, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(_fig_nc), use_container_width=True)
+        with _a3b_c2:
+            st.dataframe(_naics_noncanon_df, use_container_width=True, hide_index=True)
+
+        # Analyst interpretation
+        _n_user_naics = int(_naics_noncanon_df[_naics_noncanon_df["naics_winner"]=="User Submitted"]["businesses"].sum()) \
+            if "User Submitted" in _naics_noncanon_df["naics_winner"].values else 0
+        _n_ai_naics   = int(_naics_noncanon_df[_naics_noncanon_df["naics_winner"]=="AI Enrichment"]["businesses"].sum()) \
+            if "AI Enrichment" in _naics_noncanon_df["naics_winner"].values else 0
+        _total_nc     = int(_naics_noncanon_df["businesses"].sum())
+
+        if _total_nc > 0:
+            st.markdown(f"""<div style="background:#1c1a2e;border-left:3px solid #a78bfa;
+                border-radius:6px;padding:10px 14px;margin:8px 0;font-size:.83rem;color:#cbd5e1">
+  <strong style="color:#a78bfa">📊 Analyst Interpretation:</strong><br/><br/>
+  Total non-canonical pairs: <strong>{_total_nc:,}</strong><br/>
+  User Submitted won NAICS: <strong>{_n_user_naics:,}</strong> ({round(100*_n_user_naics/max(_total_nc,1),1)}%) — 
+  {'⚠️ User input is a significant driver of mismatches — consider raising vendor weight' if _n_user_naics > _total_nc*0.2 else '✅ User submissions are NOT the primary driver of mismatches'}<br/>
+  AI Enrichment won NAICS: <strong>{_n_ai_naics:,}</strong> ({round(100*_n_ai_naics/max(_total_nc,1),1)}%) — 
+  {'⚠️ AI classification is producing inconsistent NAICS-MCC pairs — review AI enrichment quality' if _n_ai_naics > _total_nc*0.3 else '✅ AI Enrichment is NOT the primary driver'}<br/><br/>
+  <em>Note: MCC winner is often "Calculated (-1)" because MCC is derived from NAICS via 
+  <code>rel_naics_mcc</code> lookup, not directly provided by vendors.</em>
+</div>""", unsafe_allow_html=True)
+    elif is_live:
+        st.success("✅ No non-canonical NAICS-MCC pairs detected in this portfolio.", icon="✅")
+    else:
+        st.info("Run with live Redshift connection to see non-canonical pair breakdown.", icon="ℹ️")
+
+    detail_panel("🔍 A3b Non-Canonical Breakdown",
+        "Who drove the NAICS-MCC mismatch — user or vendor?",
+        what_it_means=(
+            "**Why this analysis matters:**\n\n"
+            "Non-canonical pairs mean NAICS and MCC both exist but their combination is not in "
+            "`rel_naics_mcc`. This breakdown identifies WHO is responsible:\n\n"
+            "| NAICS Winner | MCC Winner | Interpretation |\n|---|---|---|\n"
+            "| User Submitted | AI Enrichment / Calculated | User's NAICS + derived MCC don't match — "
+            "user may have entered an incorrect or niche code |\n"
+            "| AI Enrichment | Calculated | AI NAICS did not produce a canonical MCC via `rel_naics_mcc` "
+            "— AI quality issue |\n"
+            "| OpenCorporates | Calculated | OC NAICS is inconsistent with derived MCC — "
+            "possible OC data quality issue |\n"
+            "| Equifax | Calculated | Equifax NAICS does not map to a canonical MCC — "
+            "investigate Equifax data quality |\n\n"
+            "**MCC winner is usually Calculated (-1)** because MCC is almost never provided directly "
+            "by vendors — it is derived from NAICS via `mcc_code_from_naics` → "
+            "`internalGetNaicsCode(final_naics)` → `rel_naics_mcc` lookup.\n\n"
+            "**Action thresholds:**\n"
+            "- User Submitted > 20% of non-canonical: raise vendor weights or add user-input validation\n"
+            "- AI Enrichment > 30% of non-canonical: review AI prompt quality and `rel_naics_mcc` coverage\n\n"
+            "**Source:** `rds_warehouse_public.facts name='naics_code'` + `name='mcc_code'` (source.platformId) · "
+            "`rds_cases_public.rel_naics_mcc`"
+        ),
+        source_table="rds_warehouse_public.facts (naics_code + mcc_code source.platformId) + rds_cases_public.rel_naics_mcc",
+        sql=_sql_noncanon if is_live else "-- Run with is_live=True",
+        icon="🔍", color="#a78bfa")
 
     # ── A4: Pairwise Vendor Concordance ────────────────────────────────────────
     st.markdown("---")
