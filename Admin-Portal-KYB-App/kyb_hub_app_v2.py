@@ -4314,12 +4314,24 @@ if tab=="🏠 Home":
         # A business is FOREIGN   if ALL filings classify as foreign  via rules 2 or 3b (and no domestic).
         # A business is UNKNOWN   if NO filing can be classified (all have null fd + null formation_state).
 
+        # ── ALL SOURCE SIGNALS FOR SECTION 1 COME FROM rds_warehouse_public.facts ONLY ──
+        # NEVER use clients.*, datascience.*, or rds_integration_data.* tables here.
+        # formation_state → facts name='formation_state' (Middesk businessEntityVerification.formation_state)
+        # operating_state → facts name='primary_address' value.state (submitted onboarding address)
+        # sos_filings[]   → facts name='sos_filings' (per-filing JSON, parsed in _load_sos_filings_for_bids)
+        # sos_match_boolean → facts name='sos_match_boolean'
+        # sos_active      → facts name='sos_active' (dependent fact, only written when sos_filings.length > 0)
+
         _ref_bids_set = set(_funnel[_reg_found_extended_mask]["business_id"].tolist())
         _op_state_col   = _funnel.get("operating_state", pd.Series([""] * len(_funnel)))
         _op_state_col_u = _op_state_col.astype(str).str.upper().str.strip().fillna("")
         _form_state_by_bid = {}
+        _bid_to_op = {}   # business_id → operating_state (UPPER) from primary_address fact
         if "formation_state" in _funnel.columns:
             _form_state_by_bid = _funnel.set_index("business_id")["formation_state"] \
+                .astype(str).str.upper().str.strip().fillna("").to_dict()
+        if "operating_state" in _funnel.columns:
+            _bid_to_op = _funnel.set_index("business_id")["operating_state"] \
                 .astype(str).str.upper().str.strip().fillna("").to_dict()
 
         _domestic_bids     = set()   # confirmed domestic (explicit or proxy)
