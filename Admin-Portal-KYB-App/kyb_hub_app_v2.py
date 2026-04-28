@@ -9681,61 +9681,539 @@ ORDER BY avg_impact_pts ASC;"""
         st.success("✅ No Registry × TIN contradictions detected.", icon="✅")
 
     # ════════════════════════════════════════════════════════════════════════
-    # 6.2  NAICS CLASSIFICATION ANOMALIES
+    # 6.2  NAICS/MCC CLASSIFICATION INTELLIGENCE
+    # ════════════════════════════════════════════════════════════════════════
+    # Source: rds_warehouse_public.facts (naics_code, mcc_code, mcc_code_found,
+    #         mcc_code_from_naics) + rds_cases_public.rel_naics_mcc / core_naics_code / core_mcc_code
+    # Lineage: businessDetails/index.ts (sources + weights) · aiNaicsEnrichment.ts (561499 fallback)
+    # All SQL uses the correct rds_ schema — NO clients.* or datascience.* tables.
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("#### 6.2  NAICS Classification Anomalies")
-    st.caption("Industry classification gaps that affect Worth Score accuracy and MCC code validity. "
-               "NAICS=561499 is the hardcoded NAICS_OF_LAST_RESORT (aiNaicsEnrichment.ts:63).")
+    st.markdown("#### 6.2  NAICS/MCC Classification Intelligence")
+    st.caption(
+        "Multi-source NAICS/MCC industry classification analysis. "
+        "Source: `rds_warehouse_public.facts` · `rds_cases_public.*` tables. "
+        "All signals derived from `alternatives[]` array — the same positional JSON extraction "
+        "used for `sos_filings` analysis. No materialized tables."
+    )
 
     _NAICS_AN_COLS = ["naics_code","sos_match_boolean","sos_active","tin_match","formation_state","revenue","watchlist_hits"]
     _G5_KEYS = ["g5_naics_fallback","g5_naics_fb_sos_found"]
 
-    # NAICS distribution chart
+    # ── Build NAICS/MCC analytics from live Redshift queries ──────────────────
+    # These queries run only when the app is live (is_live=True)
+    _naics_cov_df   = None   # Coverage: real / fallback / missing
+    _naics_vendor_df = None  # Winning vendor distribution
+    _naics_mcc_pair_df = None  # Canonical pair status
+    _naics_concordance_df = None  # Pairwise vendor concordance
+    _user_override_df = None  # User vs vendor override status
+    _user_override_vendor_df = None  # Override breakdown by winner vendor
+
+    _cust_clause = hub_cust_clause("rbcm")
+    _date_filter = (
+        f"DATE(rbcm.created_at) BETWEEN '{hub_date_from}' AND '{hub_date_to}'"
+        if hub_date_from else "1=1"
+    )
+    _onboarded_cte = (
+        f"WITH onboarded AS (\n"
+        f"  SELECT DISTINCT rbcm.business_id\n"
+        f"  FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+        f"  WHERE {_date_filter}{_cust_clause}\n"
+        f")\n"
+    )
+
+    if is_live:
+        # ── Analysis 1: NAICS Coverage Distribution ───────────────────────────
+        _sql_cov = _onboarded_cte + """
+SELECT
+  CASE
+    WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value')='561499'         THEN 'Fallback 561499'
+    WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NULL
+      OR JSON_EXTRACT_PATH_TEXT(f.value,'value')=''               THEN 'Missing'
+    ELSE 'Real NAICS Code'
+  END AS naics_status,
+  COUNT(DISTINCT f.business_id) AS businesses,
+  ROUND(100.0*COUNT(DISTINCT f.business_id)/SUM(COUNT(DISTINCT f.business_id)) OVER (),2) AS pct
+FROM rds_warehouse_public.facts f
+JOIN onboarded o ON o.business_id=f.business_id
+WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+GROUP BY 1 ORDER BY businesses DESC;"""
+        _naics_cov_df, _ = run_sql(_sql_cov)
+
+        # ── Analysis 2: Winning Vendor Distribution ───────────────────────────
+        _sql_vendor = _onboarded_cte + """
+SELECT
+  CASE JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')
+    WHEN '16' THEN 'Middesk'        WHEN '23' THEN 'OpenCorporates'
+    WHEN '24' THEN 'ZoomInfo'       WHEN '17' THEN 'Equifax'
+    WHEN '38' THEN 'Trulioo'        WHEN '31' THEN 'AI Enrichment'
+    WHEN '0'  THEN 'User Submitted' ELSE 'Other'
+  END AS winning_vendor,
+  COUNT(*) AS businesses_won,
+  SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value')='561499' THEN 1 ELSE 0 END) AS fallback_count,
+  ROUND(100.0*SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value')='561499' THEN 1 ELSE 0 END)/COUNT(*),2) AS fallback_pct
+FROM rds_warehouse_public.facts f
+JOIN onboarded o ON o.business_id=f.business_id
+WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+GROUP BY 1 ORDER BY businesses_won DESC;"""
+        _naics_vendor_df, _ = run_sql(_sql_vendor)
+
+        # ── Analysis 3: NAICS-MCC Canonical Pair Check (1-to-many, pre-built CTE) ──
+        _sql_pair = _onboarded_cte + """
+,naics_f AS (
+  SELECT f.business_id, JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_naics
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+),
+mcc_f AS (
+  SELECT f.business_id, JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_mcc
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code' AND LENGTH(f.value)<60000
+),
+canonical_pairs AS (
+  SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+  FROM rds_cases_public.rel_naics_mcc r
+  JOIN rds_cases_public.core_naics_code nc ON nc.id=r.naics_id
+  JOIN rds_cases_public.core_mcc_code mc   ON mc.id=r.mcc_id
+)
+SELECT
+  CASE
+    WHEN n.final_naics='561499' OR m.final_mcc='5614' THEN 'Fallback Pair'
+    WHEN n.final_naics IS NULL OR n.final_naics=''     THEN 'NAICS Missing'
+    WHEN m.final_mcc  IS NULL OR m.final_mcc=''        THEN 'MCC Missing'
+    WHEN cp.naics_code IS NOT NULL                      THEN 'Canonical Pair'
+    ELSE 'Non-Canonical Pair'
+  END AS pair_status,
+  COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER (),2) AS pct
+FROM naics_f n
+LEFT JOIN mcc_f m            ON m.business_id  = n.business_id
+LEFT JOIN canonical_pairs cp ON cp.naics_code  = n.final_naics AND cp.mcc_code = m.final_mcc
+GROUP BY 1 ORDER BY businesses DESC;"""
+        _naics_mcc_pair_df, _ = run_sql(_sql_pair)
+
+        # ── Analysis 4: Pairwise Vendor Concordance (alternatives[] parsing) ──
+        _sql_concordance = _onboarded_cte + """
+,naics_raw AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')                    AS win_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')                                  AS win_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','source','platformId') AS a0_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','value')               AS a0_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','source','platformId') AS a1_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','value')               AS a1_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','source','platformId') AS a2_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','value')               AS a2_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','3','source','platformId') AS a3_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','3','value')               AS a3_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','4','source','platformId') AS a4_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','4','value')               AS a4_naics
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+),
+per_vendor AS (
+  SELECT business_id, win_naics AS final_naics,
+    MAX(CASE WHEN win_pid='23' THEN win_naics WHEN a0_pid='23' THEN a0_naics
+             WHEN a1_pid='23' THEN a1_naics  WHEN a2_pid='23' THEN a2_naics
+             WHEN a3_pid='23' THEN a3_naics  WHEN a4_pid='23' THEN a4_naics END) AS oc_naics,
+    MAX(CASE WHEN win_pid='17' THEN win_naics WHEN a0_pid='17' THEN a0_naics
+             WHEN a1_pid='17' THEN a1_naics  WHEN a2_pid='17' THEN a2_naics
+             WHEN a3_pid='17' THEN a3_naics  WHEN a4_pid='17' THEN a4_naics END) AS equifax_naics,
+    MAX(CASE WHEN win_pid='24' THEN win_naics WHEN a0_pid='24' THEN a0_naics
+             WHEN a1_pid='24' THEN a1_naics  WHEN a2_pid='24' THEN a2_naics
+             WHEN a3_pid='24' THEN a3_naics  WHEN a4_pid='24' THEN a4_naics END) AS zoominfo_naics
+  FROM naics_raw GROUP BY business_id, win_naics
+)
+SELECT 'OC vs Equifax' AS pair,
+  CASE
+    WHEN oc_naics IS NULL AND equifax_naics IS NULL     THEN 'both_null'
+    WHEN oc_naics IS NULL AND equifax_naics IS NOT NULL THEN 'oc_null_equifax_found'
+    WHEN oc_naics IS NOT NULL AND equifax_naics IS NULL THEN 'oc_found_equifax_null'
+    WHEN oc_naics = equifax_naics                       THEN 'exact_6_digit'
+    WHEN LEFT(oc_naics,4)=LEFT(equifax_naics,4)         THEN 'same_4_digit_group'
+    WHEN LEFT(oc_naics,3)=LEFT(equifax_naics,3)         THEN 'same_3_digit_subsector'
+    WHEN LEFT(oc_naics,2)=LEFT(equifax_naics,2)         THEN 'same_2_digit_sector'
+    ELSE 'different_sector'
+  END AS concordance_level,
+  COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER (),2) AS pct
+FROM per_vendor GROUP BY 2 ORDER BY businesses DESC;"""
+        _naics_concordance_df, _ = run_sql(_sql_concordance)
+
+        # ── Analysis 5: User vs Vendor Override ──────────────────────────────
+        _sql_override = _onboarded_cte + """
+,naics_raw AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS win_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_naics,
+    COALESCE(
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','value') END,
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','value') END,
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','value') END
+    ) AS user_naics_in_alt,
+    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')='0'
+         THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END AS user_naics_winner
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+)
+SELECT
+  CASE
+    WHEN user_naics_winner IS NOT NULL              THEN 'user_won'
+    WHEN user_naics_in_alt IS NOT NULL
+     AND user_naics_in_alt != final_naics           THEN 'user_overridden'
+    WHEN user_naics_in_alt IS NOT NULL
+     AND user_naics_in_alt = final_naics            THEN 'user_agreed_with_winner'
+    ELSE                                                 'no_user_submission'
+  END AS override_status,
+  COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER (),2) AS pct
+FROM naics_raw GROUP BY 1 ORDER BY businesses DESC;"""
+        _user_override_df, _ = run_sql(_sql_override)
+
+        # ── Analysis 6: User Override — by Winner Vendor ─────────────────────
+        _sql_override_vendor = _onboarded_cte + """
+,naics_raw AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS win_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_naics,
+    COALESCE(
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','value') END,
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','value') END,
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','value') END
+    ) AS user_naics_in_alt,
+    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')='0'
+         THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END AS user_naics_winner
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+),
+classified AS (
+  SELECT *,
+    CASE
+      WHEN user_naics_winner IS NOT NULL                   THEN 'user_won'
+      WHEN user_naics_in_alt IS NOT NULL
+       AND user_naics_in_alt != final_naics                THEN 'user_overridden'
+      WHEN user_naics_in_alt IS NOT NULL
+       AND user_naics_in_alt = final_naics                 THEN 'user_agreed_with_winner'
+      ELSE 'no_user_submission'
+    END AS override_status,
+    CASE win_pid
+      WHEN '23' THEN 'OpenCorporates' WHEN '17' THEN 'Equifax'
+      WHEN '24' THEN 'ZoomInfo'       WHEN '16' THEN 'Middesk'
+      WHEN '38' THEN 'Trulioo'        WHEN '31' THEN 'AI Enrichment'
+      WHEN '0'  THEN 'User (self)'    ELSE 'Other'
+    END AS winner_vendor
+  FROM naics_raw
+)
+SELECT override_status, winner_vendor,
+  COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER (PARTITION BY override_status),2) AS pct_within_status
+FROM classified
+WHERE override_status IN ('user_agreed_with_winner','user_overridden')
+GROUP BY 1,2 ORDER BY override_status, businesses DESC;"""
+        _user_override_vendor_df, _ = run_sql(_sql_override_vendor)
+
+    # ── RENDER ALL ANALYSES ────────────────────────────────────────────────────
+
+    # ── A1: Coverage Distribution ─────────────────────────────────────────────
+    st.markdown("##### 📊 A1 — NAICS Classification Coverage")
+    st.caption(
+        "Three-bucket view: Real NAICS (any 6-digit code except 561499) / "
+        "Fallback 561499 (NAICS_OF_LAST_RESORT from aiNaicsEnrichment.ts:63) / Missing (null). "
+        "Source: `rds_warehouse_public.facts name='naics_code'`."
+    )
+
     if not _sdf.empty and "naics_code" in _sdf.columns:
         _naics_col = _s("naics_code")
         _n_fallback = int((_naics_col == "561499").sum())
         _n_missing  = int(_naics_col.isin(["","none","nan"]).sum())
         _n_real     = len(_sdf) - _n_fallback - _n_missing
-        _naics_dist = pd.DataFrame({
+    else:
+        _n_real = _n_fallback = _n_missing = 0
+
+    _a1c1, _a1c2, _a1c3, _a1c4 = st.columns(4)
+    _port = max(len(_sdf), 1)
+    for _col, _lbl, _val, _color in [
+        (_a1c1, "📋 Total Businesses", len(_sdf), "#3B82F6"),
+        (_a1c2, "✅ Real NAICS", _n_real, "#22c55e"),
+        (_a1c3, "⚠️ Fallback 561499", _n_fallback, "#ef4444"),
+        (_a1c4, "❓ Missing", _n_missing, "#64748b"),
+    ]:
+        with _col:
+            kpi(_lbl, f"{_val:,}", rate(_val, _port), _color)
+
+    if _naics_cov_df is not None and not _naics_cov_df.empty:
+        _a1_r1, _a1_r2 = st.columns([1,1])
+        with _a1_r1:
+            _cov_color = {"Real NAICS Code":"#22c55e","Fallback 561499":"#ef4444","Missing":"#64748b"}
+            _fig_cov = px.pie(_naics_cov_df, names="naics_status", values="businesses", hole=0.5,
+                              title="NAICS Coverage Distribution",
+                              color="naics_status", color_discrete_map=_cov_color)
+            _fig_cov.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(_fig_cov), use_container_width=True)
+        with _a1_r2:
+            st.dataframe(_naics_cov_df, use_container_width=True, hide_index=True)
+    elif not _sdf.empty:
+        _dist_df = pd.DataFrame({
             "NAICS Status": ["Real NAICS Code","Fallback 561499","Missing"],
             "Count": [_n_real, _n_fallback, _n_missing],
+            "Pct": [rate(_n_real,_port), rate(_n_fallback,_port), rate(_n_missing,_port)],
         })
-        _naics_dist = _naics_dist[_naics_dist["Count"]>0]
-        if not _naics_dist.empty:
-            _nc1, _nc2 = st.columns([1, 1])
-            with _nc1:
-                fig_naics_pie = px.pie(_naics_dist, names="NAICS Status", values="Count", hole=0.5,
-                                       title="NAICS Classification Coverage",
-                                       color="NAICS Status",
-                                       color_discrete_map={"Real NAICS Code":"#22c55e",
-                                                           "Fallback 561499":"#ef4444",
-                                                           "Missing":"#64748b"})
-                fig_naics_pie.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
-                st.plotly_chart(dark_chart(fig_naics_pie), use_container_width=True)
-            with _nc2:
-                # NAICS gap type breakdown
-                _g2_n = len(_an.get("g5_naics_fb_sos_found",[]))
-                _g_all = len(_an.get("g5_naics_fallback",[]))
-                _gap_df = pd.DataFrame({
-                    "Gap Type": ["G2: Registry Found\n+ NAICS=561499\n(most fixable)",
-                                 "G1/G3: No Registry\nor No Website"],
-                    "Count": [_g2_n, max(0, _g_all - _g2_n)],
-                })
-                _gap_df = _gap_df[_gap_df["Count"]>0]
-                if not _gap_df.empty:
-                    fig_gap = px.bar(_gap_df, x="Count", y="Gap Type", orientation="h",
-                                     color="Gap Type",
-                                     color_discrete_map={
-                                         "G2: Registry Found\n+ NAICS=561499\n(most fixable)":"#f59e0b",
-                                         "G1/G3: No Registry\nor No Website":"#ef4444"
-                                     },
-                                     text="Count",
-                                     title=f"NAICS Fallback Gap Types ({_g_all:,} total)")
-                    fig_gap.update_traces(textposition="outside")
-                    fig_gap.update_layout(height=260, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
-                    st.plotly_chart(dark_chart(fig_gap), use_container_width=True)
+        _fig_cov2 = px.pie(_dist_df[_dist_df["Count"]>0], names="NAICS Status", values="Count",
+                           hole=0.5, title="NAICS Coverage (from stats_df)",
+                           color="NAICS Status",
+                           color_discrete_map={"Real NAICS Code":"#22c55e","Fallback 561499":"#ef4444","Missing":"#64748b"})
+        _fig_cov2.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
+        st.plotly_chart(dark_chart(_fig_cov2), use_container_width=True)
 
+    detail_panel("📊 A1 NAICS Coverage",
+        f"Real:{_n_real:,} · Fallback:{_n_fallback:,} · Missing:{_n_missing:,}",
+        what_it_means=(
+            "**Three-bucket NAICS classification status:**\n\n"
+            "- **Real NAICS Code**: any 6-digit NAICS except 561499\n"
+            "- **Fallback 561499**: hardcoded `NAICS_OF_LAST_RESORT` — all vendor signals were null "
+            "and AI returned last-resort value (`aiNaicsEnrichment.ts:63`)\n"
+            "- **Missing**: `naics_code` fact is null/empty — vendor was not called or returned no value\n\n"
+            "**Source:** `rds_warehouse_public.facts name='naics_code'`\n"
+            "**Key file:** `integration-service-main/lib/facts/businessDetails/index.ts:278-322`"
+        ),
+        source_table="rds_warehouse_public.facts name='naics_code'",
+        sql=_sql_cov if is_live else "-- Run with is_live=True",
+        icon="📊", color="#22c55e")
+
+    # ── A2: Winning Vendor Distribution ────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 🏭 A2 — Winning Vendor Distribution")
+    st.caption(
+        "For each business: which vendor's NAICS candidate was selected as the final winner? "
+        "Also shows fallback rate per vendor — which vendor produces the most 561499 outputs. "
+        "Source: `source.platformId` field in `rds_warehouse_public.facts name='naics_code'`."
+    )
+    if _naics_vendor_df is not None and not _naics_vendor_df.empty:
+        _a2c1, _a2c2 = st.columns([3,2])
+        with _a2c1:
+            _fig_vendor = px.bar(_naics_vendor_df, x="businesses_won", y="winning_vendor",
+                                 orientation="h", text="businesses_won",
+                                 color="fallback_pct",
+                                 color_continuous_scale=["#22c55e","#f59e0b","#ef4444"],
+                                 title="NAICS Wins by Vendor (color = fallback rate %)")
+            _fig_vendor.update_traces(textposition="outside")
+            _fig_vendor.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=60))
+            st.plotly_chart(dark_chart(_fig_vendor), use_container_width=True)
+        with _a2c2:
+            st.dataframe(_naics_vendor_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Run with live Redshift connection to see vendor distribution.", icon="ℹ️")
+
+    detail_panel("🏭 A2 Vendor Distribution",
+        "Which vendor wins NAICS classification most often?",
+        what_it_means=(
+            "**Platform ID map (from integration-service):**\n\n"
+            "| ID | Vendor | Weight |\n|---|---|---|\n"
+            "| 16 | Middesk | default |\n"
+            "| 23 | OpenCorporates | default |\n"
+            "| 24 | ZoomInfo | default |\n"
+            "| 17 | Equifax | default |\n"
+            "| 31 | AI Enrichment | **0.1** (lowest) |\n"
+            "| 0 | User Submitted | **0.2** |\n\n"
+            "A high fallback_pct for a vendor means that vendor's match is returning 561499 often. "
+            "High AI Enrichment wins + high fallback = zero vendor signal coverage.\n\n"
+            "**Source:** `JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')` from "
+            "`rds_warehouse_public.facts name='naics_code'`"
+        ),
+        source_table="rds_warehouse_public.facts name='naics_code' (source.platformId)",
+        sql=_sql_vendor if is_live else "-- Run with is_live=True",
+        icon="🏭", color="#8B5CF6")
+
+    # ── A3: NAICS-MCC Canonical Pair Check ────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 🔗 A3 — NAICS-MCC Canonical Pair Status")
+    st.caption(
+        "Checks whether the final NAICS-MCC pair is a known-valid combination in `rel_naics_mcc`. "
+        "Uses a pre-built canonical_pairs CTE (not a correlated subquery) to handle the 1-to-many "
+        "mapping correctly — a single NAICS can map to multiple valid MCCs. "
+        "Note: MCC is almost always derived from NAICS via `mcc_code_from_naics`, "
+        "so NAICS quality directly determines MCC quality."
+    )
+    if _naics_mcc_pair_df is not None and not _naics_mcc_pair_df.empty:
+        _a3c1, _a3c2 = st.columns([2,3])
+        _pair_colors = {
+            "Canonical Pair":"#22c55e","Fallback Pair":"#ef4444",
+            "Non-Canonical Pair":"#f59e0b","NAICS Missing":"#64748b","MCC Missing":"#475569"
+        }
+        with _a3c1:
+            _fig_pair = px.pie(_naics_mcc_pair_df, names="pair_status", values="businesses",
+                               hole=0.45, title="NAICS-MCC Pair Classification",
+                               color="pair_status", color_discrete_map=_pair_colors)
+            _fig_pair.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(_fig_pair), use_container_width=True)
+        with _a3c2:
+            st.dataframe(_naics_mcc_pair_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Run with live Redshift connection to see NAICS-MCC pair analysis.", icon="ℹ️")
+
+    detail_panel("🔗 A3 NAICS-MCC Canonical Pair",
+        "Is the NAICS-MCC combination valid per rel_naics_mcc?",
+        what_it_means=(
+            "**Five pair statuses:**\n\n"
+            "| Status | Meaning |\n|---|---|\n"
+            "| Canonical Pair | NAICS-MCC is in `rel_naics_mcc` — valid combination |\n"
+            "| Fallback Pair | NAICS=561499 or MCC=5614 — last-resort defaults |\n"
+            "| Non-Canonical Pair | Both exist but not mapped — review needed |\n"
+            "| NAICS Missing | No NAICS fact found |\n"
+            "| MCC Missing | No MCC fact found |\n\n"
+            "**Critical insight:** MCC is derived from NAICS via `mcc_code_from_naics` which calls "
+            "`internalGetNaicsCode(final_naics)` → `rel_naics_mcc` lookup. If NAICS is wrong, "
+            "MCC will be wrong. Fix NAICS → fix MCC downstream.\n\n"
+            "**Source:** `rds_warehouse_public.facts name='naics_code'` + `name='mcc_code'` · "
+            "`rds_cases_public.rel_naics_mcc` · `rds_cases_public.core_naics_code` · `rds_cases_public.core_mcc_code`\n"
+            "**Key file:** `integration-service-main/lib/facts/businessDetails/index.ts:351-387`"
+        ),
+        source_table="rds_warehouse_public.facts + rds_cases_public.rel_naics_mcc",
+        sql=_sql_pair if is_live else "-- Run with is_live=True",
+        icon="🔗", color="#3B82F6")
+
+    # ── A4: Pairwise Vendor Concordance ────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 🤝 A4 — Pairwise Vendor Concordance (OC vs Equifax)")
+    st.caption(
+        "When OpenCorporates and Equifax both provide a NAICS candidate for the same business, "
+        "how often do they agree? Parsed from `alternatives[]` array in `rds_warehouse_public.facts`. "
+        "Coverage gaps split: `oc_null_equifax_found` vs `oc_found_equifax_null` — shows which vendor "
+        "has better industry data coverage."
+    )
+    if _naics_concordance_df is not None and not _naics_concordance_df.empty:
+        _conc_color = {
+            "exact_6_digit":"#22c55e","same_4_digit_group":"#84cc16",
+            "same_3_digit_subsector":"#f59e0b","same_2_digit_sector":"#f97316",
+            "different_sector":"#ef4444","both_null":"#64748b",
+            "oc_null_equifax_found":"#475569","oc_found_equifax_null":"#334155"
+        }
+        _a4c1, _a4c2 = st.columns([3,2])
+        with _a4c1:
+            _fig_conc = px.bar(_naics_concordance_df, x="businesses", y="concordance_level",
+                               orientation="h", text="businesses",
+                               color="concordance_level", color_discrete_map=_conc_color,
+                               title="OC vs Equifax — NAICS Concordance Level")
+            _fig_conc.update_traces(textposition="outside")
+            _fig_conc.update_layout(height=340, showlegend=False, margin=dict(t=40,b=10,l=10,r=80))
+            st.plotly_chart(dark_chart(_fig_conc), use_container_width=True)
+        with _a4c2:
+            st.dataframe(_naics_concordance_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Run with live Redshift connection to see vendor concordance.", icon="ℹ️")
+
+    detail_panel("🤝 A4 Vendor Concordance",
+        "Do OpenCorporates and Equifax agree on NAICS?",
+        what_it_means=(
+            "**Concordance levels (OC vs Equifax):**\n\n"
+            "| Level | Meaning | Action |\n|---|---|---|\n"
+            "| both_null | Neither vendor has NAICS | Pure AI/user fallback — investigate coverage |\n"
+            "| oc_null_equifax_found | Only Equifax has NAICS | OC coverage gap |\n"
+            "| oc_found_equifax_null | Only OC has NAICS | Equifax coverage gap |\n"
+            "| exact_6_digit | Full agreement | High trust — strong signal |\n"
+            "| same_4_digit_group | Same industry group | Acceptable |\n"
+            "| same_3_digit_subsector | Same subsector | Acceptable with review |\n"
+            "| same_2_digit_sector | Same broad sector | Detail conflict — investigate |\n"
+            "| different_sector | Completely different | Material conflict — flag for review |\n\n"
+            "**SQL approach:** Positional `JSON_EXTRACT_PATH_TEXT` on `alternatives[0..4]` — "
+            "same pattern as `_load_sos_filings_for_bids`. Each alternative has "
+            "`source.platformId` extracted via nested path "
+            "`'alternatives','N','source','platformId'`.\n\n"
+            "**Source:** `rds_warehouse_public.facts name='naics_code'` alternatives[] array"
+        ),
+        source_table="rds_warehouse_public.facts name='naics_code' (alternatives[])",
+        sql=_sql_concordance if is_live else "-- Run with is_live=True",
+        icon="🤝", color="#f59e0b")
+
+    # ── A5: User vs Vendor Override ─────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 👤 A5 — User vs Vendor Override Analysis")
+    st.caption(
+        "When a user submits a NAICS code (platformId=0, businessDetails source, weight=0.2), "
+        "how often does a vendor override it? Parsed from `alternatives[]` for platformId=0. "
+        "Four outcomes: user_won / user_overridden / user_agreed_with_winner / no_user_submission."
+    )
+    if _user_override_df is not None and not _user_override_df.empty:
+        _a5c1, _a5c2 = st.columns([2,3])
+        _override_colors = {
+            "user_won":"#22c55e","user_agreed_with_winner":"#84cc16",
+            "user_overridden":"#ef4444","no_user_submission":"#64748b"
+        }
+        with _a5c1:
+            _fig_ov = px.pie(_user_override_df, names="override_status", values="businesses",
+                             hole=0.45, title="User NAICS Submission Outcomes",
+                             color="override_status", color_discrete_map=_override_colors)
+            _fig_ov.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(_fig_ov), use_container_width=True)
+        with _a5c2:
+            st.dataframe(_user_override_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Run with live Redshift connection to see user override analysis.", icon="ℹ️")
+
+    # ── A5b: Override by Winner Vendor ─────────────────────────────────────────
+    if _user_override_vendor_df is not None and not _user_override_vendor_df.empty:
+        st.markdown("**↳ When user was overridden or agreed — which vendor won?**")
+        _a5b_overridden = _user_override_vendor_df[_user_override_vendor_df["override_status"]=="user_overridden"]
+        _a5b_agreed     = _user_override_vendor_df[_user_override_vendor_df["override_status"]=="user_agreed_with_winner"]
+        _a5b_c1, _a5b_c2 = st.columns(2)
+        with _a5b_c1:
+            if not _a5b_overridden.empty:
+                _fig_ov2 = px.bar(_a5b_overridden, x="businesses", y="winner_vendor",
+                                  orientation="h", text="businesses",
+                                  color_discrete_sequence=["#ef4444"],
+                                  title="User Overridden — by Which Vendor")
+                _fig_ov2.update_traces(textposition="outside")
+                _fig_ov2.update_layout(height=250, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
+                st.plotly_chart(dark_chart(_fig_ov2), use_container_width=True)
+            else:
+                st.success("No user override cases found.", icon="✅")
+        with _a5b_c2:
+            if not _a5b_agreed.empty:
+                _fig_ov3 = px.bar(_a5b_agreed, x="businesses", y="winner_vendor",
+                                  orientation="h", text="businesses",
+                                  color_discrete_sequence=["#22c55e"],
+                                  title="User Agreed with Winner — by Which Vendor")
+                _fig_ov3.update_traces(textposition="outside")
+                _fig_ov3.update_layout(height=250, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
+                st.plotly_chart(dark_chart(_fig_ov3), use_container_width=True)
+            else:
+                st.success("No user-agreed cases found.", icon="✅")
+        st.dataframe(_user_override_vendor_df, use_container_width=True, hide_index=True)
+
+    detail_panel("👤 A5 User Override",
+        "How often do vendors override user-submitted NAICS?",
+        what_it_means=(
+            "**User-submitted NAICS** is `businessDetails` source (platformId=0) with weight=0.2. "
+            "It appears in `alternatives[]` when a vendor wins, or as the main value when user wins.\n\n"
+            "**Four outcomes:**\n\n"
+            "| Status | Meaning |\n|---|---|\n"
+            "| user_won | User's NAICS had highest score — accepted as final |\n"
+            "| user_overridden | User submitted but vendor scored higher — user NAICS ignored |\n"
+            "| user_agreed_with_winner | User submitted the same value as the winning vendor |\n"
+            "| no_user_submission | User did not submit a NAICS |\n\n"
+            "**Override breakdown by winner vendor** shows which vendor is most often responsible "
+            "for overriding user input. If AI Enrichment frequently overrides users, "
+            "the user weight (0.2) may be too low relative to AI weight (0.1).\n\n"
+            "**Source:** `rds_warehouse_public.facts name='naics_code'` — "
+            "winner `source.platformId` + `alternatives[].source` (platformId=0 = user)\n"
+            "**Key file:** `integration-service-main/lib/facts/businessDetails/index.ts:322` (weight=0.2)"
+        ),
+        source_table="rds_warehouse_public.facts name='naics_code' (alternatives[] platformId=0)",
+        sql=_sql_override if is_live else "-- Run with is_live=True",
+        icon="👤", color="#f97316")
+
+    # ── Existing anomaly rules (G5) ────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### ⚠️ Anomaly Rules — NAICS Classification Gaps")
     _group_chart_and_drilldowns(_G5_KEYS, "NAICS — Classification Anomalies by Rule", _NAICS_AN_COLS, "g5")
     for _akey in _G5_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])

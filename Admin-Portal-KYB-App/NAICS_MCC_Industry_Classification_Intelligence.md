@@ -444,187 +444,157 @@ LIMIT 50;
 
 **Business question:** Does the final NAICS-MCC pair make sense? Is it canonical, noncanonical, fallback, or missing?
 
-**Key correction from the document:** The original SQL used a 1-to-1 join on `rel_naics_mcc`. The correct approach checks if the final MCC is ANY valid MCC for the final NAICS (1-to-many).
+**What this tells you:** For every business, classify whether its current NAICS-MCC pair is a valid combination per the `rel_naics_mcc` canonical mapping table. Noncanonical pairs indicate MCC was derived from a fallback NAICS, or the AI returned an MCC inconsistent with the industry.
 
-**Correct SQL:**
+**Key correction:** The original document used a correlated `EXISTS` subquery (slow on large datasets). The improved version pre-builds all canonical pairs as a CTE and uses a `LEFT JOIN` — identical logic, much better performance.
+
+**Correct SQL (improved — pre-built canonical pairs CTE):**
 ```sql
+-- What we are trying to understand:
+-- For each business in the selected date/customer window, is the combination of
+-- final_naics_code and final_mcc_code a known-valid pair in rel_naics_mcc?
+-- Results: fallback_pair | naics_missing | mcc_missing | canonical_pair | noncanonical_pair
 WITH onboarded AS (
   SELECT DISTINCT rbcm.business_id
   FROM rds_cases_public.rel_business_customer_monitoring rbcm
   WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'
     AND rbcm.customer_id = '{customer_id}'
 ),
-naics_facts AS (
+naics_f AS (
   SELECT f.business_id,
-         JSON_EXTRACT_PATH_TEXT(f.value, 'value') AS final_naics_code
+    JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_naics
   FROM rds_warehouse_public.facts f
   JOIN onboarded o ON o.business_id = f.business_id
   WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
 ),
-mcc_facts AS (
+mcc_f AS (
   SELECT f.business_id,
-         JSON_EXTRACT_PATH_TEXT(f.value, 'value') AS final_mcc_code
+    JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_mcc
   FROM rds_warehouse_public.facts f
   JOIN onboarded o ON o.business_id = f.business_id
   WHERE f.name = 'mcc_code' AND LENGTH(f.value) < 60000
 ),
-joined AS (
-  SELECT
-    n.business_id,
-    n.final_naics_code,
-    m.final_mcc_code,
-    nc.label AS naics_title,
-    mc.label AS mcc_title
-  FROM naics_facts n
-  LEFT JOIN mcc_facts m ON m.business_id = n.business_id
-  LEFT JOIN rds_cases_public.core_naics_code nc ON nc.code = n.final_naics_code
-  LEFT JOIN rds_cases_public.core_mcc_code mc ON mc.code = m.final_mcc_code
-),
--- Check: is the MCC one of the VALID MCCs for this NAICS? (1-to-many)
-canonical_check AS (
-  SELECT
-    j.*,
-    CASE
-      WHEN j.final_naics_code = '561499' OR j.final_mcc_code = '5614' THEN 'fallback_pair'
-      WHEN j.final_naics_code IS NULL OR j.final_naics_code = ''       THEN 'naics_missing'
-      WHEN j.final_mcc_code IS NULL OR j.final_mcc_code = ''           THEN 'mcc_missing'
-      WHEN EXISTS (
-        SELECT 1
-        FROM rds_cases_public.rel_naics_mcc r
-        JOIN rds_cases_public.core_naics_code nc2 ON nc2.id = r.naics_id
-        JOIN rds_cases_public.core_mcc_code mc2 ON mc2.id = r.mcc_id
-        WHERE nc2.code = j.final_naics_code
-          AND mc2.code = j.final_mcc_code
-      ) THEN 'canonical_pair'
-      ELSE 'noncanonical_pair'
-    END AS pair_status
-  FROM joined j
+-- Pre-build all canonical pairs — avoids correlated subquery, better performance
+canonical_pairs AS (
+  SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+  FROM rds_cases_public.rel_naics_mcc r
+  JOIN rds_cases_public.core_naics_code nc ON nc.id = r.naics_id
+  JOIN rds_cases_public.core_mcc_code mc  ON mc.id = r.mcc_id
 )
 SELECT
-  pair_status,
-  COUNT(*) AS business_count,
-  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct
-FROM canonical_check
+  CASE
+    WHEN n.final_naics = '561499' OR m.final_mcc = '5614' THEN 'fallback_pair'
+    WHEN n.final_naics IS NULL OR n.final_naics = ''       THEN 'naics_missing'
+    WHEN m.final_mcc  IS NULL OR m.final_mcc  = ''        THEN 'mcc_missing'
+    WHEN cp.naics_code IS NOT NULL                         THEN 'canonical_pair'
+    ELSE 'noncanonical_pair'
+  END AS pair_status,
+  COUNT(*)                                                 AS businesses,
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2)      AS pct
+FROM naics_f n
+LEFT JOIN mcc_f m           ON m.business_id  = n.business_id
+LEFT JOIN canonical_pairs cp ON cp.naics_code = n.final_naics
+                              AND cp.mcc_code  = m.final_mcc
 GROUP BY 1
-ORDER BY business_count DESC;
+ORDER BY businesses DESC;
 ```
 
 ---
 
 ### Analysis 6: Pairwise Vendor Concordance (using `alternatives[]`)
 
-**Business question:** When OpenCorporates and Equifax both provide a NAICS, how often do they agree? At what level (exact 6-digit / same sector / different sector)?
+**Business question:** When OpenCorporates and Equifax both provide a NAICS for the same business, how often do they agree? At what level of the NAICS hierarchy?
 
-**Approach:** Use positional `JSON_EXTRACT_PATH_TEXT` on `alternatives[0..4]` — the same Redshift-compatible pattern used for `sos_filings`. Extract each alternative's `source` (platformId) and `value`, pivot by platformId to get per-vendor NAICS columns.
+**What this tells you:** Measures the agreement rate between every pair of vendors. High `both_null` = poor source coverage. High `exact_6_digit` = strong agreement and high trust. `different_sector` = material disagreement requiring review.
 
-**Correct SQL:**
+**Key improvement:** The revised SQL correctly reads `alternatives[N].source.platformId` via the nested path `'alternatives','N','source','platformId'` (note the extra nesting level). The previous version incorrectly used `'alternatives','N','source'` which returns the whole source object, not the platformId string. Also expands all 5 alternatives (0-4) for complete coverage.
+
+**Correct SQL — Pairwise Concordance (OC vs Equifax, with null breakdowns):**
 ```sql
+-- What we are trying to understand:
+-- For each business, extract the NAICS candidate each vendor provided (winner or alternative).
+-- Then compare vendor pairs to measure how often they agree, and at what NAICS hierarchy level.
+-- New concordance levels: oc_null_equifax_found / oc_found_equifax_null separate the one_null cases
+-- so we can see which vendor has better coverage.
 WITH onboarded AS (
   SELECT DISTINCT rbcm.business_id
   FROM rds_cases_public.rel_business_customer_monitoring rbcm
   WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'
     AND rbcm.customer_id = '{customer_id}'
 ),
--- Extract winner + up to 5 alternatives using positional JSON extraction
-raw_candidates AS (
-  SELECT
-    f.business_id,
-    -- Winner
-    JSON_EXTRACT_PATH_TEXT(f.value, 'source', 'platformId')  AS win_pid,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'value')                 AS win_naics,
-    -- Alternative 0
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '0', 'source') AS a0_pid,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '0', 'value')  AS a0_naics,
-    -- Alternative 1
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '1', 'source') AS a1_pid,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '1', 'value')  AS a1_naics,
-    -- Alternative 2
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '2', 'source') AS a2_pid,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '2', 'value')  AS a2_naics,
-    -- Alternative 3
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '3', 'source') AS a3_pid,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '3', 'value')  AS a3_naics,
-    -- Alternative 4
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '4', 'source') AS a4_pid,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '4', 'value')  AS a4_naics
+naics_raw AS (
+  -- Extract winner value and up to 5 alternative values from the alternatives[] array.
+  -- Each alternative has: value (NAICS code), source.platformId (vendor ID).
+  -- We use positional JSON_EXTRACT_PATH_TEXT (Redshift-compatible, same as sos_filings pattern).
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')                    AS win_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')                                  AS win_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','source','platformId') AS a0_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','value')               AS a0_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','source','platformId') AS a1_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','value')               AS a1_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','source','platformId') AS a2_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','value')               AS a2_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','3','source','platformId') AS a3_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','3','value')               AS a3_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','4','source','platformId') AS a4_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','4','value')               AS a4_naics
   FROM rds_warehouse_public.facts f
   JOIN onboarded o ON o.business_id = f.business_id
   WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
 ),
--- Pivot: assign each candidate to its vendor column by platformId
 per_vendor AS (
-  SELECT
-    business_id,
-    -- Winner is added to its vendor column
-    MAX(CASE WHEN win_pid = '16' THEN win_naics
-             WHEN a0_pid = '16'  THEN a0_naics
-             WHEN a1_pid = '16'  THEN a1_naics
-             WHEN a2_pid = '16'  THEN a2_naics
-             WHEN a3_pid = '16'  THEN a3_naics
-             WHEN a4_pid = '16'  THEN a4_naics END) AS middesk_naics,
-    MAX(CASE WHEN win_pid = '23' THEN win_naics
-             WHEN a0_pid = '23'  THEN a0_naics
-             WHEN a1_pid = '23'  THEN a1_naics
-             WHEN a2_pid = '23'  THEN a2_naics
-             WHEN a3_pid = '23'  THEN a3_naics
-             WHEN a4_pid = '23'  THEN a4_naics END) AS oc_naics,
-    MAX(CASE WHEN win_pid = '24' THEN win_naics
-             WHEN a0_pid = '24'  THEN a0_naics
-             WHEN a1_pid = '24'  THEN a1_naics
-             WHEN a2_pid = '24'  THEN a2_naics
-             WHEN a3_pid = '24'  THEN a3_naics
-             WHEN a4_pid = '24'  THEN a4_naics END) AS zoominfo_naics,
-    MAX(CASE WHEN win_pid = '17' THEN win_naics
-             WHEN a0_pid = '17'  THEN a0_naics
-             WHEN a1_pid = '17'  THEN a1_naics
-             WHEN a2_pid = '17'  THEN a2_naics
-             WHEN a3_pid = '17'  THEN a3_naics
-             WHEN a4_pid = '17'  THEN a4_naics END) AS equifax_naics,
-    MAX(CASE WHEN win_pid = '31' THEN win_naics
-             WHEN a0_pid = '31'  THEN a0_naics
-             WHEN a1_pid = '31'  THEN a1_naics
-             WHEN a2_pid = '31'  THEN a2_naics
-             WHEN a3_pid = '31'  THEN a3_naics
-             WHEN a4_pid = '31'  THEN a4_naics END) AS ai_naics,
-    MAX(CASE WHEN win_pid = '0'  THEN win_naics
-             WHEN a0_pid = '0'   THEN a0_naics
-             WHEN a1_pid = '0'   THEN a1_naics
-             WHEN a2_pid = '0'   THEN a2_naics
-             WHEN a3_pid = '0'   THEN a3_naics
-             WHEN a4_pid = '0'   THEN a4_naics END) AS user_naics,
-    win_naics AS final_naics
-  FROM raw_candidates
+  -- Pivot: for each business, assign each vendor's NAICS to a named column.
+  -- A vendor's value may be the winner OR one of the alternatives.
+  SELECT business_id,
+    win_naics AS final_naics,
+    MAX(CASE WHEN win_pid='23' THEN win_naics WHEN a0_pid='23' THEN a0_naics
+             WHEN a1_pid='23' THEN a1_naics  WHEN a2_pid='23' THEN a2_naics
+             WHEN a3_pid='23' THEN a3_naics  WHEN a4_pid='23' THEN a4_naics END) AS oc_naics,
+    MAX(CASE WHEN win_pid='17' THEN win_naics WHEN a0_pid='17' THEN a0_naics
+             WHEN a1_pid='17' THEN a1_naics  WHEN a2_pid='17' THEN a2_naics
+             WHEN a3_pid='17' THEN a3_naics  WHEN a4_pid='17' THEN a4_naics END) AS equifax_naics,
+    MAX(CASE WHEN win_pid='24' THEN win_naics WHEN a0_pid='24' THEN a0_naics
+             WHEN a1_pid='24' THEN a1_naics  WHEN a2_pid='24' THEN a2_naics
+             WHEN a3_pid='24' THEN a3_naics  WHEN a4_pid='24' THEN a4_naics END) AS zoominfo_naics,
+    MAX(CASE WHEN win_pid='0'  THEN win_naics WHEN a0_pid='0'  THEN a0_naics
+             WHEN a1_pid='0'  THEN a1_naics  WHEN a2_pid='0'  THEN a2_naics
+             WHEN a3_pid='0'  THEN a3_naics  WHEN a4_pid='0'  THEN a4_naics END) AS user_naics
+  FROM naics_raw
   GROUP BY business_id, win_naics
-),
--- Pairwise concordance for key pairs
-pairs AS (
-  SELECT business_id, 'OC vs Equifax'     AS pair, oc_naics AS a, equifax_naics AS b FROM per_vendor
-  UNION ALL
-  SELECT business_id, 'OC vs ZoomInfo'    AS pair, oc_naics,      zoominfo_naics    FROM per_vendor
-  UNION ALL
-  SELECT business_id, 'Equifax vs ZoomInfo' AS pair, equifax_naics, zoominfo_naics  FROM per_vendor
-  UNION ALL
-  SELECT business_id, 'User vs Final'     AS pair, user_naics,    final_naics       FROM per_vendor
-  UNION ALL
-  SELECT business_id, 'AI vs Final'       AS pair, ai_naics,      final_naics       FROM per_vendor
 )
-SELECT
-  pair,
+SELECT 'OC vs Equifax' AS pair,
   CASE
-    WHEN a IS NULL AND b IS NULL                        THEN 'both_null'
-    WHEN a IS NULL OR b IS NULL                         THEN 'one_null'
-    WHEN a = b                                          THEN 'exact_6_digit'
-    WHEN LEFT(a,4) = LEFT(b,4)                         THEN 'same_4_digit_group'
-    WHEN LEFT(a,3) = LEFT(b,3)                         THEN 'same_3_digit_subsector'
-    WHEN LEFT(a,2) = LEFT(b,2)                         THEN 'same_2_digit_sector'
-    ELSE                                                     'different_sector'
+    -- Coverage gaps: one source provided NAICS, the other did not
+    WHEN oc_naics IS NULL AND equifax_naics IS NULL     THEN 'both_null'
+    WHEN oc_naics IS NULL AND equifax_naics IS NOT NULL THEN 'oc_null_equifax_found'
+    WHEN oc_naics IS NOT NULL AND equifax_naics IS NULL THEN 'oc_found_equifax_null'
+    -- Agreement levels at different NAICS hierarchy depths
+    WHEN oc_naics = equifax_naics                       THEN 'exact_6_digit'
+    WHEN LEFT(oc_naics,4) = LEFT(equifax_naics,4)       THEN 'same_4_digit_group'
+    WHEN LEFT(oc_naics,3) = LEFT(equifax_naics,3)       THEN 'same_3_digit_subsector'
+    WHEN LEFT(oc_naics,2) = LEFT(equifax_naics,2)       THEN 'same_2_digit_sector'
+    ELSE 'different_sector'
   END AS concordance_level,
-  COUNT(*) AS businesses,
-  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY pair), 2) AS pct_within_pair
-FROM pairs
-GROUP BY 1, 2
-ORDER BY pair, businesses DESC;
+  COUNT(*)                                              AS businesses,
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2)   AS pct
+FROM per_vendor
+GROUP BY 2
+ORDER BY businesses DESC;
 ```
+
+**How to interpret the results:**
+
+| Concordance Level | Meaning | Action |
+|---|---|---|
+| `both_null` | Neither OC nor Equifax returned a NAICS for this business | Pure AI/user fallback — investigate vendor coverage |
+| `oc_null_equifax_found` | Only Equifax had a NAICS; OC coverage gap | OC failed to match or lacked industry data |
+| `oc_found_equifax_null` | Only OC had a NAICS; Equifax coverage gap | Equifax failed to match or lacked industry data |
+| `exact_6_digit` | Both vendors agree at the most granular level | Strong signal — high confidence in the NAICS |
+| `same_4_digit_group` | Same industry group, different sub-detail | Acceptable — vendors broadly agree |
+| `same_3_digit_subsector` | Same subsector | Acceptable with review |
+| `same_2_digit_sector` | Same broad sector only | Vendor conflict at detail level — investigate |
+| `different_sector` | Vendors say completely different industries | Material conflict — flag for manual review |
 
 ---
 
@@ -632,158 +602,138 @@ ORDER BY pair, businesses DESC;
 
 **Business question:** How often does the user submit a NAICS that vendors override? When they disagree, how severe is the disagreement?
 
-**Approach:** Parse `alternatives[]` to find platformId=0 (user submitted). If present but not the winner, user was overridden.
+**What this tells you:** Identifies three groups: user won (user submitted and their value was selected), user overridden (user submitted but a vendor won with a different value), user agreed with winner (user submitted the same value that a vendor also had), no user submission. This surfaces whether the classification pipeline is ignoring potentially correct user input.
 
-**Correct SQL:**
+**Correct SQL — User Override Status:**
 ```sql
+-- What we are trying to understand:
+-- The user/applicant submits a NAICS code (platformId=0, businessDetails source).
+-- This appears either as the winner OR in alternatives[].
+-- We classify each business into: user_won / user_overridden / user_agreed_with_winner / no_user_submission.
+WITH onboarded AS (
+  SELECT DISTINCT rbcm.business_id FROM rds_cases_public.rel_business_customer_monitoring rbcm
+  WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'
+    AND rbcm.customer_id = '{customer_id}'
+),
+naics_raw AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS win_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_naics,
+    -- Locate the user-submitted value in alternatives[] (platformId='0' = businessDetails = user)
+    COALESCE(
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','value') END,
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','value') END,
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','value') END
+    ) AS user_naics_in_alt,
+    -- Or the user won outright (user's value had the highest score)
+    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')='0'
+         THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END AS user_naics_winner
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id = f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+)
+SELECT
+  CASE
+    WHEN user_naics_winner IS NOT NULL              THEN 'user_won'
+    WHEN user_naics_in_alt IS NOT NULL
+     AND user_naics_in_alt != final_naics           THEN 'user_overridden'
+    WHEN user_naics_in_alt IS NOT NULL
+     AND user_naics_in_alt = final_naics            THEN 'user_agreed_with_winner'
+    ELSE                                                 'no_user_submission'
+  END AS override_status,
+  COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER (),2) AS pct
+FROM naics_raw
+GROUP BY 1 ORDER BY businesses DESC;
+```
+
+---
+
+### Analysis 7b: User Override — Which Vendor Won When User Was Overridden?
+
+**Business question:** When a vendor overrides the user's submitted NAICS, which vendor is responsible? And when the user agreed with the winner, which vendor was that?
+
+**What this tells you:** Breaks down the `user_overridden` and `user_agreed_with_winner` groups by the winning vendor. This answers: "Is Equifax consistently overriding what users submit? Or is it OpenCorporates?" If one vendor consistently overrides users, it deserves extra scrutiny of its data quality.
+
+**Correct SQL — Override Breakdown by Winner Vendor:**
+```sql
+-- What we are trying to understand:
+-- Of the businesses where the user submitted a NAICS that was either accepted (agreed)
+-- or rejected (overridden), which vendor made the winning decision?
+-- This identifies which data source has the most influence over user input.
 WITH onboarded AS (
   SELECT DISTINCT rbcm.business_id
   FROM rds_cases_public.rel_business_customer_monitoring rbcm
   WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'
     AND rbcm.customer_id = '{customer_id}'
 ),
-raw AS (
-  SELECT
-    f.business_id,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'source', 'platformId') AS win_pid,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'value')                AS final_naics,
-    -- Find user-submitted value in alternatives
+naics_raw AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS win_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_naics,
     COALESCE(
-      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '0', 'source') = '0'
-           THEN JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '0', 'value') END,
-      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '1', 'source') = '0'
-           THEN JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '1', 'value') END,
-      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '2', 'source') = '0'
-           THEN JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '2', 'value') END,
-      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '3', 'source') = '0'
-           THEN JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '3', 'value') END,
-      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '4', 'source') = '0'
-           THEN JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '4', 'value') END
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','value') END,
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','value') END,
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','value') END
     ) AS user_naics_in_alt,
-    -- Or user won outright
-    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value, 'source', 'platformId') = '0'
-         THEN JSON_EXTRACT_PATH_TEXT(f.value, 'value') END AS user_naics_winner
+    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')='0'
+         THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END AS user_naics_winner
   FROM rds_warehouse_public.facts f
   JOIN onboarded o ON o.business_id = f.business_id
   WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
 ),
 classified AS (
-  SELECT
-    business_id,
-    final_naics,
-    COALESCE(user_naics_winner, user_naics_in_alt) AS user_naics,
+  SELECT *,
     CASE
-      WHEN user_naics_winner IS NOT NULL          THEN 'user_won'
+      WHEN user_naics_winner IS NOT NULL                   THEN 'user_won'
       WHEN user_naics_in_alt IS NOT NULL
-       AND user_naics_in_alt != final_naics        THEN 'user_overridden'
+       AND user_naics_in_alt != final_naics                THEN 'user_overridden'
       WHEN user_naics_in_alt IS NOT NULL
-       AND user_naics_in_alt = final_naics          THEN 'user_agreed_with_winner'
-      ELSE                                              'no_user_submission'
+       AND user_naics_in_alt = final_naics                 THEN 'user_agreed_with_winner'
+      ELSE                                                      'no_user_submission'
     END AS override_status,
-    CASE
-      WHEN COALESCE(user_naics_winner, user_naics_in_alt) IS NULL OR final_naics IS NULL
-        THEN 'na'
-      WHEN COALESCE(user_naics_winner, user_naics_in_alt) = final_naics
-        THEN 'exact_match'
-      WHEN LEFT(COALESCE(user_naics_winner, user_naics_in_alt), 2)
-         = LEFT(final_naics, 2)
-        THEN 'same_sector'
-      ELSE 'different_sector'
-    END AS disagreement_severity
-  FROM raw
+    -- Human-readable name for the winning vendor
+    CASE win_pid
+      WHEN '23' THEN 'OpenCorporates'
+      WHEN '17' THEN 'Equifax'
+      WHEN '24' THEN 'ZoomInfo'
+      WHEN '16' THEN 'Middesk'
+      WHEN '38' THEN 'Trulioo'
+      WHEN '31' THEN 'AI Enrichment'
+      WHEN '0'  THEN 'User (self)'
+      ELSE 'Other (' || win_pid || ')'
+    END AS winner_vendor
+  FROM naics_raw
 )
+-- Only show cases where user submitted something (overridden or agreed)
 SELECT
   override_status,
-  disagreement_severity,
-  COUNT(*) AS businesses,
-  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 2) AS pct
+  winner_vendor,
+  COUNT(*)                                                                      AS businesses,
+  ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY override_status), 2) AS pct_within_status
 FROM classified
+WHERE override_status IN ('user_agreed_with_winner', 'user_overridden')
 GROUP BY 1, 2
-ORDER BY businesses DESC;
+ORDER BY override_status, businesses DESC;
 ```
+
+**How to interpret the results:**
+
+| override_status | winner_vendor | Interpretation |
+|---|---|---|
+| `user_overridden` | Equifax | Equifax overrode what the user submitted — check if Equifax data quality justifies this |
+| `user_overridden` | AI Enrichment | The AI overrode the user — lowest trust, consider raising user weight |
+| `user_agreed_with_winner` | OpenCorporates | OC and the user agreed — strong signal, OC likely correct |
+| `user_agreed_with_winner` | Equifax | Equifax and user agreed — supports Equifax data quality |
 
 ---
 
-### Analysis 8: Vendor Coverage Heatmap
-
-**Business question:** For each vendor, what percentage of businesses in the portfolio did they provide ANY NAICS signal for?
-
-**What to show:** Table with one row per vendor, showing coverage rate (% of businesses where this vendor had a candidate) and "win rate" (% of businesses where this vendor's candidate was selected as final).
-
-**Correct SQL:**
-```sql
-WITH onboarded AS (
-  SELECT DISTINCT rbcm.business_id
-  FROM rds_cases_public.rel_business_customer_monitoring rbcm
-  WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'
-    AND rbcm.customer_id = '{customer_id}'
-),
-total AS (SELECT COUNT(DISTINCT business_id) AS total_biz FROM onboarded),
-raw AS (
-  SELECT
-    f.business_id,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'source', 'platformId') AS win_pid,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '0', 'source') AS a0,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '0', 'value')  AS a0_val,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '1', 'source') AS a1,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '1', 'value')  AS a1_val,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '2', 'source') AS a2,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '2', 'value')  AS a2_val,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '3', 'source') AS a3,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '3', 'value')  AS a3_val,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '4', 'source') AS a4,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'alternatives', '4', 'value')  AS a4_val
-  FROM rds_warehouse_public.facts f
-  JOIN onboarded o ON o.business_id = f.business_id
-  WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
-),
-vendor_coverage AS (
-  -- For each vendor: did they have a non-null value (winner or alternative)?
-  SELECT business_id, '16' AS pid, 1 AS covered, CASE WHEN win_pid='16' THEN 1 ELSE 0 END AS won
-  FROM raw WHERE win_pid='16' OR (a0='16' AND a0_val IS NOT NULL)
-                             OR (a1='16' AND a1_val IS NOT NULL)
-                             OR (a2='16' AND a2_val IS NOT NULL)
-                             OR (a3='16' AND a3_val IS NOT NULL)
-                             OR (a4='16' AND a4_val IS NOT NULL)
-  UNION ALL
-  SELECT business_id, '23', 1, CASE WHEN win_pid='23' THEN 1 ELSE 0 END FROM raw
-  WHERE win_pid='23' OR (a0='23' AND a0_val IS NOT NULL) OR (a1='23' AND a1_val IS NOT NULL)
-                     OR (a2='23' AND a2_val IS NOT NULL) OR (a3='23' AND a3_val IS NOT NULL)
-                     OR (a4='23' AND a4_val IS NOT NULL)
-  UNION ALL
-  SELECT business_id, '24', 1, CASE WHEN win_pid='24' THEN 1 ELSE 0 END FROM raw
-  WHERE win_pid='24' OR (a0='24' AND a0_val IS NOT NULL) OR (a1='24' AND a1_val IS NOT NULL)
-                     OR (a2='24' AND a2_val IS NOT NULL) OR (a3='24' AND a3_val IS NOT NULL)
-                     OR (a4='24' AND a4_val IS NOT NULL)
-  UNION ALL
-  SELECT business_id, '17', 1, CASE WHEN win_pid='17' THEN 1 ELSE 0 END FROM raw
-  WHERE win_pid='17' OR (a0='17' AND a0_val IS NOT NULL) OR (a1='17' AND a1_val IS NOT NULL)
-                     OR (a2='17' AND a2_val IS NOT NULL) OR (a3='17' AND a3_val IS NOT NULL)
-                     OR (a4='17' AND a4_val IS NOT NULL)
-  UNION ALL
-  SELECT business_id, '31', 1, CASE WHEN win_pid='31' THEN 1 ELSE 0 END FROM raw
-  WHERE win_pid='31' OR (a0='31' AND a0_val IS NOT NULL) OR (a1='31' AND a1_val IS NOT NULL)
-                     OR (a2='31' AND a2_val IS NOT NULL) OR (a3='31' AND a3_val IS NOT NULL)
-                     OR (a4='31' AND a4_val IS NOT NULL)
-)
-SELECT
-  CASE pid
-    WHEN '16' THEN 'Middesk'
-    WHEN '23' THEN 'OpenCorporates'
-    WHEN '24' THEN 'ZoomInfo'
-    WHEN '17' THEN 'Equifax'
-    WHEN '31' THEN 'AI Enrichment'
-    ELSE pid
-  END AS vendor,
-  COUNT(DISTINCT business_id) AS businesses_with_signal,
-  (SELECT total_biz FROM total) AS total_businesses,
-  ROUND(100.0 * COUNT(DISTINCT business_id) / (SELECT total_biz FROM total), 2) AS coverage_pct,
-  SUM(won) AS businesses_won,
-  ROUND(100.0 * SUM(won) / (SELECT total_biz FROM total), 2) AS win_rate_pct
-FROM vendor_coverage
-GROUP BY 1
-ORDER BY coverage_pct DESC;
-```
 
 ---
 
