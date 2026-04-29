@@ -7998,10 +7998,970 @@ HAVING SUM(CASE WHEN LOWER(JSON_EXTRACT_PATH_TEXT(f.value,'value','0','foreign_d
             </div>""", unsafe_allow_html=True)
 
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 2 — TIN VERIFICATION ANALYSIS
+    # SECTION 2 — REGISTRY COVERAGE ANALYSIS
+    # Domestic Filing · Operating Authorization · Vendor Quality · Confidence
+    # All signals from rds_warehouse_public.facts ONLY — 100% of portfolio
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("### 🔐 Section 2 — TIN / EIN Verification")
+    st.markdown("### 🏛️ Section 2 — Registry Coverage Analysis")
+    st.caption(
+        "For each onboarded business: "
+        "**Did we find the domestic incorporation filing?** "
+        "**Did we find authorization to operate in the submitted state?** "
+        "Which vendor answered each question — and how confident are we? "
+        "All metrics cover 100% of the onboarded portfolio. "
+        "All signals from `rds_warehouse_public.facts` only."
+    )
+
+    if _sos_filings_df is not None and not _sos_filings_df.empty and not _funnel.empty:
+        # ── Build per-business classification ──────────────────────────────────
+        # Domestic Filing: Did we find the incorporation/formation filing in the entity's home state?
+        #   Explicit: sos_filings[].foreign_domestic = 'domestic'         ← authoritative (vendor set)
+        #   Proxy:    sos_filings[].state = formation_state fact           ← inferred (state comparison)
+        # Operating Authorization: Did we find a filing authorizing the entity to operate in the submitted state?
+        #   Explicit: sos_filings[].foreign_domestic = 'foreign' AND state = operating_state
+        #   Proxy:    sos_filings[].state = operating_state AND state ≠ formation_state
+        # When both foreign_domestic and formation_state are NULL → UNKNOWN (never proxy-classified)
+        # Source: rds_warehouse_public.facts name='sos_filings' + 'formation_state' + 'primary_address'
+
+        # Build lookup maps from funnel_df
+        _bid_to_form  = {}
+        _bid_to_op    = {}
+        if "formation_state" in _funnel.columns:
+            _bid_to_form = _funnel.set_index("business_id")["formation_state"].str.upper().str.strip().fillna("").to_dict()
+        if "operating_state" in _funnel.columns:
+            _bid_to_op = _funnel.set_index("business_id")["operating_state"].str.upper().str.strip().fillna("").to_dict()
+
+        _VENDOR_NAMES = {
+            "16": "Middesk","23": "OpenCorporates","17": "Baselayer",
+            "22": "Cobalt","4": "Enigma","24": "ZoomInfo","0": "BusinessDetails",
+        }
+
+        # Per-business Domestic Filing / Operating Authorization classification
+        _dom_explicit  = set()   # Domestic Filing: foreign_domestic='domestic'
+        _dom_proxy     = set()   # Domestic Filing: filing.state = formation_state
+        _op_explicit   = set()   # Operating Auth: foreign_domestic='foreign' AND state=op_state
+        _op_proxy      = set()   # Operating Auth: filing.state=op_state AND state≠formation_state
+        _single_state_bids = set()  # formation = operating (Domestic Filing IS the authorization)
+        _vendor_per_bid    = {}
+
+        _all_portfolio_bids = set(_funnel["business_id"].tolist())
+
+        for _bid in _all_portfolio_bids:
+            _fs = _bid_to_form.get(_bid, "")
+            _os = _bid_to_op.get(_bid, "")
+            if _fs and _os and _fs == _os:
+                _single_state_bids.add(_bid)
+
+        for _bid, _grp in _sos_filings_df.groupby("business_id"):
+            _fs = _bid_to_form.get(_bid, "")
+            _os = _bid_to_op.get(_bid, "")
+            _vid = str(_grp["source_platform_id"].iloc[0] if "source_platform_id" in _grp.columns else "")
+            _vendor_per_bid[_bid] = _VENDOR_NAMES.get(_vid, f"Vendor {_vid}" if _vid else "Unknown")
+
+            for _, _row in _grp.iterrows():
+                _fd  = str(_row.get("foreign_domestic", "") or "").lower().strip()
+                _fst = str(_row.get("filing_state", "") or "").upper().strip()
+
+                # Domestic Filing classification
+                if _fd == "domestic":
+                    _dom_explicit.add(_bid)
+                elif _fst and _fs and _fst == _fs:
+                    _dom_proxy.add(_bid)
+
+                # Operating Authorization classification
+                if _bid not in _single_state_bids:
+                    if _fd == "foreign" and _fst and _os and _fst == _os:
+                        _op_explicit.add(_bid)
+                    elif _fst and _os and _fst == _os and _fst != _fs:
+                        _op_proxy.add(_bid)
+
+        # Combined sets (plain-English names everywhere)
+        _dom_all = _dom_explicit | _dom_proxy
+        _op_all  = _op_explicit  | _op_proxy
+
+        # Scopes — 100% of portfolio
+        _reg_bids       = set(_seg.get("sos_found_extended", []))
+        _no_reg_bids    = set(_seg.get("no_sos", []))
+        _rf_funnel_bids = _all_portfolio_bids & _reg_bids
+
+        # Five-state matrix (100% of portfolio)
+        _fully_covered  = _rf_funnel_bids & _dom_all & (_op_all | _single_state_bids)
+        _dom_only       = (_rf_funnel_bids & _dom_all) - _op_all - _single_state_bids
+        _op_only        = (_rf_funnel_bids & _op_all)  - _dom_all
+        _filing_neither = _rf_funnel_bids - _dom_all - _op_all - _single_state_bids
+        _no_filing_data = _all_portfolio_bids & _no_reg_bids  # 5th state
+
+        _portfolio_total = len(_all_portfolio_bids)
+
+        def _pct(n): return f"{round(100*n/max(_portfolio_total,1))}%"
+
+        # ── BLOCK 1: Registry Coverage Matrix (5 states, 100% portfolio) ──────
+        st.markdown("#### 📊 Block 1 — Registry Coverage Matrix")
+        st.caption(
+            f"All {_portfolio_total:,} onboarded businesses classified into one of five states. "
+            "**Explicit** = `foreign_domestic` field set by vendor (authoritative). "
+            "**Proxy ⚠️** = inferred from state comparisons when `foreign_domestic` is absent — carries inherent uncertainty."
+        )
+
+        def _q_badge(explicit_n, proxy_n):
+            parts = []
+            if explicit_n > 0: parts.append(f"<span style='color:#22c55e'>{explicit_n} explicit</span>")
+            if proxy_n   > 0: parts.append(f"<span style='color:#f59e0b'>{proxy_n} proxy ⚠️</span>")
+            return f"<span style='font-size:.7rem'>{' · '.join(parts)}</span>" if parts else ""
+
+        _n_fc  = len(_fully_covered)
+        _n_do  = len(_dom_only)
+        _n_oo  = len(_op_only)
+        _n_fn  = len(_filing_neither)
+        _n_nfd = len(_no_filing_data)
+
+        _bc1, _bc2, _bc3 = st.columns(3)
+        _bc4, _bc5 = st.columns(2)
+
+        with _bc1:
+            _fc_exp = len(_fully_covered & (_dom_explicit | _op_explicit | _single_state_bids))
+            _fc_prx = _n_fc - _fc_exp
+            st.markdown(f"""<div style="background:#052e16;border:1px solid #22c55e;border-radius:8px;padding:10px 14px">
+  <div style="color:#22c55e;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em">✅ Fully Covered</div>
+  <div style="color:#fff;font-size:1.8rem;font-weight:800;line-height:1.1">{_n_fc:,}</div>
+  <div style="color:#6b7280;font-size:.72rem">{_pct(_n_fc)} of all onboarded</div>
+  <div style="color:#a3e635;font-size:.72rem;margin-top:4px">Domestic incorporation + operating authorization both found</div>
+  <div style="margin-top:3px">{_q_badge(_fc_exp, _fc_prx)}</div>
+</div>""", unsafe_allow_html=True)
+
+        with _bc2:
+            _do_exp = len(_dom_only & _dom_explicit)
+            _do_prx = len(_dom_only & _dom_proxy - _dom_explicit)
+            st.markdown(f"""<div style="background:#1c1405;border:1px solid #f59e0b;border-radius:8px;padding:10px 14px">
+  <div style="color:#f59e0b;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em">⚠️ Domestic Found · Op. Auth Missing</div>
+  <div style="color:#fff;font-size:1.8rem;font-weight:800;line-height:1.1">{_n_do:,}</div>
+  <div style="color:#6b7280;font-size:.72rem">{_pct(_n_do)} of all onboarded</div>
+  <div style="color:#fbbf24;font-size:.72rem;margin-top:4px">Domestic incorporation found · no filing confirms operating state authorization</div>
+  <div style="margin-top:3px">{_q_badge(_do_exp, _do_prx)}</div>
+</div>""", unsafe_allow_html=True)
+
+        with _bc3:
+            _oo_exp = len(_op_only & _op_explicit)
+            _oo_prx = len(_op_only & _op_proxy - _op_explicit)
+            st.markdown(f"""<div style="background:#1c0a05;border:1px solid #f97316;border-radius:8px;padding:10px 14px">
+  <div style="color:#f97316;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em">🔶 Op. Auth Found · Domestic Unverified</div>
+  <div style="color:#fff;font-size:1.8rem;font-weight:800;line-height:1.1">{_n_oo:,}</div>
+  <div style="color:#6b7280;font-size:.72rem">{_pct(_n_oo)} of all onboarded</div>
+  <div style="color:#fb923c;font-size:.72rem;margin-top:4px">Operating state filing found · domestic incorporation origin unknown (tax-haven pattern)</div>
+  <div style="margin-top:3px">{_q_badge(_oo_exp, _oo_prx)}</div>
+</div>""", unsafe_allow_html=True)
+
+        with _bc4:
+            st.markdown(f"""<div style="background:#1a0505;border:1px solid #ef4444;border-radius:8px;padding:10px 14px">
+  <div style="color:#ef4444;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em">🔲 Filing Data · Neither Confirmed</div>
+  <div style="color:#fff;font-size:1.8rem;font-weight:800;line-height:1.1">{_n_fn:,}</div>
+  <div style="color:#6b7280;font-size:.72rem">{_pct(_n_fn)} of all onboarded</div>
+  <div style="color:#f87171;font-size:.72rem;margin-top:4px">Vendor returned filing data but neither domestic incorporation nor operating authorization can be confirmed</div>
+</div>""", unsafe_allow_html=True)
+
+        with _bc5:
+            st.markdown(f"""<div style="background:#0f0a1e;border:1px solid #6366f1;border-radius:8px;padding:10px 14px">
+  <div style="color:#818cf8;font-size:.7rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em">⚫ No Filing Data</div>
+  <div style="color:#fff;font-size:1.8rem;font-weight:800;line-height:1.1">{_n_nfd:,}</div>
+  <div style="color:#6b7280;font-size:.72rem">{_pct(_n_nfd)} of all onboarded</div>
+  <div style="color:#a5b4fc;font-size:.72rem;margin-top:4px">Vendor found nothing — sos_filings[] is empty. Neither question can be answered.</div>
+</div>""", unsafe_allow_html=True)
+
+        # Sanity check
+        _matrix_total = _n_fc + _n_do + _n_oo + _n_fn + _n_nfd
+        if _matrix_total == _portfolio_total:
+            st.caption(f"✅ All {_portfolio_total:,} businesses accounted for across 5 states.")
+        else:
+            st.caption(f"⚠️ Matrix total: {_matrix_total:,} · Portfolio: {_portfolio_total:,} · "
+                       f"Gap: {abs(_portfolio_total - _matrix_total):,} (businesses missing from sos_filings_df)")
+
+        # Proxy legend
+        st.markdown("""<div style="margin-top:6px;font-size:.74rem;color:#6b7280">
+  <span style="color:#22c55e">■</span> <strong>Explicit</strong>: <code>sos_filings[].foreign_domestic</code> set by vendor — authoritative &nbsp;·&nbsp;
+  <span style="color:#f59e0b">■</span> <strong>Proxy ⚠️</strong>: inferred from <code>sos_filings[].state</code> vs <code>formation_state</code>
+  or <code>primary_address.state</code> — uncertain when <code>foreign_domestic</code> absent (see decision tree in ⚙️ How Calculated)
+</div>""", unsafe_allow_html=True)
+
+        # Drilldowns
+        st.markdown("---")
+        _DOM_OP_HOW = (
+            "**Domestic Filing** = the incorporation/formation filing in the entity's home state\n"
+            "- Explicit: `sos_filings[].foreign_domestic = 'domestic'` — set by Middesk from `registration.jurisdiction` "
+            "or by OpenCorporates from `home_jurisdiction_code === jurisdiction_code` (`index.ts:799-883`)\n"
+            "- Proxy: `sos_filings[].state = formation_state` fact — filing is in the state Middesk recorded as formation state. "
+            "`formation_state` comes from `businessEntityVerification.formation_state` (Middesk) — an INDEPENDENT source from the filing state.\n\n"
+            "**Operating Authorization** = a filing confirming the entity is authorized to operate in the submitted state\n"
+            "- Explicit: `sos_filings[].foreign_domestic = 'foreign'` AND `sos_filings[].state = primary_address.state`\n"
+            "- Proxy: `sos_filings[].state = primary_address.state` AND `state ≠ formation_state` — "
+            "⚠️ UNCERTAIN: cannot distinguish foreign qualification from domestic filing when `foreign_domestic` is absent.\n\n"
+            "**Single-state businesses** (`formation_state = primary_address.state`): finding the domestic incorporation IS the authorization — counted in Fully Covered.\n\n"
+            "**No Filing Data**: `sos_filings[]` is empty — `sos_active IS NULL` in `rds_warehouse_public.facts` "
+            "(proxy: `sos_active` only written when `sos_filings.length > 0`, per `index.ts:1431`).\n\n"
+            "**Source tables:** `rds_warehouse_public.facts name='sos_filings'` · `name='formation_state'` · `name='primary_address'` · `name='sos_active'`"
+        )
+
+        def _cov_drilldown(seg_bids, label, seg_key_prefix, include_no_filing=False):
+            if not seg_bids: return
+            _bids_list = sorted(seg_bids)
+            with st.expander(f"👁️ Show {len(_bids_list):,} business IDs — {label}", expanded=False):
+                st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid #8B5CF6;
+                    border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
+                  <span style="color:#a78bfa;font-weight:700">⚙️ How this classification is determined</span>
+                </div>""", unsafe_allow_html=True)
+                st.markdown(_DOM_OP_HOW)
+                if not include_no_filing and _sos_filings_df is not None and not _sos_filings_df.empty:
+                    _sf_s = _sos_filings_df[_sos_filings_df["business_id"].isin(_bids_list)].groupby("business_id").agg(
+                        vendor=("source_vendor_name","first") if "source_vendor_name" in _sos_filings_df.columns else ("filing_state","count"),
+                        foreign_domestic=("foreign_domestic", lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
+                        filing_states=("filing_state", lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
+                        n_filings=("filing_state","count"),
+                        entity_type=("entity_type","first"),
+                    ).reset_index()
+                    _sf_s["formation_state"]   = _sf_s["business_id"].map(pd.Series(_bid_to_form))
+                    _sf_s["operating_state"]    = _sf_s["business_id"].map(pd.Series(_bid_to_op))
+                    _sf_s["Domestic Method"]    = _sf_s["business_id"].apply(
+                        lambda b: "Explicit ✅" if b in _dom_explicit else ("Proxy ⚠️" if b in _dom_proxy else "Not found ❌"))
+                    _sf_s["Op. Auth Method"]    = _sf_s["business_id"].apply(
+                        lambda b: "Explicit ✅" if b in _op_explicit else
+                                  ("Single-state 🔵" if b in _single_state_bids else
+                                   ("Proxy ⚠️" if b in _op_proxy else "Not found ❌")))
+                    _sf_s = _sf_s.rename(columns={
+                        "vendor":"Vendor","foreign_domestic":"Dom/Foreign Filed",
+                        "filing_states":"Filing State(s)","n_filings":"# Filings",
+                        "entity_type":"Entity Type","formation_state":"Formation State",
+                        "operating_state":"Operating State",
+                    })
+                    _ord = ["business_id","Vendor","Formation State","Operating State",
+                            "Filing State(s)","Dom/Foreign Filed","Domestic Method","Op. Auth Method",
+                            "# Filings","Entity Type"]
+                    _sf_s = _sf_s[[c for c in _ord if c in _sf_s.columns]]
+                    st.dataframe(_sf_s, use_container_width=True, hide_index=True)
+                    st.download_button(f"⬇️ Download {len(_bids_list)} IDs (CSV)",
+                                       _sf_s.to_csv(index=False).encode(),
+                                       f"{seg_key_prefix}_ids.csv","text/csv",
+                                       key=f"dl_cov_{seg_key_prefix}")
+                else:
+                    # No filing data — show basic table from funnel
+                    _nfd_df = _funnel[_funnel["business_id"].isin(_bids_list)][
+                        ["business_id"] + [c for c in ["sos_match_boolean","sos_active","formation_state","operating_state"] if c in _funnel.columns]
+                    ].copy()
+                    _nfd_df["Domestic Filing"] = "❌ Not found"
+                    _nfd_df["Op. Authorization"] = "❌ Not found"
+                    st.dataframe(_nfd_df, use_container_width=True, hide_index=True)
+                    st.download_button(f"⬇️ Download {len(_bids_list)} IDs (CSV)",
+                                       _nfd_df.to_csv(index=False).encode(),
+                                       f"{seg_key_prefix}_ids.csv","text/csv",
+                                       key=f"dl_cov_{seg_key_prefix}")
+                # Investigate buttons
+                st.caption("Click 🔍 Investigate to set a business ID in the filter bar.")
+                for _idx, _bid in enumerate(_bids_list[:50]):
+                    _il, _ir = st.columns([5,1])
+                    _v = _vendor_per_bid.get(_bid, "No filing data")
+                    _dm = "✅ Explicit" if _bid in _dom_explicit else ("🟡 Proxy" if _bid in _dom_proxy else "❌")
+                    _om = "✅ Explicit" if _bid in _op_explicit else ("🔵 Single-state" if _bid in _single_state_bids else ("🟡 Proxy⚠️" if _bid in _op_proxy else "❌"))
+                    with _il:
+                        st.markdown(
+                            f"<span style='font-family:monospace;font-size:.78rem'>{_bid}</span> &nbsp; "
+                            f"<span style='color:#94a3b8;font-size:.72rem'>{_v} · "
+                            f"Domestic:{_dm} · Op.Auth:{_om}</span>",
+                            unsafe_allow_html=True)
+                    with _ir:
+                        if st.button("🔍", key=f"inv_cov_{seg_key_prefix}_{_idx}"):
+                            st.session_state["_pending_bid"] = _bid
+                            st.rerun()
+
+        _cov_drilldown(_fully_covered, "✅ Fully Covered — domestic + operating authorization both found", "cov_full")
+        _cov_drilldown(_dom_only,      "⚠️ Domestic Found · Op. Auth Missing — incorporated but no operating state filing", "cov_dom")
+        _cov_drilldown(_op_only,       "🔶 Op. Auth Found · Domestic Unverified — operating state filing found, origin unknown", "cov_op")
+        _cov_drilldown(_filing_neither,"🔲 Filing Data · Neither Confirmed — vendor returned data but cannot confirm either", "cov_neither")
+        _cov_drilldown(_no_filing_data,"⚫ No Filing Data — vendor found nothing, sos_filings[] empty", "cov_nfd", include_no_filing=True)
+
+        # ── BLOCK 2: Vendor Quality Scorecard (100% portfolio scope) ─────────
+        st.markdown("---")
+        st.markdown("#### 🏭 Block 2 — Vendor Quality Scorecard")
+        st.caption(
+            "For each vendor that won `factWithHighestConfidence` for `sos_filings` — how often did their data "
+            "confirm the domestic incorporation and operating authorization, and confirm the entity match? "
+            "Denominator = all onboarded businesses (Registry Found + No Filing Data). "
+            "⚠️ Reflects winning-vendor performance only — alternatives are not persisted in `rds_warehouse_public.facts`."
+        )
+
+        _vendor_rows = []
+        _TAXHAVEN    = {"DE","NV","WY","SD","MT","NM"}
+        _taxhaven_bids = {b for b in _all_portfolio_bids if _bid_to_form.get(b,"") in _TAXHAVEN}
+
+        _sos_match_by_bid = {}
+        if "sos_match_boolean" in _funnel.columns:
+            _sos_match_by_bid = _funnel.set_index("business_id")["sos_match_boolean"].str.lower().to_dict()
+
+        # Vendor attribution from sos_match_boolean fact source (for no-filing businesses)
+        # When sos_filings is empty, check sos_match_boolean.source.platformId
+        _smb_vendor_by_bid = {}
+        # (This would require loading source.platformId from sos_match_boolean fact;
+        #  for now we use sos_filings source_vendor_name for registry-found businesses)
+
+        if "source_vendor_name" in _sos_filings_df.columns and "source_platform_id" in _sos_filings_df.columns:
+            # Fill missing source_vendor_name from source_platform_id using the _VENDOR_NAMES map.
+            # The sos_filings fact stores source.platformId reliably even when source.name is NULL.
+            # This is why "None / 16 / 22" appears in the SQL runner — the name wasn't stored
+            # but the platformId was. We resolve it here so those businesses are attributed correctly.
+            _sf_for_vendor = _sos_filings_df.copy()
+            _sf_for_vendor["_resolved_vendor"] = _sf_for_vendor.apply(
+                lambda r: (
+                    str(r["source_vendor_name"]).strip()
+                    if str(r.get("source_vendor_name","") or "").strip() not in ("","nan","None","none")
+                    else _VENDOR_NAMES.get(str(r.get("source_platform_id","") or "").strip(), "")
+                ),
+                axis=1,
+            )
+            _vendor_groups = (
+                _sf_for_vendor[_sf_for_vendor["_resolved_vendor"] != ""]
+                .groupby("_resolved_vendor")["business_id"]
+                .apply(set)
+                .to_dict()
+            )
+        elif "source_vendor_name" in _sos_filings_df.columns:
+            _vendor_groups = _sos_filings_df.groupby("source_vendor_name")["business_id"].apply(set).to_dict()
+        else:
+            _vendor_groups = {}
+
+        for _vname, _vbids in sorted(_vendor_groups.items(), key=lambda x: -len(x[1])):
+            if not _vname or str(_vname) in ("nan","None",""): continue
+            # Denominator: all portfolio businesses this vendor served (registry found only for now;
+            # full attribution requires sos_match_boolean source which is noted as a known gap)
+            _vbids_portfolio = _vbids & _all_portfolio_bids
+            _n_v_total = len(_vbids_portfolio)
+            if _n_v_total == 0: continue
+            _v_dom    = len(_vbids_portfolio & _dom_all)
+            _v_op     = len(_vbids_portfolio & (_op_all | _single_state_bids))
+            _v_match  = sum(1 for b in _vbids_portfolio if _sos_match_by_bid.get(b,"") == "true")
+            _v_th     = len(_vbids_portfolio & _taxhaven_bids)
+            _v_th_dom = len(_vbids_portfolio & _taxhaven_bids & _dom_all)
+            _vendor_rows.append({
+                "Vendor":                _vname,
+                "Businesses":            _n_v_total,
+                "Domestic Filing Rate":  f"{round(100*_v_dom/max(_n_v_total,1))}% ({_v_dom})",
+                "Op. Auth Rate":         f"{round(100*_v_op/max(_n_v_total,1))}% ({_v_op})",
+                "Match Confirmed":       f"{round(100*_v_match/max(_n_v_total,1))}% ({_v_match})",
+                "Tax-Haven Dom. Rate":   f"{round(100*_v_th_dom/max(_v_th,1))}% ({_v_th_dom}/{_v_th})" if _v_th else "n/a",
+            })
+        # Add unattributed row for No Filing Data businesses not in any vendor group
+        # "No vendor attribution" = businesses where sos_filings[] exists but NEITHER
+        # source.name NOR source.platformId could be resolved to a known vendor.
+        # Businesses with a known platformId are already attributed above via _resolved_vendor.
+        _all_attributed_bids = set().union(*_vendor_groups.values()) if _vendor_groups else set()
+        _unattr_bids = _all_portfolio_bids - _all_attributed_bids - _no_filing_data
+        if _unattr_bids:
+            _vendor_rows.append({
+                "Vendor":                "⚫ No vendor attribution",
+                "Businesses":            len(_unattr_bids),
+                "Domestic Filing Rate":  "0% (0)",
+                "Op. Auth Rate":         "0% (0)",
+                "Match Confirmed":       "0% (0)",
+                "Tax-Haven Dom. Rate":   "n/a",
+            })
+
+        if _vendor_rows:
+            _vdf = pd.DataFrame(_vendor_rows)
+            st.dataframe(_vdf, use_container_width=True, hide_index=True)
+            detail_panel(
+                "🏭 Vendor Quality Scorecard",
+                f"{_portfolio_total:,} businesses (100% of portfolio)",
+                what_it_means=(
+                    "**Column definitions (plain English):**\n\n"
+                    "- **Businesses**: how many in the portfolio this vendor served (won `factWithHighestConfidence` for `sos_filings`)\n"
+                    "- **Domestic Filing Rate**: % where a domestic incorporation filing was confirmed (explicit `foreign_domestic='domestic'` OR `filing.state=formation_state` proxy)\n"
+                    "- **Op. Auth Rate**: % where operating state authorization was confirmed (explicit foreign qual OR single-state entity)\n"
+                    "- **Match Confirmed**: % where `sos_match_boolean='true'` — vendor confirmed the filing belongs to the submitted business\n"
+                    "- **Tax-Haven Dom. Rate**: of businesses formed in DE/NV/WY/SD/MT/NM, % where the domestic (tax-haven state) filing was found\n\n"
+                    "⚠️ **Known limitation:** Denominator is businesses where this vendor won `sos_filings`. "
+                    "No Registry Found businesses cannot be attributed to a specific vendor from `rds_warehouse_public.facts` alone — "
+                    "this would require reading `source.platformId` from the `sos_match_boolean` fact. "
+                    "The '⚫ No vendor attribution' row captures these."
+                ),
+                source_table="rds_warehouse_public.facts name='sos_filings' (source.platformId + source.name)",
+                sql=(
+                    "-- Vendor attribution from sos_filings winning source\n"
+                    "SELECT\n"
+                    "  JSON_EXTRACT_PATH_TEXT(value,'source','name')       AS vendor,\n"
+                    "  JSON_EXTRACT_PATH_TEXT(value,'source','platformId') AS platform_id,\n"
+                    "  COUNT(DISTINCT f.business_id)                        AS businesses\n"
+                    "FROM rds_warehouse_public.facts f\n"
+                    "JOIN rds_cases_public.rel_business_customer_monitoring rbcm\n"
+                    "  ON rbcm.business_id = f.business_id\n"
+                    "WHERE f.name = 'sos_filings' AND LENGTH(f.value) < 60000\n"
+                    "  AND DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}\n"
+                    "GROUP BY 1, 2 ORDER BY businesses DESC;"
+                ),
+                icon="🏭", color="#8B5CF6"
+            )
+
+        # ── BLOCK 3: Gap Analysis ─────────────────────────────────────────────
+        st.markdown("---")
+        st.markdown("#### 🔍 Block 3 — Gap Analysis")
+
+        _gaps_s2 = []
+
+        _dom_missing = _rf_funnel_bids - _dom_all
+        if _dom_missing:
+            _gaps_s2.append(("🔴", f"Domestic Incorporation Unverified — {len(_dom_missing):,} businesses",
+                f"""<strong>Observed:</strong> {len(_dom_missing):,} registry-found businesses where no filing confirms domestic incorporation.<br/><br/>
+<strong>Why this matters:</strong> The domestic incorporation record — which contains the true formation date,
+registered agent, and officer history — was NOT confirmed. The filing found may be a foreign qualification only.<br/><br/>
+<strong>Common causes:</strong>
+<ol style="margin:4px 0;padding-left:16px">
+  <li><strong>Tax-haven incorporation:</strong> Entity formed in DE/NV/WY; vendor found only the operating-state foreign qualification</li>
+  <li><strong>OpenCorporates limitation:</strong> OC did not have <code>home_jurisdiction_code</code> to set <code>foreign_domestic</code>, and <code>formation_state</code> fact is also null</li>
+  <li><strong>Middesk name/address mismatch:</strong> Vendor found a filing but could not confirm it is the domestic one</li>
+</ol>
+<strong>Action:</strong> Use Block 5 — Direct SOS Enrichment Agent to fill this gap via OpenCorporates API.<br/>
+<strong>Source:</strong> <code>rds_warehouse_public.facts name='sos_filings'</code> · <code>name='formation_state'</code>"""))
+
+        _multi_state = _rf_funnel_bids - _single_state_bids
+        _op_missing_multi = _multi_state - _op_all
+        if _op_missing_multi:
+            _gaps_s2.append(("🟠", f"Operating State Authorization Gap — {len(_op_missing_multi):,} multi-state businesses",
+                f"""<strong>Observed:</strong> {len(_op_missing_multi):,} businesses where <code>formation_state ≠ primary_address.state</code>
+(incorporated in a different state than where they operate) but no filing in the operating state was found.<br/><br/>
+<strong>Why this matters:</strong> An entity operating in a state without a domestic registration OR foreign qualification
+may be non-compliant with state registration requirements.<br/><br/>
+<strong>Source:</strong> <code>rds_warehouse_public.facts name='sos_filings'</code> · <code>name='primary_address'</code> · <code>name='formation_state'</code>"""))
+
+        _found_unmatched = {b for b in _rf_funnel_bids if _sos_match_by_bid.get(b,"") != "true"}
+        if _found_unmatched:
+            _gaps_s2.append(("🟡", f"Filing Found · Entity Match Uncertain — {len(_found_unmatched):,} businesses",
+                f"""<strong>Observed:</strong> {len(_found_unmatched):,} registry-found businesses where <code>sos_match_boolean ≠ 'true'</code>
+— the vendor returned filing data but could NOT confirm it belongs to the submitted business.<br/><br/>
+<strong>Why this matters:</strong> Domestic/operating classification may be explicit or proxy, but the underlying entity match
+is uncertain — the filing might belong to a different entity with a similar name or address.<br/><br/>
+<strong>Signal:</strong> <code>sos_match_boolean = 'false'</code> with <code>sos_active IS NOT NULL</code>.<br/>
+<strong>Source:</strong> <code>rds_warehouse_public.facts name='sos_match_boolean'</code> · <code>name='sos_filings'</code>"""))
+
+        for _gicon, _gtitle, _gcontent in _gaps_s2:
+            _g_color = {"🔴":"#ef4444","🟠":"#f97316","🟡":"#f59e0b"}.get(_gicon,"#64748b")
+            st.markdown(f"""<div style="background:#1E293B;border-left:4px solid {_g_color};
+                border-radius:10px;padding:14px 18px;margin:6px 0">
+              <div style="color:{_g_color};font-weight:700;font-size:.88rem;margin-bottom:8px">{_gicon} {_gtitle}</div>
+              <div style="color:#CBD5E1;font-size:.80rem;line-height:1.6">{_gcontent}</div>
+            </div>""", unsafe_allow_html=True)
+
+        # ── BLOCK 4: Registry Confidence Tier (100% portfolio) ────────────────
+        st.markdown("---")
+        st.markdown("#### 🛡️ Block 4 — Registry Confidence Tier")
+        st.caption(
+            f"All {_portfolio_total:,} onboarded businesses assigned a confidence tier. "
+            "**Explicit** = vendor set `foreign_domestic`. **Proxy ⚠️** = inferred from state comparison. "
+            "**No Filing Data** = vendor found nothing — both questions unanswerable."
+        )
+
+        _conf_high = set(); _conf_med = set(); _conf_low = set()
+        _conf_unver_filing = set()   # filing data present but neither confirmed
+        _conf_unver_nofiling = set() # no filing data at all
+
+        for _bid in _all_portfolio_bids:
+            _has_dom = _bid in _dom_all
+            _has_op  = _bid in _op_all or _bid in _single_state_bids
+            _matched = _sos_match_by_bid.get(_bid,"") == "true"
+            if _bid in _no_filing_data:
+                _conf_unver_nofiling.add(_bid)
+            elif _has_dom and _has_op and _matched:
+                _conf_high.add(_bid)
+            elif (_has_dom or _has_op) and _matched:
+                _conf_med.add(_bid)
+            elif (_has_dom or _has_op) and not _matched:
+                _conf_low.add(_bid)
+            else:
+                _conf_unver_filing.add(_bid)
+
+        _ct1, _ct2, _ct3, _ct4, _ct5 = st.columns(5)
+        _conf_data = [
+            (_ct1, "HIGH",              _conf_high,         "#22c55e", "Domestic + Op.Auth confirmed AND match verified"),
+            (_ct2, "MEDIUM",            _conf_med,          "#f59e0b", "One confirmed AND match verified"),
+            (_ct3, "LOW",               _conf_low,          "#f97316", "Filing found BUT match unconfirmed"),
+            (_ct4, "UNVERIFIED",        _conf_unver_filing, "#ef4444", "Filing data present · neither confirmed"),
+            (_ct5, "NO FILING DATA",    _conf_unver_nofiling,"#6366f1","Vendor found nothing"),
+        ]
+        for _col, _tier, _bids_t, _color, _desc in _conf_data:
+            _n_t   = len(_bids_t)
+            _exp_t = len(_bids_t & (_dom_explicit | _op_explicit))
+            _prx_t = _n_t - _exp_t if _tier not in ("UNVERIFIED","NO FILING DATA") else 0
+            # Build badge HTML outside the f-string to avoid quote conflicts
+            _exp_badge = f"<span style='color:#22c55e'>{_exp_t} explicit</span>" if _exp_t > 0 else ""
+            _prx_badge = f"<span style='color:#f59e0b'> &middot; {_prx_t} proxy ⚠️</span>" if _prx_t > 0 else ""
+            with _col:
+                st.markdown(f"""<div style="background:#0f172a;border:1px solid {_color};border-radius:8px;padding:10px 14px">
+  <div style="color:{_color};font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.03em">{_tier}</div>
+  <div style="color:#fff;font-size:1.5rem;font-weight:800">{_n_t:,}</div>
+  <div style="color:#6b7280;font-size:.68rem">{_pct(_n_t)} of portfolio</div>
+  <div style="color:#94a3b8;font-size:.68rem;margin-top:3px">{_desc}</div>
+  <div style="margin-top:3px;font-size:.68rem">{_exp_badge}{_prx_badge}</div>
+</div>""", unsafe_allow_html=True)
+
+        _conf_total = sum(len(b) for _,_,b,_,_ in _conf_data)
+        st.caption(
+            f"✅ {_conf_total:,} businesses across all tiers = {_portfolio_total:,} onboarded. "
+            f"Explicit/proxy breakdown: {len(_dom_explicit|_op_explicit):,} explicit · "
+            f"{len((_dom_proxy|_op_proxy) - (_dom_explicit|_op_explicit)):,} proxy ⚠️ · "
+            f"{_n_nfd:,} no filing data"
+        )
+
+        detail_panel(
+            "🛡️ Registry Confidence Tier",
+            f"HIGH:{len(_conf_high)} · MED:{len(_conf_med)} · LOW:{len(_conf_low)} · "
+            f"UNVERIFIED:{len(_conf_unver_filing)} · NO FILING:{len(_conf_unver_nofiling)}",
+            what_it_means=(
+                "**Confidence tiers across 100% of the onboarded portfolio:**\n\n"
+                "| Tier | Domestic Filing | Op. Auth | Match | Note |\n|---|---|---|---|---|\n"
+                "| HIGH | ✓ | ✓ | ✓ | Both confirmed AND vendor confirmed entity match |\n"
+                "| MEDIUM | ✓ or ✓ | — | ✓ | One confirmed AND match confirmed |\n"
+                "| LOW | ✓ or ✓ | — | ✗ | Filing data found but vendor could not confirm entity match |\n"
+                "| UNVERIFIED | ✗ | ✗ | — | Vendor returned filing data, but neither domestic nor operating confirmed |\n"
+                "| NO FILING DATA | ✗ | ✗ | ✗ | `sos_filings[]` is empty — vendor found nothing at all |\n\n"
+                "**Key distinction in UNVERIFIED:**\n"
+                "- UNVERIFIED: vendor returned filing data but classification failed (data quality issue)\n"
+                "- NO FILING DATA: vendor found absolutely nothing (coverage issue)\n\n"
+                "⚠️ **Proxy classifications carry inherent uncertainty** — inferred from state comparisons "
+                "when `sos_filings[].foreign_domestic` is absent. Explicit counts are shown per tier."
+            ),
+            source_table="rds_warehouse_public.facts name='sos_filings' + 'sos_match_boolean' + 'formation_state' + 'primary_address'",
+            sql=(
+                "-- Registry confidence per business\n"
+                "-- Note: table alias must be 'rbcm' so {customer_clause} resolves correctly\n"
+                "WITH base AS (\n"
+                "  SELECT rbcm.business_id,\n"
+                "    MAX(CASE WHEN f.name='sos_match_boolean' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS sos_match_boolean,\n"
+                "    MAX(CASE WHEN f.name='formation_state'   THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END) AS formation_state,\n"
+                "    MAX(CASE WHEN f.name='primary_address'   THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','state') END) AS operating_state,\n"
+                "    MAX(CASE WHEN f.name='sos_filings' THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','0','foreign_domestic') END) AS fd_first_filing\n"
+                "  FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+                "  LEFT JOIN rds_warehouse_public.facts f ON f.business_id=rbcm.business_id\n"
+                "    AND LENGTH(f.value)<60000\n"
+                "    AND f.name IN ('sos_match_boolean','formation_state','primary_address','sos_filings')\n"
+                "  WHERE DATE(rbcm.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}\n"
+                "  GROUP BY rbcm.business_id\n"
+                ")\n"
+                "SELECT business_id, sos_match_boolean, formation_state, operating_state, fd_first_filing,\n"
+                "  CASE\n"
+                "    WHEN fd_first_filing='domestic' AND sos_match_boolean='true' THEN 'HIGH (explicit)'\n"
+                "    WHEN UPPER(formation_state)=UPPER(operating_state) AND sos_match_boolean='true' THEN 'HIGH (proxy)'\n"
+                "    WHEN fd_first_filing IS NOT NULL AND sos_match_boolean='true' THEN 'MEDIUM'\n"
+                "    WHEN fd_first_filing IS NOT NULL THEN 'LOW'\n"
+                "    ELSE 'UNVERIFIED'\n"
+                "  END AS confidence_tier\n"
+                "FROM base\n"
+                "WHERE (sos_match_boolean='true' OR formation_state IS NOT NULL);"
+            ),
+            icon="🛡️", color="#8B5CF6"
+        )
+
+    else:
+        st.info("Registry Intelligence requires sos_filings data. Load a date range and customer to populate.", icon="ℹ️")
+
+    # ── BLOCK 5: Direct SOS Enrichment Agent ─────────────────────────────────
+    # Automatic gap-fill: identifies candidates from current portfolio, runs lookups
+    # automatically, then shows results table + before/after comparison + impact analysis.
+    # User can also run individual on-demand lookups for testing/investigation.
+    st.markdown("---")
+    st.markdown("#### 🏛️ Block 5 — Direct SOS Enrichment Agent")
+    st.caption(
+        "Automatically identifies gaps in the current portfolio, queries OpenCorporates API and state open data APIs "
+        "to fill them, then shows a before/after comparison with impact analysis. "
+        "Results are labeled **🏛️ DirectSOS** (pid=99) — explicitly distinct from vendor-provided data. "
+        "A manual on-demand lookup is also available for individual investigation."
+    )
+
+    try:
+        from sos_direct_agent import SOSDirectAgent, should_trigger_lookup, format_result_badge
+        _direct_sos_available = True
+    except ImportError:
+        _direct_sos_available = False
+
+    if not _direct_sos_available:
+        st.warning("sos_direct_agent.py not found. Place it in the Admin-Portal-KYB-App/ directory.", icon="⚠️")
+    else:
+        # Source confidence hierarchy explanation
+        with st.expander("⚙️ How Direct SOS Enrichment works — source hierarchy, methods, labeling"):
+            st.markdown(
+                "**Source confidence hierarchy after enrichment:**\n\n"
+                "| Priority | Source | Label | How determined |\n|---|---|---|---|\n"
+                "| 1 | Vendor explicit | `Middesk` / `OpenCorporates` / `Baselayer` | `sos_filings[].foreign_domestic` set by vendor |\n"
+                "| 2 | Direct SOS (high confidence) | `🏛️ DirectSOS · opencorporates_api · conf:85%+` | OpenCorporates API + LLM entity match ≥ 0.7 |\n"
+                "| 3 | Direct SOS (medium confidence) | `🏛️ DirectSOS · conf:55-70%` | Match score 0.55–0.70 — use with caution |\n"
+                "| 4 | Proxy ⚠️ | State comparison inferred | `sos_filings[].state` vs `formation_state` or `primary_address.state` |\n"
+                "| 5 | Unknown | No data | Neither vendor nor direct lookup found a match |\n\n"
+                "**Lookup methods:**\n"
+                "1. **OpenCorporates public API** (`api.opencorporates.com/v0.4/companies/search`) — covers all 50 US states. "
+                "Same data source as vendor pid=23 but queried directly with full context (name + state + formation year). "
+                "No API key needed for basic search; token optional for higher rate limits.\n"
+                "2. **State open data APIs** — Missouri, Indiana, Iowa, Colorado, Wisconsin have confirmed open JSON APIs "
+                "with no CAPTCHA, no ToS concerns. Used first when available.\n"
+                "3. **LLM entity matcher** (GPT-4o-mini) — scores candidate matches: "
+                "is the found entity the same legal entity as submitted? Returns confidence 0.0–1.0.\n\n"
+                "**What is NOT used:** Delaware, Nevada, Wyoming, Montana, South Dakota SOS portals are NOT scraped "
+                "directly — they have anti-automation measures and explicit ToS prohibitions. "
+                "OpenCorporates API covers these states instead.\n\n"
+                "**Source identification fields stored per result:**\n"
+                "```\nsource_platform_id = '99'          ← distinct from all vendors (16/23/17 etc.)\n"
+                "source_vendor_name  = 'DirectSOS'\n"
+                "source_url          = exact URL queried (fully auditable)\n"
+                "source_method       = 'opencorporates_api' | 'state_open_api'\n"
+                "match_confidence    = 0.0-1.0 (LLM-assessed entity match)\n"
+                "is_proxy            = False   (always False — direct lookup, not inferred)\n```\n\n"
+                "**Key file:** `Admin-Portal-KYB-App/sos_direct_agent.py` · "
+                "`integration-service/lib/facts/kyb/index.ts:640` (formation_state fact) · "
+                "`integration-service/lib/facts/kyb/index.ts:717` (sos_filings transformer)"
+            )
+
+        # ── Source hierarchy explanation ──────────────────────────────────────
+        with st.expander("⚙️ How Direct SOS Enrichment works — source hierarchy, methods, labeling"):
+            st.markdown(
+                "**Source confidence hierarchy:**\n\n"
+                "| Priority | Source | Label | How determined |\n|---|---|---|---|\n"
+                "| 1 | Vendor explicit | `Middesk` / `OpenCorporates` / `Baselayer` | `sos_filings[].foreign_domestic` set by vendor |\n"
+                "| 2 | DirectSOS (conf ≥ 70%) | `🏛️ DirectSOS · conf:70%+` | OC API + LLM entity match — high confidence |\n"
+                "| 3 | DirectSOS (conf 55-70%) | `🏛️ DirectSOS · conf:55-70%` | Use with caution |\n"
+                "| 4 | Proxy ⚠️ | State comparison | `sos_filings[].state` vs `formation_state` or `primary_address.state` |\n"
+                "| 5 | No data | — | No vendor data, no direct lookup result |\n\n"
+                "**When a business is a candidate:**\n"
+                "- Domestic Filing not confirmed AND formation state is a tax-haven (DE/NV/WY/SD/MT/NM)\n"
+                "- Operating Authorization not confirmed AND multi-state entity (formation ≠ operating state)\n"
+                "- Either classification is proxy-only (upgrade to confirmed)\n\n"
+                "**Lookup methods (in priority order):**\n"
+                "1. State open data APIs (MO, IN — confirmed public JSON, no ToS concerns)\n"
+                "2. OpenCorporates public API (all 50 states, same source as vendor pid=23)\n"
+                "3. GPT-4o-mini entity matcher (borderline confidence 40-85%)\n\n"
+                "**Source identification per result:**\n"
+                "```\nsource_platform_id = '99'  ← distinct from all vendors\n"
+                "source_vendor_name  = 'DirectSOS'\n"
+                "source_url          = exact URL (fully auditable)\n"
+                "is_proxy            = False (always — direct lookup, never inferred)\n```"
+            )
+
+        # ── STEP 1: Identify enrichment candidates automatically ──────────────
+        _legal_names_map = {}
+        if stats_df is not None and not stats_df.empty and "legal_name" in stats_df.columns:
+            _legal_names_map = stats_df.set_index("business_id")["legal_name"].to_dict()
+
+        _enrich_candidates = []
+        if not _funnel.empty:
+            for _, _row in _funnel.iterrows():
+                _bid = _row.get("business_id","")
+                _fs  = str(_row.get("formation_state","") or "").upper().strip()
+                _os  = str(_row.get("operating_state","") or "").upper().strip()
+                _dom_f  = _bid in _dom_all  if '_dom_all'  in dir() else False
+                _op_f   = _bid in _op_all   if '_op_all'   in dir() else False
+                _dom_p  = (_bid in _dom_proxy - _dom_explicit) if '_dom_proxy' in dir() else False
+                _op_p   = (_bid in _op_proxy  - _op_explicit)  if '_op_proxy'  in dir() else False
+                _should, _reason = should_trigger_lookup(
+                    business_id=_bid, q1_found=_dom_f, q2_found=_op_f,
+                    q1_is_proxy=_dom_p, q2_is_proxy=_op_p,
+                    formation_state=_fs or None, operating_state=_os,
+                )
+                if _should:
+                    _lname = str(_legal_names_map.get(_bid,"") or "").strip()
+                    _enrich_candidates.append({
+                        "business_id":        _bid,
+                        "legal_name":         _lname,
+                        "formation_state":    _fs,
+                        "operating_state":    _os,
+                        "trigger_reason":     _reason,
+                        "domestic_before":    "✅ Explicit" if _bid in (_dom_explicit if '_dom_explicit' in dir() else set()) else
+                                              ("🟡 Proxy ⚠️" if _dom_p else "❌ Not found"),
+                        "op_auth_before":     "✅ Explicit" if _bid in (_op_explicit if '_op_explicit' in dir() else set()) else
+                                              ("🟡 Proxy ⚠️" if _op_p else "❌ Not found"),
+                        "has_legal_name":     bool(_lname),
+                    })
+
+        _n_candidates = len(_enrich_candidates)
+        _n_with_name  = sum(1 for c in _enrich_candidates if c["has_legal_name"])
+
+        # ── Candidate table — always shown automatically ───────────────────────
+        st.markdown(f"**📋 Step 1 — Enrichment Candidates ({_n_candidates:,} identified automatically)**")
+        if _n_candidates == 0:
+            st.success("✅ No enrichment gaps detected — all businesses in this portfolio have explicit vendor classification.", icon="✅")
+        else:
+            # Show why each business is a candidate
+            _cand_df = pd.DataFrame([{
+                "Business ID":         c["business_id"],
+                "Legal Name":          c["legal_name"] or "⚠️ Missing",
+                "Formation State":     c["formation_state"] or "—",
+                "Operating State":     c["operating_state"] or "—",
+                "Domestic (before)":   c["domestic_before"],
+                "Op. Auth (before)":   c["op_auth_before"],
+                "Why Candidate":       c["trigger_reason"],
+            } for c in _enrich_candidates])
+            st.dataframe(_cand_df, use_container_width=True, hide_index=True)
+            st.caption(
+                f"**{_n_candidates:,} businesses** need Direct SOS enrichment · "
+                f"**{_n_with_name:,}** have legal names (required for lookup) · "
+                f"**{_n_candidates - _n_with_name:,}** missing legal names (will be skipped)."
+            )
+            if _n_with_name == 0:
+                st.warning(
+                    "No legal names available. `legal_name` is loaded from `rds_warehouse_public.facts name='legal_name'` "
+                    "via `_load_stats_for_bids()`. Ensure stats_df is loaded for the current date range.",
+                    icon="⚠️"
+                )
+
+        # Session state for results and OC token
+        if "direct_sos_results" not in st.session_state:
+            st.session_state["direct_sos_results"] = {}
+        _stored_results = st.session_state.get("direct_sos_results", {})
+        _oc_token = st.session_state.get("oc_token","") or st.session_state.get("openai_key","")
+
+        # ── STEP 2: Connectivity check + Portfolio Enrichment ─────────────────
+        st.markdown("---")
+        st.markdown("**🏛️ Step 2 — Portfolio Enrichment** (automatic)")
+
+        # Run connectivity check once per session to diagnose API access
+        if "sos_connectivity" not in st.session_state:
+            _test_agent = SOSDirectAgent(oc_api_token=_oc_token)
+            st.session_state["sos_connectivity"] = _test_agent.check_connectivity()
+        _conn = st.session_state.get("sos_connectivity", {})
+
+        # Show connectivity status
+        _conn_col1, _conn_col2 = st.columns([3,1])
+        with _conn_col1:
+            if not _conn.get("oc_reachable"):
+                st.warning(
+                    "⚠️ **OpenCorporates API unreachable** from this environment. "
+                    "This is common in cloud/VM environments with restricted outbound access. "
+                    "The enrichment agent cannot perform lookups without API access. "
+                    f"Network error: `{_conn.get('error','unknown')}`",
+                    icon="🌐"
+                )
+            elif _conn.get("oc_needs_token") or not _conn.get("oc_auth_ok"):
+                st.warning(
+                    "⚠️ **OpenCorporates API token required.** "
+                    "The free unauthenticated tier now requires an API token even for basic searches. "
+                    "Get a free token at [opencorporates.com/users/account](https://opencorporates.com/users/account) "
+                    "and enter it below.",
+                    icon="🔑"
+                )
+            else:
+                st.success("✅ OpenCorporates API reachable and authenticated.", icon="🏛️")
+        with _conn_col2:
+            if st.button("🔄 Re-check connectivity", key="sos_recheck"):
+                if "sos_connectivity" in st.session_state:
+                    del st.session_state["sos_connectivity"]
+                st.rerun()
+
+        # OC API token input — always shown so user can provide it
+        _oc_input = st.text_input(
+            "🔑 OpenCorporates API token (required for lookups)",
+            value=st.session_state.get("oc_token",""),
+            type="password",
+            key="oc_token_input",
+            help="Get a free token at https://opencorporates.com/users/account — paste it here, then re-check connectivity.",
+        )
+        if _oc_input and _oc_input != st.session_state.get("oc_token",""):
+            st.session_state["oc_token"] = _oc_input
+            if "sos_connectivity" in st.session_state:
+                del st.session_state["sos_connectivity"]  # force re-check with new token
+            st.rerun()
+
+        _api_ready = _conn.get("oc_reachable") and _conn.get("oc_auth_ok")
+
+        if _n_candidates > 0 and _n_with_name > 0:
+            _runnable = [c for c in _enrich_candidates if c["has_legal_name"]][:20]
+            _already_run = [c for c in _runnable if c["business_id"] in _stored_results]
+            _pending_run = [c for c in _runnable if c["business_id"] not in _stored_results]
+
+            _status_col, _btn_col = st.columns([3,1])
+            with _status_col:
+                if _already_run:
+                    st.info(
+                        f"**{len(_already_run):,}** businesses already enriched this session · "
+                        f"**{len(_pending_run):,}** pending · "
+                        f"Results cached until session ends or cleared.",
+                        icon="ℹ️"
+                    )
+                elif _api_ready:
+                    st.info(
+                        f"**{len(_runnable):,}** businesses ready to enrich via OpenCorporates API. "
+                        f"Rate-limited to ~40 req/min.",
+                        icon="ℹ️"
+                    )
+                else:
+                    st.info(
+                        f"**{len(_runnable):,}** businesses pending — provide a valid OC API token above to run.",
+                        icon="🔑"
+                    )
+            with _btn_col:
+                _run_label = f"▶ Run {len(_pending_run):,} lookups" if _pending_run else "▶ Re-run all"
+                _run_disabled = not _api_ready
+                if st.button(_run_label, key="sos_auto_run", type="primary", disabled=_run_disabled):
+                    _targets = _runnable if not _pending_run else _pending_run
+                    _agent   = SOSDirectAgent(
+                        openai_api_key = st.session_state.get("openai_key",""),
+                        oc_api_token   = st.session_state.get("oc_token",""),
+                    )
+                    _prog = st.progress(0, text="Running DirectSOS lookups...")
+                    _new_results = []
+                    for _bi, _biz in enumerate(_targets):
+                        _r = _agent.lookup(
+                            business_id     = _biz["business_id"],
+                            legal_name      = _biz["legal_name"],
+                            operating_state = _biz["operating_state"],
+                            formation_state = _biz["formation_state"] or None,
+                        )
+                        _new_results.append(_r)
+                        st.session_state["direct_sos_results"][_biz["business_id"]] = _r
+                        _prog.progress(
+                            (_bi+1)/len(_targets),
+                            text=f"🏛️ {_biz['legal_name'][:40]} — {_biz['operating_state']} ({_bi+1}/{len(_targets)})"
+                        )
+                        time.sleep(1.5)
+                    _prog.empty()
+                    _ok = [r for r in _new_results if r.succeeded]
+                    st.success(
+                        f"✅ **{len(_ok):,}/{len(_new_results):,} confirmed** via DirectSOS · "
+                        f"{len(_new_results)-len(_ok):,} not found or below confidence threshold.",
+                        icon="🏛️"
+                    )
+                    st.rerun()
+
+        # ── STEP 3: Results table + before/after comparison ───────────────────
+        if _stored_results:
+            st.markdown("---")
+            st.markdown(f"**📊 Step 3 — Enrichment Results & Before/After Comparison** ({len(_stored_results):,} businesses)")
+
+            # Build results table
+            _res_rows = []
+            _before_dom_ok  = 0; _after_dom_ok  = 0
+            _before_op_ok   = 0; _after_op_ok   = 0
+            for _c in _enrich_candidates:
+                _bid = _c["business_id"]
+                _r   = _stored_results.get(_bid)
+                if not _r: continue
+                _dom_after = "✅ DirectSOS" if _r.q1_found and _r.match_confidence >= 0.55 else _c["domestic_before"]
+                _op_after  = "✅ DirectSOS" if _r.q2_found and _r.match_confidence >= 0.55 else _c["op_auth_before"]
+                _dom_changed = _dom_after != _c["domestic_before"]
+                _op_changed  = _op_after  != _c["op_auth_before"]
+                if "✅" in _c["domestic_before"]: _before_dom_ok += 1
+                if "✅" in _dom_after:            _after_dom_ok  += 1
+                if "✅" in _c["op_auth_before"]:  _before_op_ok  += 1
+                if "✅" in _op_after:             _after_op_ok   += 1
+                _res_rows.append({
+                    "Business ID":          _bid,
+                    "Legal Name":           _c["legal_name"] or "—",
+                    "Registered Name":      _r.registered_name or "—",
+                    "Filing State":         _r.filing_state or "—",
+                    "Active":               "✅" if _r.active else ("❌" if _r.active is False else "?"),
+                    "Domestic (before)":    _c["domestic_before"],
+                    "Domestic (after)":     _dom_after + (" 🆕" if _dom_changed else ""),
+                    "Op. Auth (before)":    _c["op_auth_before"],
+                    "Op. Auth (after)":     _op_after + (" 🆕" if _op_changed else ""),
+                    "Confidence":           f"{_r.match_confidence:.0%}",
+                    "Method":               f"🏛️ {_r.source_method.replace('_',' ')}",
+                    "Match Reason":         (_r.match_reason or "—")[:80],
+                    "Source URL":           _r.source_url or "—",
+                })
+
+            if _res_rows:
+                _res_df = pd.DataFrame(_res_rows)
+                st.dataframe(_res_df, use_container_width=True, hide_index=True)
+                st.download_button("⬇️ Download enrichment results (CSV)",
+                                   _res_df.to_csv(index=False).encode(),
+                                   "direct_sos_enrichment.csv","text/csv",
+                                   key="dl_direct_sos")
+
+                # ── Before/After impact summary ───────────────────────────────
+                st.markdown("**📈 Impact Analysis — Before vs After DirectSOS Enrichment:**")
+                _imp1, _imp2, _imp3, _imp4 = st.columns(4)
+                _n_enriched  = len(_res_rows)
+                _n_confirmed = sum(1 for r in _res_rows if "🆕" in r.get("Domestic (after)","") or "🆕" in r.get("Op. Auth (after)",""))
+                _dom_lift    = _after_dom_ok - _before_dom_ok
+                _op_lift     = _after_op_ok  - _before_op_ok
+                for _col, _lbl, _val, _sub, _color in [
+                    (_imp1, "Businesses Looked Up",   f"{_n_enriched:,}",    "DirectSOS queries run", "#3B82F6"),
+                    (_imp2, "Newly Confirmed",         f"{_n_confirmed:,}",   "classifications upgraded", "#22c55e" if _n_confirmed else "#64748b"),
+                    (_imp3, "Domestic Filing Lift",    f"+{_dom_lift:,}" if _dom_lift >= 0 else str(_dom_lift), "more domestic filings confirmed", "#22c55e" if _dom_lift > 0 else "#64748b"),
+                    (_imp4, "Op. Auth Lift",           f"+{_op_lift:,}" if _op_lift >= 0 else str(_op_lift),  "more op. authorizations confirmed", "#22c55e" if _op_lift > 0 else "#64748b"),
+                ]:
+                    with _col:
+                        st.markdown(f"""<div style="background:#0f172a;border:1px solid {_color};border-radius:8px;padding:10px 14px">
+  <div style="color:{_color};font-size:.7rem;font-weight:700;text-transform:uppercase">{_lbl}</div>
+  <div style="color:#fff;font-size:1.6rem;font-weight:800">{_val}</div>
+  <div style="color:#6b7280;font-size:.7rem">{_sub}</div>
+</div>""", unsafe_allow_html=True)
+
+                # Confidence distribution bar chart
+                _conf_buckets = {"≥90%": 0, "70-89%": 0, "55-69%": 0, "<55%": 0, "Not found": 0}
+                for _bid, _r in _stored_results.items():
+                    if _r.skipped or _r.error: _conf_buckets["Not found"] += 1
+                    elif _r.match_confidence >= 0.90: _conf_buckets["≥90%"] += 1
+                    elif _r.match_confidence >= 0.70: _conf_buckets["70-89%"] += 1
+                    elif _r.match_confidence >= 0.55: _conf_buckets["55-69%"] += 1
+                    else: _conf_buckets["Not found"] += 1
+                _cb_df = pd.DataFrame({"Confidence": list(_conf_buckets.keys()), "Businesses": list(_conf_buckets.values())})
+                _cb_df = _cb_df[_cb_df["Businesses"] > 0]
+                if not _cb_df.empty:
+                    import plotly.express as px
+                    _fig_conf = px.bar(
+                        _cb_df, x="Confidence", y="Businesses", text="Businesses",
+                        color="Confidence",
+                        color_discrete_map={"≥90%":"#22c55e","70-89%":"#84cc16","55-69%":"#f59e0b","<55%":"#f97316","Not found":"#ef4444"},
+                        title="DirectSOS Match Confidence Distribution",
+                    )
+                    _fig_conf.update_layout(
+                        paper_bgcolor="#0f172a", plot_bgcolor="#0f172a",
+                        font_color="#94a3b8", showlegend=False,
+                        title_font_color="#f1f5f9", height=220,
+                        margin=dict(l=0,r=0,t=40,b=0),
+                    )
+                    _fig_conf.update_traces(textposition="outside", textfont_color="#f1f5f9")
+                    st.plotly_chart(_fig_conf, use_container_width=True)
+
+            if st.button("🗑️ Clear results and re-run", key="clear_direct_sos"):
+                st.session_state["direct_sos_results"] = {}
+                st.rerun()
+
+        # ── MANUAL ON-DEMAND LOOKUP (secondary, for testing) ──────────────────
+        st.markdown("---")
+        with st.expander("🔍 Manual Lookup — search any business by name + state (for testing/investigation)"):
+            st.caption("Use this to test individual lookups, verify a specific entity, or investigate a business not in the current portfolio.")
+            _od_col1, _od_col2, _od_col3 = st.columns([3, 1, 1])
+            with _od_col1:
+                _od_name = st.text_input("Business name", key="sos_direct_name", placeholder="e.g. PORFIRIO AUTO REPAIR LLC")
+            with _od_col2:
+                _od_state = st.text_input("State (2-letter)", key="sos_direct_state", placeholder="e.g. MO")
+            with _od_col3:
+                _od_date = st.text_input("Formation year (optional)", key="sos_direct_date", placeholder="e.g. 2023")
+            if st.button("🏛️ Run Lookup", key="sos_direct_run"):
+                if _od_name.strip() and _od_state.strip():
+                    _agent = SOSDirectAgent(
+                        openai_api_key=st.session_state.get("openai_key",""),
+                        oc_api_token=st.session_state.get("oc_token",""),
+                    )
+                    with st.spinner(f"Querying '{_od_name}' in {_od_state.upper()}..."):
+                        _od_r = _agent.lookup(
+                            business_id="on-demand", legal_name=_od_name.strip(),
+                            operating_state=_od_state.upper().strip(),
+                            formation_state=_od_state.upper().strip(),
+                            formation_date=_od_date.strip() or None, force=True,
+                        )
+                    if _od_r.succeeded:
+                        st.success(
+                            f"✅ **{_od_r.registered_name}** · State: {_od_r.filing_state} · "
+                            f"Active: {'✅' if _od_r.active else '❌'} · Confidence: {_od_r.match_confidence:.0%}",
+                            icon="🏛️"
+                        )
+                        st.caption(f"Source: {_od_r.source_method} · {_od_r.source_url}")
+                        st.caption(f"Match reason: {_od_r.match_reason}")
+                        with st.expander("Full result JSON"):
+                            st.json(_od_r.to_dict())
+                    else:
+                        st.warning(f"No confirmed match. {_od_r.error or 'No candidates above confidence threshold.'}")
+                else:
+                    st.warning("Please enter both business name and state.", icon="⚠️")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # SECTION 3 — TIN VERIFICATION ANALYSIS (was Section 2)
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### 🔐 Section 3 — TIN / EIN Verification")
     st.caption("Of the onboarded businesses, how many submitted a TIN? Of those, how many passed? "
                "Does TINs Submitted = TINs Pass + TINs Fail?")
 
@@ -8206,10 +9166,10 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
         sql=_tin_sql, icon="🔍", color="#8B5CF6")
 
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 3 — KYB HEALTH RATES
+    # SECTION 4 — KYB HEALTH RATES
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("### 🩺 Section 3 — KYB Health Rates")
+    st.markdown("### 🩺 Section 4 — KYB Health Rates")
 
     if stats_df is None or stats_df.empty:
         st.warning(f"⚠️ KYB Health data unavailable. {stats_err or ''}", icon="⚠️")
@@ -8350,10 +9310,10 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
                 </div>""", unsafe_allow_html=True)
 
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 4 — RED FLAG DISTRIBUTION
+    # SECTION 5 — RED FLAG DISTRIBUTION
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("### 🚩 Section 4 — Red Flag Distribution")
+    st.markdown("### 🚩 Section 5 — Red Flag Distribution")
 
     if stats_df is not None and not stats_df.empty:
         flag_type_counts = {}
@@ -8441,10 +9401,10 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
                 _drilldown_table("rf_idv_fail",     f"IDV Failed — {len(_seg.get('rf_idv_fail',[]))} businesses", _RF_COLS)
 
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 5 — WORTH SCORE DISTRIBUTION
+    # SECTION 6 — WORTH SCORE DISTRIBUTION
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("### 💰 Section 5 — Worth Score Distribution")
+    st.markdown("### 💰 Section 6 — Worth Score Distribution")
     st.caption(
         "Score distribution, decision outcomes, and model factor contributions across "
         "the portfolio. Mirrors the per-business 💰 Score & Architecture and 📊 Waterfall & Features "
@@ -8957,10 +9917,135 @@ ORDER BY avg_impact_pts ASC;"""
 
     # ════════════════════════════════════════════════════════════════════════
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 6 — PORTFOLIO ANOMALY & CONTRADICTION SCANNER
+    # SECTION 7 — PORTFOLIO-LEVEL KYB RISK SIGNALS (from sos_filings[] — rds_ facts only)
+    # Shell Company Signal · Multi-Jurisdiction Good Standing · Entity Type Risk Mix
+    # ════════════════════════════════════════════════════════════════════════
+    if _sos_filings_df is not None and not _sos_filings_df.empty:
+        st.markdown("---")
+        st.markdown("### 🛡️ Section 7 — Portfolio-Level KYB Risk Signals — from sos_filings[] fact")
+        st.caption(
+            "All signals derived from `rds_warehouse_public.facts name='sos_filings'` — "
+            "parsing `sos_filings[].jurisdiction`, `foreign_domestic`, `active`, `entity_type`, `officers`. "
+            "No materialized tables. Source: `integration-service/lib/facts/kyb/index.ts lines 767-987`"
+        )
+
+        _all_bids_sf = set(_seg.get("sos_found_extended",[]))
+        _sf_all = _sos_filings_df.copy()
+        _sf_portfolio = _sf_all  # use all loaded filings for portfolio metrics
+
+        # ── A. Shell Company Signal Rate ──────────────────────────────────────
+        # Definition: sos_filings[].jurisdiction in tax-haven + no officers + domestic filing
+        # Source: jurisdiction (index.ts transformer) + officers array + foreign_domestic
+        TAX_HAVEN_J = {"us::de","us::nv","us::wy","us::sd","us::mt","us::nm"}
+        _shell_bids_map = {}
+        for _bid_sh, _grp in _sf_portfolio.groupby("business_id"):
+            _is_th = _grp["jurisdiction"].isin(TAX_HAVEN_J).any()
+            _no_off = (_grp["has_officers"]==0).all()
+            _is_dom = (_grp["foreign_domestic"]=="domestic").any()
+            if _is_th and _no_off and _is_dom:
+                _shell_bids_map[_bid_sh] = {
+                    "jurisdictions": _grp["jurisdiction"].tolist(),
+                    "entity_types":  _grp["entity_type"].tolist(),
+                    "filings":       len(_grp),
+                }
+        _n_shell = len(_shell_bids_map)
+        _seg["shell_signal"] = list(_shell_bids_map.keys())
+        _SEG_CALC["shell_signal"] = (
+            "**Shell Company Signal — 3 conditions from sos_filings[]:**\n\n"
+            "1. `sos_filings[].jurisdiction` IN {us::de, us::nv, us::wy, us::sd, us::mt, us::nm} "
+            "→ tax-haven state registration\n"
+            "2. `sos_filings[].officers` is empty for all filings → no officers found\n"
+            "3. `sos_filings[].foreign_domestic='domestic'` → at least one domestic filing\n\n"
+            "**Why this combination signals a shell entity:**\n"
+            "Tax-haven incorporation + no officers + domestic-classified filing = "
+            "the classic shell company structure: incorporated in DE/NV/WY for legal advantages, "
+            "no identifiable officers in the SOS record.\n\n"
+            "**KYB action:** Enhanced Due Diligence (EDD). Request formation documents, "
+            "ownership structure, and officer verification.\n\n"
+            "**Source:** `rds_warehouse_public.facts name='sos_filings'` → "
+            "`jurisdiction`, `officers`, `foreign_domestic` fields"
+        )
+
+        # ── B. Multi-Jurisdiction Good Standing Rate ──────────────────────────
+        _mj_biz = _sf_portfolio.groupby("business_id").agg(
+            n_juris=("jurisdiction","nunique"),
+            all_active=("filing_active", lambda x: (x==True).all()),
+        ).reset_index()
+        _mj_multi = _mj_biz[_mj_biz["n_juris"]>1]
+        _n_mj_all_active = int((_mj_multi["all_active"]==True).sum())
+        _n_mj_not_all    = int((_mj_multi["all_active"]!=True).sum())
+        _n_mj_total      = len(_mj_multi)
+        _seg["mj_all_active"] = _mj_multi[_mj_multi["all_active"]==True]["business_id"].tolist()
+        _seg["mj_not_active"] = _mj_multi[_mj_multi["all_active"]!=True]["business_id"].tolist()
+        _SEG_CALC["mj_all_active"] = "**Multi-jurisdiction businesses where ALL filings are active** — entity is in good standing in every state where it has an SOS filing.\n\n**Source:** `sos_filings[].active` across all filing jurisdictions"
+        _SEG_CALC["mj_not_active"] = "**Multi-jurisdiction businesses with at least one inactive filing** — entity is revoked or dissolved in at least one operating state. This is a compliance issue.\n\n**KYB action:** Identify which jurisdiction is inactive and require reinstatement.\n\n**Source:** `sos_filings[].active` per jurisdiction"
+
+        # ── C. Entity Type Risk Mix ───────────────────────────────────────────
+        _HIGH_RISK_ET = {"lp","llp"}
+        _et_risk_bids = _sf_portfolio[_sf_portfolio["entity_type"].isin(_HIGH_RISK_ET)]["business_id"].unique().tolist()
+        _np_bids      = _sf_portfolio[_sf_portfolio["non_profit"]==1]["business_id"].unique().tolist()
+        _n_high_risk_et = len(_et_risk_bids)
+        _n_np_et        = len(_np_bids)
+        _seg["high_risk_et"] = _et_risk_bids
+        _seg["non_profit_et"]= _np_bids
+        _SEG_CALC["high_risk_et"] = "**LP or LLP entity type** — these entity structures carry elevated AML risk:\n- LP (Limited Partnership): often used in real estate/investment structures, higher shell company risk\n- LLP: typically professional services (law/accounting) — industry-specific AML risk\n\n**KYB action:** Enhanced Due Diligence (EDD) protocol required.\n\n**Source:** `sos_filings[].entity_type` (index.ts transformer)"
+        _SEG_CALC["non_profit_et"] = "**Non-profit entity** — `sos_filings[].non_profit=true` (from OpenCorporates transformer). Non-profits have different revenue profiles and AML obligations. Worth Score financial model may not apply normally.\n\n**Source:** `sos_filings[].non_profit` field"
+
+        # ── Render ────────────────────────────────────────────────────────────
+        _pra,_prb,_prc,_prd,_pre = st.columns(5)
+        with _pra: kpi("⚠️ Shell Signal", f"{_n_shell:,}",
+                       f"{rate(_n_shell,total_biz)} · tax-haven + no officers + domestic",
+                       "#ef4444" if _n_shell>0 else "#22c55e")
+        with _prb: kpi("✅ Multi-Juris All Active", f"{_n_mj_all_active:,}",
+                       f"{rate(_n_mj_all_active,_n_mj_total)} of multi-filing · all jurisdictions ok",
+                       "#22c55e" if _n_mj_all_active>0 else "#64748b")
+        with _prc: kpi("🔴 Multi-Juris Issues", f"{_n_mj_not_all:,}",
+                       f"{rate(_n_mj_not_all,_n_mj_total)} of multi-filing · inactive in some state",
+                       "#ef4444" if _n_mj_not_all>0 else "#64748b")
+        with _prd: kpi("🔴 LP/LLP (EDD)", f"{_n_high_risk_et:,}",
+                       f"{rate(_n_high_risk_et,total_biz)} · LP or LLP entity type",
+                       "#f97316" if _n_high_risk_et>0 else "#64748b")
+        with _pre: kpi("🔵 Non-Profit", f"{_n_np_et:,}",
+                       f"{rate(_n_np_et,total_biz)} · sos_filings[].non_profit=true",
+                       "#3B82F6" if _n_np_et>0 else "#64748b")
+
+        _drilldown_table("shell_signal",  f"⚠️ Shell Company Signal — {_n_shell:,} businesses (tax-haven + no officers)", _SOS_COLS)
+        _drilldown_table("mj_all_active", f"✅ Multi-Juris All Active — {_n_mj_all_active:,} businesses", _SOS_COLS)
+        _drilldown_table("mj_not_active", f"🔴 Multi-Juris Issues — {_n_mj_not_all:,} businesses", _SOS_COLS)
+        _drilldown_table("high_risk_et",  f"🔴 LP/LLP (EDD Required) — {_n_high_risk_et:,} businesses", _SOS_COLS)
+        _drilldown_table("non_profit_et", f"🔵 Non-Profit — {_n_np_et:,} businesses", _SOS_COLS)
+
+        detail_panel("🛡️ Portfolio KYB Risk Signals",
+            f"Shell: {_n_shell:,} · Multi-Juris Issues: {_n_mj_not_all:,} · LP/LLP: {_n_high_risk_et:,}",
+            what_it_means=(
+                "**All 5 signals derived from `sos_filings[]` JSON array (rds_ facts only):**\n\n"
+                "| Signal | Source fields | Rule |\n|---|---|---|\n"
+                "| Shell Signal | `jurisdiction` + `officers` + `foreign_domestic` | Tax-haven + no officers + domestic filing |\n"
+                "| Multi-Juris All Active | `active` per `jurisdiction` | All filings active in all states |\n"
+                "| Multi-Juris Issues | `active` per `jurisdiction` | At least one filing inactive |\n"
+                "| LP/LLP EDD | `entity_type` in {'lp','llp'} | High-risk entity structures |\n"
+                "| Non-Profit | `non_profit=true` | OpenCorporates transformer flag |\n\n"
+                "**No materialized tables used.** All from `rds_warehouse_public.facts name='sos_filings'`.\n\n"
+                "**Source:** `integration-service/lib/facts/kyb/index.ts lines 767-987` · "
+                "`integration-service/lib/facts/kyb/types.ts lines 20-32`"
+            ),
+            source_table="rds_warehouse_public.facts (name='sos_filings')",
+            source_file="integration-service/lib/facts/kyb/index.ts:767-987 · types.ts:20-32",
+            json_obj={
+                "shell_signal": _n_shell,
+                "mj_all_active": _n_mj_all_active,
+                "mj_not_active": _n_mj_not_all,
+                "lp_llp_edd": _n_high_risk_et,
+                "non_profit": _n_np_et,
+                "data_source": "rds_warehouse_public.facts name='sos_filings' — no materialized tables",
+            },
+            icon="🛡️", color="#8B5CF6")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # SECTION 8 — PORTFOLIO ANOMALY & CONTRADICTION SCANNER
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("### 🔬 Section 6 — Portfolio Anomaly & Contradiction Scanner")
+    st.markdown("### 🔬 Section 8 — Portfolio Anomaly & Contradiction Scanner")
     st.caption(
         "Applies the same deterministic cross-field rules from the Check-Agent (check_agent_v2.py) "
         "across the ENTIRE portfolio at once — no per-business fact loading, no LLM calls, no new "
@@ -10818,10 +11903,10 @@ GROUP BY 1 ORDER BY businesses DESC;"""
         st.success("✅ No anomalies detected across the portfolio. All KYB signals are internally consistent.", icon="✅")
 
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 7 — RECENTLY ONBOARDED + TOP 10 AT RISK
+    # SECTION 9 — RECENTLY ONBOARDED + TOP 10 AT RISK
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("### 🕐 Section 7 — Recently Onboarded Businesses")
+    st.markdown("### 🕐 Section 9 — Recently Onboarded Businesses")
     st.markdown("*Most recently seen in the facts table — ordered by first_seen DESC.*")
 
     recent_10 = recent_df.head(10).copy()
