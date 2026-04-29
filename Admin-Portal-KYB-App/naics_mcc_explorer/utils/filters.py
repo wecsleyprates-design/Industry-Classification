@@ -100,14 +100,17 @@ def render_sidebar() -> dict:
 
 
 def kpi(label: str, value: str, delta: str = "", color: str = "#3b82f6") -> None:
-    st.markdown(f"""
-<div style="background:#1e293b;border:1px solid #334155;border-left:4px solid {color};
-     border-radius:8px;padding:14px 16px;margin:4px 0">
-  <div style="color:#94a3b8;font-size:.75rem;font-weight:600;text-transform:uppercase;
-       letter-spacing:.05em;margin-bottom:4px">{label}</div>
-  <div style="color:#f1f5f9;font-size:1.6rem;font-weight:700;line-height:1">{value}</div>
-  {"<div style='color:#64748b;font-size:.75rem;margin-top:4px'>" + delta + "</div>" if delta else ""}
-</div>""", unsafe_allow_html=True)
+    delta_html = f"<div style='color:#64748b;font-size:.75rem;margin-top:4px'>{delta}</div>" if delta else ""
+    html = (
+        f"<div style='background:#1e293b;border:1px solid #334155;border-left:4px solid {color};"
+        f"border-radius:8px;padding:14px 16px;margin:4px 0'>"
+        f"<div style='color:#94a3b8;font-size:.75rem;font-weight:600;text-transform:uppercase;"
+        f"letter-spacing:.05em;margin-bottom:4px'>{label}</div>"
+        f"<div style='color:#f1f5f9;font-size:1.6rem;font-weight:700;line-height:1'>{value}</div>"
+        f"{delta_html}"
+        f"</div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def no_data(msg: str = "No data for the selected filters.") -> None:

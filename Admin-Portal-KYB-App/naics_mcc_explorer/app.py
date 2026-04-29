@@ -165,13 +165,15 @@ r1, r2, r3 = st.columns(3)
 for i, (icon, title, desc) in enumerate(nav_items):
     col = [r1, r2, r3][i % 3]
     with col:
-        st.markdown(f"""
-<div style="background:#1e293b;border:1px solid #334155;border-radius:10px;
-     padding:16px;margin:6px 0;cursor:pointer">
-  <div style="font-size:1.6rem">{icon}</div>
-  <div style="color:#f1f5f9;font-weight:600;margin:6px 0 4px">{title}</div>
-  <div style="color:#64748b;font-size:.85rem">{desc}</div>
-</div>""", unsafe_allow_html=True)
+        html = (
+            f"<div style='background:#1e293b;border:1px solid #334155;border-radius:10px;"
+            f"padding:16px;margin:6px 0'>"
+            f"<div style='font-size:1.6rem'>{icon}</div>"
+            f"<div style='color:#f1f5f9;font-weight:600;margin:6px 0 4px'>{title}</div>"
+            f"<div style='color:#64748b;font-size:.85rem'>{desc}</div>"
+            f"</div>"
+        )
+        st.markdown(html, unsafe_allow_html=True)
 
 st.markdown("")
 st.caption(

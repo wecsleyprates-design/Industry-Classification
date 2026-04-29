@@ -43,24 +43,29 @@ def _onboarded_cte(date_from=None, date_to=None, customer_id=None, business_id=N
 
 # ── Sidebar population queries ─────────────────────────────────────────────────
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def load_customers(date_from=None, date_to=None) -> pd.DataFrame:
-    """Distinct customers in the date range. Uses customer_id as the display name
-    because rds_cases_public.customers does not exist in this Redshift cluster."""
+    """Distinct customers in the date range.
+    Uses customer_id directly — no join to a customers name table,
+    as rds_cases_public.customers does not exist in this cluster."""
     parts = ["1=1"]
     if date_from:
         parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
     if date_to:
         parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
     where = " AND ".join(parts)
-    df = run_query(f"""
-        SELECT DISTINCT rbcm.customer_id,
-               rbcm.customer_id AS customer_name
-        FROM rds_cases_public.rel_business_customer_monitoring rbcm
-        WHERE {where}
-        ORDER BY rbcm.customer_id
-    """)
-    return df
+    try:
+        df = run_query(f"""
+            SELECT DISTINCT
+                rbcm.customer_id,
+                rbcm.customer_id AS customer_name
+            FROM rds_cases_public.rel_business_customer_monitoring rbcm
+            WHERE {where}
+            ORDER BY rbcm.customer_id
+        """)
+        return df if df is not None else pd.DataFrame(columns=["customer_id","customer_name"])
+    except Exception:
+        return pd.DataFrame(columns=["customer_id","customer_name"])
 
 
 @st.cache_data(ttl=300, show_spinner=False)

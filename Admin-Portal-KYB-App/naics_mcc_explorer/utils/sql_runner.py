@@ -29,30 +29,41 @@ def analyst_note(
     bullets: list[str] | None = None,
     action: str = "",
 ) -> None:
-    """Render a coloured analyst interpretation box below any chart or table."""
+    """Render a coloured analyst interpretation box below any chart or table.
+
+    NOTE: The entire HTML must be on ONE line — multi-line HTML inside
+    st.markdown(unsafe_allow_html=True) causes Streamlit's markdown parser
+    to treat indented closing tags as code blocks (the </div> bug).
+    """
     bg, border, icon = _INSIGHT_STYLES.get(level, _INSIGHT_STYLES["info"])
+
     bullet_html = ""
     if bullets:
-        items = "".join(f"<li style='margin:3px 0'>{b}</li>" for b in bullets)
-        bullet_html = f"<ul style='margin:8px 0 4px 1rem;padding:0;color:#cbd5e1'>{items}</ul>"
-    action_html = (
-        f"<div style='margin-top:10px;padding:8px 10px;background:{bg};"
-        f"border-left:3px solid {border};border-radius:4px;"
-        f"color:#94a3b8;font-size:.8rem'><strong>Recommended action:</strong> {action}</div>"
-        if action else ""
+        items = "".join(f"<li style='margin:3px 0;color:#cbd5e1'>{b}</li>" for b in bullets)
+        bullet_html = f"<ul style='margin:8px 0 4px 1.2rem;padding:0'>{items}</ul>"
+
+    action_html = ""
+    if action:
+        action_html = (
+            f"<div style='margin-top:10px;padding:8px 10px;background:{bg};"
+            f"border-left:3px solid {border};border-radius:4px;"
+            f"color:#94a3b8;font-size:.8rem'>"
+            f"<strong>Recommended action:</strong> {action}</div>"
+        )
+
+    # Single-line HTML — no newlines between tags to avoid Streamlit markdown parsing issues
+    html = (
+        f"<div style='background:{bg};border:1px solid {border};"
+        f"border-left:4px solid {border};border-radius:8px;"
+        f"padding:14px 16px;margin:10px 0 4px 0'>"
+        f"<div style='color:{border};font-weight:700;font-size:.9rem;margin-bottom:6px'>"
+        f"{icon}&nbsp;{title}</div>"
+        f"<div style='color:#cbd5e1;font-size:.875rem;line-height:1.5'>{body}</div>"
+        f"{bullet_html}"
+        f"{action_html}"
+        f"</div>"
     )
-    st.markdown(
-        f"""<div style="background:{bg};border:1px solid {border};border-left:4px solid {border};
-        border-radius:8px;padding:14px 16px;margin:10px 0 4px 0">
-          <div style="color:{border};font-weight:700;font-size:.9rem;margin-bottom:6px">
-            {icon}&nbsp; {title}
-          </div>
-          <div style="color:#cbd5e1;font-size:.875rem;line-height:1.5">{body}</div>
-          {bullet_html}
-          {action_html}
-        </div>""",
-        unsafe_allow_html=True,
-    )
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def sql_panel(
@@ -98,15 +109,14 @@ def platform_legend_panel() -> None:
     from utils.platform_map import PLATFORM_LEGEND
     with st.expander("📖 Platform ID Legend — what does each platform mean?"):
         st.markdown(PLATFORM_LEGEND)
-        st.markdown("""
-**Why does Platform -1 / Legacy Schema appear?**
-
-The facts table stores two different JSON schemas depending on when the record was written:
-
-| Schema | `source` field | Extraction |
-|---|---|---|
-| **New** (current) | `{"platformId": 31, "confidence": 0.15, "updatedAt": "..."}` | `JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId')` → `"31"` |
-| **Old** (legacy) | `{"name": "AINaicsEnrichment", "confidence": 0.15}` | Returns `NULL` → shown as **Legacy Schema** |
-
-Legacy records are not missing data — the actual source is in `source.name` (visible in the raw JSON).
-        """)
+        st.markdown(
+            "**Why does Platform -1 / Legacy Schema appear?**\n\n"
+            "The facts table stores two different JSON schemas:\n\n"
+            "| Schema | `source` field | Extraction |\n"
+            "|---|---|---|\n"
+            "| **New** (current) | `{\"platformId\": 31, \"confidence\": 0.15, \"updatedAt\": \"...\"}` "
+            "| `JSON_EXTRACT_PATH_TEXT(value, 'source', 'platformId')` → `\"31\"` |\n"
+            "| **Old** (legacy) | `{\"name\": \"AINaicsEnrichment\", \"confidence\": 0.15}` "
+            "| Returns `NULL` → shown as **Legacy Schema** |\n\n"
+            "Legacy records are not missing data — the actual source is in `source.name` (visible in the raw JSON)."
+        )
