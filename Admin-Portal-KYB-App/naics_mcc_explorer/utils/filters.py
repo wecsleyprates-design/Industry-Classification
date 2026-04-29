@@ -4,6 +4,7 @@ All pages import `render_sidebar()` which returns the current filter state
 and caches customer/business lists based on date range + customer selection.
 Session state keys are shared so all pages see the same filter values.
 """
+from __future__ import annotations
 
 import streamlit as st
 from datetime import date, timedelta

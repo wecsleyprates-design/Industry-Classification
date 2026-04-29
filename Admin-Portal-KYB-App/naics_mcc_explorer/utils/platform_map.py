@@ -3,6 +3,7 @@
 Source: integration-service/lib/facts/sources.ts
 platformId values are integers stored as strings in the facts JSON.
 """
+from __future__ import annotations
 
 PLATFORM_MAP: dict[str, dict] = {
     "0":  {"name": "Applicant Entry",       "short": "P0",  "type": "applicant",  "color": "#ef4444"},

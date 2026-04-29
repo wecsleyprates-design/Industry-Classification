@@ -1,4 +1,5 @@
 """Redshift connection using psycopg2."""
+from __future__ import annotations
 
 import os
 import psycopg2

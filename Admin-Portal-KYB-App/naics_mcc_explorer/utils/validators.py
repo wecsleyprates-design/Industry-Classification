@@ -1,4 +1,5 @@
 """NAICS and MCC format/lookup validators."""
+from __future__ import annotations
 
 import re
 from utils.platform_map import CATCH_ALL_NAICS, CATCH_ALL_MCC, KNOWN_INVALID_MCC

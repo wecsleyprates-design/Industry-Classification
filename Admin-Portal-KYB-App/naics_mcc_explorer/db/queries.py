@@ -6,6 +6,7 @@ Rules:
 - JSON_EXTRACT_PATH_TEXT with nested paths for new-schema records.
 - Filters applied via WITH onboarded AS (...) CTE — no IN (list) size limits.
 """
+from __future__ import annotations
 
 import streamlit as st
 import pandas as pd
