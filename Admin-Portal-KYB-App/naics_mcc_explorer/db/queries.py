@@ -45,31 +45,21 @@ def _onboarded_cte(date_from=None, date_to=None, customer_id=None, business_id=N
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_customers(date_from=None, date_to=None) -> pd.DataFrame:
-    """Distinct customers with name mapping in the date range."""
+    """Distinct customers in the date range. Uses customer_id as the display name
+    because rds_cases_public.customers does not exist in this Redshift cluster."""
     parts = ["1=1"]
     if date_from:
         parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
     if date_to:
         parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
     where = " AND ".join(parts)
-    # Try to join to customers table for a readable name; fall back to ID only
     df = run_query(f"""
         SELECT DISTINCT rbcm.customer_id,
-               COALESCE(c.name, rbcm.customer_id) AS customer_name
+               rbcm.customer_id AS customer_name
         FROM rds_cases_public.rel_business_customer_monitoring rbcm
-        LEFT JOIN rds_cases_public.customers c ON c.id = rbcm.customer_id
         WHERE {where}
-        ORDER BY customer_name
+        ORDER BY rbcm.customer_id
     """)
-    if df.empty:
-        # Fallback: no join
-        df = run_query(f"""
-            SELECT DISTINCT rbcm.customer_id,
-                   rbcm.customer_id AS customer_name
-            FROM rds_cases_public.rel_business_customer_monitoring rbcm
-            WHERE {where}
-            ORDER BY rbcm.customer_id
-        """)
     return df
 
 
@@ -320,13 +310,12 @@ def load_business_facts(business_id: str) -> pd.DataFrame:
 def load_business_customer(business_id: str) -> pd.DataFrame:
     return run_query(f"""
         SELECT DISTINCT rbcm.customer_id,
-               COALESCE(c.name, rbcm.customer_id) AS customer_name,
+               rbcm.customer_id AS customer_name,
                MIN(rbcm.created_at) AS first_seen,
                MAX(rbcm.created_at) AS last_seen
         FROM rds_cases_public.rel_business_customer_monitoring rbcm
-        LEFT JOIN rds_cases_public.customers c ON c.id = rbcm.customer_id
         WHERE rbcm.business_id = '{business_id}'
-        GROUP BY rbcm.customer_id, c.name
+        GROUP BY rbcm.customer_id
     """)
 
 
