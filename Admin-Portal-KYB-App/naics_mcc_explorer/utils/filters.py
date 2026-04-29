@@ -13,11 +13,10 @@ import pandas as pd
 
 def render_sidebar() -> dict:
     """Render sidebar filters and return current filter state dict."""
-    # Import here to avoid circular import at module level
     from db.queries import load_customers, load_businesses
 
     st.sidebar.markdown("## 🔎 Global Filters")
-    st.sidebar.markdown("*All filters are linked — selections cascade automatically.*")
+    st.sidebar.markdown("*All filters cascade: date → customer → business.*")
     st.sidebar.markdown("---")
 
     # ── Date Range ──────────────────────────────────────────────────────────
@@ -26,10 +25,8 @@ def render_sidebar() -> dict:
     default_from = today - timedelta(days=90)
 
     col1, col2 = st.sidebar.columns(2)
-    date_from = col1.date_input("From", value=default_from, key="g_date_from",
-                                 max_value=today)
-    date_to   = col2.date_input("To",   value=today,         key="g_date_to",
-                                 max_value=today)
+    date_from = col1.date_input("From", value=default_from, key="g_date_from", max_value=today)
+    date_to   = col2.date_input("To",   value=today,         key="g_date_to",   max_value=today)
 
     if date_from > date_to:
         st.sidebar.warning("⚠️ 'From' is after 'To'.")
@@ -37,16 +34,30 @@ def render_sidebar() -> dict:
     df_from = str(date_from)
     df_to   = str(date_to)
 
-    # ── Customer (derived from date range) ────────────────────────────────
+    # ── Customer (derived from date range, shown as Name + ID) ────────────
     st.sidebar.markdown("**👥 Customer**")
     with st.sidebar:
         with st.spinner("Loading customers…"):
             cust_df = load_customers(df_from, df_to)
 
-    cust_ids = ["All Customers"] + (cust_df["customer_id"].tolist() if not cust_df.empty else [])
-    customer_id = st.sidebar.selectbox("Customer ID", cust_ids, key="g_customer_id")
-    if customer_id == "All Customers":
-        customer_id = None
+    customer_id = None
+    if not cust_df.empty:
+        # Build display label "Name (id)" or just "id" if name == id
+        def _label(row):
+            name = str(row.get("customer_name", "")).strip()
+            cid  = str(row.get("customer_id", "")).strip()
+            return f"{name} ({cid})" if name and name != cid else cid
+
+        cust_df["display"] = cust_df.apply(_label, axis=1)
+        options = ["All Customers"] + cust_df["display"].tolist()
+        selected = st.sidebar.selectbox("Customer Name / ID", options, key="g_customer_sel")
+        if selected != "All Customers":
+            # Recover the raw customer_id from the selected display label
+            matched = cust_df[cust_df["display"] == selected]
+            if not matched.empty:
+                customer_id = matched.iloc[0]["customer_id"]
+    else:
+        st.sidebar.info("No customers in date range.")
 
     # ── Business ID (derived from date range + customer) ──────────────────
     st.sidebar.markdown("**🏢 Business ID**")
@@ -54,10 +65,14 @@ def render_sidebar() -> dict:
         with st.spinner("Loading businesses…"):
             biz_df = load_businesses(df_from, df_to, customer_id)
 
-    biz_ids = ["All Businesses"] + (biz_df["business_id"].tolist() if not biz_df.empty else [])
-    business_id = st.sidebar.selectbox("Business ID", biz_ids, key="g_business_id")
-    if business_id == "All Businesses":
-        business_id = None
+    business_id = None
+    if not biz_df.empty:
+        biz_ids = ["All Businesses"] + biz_df["business_id"].tolist()
+        biz_sel = st.sidebar.selectbox("Business ID", biz_ids, key="g_business_id")
+        if biz_sel != "All Businesses":
+            business_id = biz_sel
+    else:
+        st.sidebar.info("No businesses matched.")
 
     # ── Fact Type multiselect ─────────────────────────────────────────────
     st.sidebar.markdown("**📊 Fact Types**")
@@ -71,8 +86,8 @@ def render_sidebar() -> dict:
 
     st.sidebar.markdown("---")
     st.sidebar.caption(
-        f"📌 `{len(biz_df):,}` businesses matched  \n"
-        f"📌 `{len(cust_df):,}` customers matched"
+        f"📌 `{len(biz_df) if not biz_df.empty else 0:,}` businesses matched  \n"
+        f"📌 `{len(cust_df) if not cust_df.empty else 0:,}` customers matched"
     )
 
     return {
@@ -85,7 +100,6 @@ def render_sidebar() -> dict:
 
 
 def kpi(label: str, value: str, delta: str = "", color: str = "#3b82f6") -> None:
-    """Render a styled KPI metric card."""
     st.markdown(f"""
 <div style="background:#1e293b;border:1px solid #334155;border-left:4px solid {color};
      border-radius:8px;padding:14px 16px;margin:4px 0">
@@ -105,3 +119,43 @@ def section_header(title: str, subtitle: str = "") -> None:
     if subtitle:
         st.caption(subtitle)
     st.markdown("---")
+
+
+def parse_alternatives(raw_json: str) -> list[dict]:
+    """Parse alternatives[] from raw facts JSON. Returns list of dicts."""
+    import json
+    from utils.platform_map import platform_label
+    alts = []
+    try:
+        obj = json.loads(str(raw_json)) if isinstance(raw_json, str) else (raw_json or {})
+        for a in (obj.get("alternatives") or []):
+            src = a.get("source", {})
+            if isinstance(src, dict):
+                pid   = str(src.get("platformId", "unknown"))
+                conf  = src.get("confidence", a.get("confidence", ""))
+                ts    = src.get("updatedAt", "")
+            else:
+                pid  = str(src) if src is not None else "unknown"
+                conf = a.get("confidence", "")
+                ts   = ""
+            alts.append({
+                "alt_platform":    platform_label(pid),
+                "alt_platform_id": pid,
+                "alt_value":       a.get("value"),
+                "alt_confidence":  conf,
+                "alt_updated_at":  ts,
+            })
+    except Exception:
+        pass
+    return alts
+
+
+def alternatives_table(raw_json: str, key: str = "") -> None:
+    """Render a mini alternatives table from raw JSON inline."""
+    alts = parse_alternatives(raw_json)
+    if alts:
+        df = pd.DataFrame(alts)
+        df.columns = ["Platform", "ID", "Value", "Confidence", "Updated At"]
+        st.dataframe(df, hide_index=True, use_container_width=True)
+    else:
+        st.caption("No alternatives found (or old schema without alternatives array).")

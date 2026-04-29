@@ -15,7 +15,8 @@ import pandas as pd
 
 from utils.filters import render_sidebar, kpi, section_header, no_data
 from utils.platform_map import PLATFORM_MAP, platform_label, platform_color, CATCH_ALL_NAICS, CATCH_ALL_MCC
-from db.queries import load_overview, load_platform_winners
+from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
+from db.queries import load_overview, load_platform_winners, _onboarded_cte
 
 st.set_page_config(
     page_title="NAICS/MCC Quality Explorer",
@@ -43,6 +44,7 @@ f_biz    = filters["business_id"]
 
 # ── Page header ────────────────────────────────────────────────────────────────
 st.markdown("# 🔬 NAICS / MCC Data Quality Explorer")
+platform_legend_panel()
 st.markdown(
     "Internal monitoring dashboard for NAICS and MCC fact quality across the Worth AI platform. "
     "Use the sidebar filters to scope by customer, business, and date range."
@@ -126,12 +128,25 @@ for fact, col, title in [
             p0_row = pw_df[pw_df["platform_id"] == "0"]
             if not p0_row.empty:
                 p0_n = int(p0_row["business_count"].iloc[0])
-                st.error(
-                    f"⚠️ **Ghost Assigner (P0 — Applicant Entry) is winning for {p0_n:,} businesses.** "
-                    "This means self-reported onboarding data beat real vendor data in the confidence race. "
-                    "See the [Platform Winners page] for details.",
-                    icon="🚨",
+                analyst_note(
+                    f"⚠️ Ghost Assigner (P0) winning for {p0_n:,} {fact} businesses",
+                    "Self-reported onboarding data is beating real vendor data. "
+                    "Root cause: <code>confidence: 1</code> hardcoded in <code>sources.ts:151</code>. "
+                    "See Platform Winners page for full analysis.",
+                    level="danger",
                 )
+
+sql_panel("Home overview metrics",
+          f"""{_onboarded_cte(f_from, f_to, f_cust)}
+SELECT COUNT(DISTINCT o.business_id) AS total_businesses,
+       COUNT(DISTINCT o.customer_id) AS total_customers,
+       COUNT(DISTINCT CASE WHEN f.name='naics_code' AND JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NOT NULL THEN f.business_id END) AS with_naics,
+       COUNT(DISTINCT CASE WHEN f.name='mcc_code'   AND JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NOT NULL THEN f.business_id END) AS with_mcc,
+       COUNT(DISTINCT CASE WHEN f.name='naics_code' AND COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId'),'x')='0' THEN f.business_id END) AS naics_p0_wins,
+       COUNT(DISTINCT CASE WHEN f.name='naics_code' AND JSON_EXTRACT_PATH_TEXT(f.value,'value')='561499' THEN f.business_id END) AS naics_catchall
+FROM onboarded o
+LEFT JOIN rds_warehouse_public.facts f ON f.business_id=o.business_id
+    AND f.name IN ('naics_code','mcc_code') AND LENGTH(f.value)<60000""", key_suffix="home")
 
 # ── Navigation cards ────────────────────────────────────────────────────────────
 st.markdown("---")
