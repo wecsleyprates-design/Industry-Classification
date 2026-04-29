@@ -1046,6 +1046,24 @@ def load_customer_names(date_from, date_to):
     return run_sql(sql_ids)
 
 @st.cache_data(ttl=600, show_spinner=False)
+def _onboarded_cte_sql(date_from, date_to, customer_id):
+    """Module-level helper: build 'WITH onboarded AS (...)' CTE string.
+    Used by all _load_* functions. No [:N] cap — Redshift handles scale via JOIN."""
+    parts = []
+    if date_from:   parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
+    if date_to:     parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
+    if customer_id: parts.append(f"rbcm.customer_id = '{customer_id}'")
+    where = (" AND " + " AND ".join(parts)) if parts else ""
+    return (
+        "WITH onboarded AS (\n"
+        "  SELECT DISTINCT rbcm.business_id\n"
+        "  FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+        f"  WHERE 1=1{where}\n"
+        ")\n"
+    )
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_home_recent(date_from, date_to, customer_id=None):
     """
     Load recently onboarded businesses.
@@ -1057,14 +1075,15 @@ def load_home_recent(date_from, date_to, customer_id=None):
     if customer_id:  parts.append(f"rbcm.customer_id = '{customer_id}'")
     dc=(" AND "+" AND ".join(parts)) if parts else ""
 
+    # Fast query: rbcm only — no facts join (the facts join was O(n*m) and very slow)
+    # fact_count is dropped — it was only cosmetic and caused a massive federated join
     sql = f"""
-        SELECT DISTINCT
+        SELECT
             rbcm.business_id,
-            MIN(rbcm.created_at)   AS first_seen,
-            MAX(rbcm.created_at)   AS last_updated,
-            COUNT(DISTINCT f.name) AS fact_count
+            MIN(rbcm.created_at) AS first_seen,
+            MAX(rbcm.created_at) AS last_updated,
+            0                    AS fact_count
         FROM rds_cases_public.rel_business_customer_monitoring rbcm
-        LEFT JOIN rds_warehouse_public.facts f ON f.business_id = rbcm.business_id
         WHERE 1=1{dc}
         GROUP BY rbcm.business_id
         ORDER BY first_seen DESC
@@ -1086,7 +1105,7 @@ def load_home_recent(date_from, date_to, customer_id=None):
         GROUP BY business_id ORDER BY first_seen DESC
     """)
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_home_kyb_stats(date_from, date_to, customer_id=None):
     """
     KYB health metrics — respects both date range and optional customer filter.
@@ -1141,6 +1160,7 @@ def load_home_kyb_stats(date_from, date_to, customer_id=None):
             COUNT(DISTINCT f.name) AS fact_count
         FROM rds_warehouse_public.facts f
         JOIN onboarded o ON o.business_id = f.business_id
+          AND LENGTH(f.value) < 60000
         LEFT JOIN rds_integration_data.business_entity_verification bev
             ON bev.business_id = f.business_id
         LEFT JOIN rds_integration_data.business_entity_review_task bert
@@ -1165,7 +1185,7 @@ def load_home_kyb_stats(date_from, date_to, customer_id=None):
     # The stats_df intersection in Home tab (stats_df = stats_df[bids isin recent_df]) handles this.
     return None, "rbcm not accessible — no fallback to avoid incorrect business counts"
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_home_flags(date_from, date_to, customer_id=None):
     """Flag scoring facts — respects both date range and optional customer filter."""
     parts=[]
@@ -1184,7 +1204,8 @@ def load_home_flags(date_from, date_to, customer_id=None):
                f.received_at
         FROM rds_warehouse_public.facts f
         JOIN onboarded o ON o.business_id = f.business_id
-        WHERE f.name IN (
+        WHERE LENGTH(f.value) < 60000
+          AND f.name IN (
             'sos_active','tin_match_boolean','watchlist_hits',
             'naics_code','idv_passed_boolean','num_bankruptcies',
             'num_judgements','num_liens','sos_match_boolean'
@@ -3506,6 +3527,256 @@ _search_q = ""  # search bar removed from filter bar
 # HOME — Live Dashboard
 # ════════════════════════════════════════════════════════════════════════════════
 
+# ── Cached data loaders — module-level so @st.cache_data works correctly ──
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_flags_for_bids(date_from, date_to, customer_id):
+    cte = _onboarded_cte_sql(date_from, date_to, customer_id)
+    return run_sql(cte + """SELECT f.business_id, f.name,
+               JSON_EXTRACT_PATH_TEXT(f.value,'value') AS val,
+               f.received_at
+        FROM rds_warehouse_public.facts f
+        JOIN onboarded o ON o.business_id = f.business_id
+        WHERE LENGTH(f.value) < 60000
+          AND f.name IN (
+              'sos_active','tin_match_boolean','watchlist_hits',
+              'naics_code','idv_passed_boolean','num_bankruptcies',
+              'num_judgements','num_liens','sos_match_boolean'
+          )
+        ORDER BY f.business_id, f.name, f.received_at DESC""")
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_kyb_funnel_for_bids(date_from, date_to, customer_id):
+    """Load granular SOS and TIN facts needed for funnel analysis.
+    Returns one row per business with:
+      - tin_submitted, tin_status (from tin_match.value.status), tin_match_boolean
+      - sos_match_boolean, sos_active, formation_state, operating_state
+      - middesk_confidence
+
+    NOTE: idv_last4_ssn (Plaid IDV SSN last-4) is loaded separately in
+    _load_sole_prop_signal() using JSON_EXTRACT_PATH_TEXT (Redshift-safe).
+    The identity_verification.meta join is NOT done here because Redshift
+    does NOT support the PostgreSQL ::json-> operator — that caused this
+    entire query to fail and return an empty DataFrame, making all Section 1
+    counts 0 and all drilldown tables empty.
+    """
+    cte = _onboarded_cte_sql(date_from, date_to, customer_id)
+    return run_sql(cte + """
+        SELECT f.business_id,
+            MAX(CASE WHEN f.name='tin_submitted'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_submitted,
+            MAX(CASE WHEN f.name='tin_match'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS tin_status,
+            MAX(CASE WHEN f.name='tin_match_boolean'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_match_boolean,
+            MAX(CASE WHEN f.name='sos_match_boolean'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_match_boolean,
+            MAX(CASE WHEN f.name='sos_active'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_active,
+            MAX(CASE WHEN f.name='formation_state'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_state,
+            MAX(CASE WHEN f.name='primary_address'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','state') END)       AS operating_state,
+            MAX(CASE WHEN f.name='middesk_confidence'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS middesk_confidence
+        FROM rds_warehouse_public.facts f
+        JOIN onboarded o ON o.business_id = f.business_id
+        WHERE LENGTH(f.value) < 60000
+          AND f.name IN ('tin_submitted','tin_match','tin_match_boolean',
+                         'sos_match_boolean','sos_active','formation_state',
+                         'primary_address','middesk_confidence')
+        GROUP BY f.business_id
+    """)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_sos_filings_for_bids(date_from, date_to, customer_id):
+    """Parse sos_filings[] JSON array from rds_warehouse_public.facts.
+    Source: API JSON sos_filings fact (name='sos_filings').
+    ALL signals derived from the sos_filings JSON array — no review tasks, no materialized tables.
+
+    Returns one row per FILING (multiple rows per business if multiple filings):
+      - business_id
+      - foreign_domestic  : 'domestic' | 'foreign'   (sos_filings[].foreign_domestic)
+      - filing_active     : true | false               (sos_filings[].active)
+      - filing_state      : 'FL','DE',etc.             (sos_filings[].state)
+      - jurisdiction      : 'us::fl', 'us::de', etc.  (sos_filings[].jurisdiction)
+      - entity_type       : 'llc','corporation',etc.   (sos_filings[].entity_type)
+      - non_profit        : true | false               (sos_filings[].non_profit)
+      - registration_date : date string                (sos_filings[].registration_date)
+      - filing_name       : business name on filing    (sos_filings[].filing_name)
+      - has_officers      : 1 if officers[] non-empty  (sos_filings[].officers)
+      - filing_index      : 0-based index in array
+
+    Source: integration-service/lib/facts/kyb/index.ts lines 767-987 (transformer)
+            integration-service/lib/facts/kyb/types.ts lines 20-32 (SoSRegistration schema)
+            warehouse-service/datapooler/adapters/db/models/facts.py (storage)
+    """
+    cte = _onboarded_cte_sql(date_from, date_to, customer_id)
+    # Redshift federated tables do NOT support PostgreSQL-specific JSON operators.
+    # Use JSON_EXTRACT_PATH_TEXT with positional indices (0-9) via UNION ALL.
+    def _filing_row(i):
+        idx = str(i)
+        return (
+            f"  SELECT f.business_id, {i} AS filing_index,\n"
+            f"    JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','foreign_domestic') AS foreign_domestic,\n"
+            f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','active')='true' THEN true ELSE false END AS filing_active,\n"
+            f"    UPPER(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','state'),''))          AS filing_state,\n"
+            f"    LOWER(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','jurisdiction'),''))   AS jurisdiction,\n"
+            f"    LOWER(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','entity_type'),''))    AS entity_type,\n"
+            f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','non_profit')='true' THEN 1 ELSE 0 END AS non_profit,\n"
+            f"    LEFT(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','registration_date'),\n"
+            f"                  JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','filing_date'),''),10)  AS registration_date,\n"
+            f"    JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','filing_name')                        AS filing_name,\n"
+            f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','officers','0') IS NOT NULL\n"
+            f"         THEN 1 ELSE 0 END                                                              AS has_officers,\n"
+            f"    JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','id')                                 AS filing_id,\n"
+            f"    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')                                AS source_platform_id,\n"
+            f"    JSON_EXTRACT_PATH_TEXT(f.value,'source','name')                                      AS source_vendor_name\n"
+            f"  FROM rds_warehouse_public.facts f\n"
+            f"  JOIN onboarded o ON o.business_id = f.business_id\n"
+            f"  WHERE f.name='sos_filings' AND LENGTH(f.value)<60000\n"
+            f"    AND JSON_EXTRACT_PATH_TEXT(f.value,'value','{idx}','state') IS NOT NULL"
+        )
+    # 5 branches covers >99% of businesses (most have 1-3 filings)
+    # Reduced from 10 to cut query execution time in half
+    union_sql = "\nUNION ALL\n".join(_filing_row(i) for i in range(5))
+    return run_sql(cte + f"SELECT * FROM (\n{union_sql}\n) sos_rows WHERE filing_state != '' OR foreign_domestic IS NOT NULL;")
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_sole_prop_signal(date_from, date_to, customer_id):
+    """Load Plaid IDV SSN last-4 for Possible Sole Prop detection.
+    Source: integration-service/lib/facts/kyb/index.ts:606
+      type === IDNumberType.UsSsnLast4 && value === tin.slice(-4) → is_sole_prop=true
+
+    Uses JSON_EXTRACT_PATH_TEXT (Redshift-compatible) on the
+    rds_integration_data.identity_verification table (federated from PostgreSQL RDS).
+    Returns: business_id, idv_last4_ssn (the SSN last-4 from Plaid IDV meta)
+    """
+    cte = _onboarded_cte_sql(date_from, date_to, customer_id)
+    return run_sql(cte + """SELECT iv.business_id,
+            MAX(JSON_EXTRACT_PATH_TEXT(iv.meta, 'user', 'id_number', 'value')) AS idv_last4_ssn
+        FROM rds_integration_data.identity_verification iv
+        JOIN onboarded o ON o.business_id = iv.business_id
+        WHERE JSON_EXTRACT_PATH_TEXT(iv.meta, 'user', 'id_number', 'type') = 'us_ssn_last_4'
+        GROUP BY iv.business_id""")
+
+# ── Load enriched KYB stats using the same authoritative business ID list ──
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_stats_for_bids(date_from, date_to, customer_id):
+    """Load KYB stats for a specific list of business IDs.
+
+    Includes all columns shown in drilldown tables:
+      - Facts API registry signals: sos_match_boolean, sos_match_status, sos_active
+      - clients.verification_results flags: sos_match_verif, sos_domestic_verif, sos_active_verif
+      - TIN signals: tin_submitted, tin_match_status, tin_match (boolean)
+      - IDV, NAICS, risk, firmographic columns
+    """
+    cte = _onboarded_cte_sql(date_from, date_to, customer_id)
+    return run_sql(cte + """
+        SELECT f.business_id,
+            -- Registry / SOS — Facts API (integration-service/lib/facts/kyb/index.ts)
+            MAX(CASE WHEN f.name='sos_match_boolean'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_match_boolean,
+            MAX(CASE WHEN f.name='sos_match'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS sos_match_status,
+            MAX(CASE WHEN f.name='sos_active'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_active,
+            MAX(CASE WHEN f.name='formation_state'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_state,
+            MAX(CASE WHEN f.name='formation_date'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_date,
+            -- SOS verification flags derived from rds_integration_data.business_entity_review_task
+            -- (rds_ tables only — no clients.verification_results materialized table)
+            MAX(CASE WHEN bert.key='sos_match'    AND bert.sublabel='Submitted Active' THEN 1 ELSE 0 END) AS sos_match_verif,
+            MAX(CASE WHEN bert.key='sos_domestic' AND bert.sublabel='Domestic Active'  THEN 1 ELSE 0 END) AS sos_domestic_verif,
+            MAX(CASE WHEN bert.key='sos_active'   AND bert.status='Success'             THEN 1 ELSE 0 END) AS sos_active_verif,
+            -- TIN / EIN (index.ts lines 399-491)
+            MAX(CASE WHEN f.name='tin_submitted'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_submitted,
+            MAX(CASE WHEN f.name='tin_match'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS tin_match_status,
+            MAX(CASE WHEN f.name='tin_match_boolean'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_match,
+            -- IDV
+            MAX(CASE WHEN f.name='idv_passed_boolean'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS idv_passed,
+            -- Sole Prop (index.ts:552-616 — true|false|null)
+            -- null = not enough data; true = confirmed; false = multiple owners or SSN mismatch
+            MAX(CASE WHEN f.name='is_sole_prop'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS is_sole_prop,
+            -- Classification
+            MAX(CASE WHEN f.name='naics_code'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS naics_code,
+            -- Risk
+            MAX(CASE WHEN f.name='watchlist_hits'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS watchlist_hits,
+            MAX(CASE WHEN f.name='num_bankruptcies'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_bankruptcies,
+            MAX(CASE WHEN f.name='num_judgements'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_judgements,
+            MAX(CASE WHEN f.name='num_liens'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_liens,
+            MAX(CASE WHEN f.name='adverse_media_hits'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS adverse_media,
+            -- Firmographic
+            MAX(CASE WHEN f.name='revenue'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS revenue,
+            -- Legal name — used by DirectSOS enrichment agent for entity matching
+            MAX(CASE WHEN f.name='legal_name'
+                THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS legal_name,
+            MAX(f.received_at) AS last_seen,
+            MIN(f.received_at) AS first_seen,
+            COUNT(DISTINCT f.name) AS fact_count
+        FROM rds_warehouse_public.facts f
+        JOIN onboarded o ON o.business_id = f.business_id
+          AND LENGTH(f.value) < 60000
+        LEFT JOIN rds_integration_data.business_entity_verification bev
+            ON bev.business_id = f.business_id
+        LEFT JOIN rds_integration_data.business_entity_review_task bert
+            ON bert.business_entity_verification_id = bev.id
+            AND bert.key IN ('sos_match','sos_domestic','sos_active')
+        WHERE f.name IN (
+              'sos_match_boolean','sos_match','sos_active',
+              'tin_submitted','tin_match','tin_match_boolean',
+              'idv_passed_boolean','is_sole_prop','naics_code',
+              'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
+              'adverse_media_hits','revenue','formation_date','formation_state',
+              'legal_name'
+          )
+        GROUP BY f.business_id
+    """)
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_home_scores(date_from, date_to, customer_id):
+    cte = _onboarded_cte_sql(date_from, date_to, customer_id)
+    return run_sql(cte + """SELECT cs.business_id,
+               bs.weighted_score_850, bs.weighted_score_100,
+               bs.risk_level, bs.score_decision, bs.created_at AS scored_at
+        FROM rds_manual_score_public.data_current_scores cs
+        JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
+        JOIN onboarded o ON o.business_id = cs.business_id
+        ORDER BY bs.weighted_score_850 ASC""")
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _load_home_factors(date_from, date_to, customer_id):
+    """Load per-category factor contributions, averaged across all scored businesses."""
+    cte = _onboarded_cte_sql(date_from, date_to, customer_id)
+    return run_sql(cte + """SELECT bsf.category_id,
+               AVG(bsf.score_100)          AS avg_score_100,
+               AVG(bsf.weighted_score_850)  AS avg_impact_pts,
+               COUNT(DISTINCT cs.business_id) AS businesses
+        FROM rds_manual_score_public.data_current_scores cs
+        JOIN rds_manual_score_public.business_score_factors bsf ON bsf.score_id=cs.score_id
+        JOIN onboarded o ON o.business_id = cs.business_id
+        GROUP BY bsf.category_id
+        ORDER BY bsf.category_id""")
+
+
 if tab=="🏠 Home":
     st.markdown("# 🔬 KYB Intelligence Hub")
 
@@ -3555,27 +3826,10 @@ if tab=="🏠 Home":
     _authoritative_bids = recent_df["business_id"].tolist()
 
     # ── Red flag scoring — query facts directly for the authoritative business list ──
-    @st.cache_data(ttl=600, show_spinner=False)
-    def _load_flags_for_bids(bid_tuple):
-        if not bid_tuple:
-            return None, "No business IDs"
-        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        return run_sql(f"""
-            SELECT business_id, name,
-                   JSON_EXTRACT_PATH_TEXT(value,'value') AS val,
-                   received_at
-            FROM rds_warehouse_public.facts
-            WHERE business_id IN ({bid_list})
-              AND name IN (
-                  'sos_active','tin_match_boolean','watchlist_hits',
-                  'naics_code','idv_passed_boolean','num_bankruptcies',
-                  'num_judgements','num_liens','sos_match_boolean'
-              )
-            ORDER BY business_id, name, received_at DESC
-        """)
+
 
     with st.spinner("Scoring red flags…"):
-        flag_df, flag_err = _load_flags_for_bids(tuple(_authoritative_bids))
+        flag_df, flag_err = _load_flags_for_bids(hub_date_from, hub_date_to, hub_customer_id)
 
     # Build per-business red flag summary
     biz_flags = {}  # business_id → {flags:[...], score:int}
@@ -3627,233 +3881,16 @@ if tab=="🏠 Home":
                 biz_flags[bid_check] = {"flags": flags, "score": score}
 
     # ── KYB Funnel: SOS/TIN granular facts ──────────────────────────────────
-    @st.cache_data(ttl=600, show_spinner=False)
-    def _load_kyb_funnel_for_bids(bid_tuple):
-        """Load granular SOS and TIN facts needed for funnel analysis.
-        Returns one row per business with:
-          - tin_submitted, tin_status (from tin_match.value.status), tin_match_boolean
-          - sos_match_boolean, sos_active, formation_state, operating_state
-          - middesk_confidence
-
-        NOTE: idv_last4_ssn (Plaid IDV SSN last-4) is loaded separately in
-        _load_sole_prop_signal() using JSON_EXTRACT_PATH_TEXT (Redshift-safe).
-        The identity_verification.meta join is NOT done here because Redshift
-        does NOT support the PostgreSQL ::json-> operator — that caused this
-        entire query to fail and return an empty DataFrame, making all Section 1
-        counts 0 and all drilldown tables empty.
-        """
-        if not bid_tuple:
-            return None, "No business IDs"
-        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        return run_sql(f"""
-            SELECT
-                f.business_id,
-                MAX(CASE WHEN f.name='tin_submitted'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_submitted,
-                MAX(CASE WHEN f.name='tin_match'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS tin_status,
-                MAX(CASE WHEN f.name='tin_match_boolean'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_match_boolean,
-                MAX(CASE WHEN f.name='sos_match_boolean'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_match_boolean,
-                MAX(CASE WHEN f.name='sos_active'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_active,
-                MAX(CASE WHEN f.name='formation_state'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_state,
-                MAX(CASE WHEN f.name='primary_address'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','state') END)       AS operating_state,
-                MAX(CASE WHEN f.name='middesk_confidence'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS middesk_confidence
-            FROM rds_warehouse_public.facts f
-            WHERE f.business_id IN ({bid_list})
-              AND f.name IN ('tin_submitted','tin_match','tin_match_boolean',
-                             'sos_match_boolean','sos_active','formation_state',
-                             'primary_address','middesk_confidence')
-            GROUP BY f.business_id
-        """)
-
-    @st.cache_data(ttl=600, show_spinner=False)
-    def _load_sos_filings_for_bids(bid_tuple):
-        """Parse sos_filings[] JSON array from rds_warehouse_public.facts.
-        Source: API JSON sos_filings fact (name='sos_filings').
-        ALL signals derived from the sos_filings JSON array — no review tasks, no materialized tables.
-
-        Returns one row per FILING (multiple rows per business if multiple filings):
-          - business_id
-          - foreign_domestic  : 'domestic' | 'foreign'   (sos_filings[].foreign_domestic)
-          - filing_active     : true | false               (sos_filings[].active)
-          - filing_state      : 'FL','DE',etc.             (sos_filings[].state)
-          - jurisdiction      : 'us::fl', 'us::de', etc.  (sos_filings[].jurisdiction)
-          - entity_type       : 'llc','corporation',etc.   (sos_filings[].entity_type)
-          - non_profit        : true | false               (sos_filings[].non_profit)
-          - registration_date : date string                (sos_filings[].registration_date)
-          - filing_name       : business name on filing    (sos_filings[].filing_name)
-          - has_officers      : 1 if officers[] non-empty  (sos_filings[].officers)
-          - filing_index      : 0-based index in array
-
-        Source: integration-service/lib/facts/kyb/index.ts lines 767-987 (transformer)
-                integration-service/lib/facts/kyb/types.ts lines 20-32 (SoSRegistration schema)
-                warehouse-service/datapooler/adapters/db/models/facts.py (storage)
-        """
-        if not bid_tuple:
-            return None, "No business IDs"
-        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        # Redshift federated tables do NOT support PostgreSQL-specific JSON operators
-        # (JSON_ARRAY_ELEMENTS, ->>, ::json, JSON_ARRAY_LENGTH).
-        # Use JSON_EXTRACT_PATH_TEXT with positional indices (0-9) via UNION ALL.
-        # Each branch extracts one filing from the array. Rows where both
-        # foreign_domestic and filing_state are NULL are filtered out (empty slots).
-        # Max 10 filings per business — covers >99% of real-world cases while
-        # keeping the query within Redshift's VARCHAR(65535) limit per row.
-        def _filing_row(i):
-            idx = str(i)
-            return (
-                f"  SELECT business_id, {i} AS filing_index,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','foreign_domestic') AS foreign_domestic,\n"
-                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','active')='true' THEN true ELSE false END AS filing_active,\n"
-                f"    UPPER(COALESCE(JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','state'),''))          AS filing_state,\n"
-                f"    LOWER(COALESCE(JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','jurisdiction'),''))   AS jurisdiction,\n"
-                f"    LOWER(COALESCE(JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','entity_type'),''))    AS entity_type,\n"
-                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','non_profit')='true' THEN 1 ELSE 0 END AS non_profit,\n"
-                f"    LEFT(COALESCE(JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','registration_date'),\n"
-                f"                  JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','filing_date'),''),10)  AS registration_date,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','filing_name')                        AS filing_name,\n"
-                f"    CASE WHEN JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','officers','0') IS NOT NULL\n"
-                f"         THEN 1 ELSE 0 END                                                              AS has_officers,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','id')                                 AS filing_id,\n"
-                f"    -- Winning vendor who provided this sos_filings fact (factWithHighestConfidence)\n"
-                f"    -- Source: index.ts factWithHighestConfidence rule selects one vendor per business\n"
-                f"    JSON_EXTRACT_PATH_TEXT(value,'source','platformId')                                AS source_platform_id,\n"
-                f"    JSON_EXTRACT_PATH_TEXT(value,'source','name')                                      AS source_vendor_name\n"
-                f"  FROM rds_warehouse_public.facts\n"
-                f"  WHERE name='sos_filings' AND LENGTH(value)<60000\n"
-                f"    AND business_id IN ({bid_list})\n"
-                f"    AND JSON_EXTRACT_PATH_TEXT(value,'value','{idx}','state') IS NOT NULL"
-            )
-        union_sql = "\nUNION ALL\n".join(_filing_row(i) for i in range(10))
-        return run_sql(f"SELECT * FROM (\n{union_sql}\n) sos_rows WHERE filing_state != '' OR foreign_domestic IS NOT NULL;")
-
-    @st.cache_data(ttl=600, show_spinner=False)
-    def _load_sole_prop_signal(bid_tuple):
-        """Load Plaid IDV SSN last-4 for Possible Sole Prop detection.
-        Source: integration-service/lib/facts/kyb/index.ts:606
-          type === IDNumberType.UsSsnLast4 && value === tin.slice(-4) → is_sole_prop=true
-
-        Uses JSON_EXTRACT_PATH_TEXT (Redshift-compatible) on the
-        rds_integration_data.identity_verification table (federated from PostgreSQL RDS).
-        Returns: business_id, idv_last4_ssn (the SSN last-4 from Plaid IDV meta)
-        """
-        if not bid_tuple:
-            return None, "No business IDs"
-        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        return run_sql(f"""
-            SELECT
-                business_id,
-                MAX(JSON_EXTRACT_PATH_TEXT(meta, 'user', 'id_number', 'value')) AS idv_last4_ssn
-            FROM rds_integration_data.identity_verification
-            WHERE business_id IN ({bid_list})
-              AND JSON_EXTRACT_PATH_TEXT(meta, 'user', 'id_number', 'type') = 'us_ssn_last_4'
-            GROUP BY business_id
-        """)
-
-    # ── Load enriched KYB stats using the same authoritative business ID list ──
-    @st.cache_data(ttl=600, show_spinner=False)
-    def _load_stats_for_bids(bid_tuple):
-        """Load KYB stats for a specific list of business IDs.
-
-        Includes all columns shown in drilldown tables:
-          - Facts API registry signals: sos_match_boolean, sos_match_status, sos_active
-          - clients.verification_results flags: sos_match_verif, sos_domestic_verif, sos_active_verif
-          - TIN signals: tin_submitted, tin_match_status, tin_match (boolean)
-          - IDV, NAICS, risk, firmographic columns
-        """
-        if not bid_tuple:
-            return None, "No business IDs"
-        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        return run_sql(f"""
-            SELECT
-                f.business_id,
-                -- Registry / SOS — Facts API (integration-service/lib/facts/kyb/index.ts)
-                MAX(CASE WHEN f.name='sos_match_boolean'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_match_boolean,
-                MAX(CASE WHEN f.name='sos_match'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS sos_match_status,
-                MAX(CASE WHEN f.name='sos_active'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS sos_active,
-                MAX(CASE WHEN f.name='formation_state'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_state,
-                MAX(CASE WHEN f.name='formation_date'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS formation_date,
-                -- SOS verification flags derived from rds_integration_data.business_entity_review_task
-                -- (rds_ tables only — no clients.verification_results materialized table)
-                MAX(CASE WHEN bert.key='sos_match'    AND bert.sublabel='Submitted Active' THEN 1 ELSE 0 END) AS sos_match_verif,
-                MAX(CASE WHEN bert.key='sos_domestic' AND bert.sublabel='Domestic Active'  THEN 1 ELSE 0 END) AS sos_domestic_verif,
-                MAX(CASE WHEN bert.key='sos_active'   AND bert.status='Success'             THEN 1 ELSE 0 END) AS sos_active_verif,
-                -- TIN / EIN (index.ts lines 399-491)
-                MAX(CASE WHEN f.name='tin_submitted'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_submitted,
-                MAX(CASE WHEN f.name='tin_match'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value','status') END)      AS tin_match_status,
-                MAX(CASE WHEN f.name='tin_match_boolean'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS tin_match,
-                -- IDV
-                MAX(CASE WHEN f.name='idv_passed_boolean'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS idv_passed,
-                -- Sole Prop (index.ts:552-616 — true|false|null)
-                -- null = not enough data; true = confirmed; false = multiple owners or SSN mismatch
-                MAX(CASE WHEN f.name='is_sole_prop'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS is_sole_prop,
-                -- Classification
-                MAX(CASE WHEN f.name='naics_code'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS naics_code,
-                -- Risk
-                MAX(CASE WHEN f.name='watchlist_hits'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS watchlist_hits,
-                MAX(CASE WHEN f.name='num_bankruptcies'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_bankruptcies,
-                MAX(CASE WHEN f.name='num_judgements'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_judgements,
-                MAX(CASE WHEN f.name='num_liens'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS num_liens,
-                MAX(CASE WHEN f.name='adverse_media_hits'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS adverse_media,
-                -- Firmographic
-                MAX(CASE WHEN f.name='revenue'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS revenue,
-                -- Legal name — used by DirectSOS enrichment agent for entity matching
-                MAX(CASE WHEN f.name='legal_name'
-                    THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END)               AS legal_name,
-                MAX(f.received_at) AS last_seen,
-                MIN(f.received_at) AS first_seen,
-                COUNT(DISTINCT f.name) AS fact_count
-            FROM rds_warehouse_public.facts f
-            LEFT JOIN rds_integration_data.business_entity_verification bev
-                ON bev.business_id = f.business_id
-            LEFT JOIN rds_integration_data.business_entity_review_task bert
-                ON bert.business_entity_verification_id = bev.id
-                AND bert.key IN ('sos_match','sos_domestic','sos_active')
-            WHERE f.business_id IN ({bid_list})
-              AND f.name IN (
-                  'sos_match_boolean','sos_match','sos_active',
-                  'tin_submitted','tin_match','tin_match_boolean',
-                  'idv_passed_boolean','is_sole_prop','naics_code',
-                  'watchlist_hits','num_bankruptcies','num_judgements','num_liens',
-                  'adverse_media_hits','revenue','formation_date','formation_state',
-                  'legal_name'
-              )
-            GROUP BY f.business_id
-        """)
-
     with st.spinner("Loading KYB metrics…"):
-        stats_df, stats_err = _load_stats_for_bids(tuple(_authoritative_bids))
+        stats_df, stats_err = _load_stats_for_bids(hub_date_from, hub_date_to, hub_customer_id)
 
     with st.spinner("Loading SOS/TIN funnel data…"):
-        funnel_df, funnel_err = _load_kyb_funnel_for_bids(tuple(_authoritative_bids))
+        funnel_df, funnel_err = _load_kyb_funnel_for_bids(hub_date_from, hub_date_to, hub_customer_id)
 
     # Load Plaid IDV SSN last-4 separately (Redshift-safe — no ::json-> operator)
     # Used only for Possible Sole Prop detection (index.ts:606 comparison)
     with st.spinner(""):
-        _sole_prop_df, _sole_prop_err = _load_sole_prop_signal(tuple(_authoritative_bids))
+        _sole_prop_df, _sole_prop_err = _load_sole_prop_signal(hub_date_from, hub_date_to, hub_customer_id)
     # Merge idv_last4_ssn into funnel_df so the sole-prop mask can use it
     if funnel_df is not None and not funnel_df.empty:
         if _sole_prop_df is not None and not _sole_prop_df.empty and "idv_last4_ssn" in _sole_prop_df.columns:
@@ -3868,7 +3905,7 @@ if tab=="🏠 Home":
     # Source: rds_warehouse_public.facts name='sos_filings' — ALL signals from API JSON
     # Replaces _load_sos_review_tasks_for_bids (review tasks are NOT facts, NOT in API JSON)
     with st.spinner(""):
-        _sos_filings_df, _sos_filings_err = _load_sos_filings_for_bids(tuple(_authoritative_bids))
+        _sos_filings_df, _sos_filings_err = _load_sos_filings_for_bids(hub_date_from, hub_date_to, hub_customer_id)
     # Build per-business aggregated signals from sos_filings[]
     # These are the correct derivations — all from rds_warehouse_public.facts
     _sfg = {}   # business_id → aggregated filing signals
@@ -4257,82 +4294,156 @@ if tab=="🏠 Home":
         _reg_found_extended_mask = _registry_found_mask | _filings_present_in_noreg_mask
         _sos_found_extended = int(_reg_found_extended_mask.sum())
 
-        # ── Domestic vs Foreign — SOURCE: rds_warehouse_public.facts name='sos_filings' ──
-        # Field: sos_filings[].foreign_domestic = 'domestic' | 'foreign'
-        # Derivation (integration-service/lib/facts/kyb/index.ts:717-987):
-        #   Middesk: registration.jurisdiction field ('foreign'/'domestic') → foreign_domestic
-        #   OpenCorporates: home_jurisdiction_code === jurisdiction_code → 'domestic', else 'foreign'
-        # We use _sos_filings_df which is loaded directly from rds_warehouse_public.facts
-        # via _load_sos_filings_for_bids() — NO review task tables involved.
+        # ── Domestic vs Foreign — Full Decision Tree (rds_warehouse_public.facts ONLY) ──
+        # Source: sos_filings[] JSON (name='sos_filings') + formation_state fact (name='formation_state')
+        #
+        # Decision tree (applied per-filing, per-business):
+        #   1. foreign_domestic = 'domestic'                       → DOMESTIC (explicit, authoritative)
+        #   2. foreign_domestic = 'foreign'                        → FOREIGN  (explicit, authoritative)
+        #   3. foreign_domestic absent/null + formation_state known:
+        #      a. sos_filings[].state = formation_state            → DOMESTIC (proxy)
+        #         (filing in same state as Middesk's entity-level formation record)
+        #      b. sos_filings[].state ≠ formation_state            → FOREIGN  (proxy)
+        #         (filing in a different state than incorporation state)
+        #   4. foreign_domestic absent + formation_state null      → UNKNOWN  (flag with warning)
+        #      Cannot classify without either foreign_domestic field or a formation state to compare.
+        #      Example: PORFIRIO AUTO REPAIR LLC (OpenCorporates, pid=23) — OC did not set
+        #      foreign_domestic because home_jurisdiction_code was unavailable; formation_state=null.
+        #
+        # A business is DOMESTIC  if ANY filing classifies as domestic via rules 1 or 3a.
+        # A business is FOREIGN   if ALL filings classify as foreign  via rules 2 or 3b (and no domestic).
+        # A business is UNKNOWN   if NO filing can be classified (all have null fd + null formation_state).
+
+        # ── ALL SOURCE SIGNALS FOR SECTION 1 COME FROM rds_warehouse_public.facts ONLY ──
+        # NEVER use clients.*, datascience.*, or rds_integration_data.* tables here.
+        # formation_state → facts name='formation_state' (Middesk businessEntityVerification.formation_state)
+        # operating_state → facts name='primary_address' value.state (submitted onboarding address)
+        # sos_filings[]   → facts name='sos_filings' (per-filing JSON, parsed in _load_sos_filings_for_bids)
+        # sos_match_boolean → facts name='sos_match_boolean'
+        # sos_active      → facts name='sos_active' (dependent fact, only written when sos_filings.length > 0)
+
         _ref_bids_set = set(_funnel[_reg_found_extended_mask]["business_id"].tolist())
+        _op_state_col   = _funnel.get("operating_state", pd.Series([""] * len(_funnel)))
+        _op_state_col_u = _op_state_col.astype(str).str.upper().str.strip().fillna("")
+        _form_state_by_bid = {}
+        _bid_to_op = {}   # business_id → operating_state (UPPER) from primary_address fact
+        if "formation_state" in _funnel.columns:
+            _form_state_by_bid = _funnel.set_index("business_id")["formation_state"] \
+                .astype(str).str.upper().str.strip().fillna("").to_dict()
+        if "operating_state" in _funnel.columns:
+            _bid_to_op = _funnel.set_index("business_id")["operating_state"] \
+                .astype(str).str.upper().str.strip().fillna("").to_dict()
+
+        _domestic_bids     = set()   # confirmed domestic (explicit or proxy)
+        _foreign_only_bids_set = set()  # confirmed foreign only (no domestic filing)
+        _unknown_dom_bids  = set()   # cannot classify — flag with warning
+
         if _sos_filings_df is not None and not _sos_filings_df.empty:
-            # Per-business: does ANY filing have foreign_domestic='domestic'?
             _sf_reg = _sos_filings_df[_sos_filings_df["business_id"].isin(_ref_bids_set)]
-            _domestic_bids = set(
-                _sf_reg[_sf_reg["foreign_domestic"].str.lower().eq("domestic")]["business_id"].unique()
-            )
-            _foreign_only_bids_set = set(
-                _sf_reg[~_sf_reg["business_id"].isin(_domestic_bids)]["business_id"].unique()
-            )
-            # Also classify operating state vs filing states for each business
-            # operating_state from primary_address fact (rds_warehouse_public.facts name='primary_address')
-            _op_state_col   = _funnel.get("operating_state", pd.Series([""] * len(_funnel)))
-            _op_state_col_u = _op_state_col.astype(str).str.upper().str.strip().fillna("")
-            # For each registry-found business, get ALL filing states from _sos_filings_df
+
+            for _bid, _grp in _sf_reg.groupby("business_id"):
+                _fs_bid = _form_state_by_bid.get(_bid, "")  # formation_state for this business
+                _classification_per_filing = []  # 'domestic', 'foreign', 'unknown' per filing
+
+                # Operating state for Step 2 (filing.state = operating_state when formation_state null)
+                _op_bid = _bid_to_op.get(_bid, "")  # _bid_to_op built before this loop
+
+                for _, _fr in _grp.iterrows():
+                    _fd  = str(_fr.get("foreign_domestic", "") or "").lower().strip()
+                    _fst = str(_fr.get("filing_state", "") or "").upper().strip()
+
+                    if _fd == "domestic":
+                        _classification_per_filing.append("domestic")   # Rule 1: explicit
+                    elif _fd == "foreign":
+                        _classification_per_filing.append("foreign")    # Rule 2: explicit
+                    elif _fd in ("", "nan", "none", "null"):
+                        # foreign_domestic absent — apply decision tree
+                        if _fs_bid and _fst:
+                            # Step 1: compare filing.state to formation_state (independent facts)
+                            if _fst == _fs_bid:
+                                _classification_per_filing.append("domestic")   # Rule 3a: proxy
+                            else:
+                                _classification_per_filing.append("foreign")    # Rule 3b: proxy
+                        elif _fst and _op_bid:
+                            # Step 2: formation_state null — compare filing.state to operating_state
+                            # Decision tree Step 2: filing.state = primary_address.state → DOMESTIC proxy
+                            # Example: PORFIRIO AUTO REPAIR LLC (OC won factWithHighestConfidence):
+                            #   OC filing has state=MO, no foreign_domestic field
+                            #   Middesk filing with foreign_domestic='domestic' is in alternatives[]
+                            #   formation_state=MO comes from Middesk BUT may be null if OC won
+                            #   filing.state=MO = operating_state=MO → DOMESTIC proxy
+                            if _fst == _op_bid:
+                                _classification_per_filing.append("domestic")   # Step 2 proxy
+                            else:
+                                _classification_per_filing.append("unknown")    # Step 2 uncertain
+                        else:
+                            _classification_per_filing.append("unknown")        # Rule 4: no signals
+
+                # Determine business-level classification from filing-level results
+                if "domestic" in _classification_per_filing:
+                    _domestic_bids.add(_bid)     # ANY domestic filing → business is domestic
+                elif "foreign" in _classification_per_filing:
+                    _foreign_only_bids_set.add(_bid)  # all classifiable → foreign only
+                else:
+                    _unknown_dom_bids.add(_bid)  # all unknown → cannot classify
+
+            # Build filing-state maps for Row 3 metrics
             _sf_states = (
                 _sf_reg.groupby("business_id")["filing_state"]
                 .apply(lambda x: set(s.upper().strip() for s in x.dropna() if str(s).strip()))
                 .to_dict()
             )
-            # (a) Domestic filing state = operating state  (formation ≡ operating)
             _formation_states = _funnel["formation_state"].astype(str).str.upper().str.strip().fillna("") \
                 if "formation_state" in _funnel.columns else pd.Series([""] * len(_funnel))
         else:
-            _domestic_bids = set()
-            _foreign_only_bids_set = set()
+            _sf_reg = pd.DataFrame()
+            _domestic_bids = set(); _foreign_only_bids_set = set(); _unknown_dom_bids = set()
             _sf_states = {}
-            _op_state_col   = _funnel.get("operating_state", pd.Series([""] * len(_funnel)))
-            _op_state_col_u = _op_state_col.astype(str).str.upper().str.strip().fillna("")
             _formation_states = pd.Series([""] * len(_funnel))
 
         _reg_domestic_mask = _reg_found_extended_mask & _funnel["business_id"].isin(_domestic_bids)
         _reg_foreign_mask  = _reg_found_extended_mask & _funnel["business_id"].isin(_foreign_only_bids_set)
+        _reg_unknown_mask  = _reg_found_extended_mask & _funnel["business_id"].isin(_unknown_dom_bids)
         _n_reg_domestic    = int(_reg_domestic_mask.sum())
         _n_reg_foreign     = int(_reg_foreign_mask.sum())
+        _n_reg_unknown_dom = int(_reg_unknown_mask.sum())
 
         # ── Row 3 — Three state-comparison metrics (all from rds_warehouse_public.facts) ──
-        # ALL three use sos_filings[].state from _sos_filings_df (rds_warehouse_public.facts name='sos_filings')
-        # and operating_state from primary_address fact (rds_warehouse_public.facts name='primary_address').
-        # formation_state is NOT used here: it is a firmographic fact from Middesk's database record
-        # and does NOT confirm that a SOS filing was found or verified in that state.
-        # (A business can have formation_state='DE' but have dissolved/inactive filings, no filings at all,
-        #  or only foreign qualifications — sos_domestic_verification would be 0 in all those cases.)
-        #
-        # Source for ALL Row 3 metrics:
-        #   sos_filings[].state   → rds_warehouse_public.facts name='sos_filings' (per-filing verified state)
-        #   primary_address.state → rds_warehouse_public.facts name='primary_address' (submitted operating state)
-        #
-        # Build per-business maps from _sos_filings_df:
-        #   _sf_states         = {bid: set(ALL filing states)}       (already built above)
-        #   _domestic_states   = {bid: set(domestic filing states)}  (sos_filings[].state where foreign_domestic='domestic')
+        # Uses the SAME decision tree as Domestic/Foreign card classification.
+        # _domestic_filing_states: per-business set of filing states classified as DOMESTIC
+        # by the decision tree (Rule 1 explicit OR Rule 3a proxy).
+        # A filing is "domestic" if:
+        #   Rule 1: foreign_domestic = 'domestic'
+        #   Rule 3a: foreign_domestic absent AND filing.state = formation_state
         if _sos_filings_df is not None and not _sos_filings_df.empty:
+            # Build domestic-classified filing states using the full decision tree
+            _domestic_filing_states = {}
+            for _bid_r3, _grp_r3 in _sf_reg.groupby("business_id"):
+                _fs_r3 = _form_state_by_bid.get(_bid_r3, "")
+                _dom_states_r3 = set()
+                for _, _fr_r3 in _grp_r3.iterrows():
+                    _fd_r3  = str(_fr_r3.get("foreign_domestic","") or "").lower().strip()
+                    _fst_r3 = str(_fr_r3.get("filing_state","") or "").upper().strip()
+                    _op_r3 = _bid_to_op.get(_bid_r3, "")
+                    if _fd_r3 == "domestic":
+                        _dom_states_r3.add(_fst_r3)           # Rule 1: explicit
+                    elif _fd_r3 in ("","nan","none","null") and _fs_r3 and _fst_r3 and _fst_r3 == _fs_r3:
+                        _dom_states_r3.add(_fst_r3)           # Rule 3a proxy: filing.state = formation_state
+                    elif _fd_r3 in ("","nan","none","null") and not _fs_r3 and _fst_r3 and _op_r3 and _fst_r3 == _op_r3:
+                        _dom_states_r3.add(_fst_r3)           # Step 2 proxy: filing.state = operating_state
+                if _dom_states_r3:
+                    _domestic_filing_states[_bid_r3] = _dom_states_r3
+            # Also keep _sf_reg_dom for gap analysis sub-buckets (Rule 1 explicit only — for active check)
             _sf_reg_dom = _sf_reg[_sf_reg["foreign_domestic"].str.lower().eq("domestic")]
-            _domestic_filing_states = (
-                _sf_reg_dom.groupby("business_id")["filing_state"]
-                .apply(lambda x: set(s.upper().strip() for s in x.dropna() if str(s).strip()))
-                .to_dict()
-            )
         else:
             _domestic_filing_states = {}
+            _sf_reg_dom = pd.DataFrame()
 
         # Metric (a): Domestic Filing State = Operating State
-        #   At least one sos_filings[] entry has foreign_domestic='domestic' AND
-        #   that filing's state matches the submitted operating state.
-        #   Rule: op_state ∈ _domestic_filing_states[bid]
-        #   This is a STRICT SUBSET of Domestic Filing (15 businesses).
-        #   formation_state is NOT used — it is firmographic, not a verified SOS filing state.
+        #   A filing classified as DOMESTIC (Rule 1 or 3a) has state = submitted operating state.
+        #   This is a strict subset of Domestic Filing.
         def _domestic_filing_matches_op(bid, op_st):
-            """True if any domestic filing state matches the operating state."""
+            """True if any domestic-classified filing state matches the operating state."""
             dom_states = _domestic_filing_states.get(bid, set())
             return bool(op_st) and op_st in dom_states
 
@@ -4455,13 +4566,14 @@ if tab=="🏠 Home":
         _no_domestic_found = 0; _state_match = 0; _no_state_match = 0
         _sos_found_verified = 0
         _domestic_active_n = 0; _domestic_inactive_n = 0; _domestic_missing_n = 0
-        _sos_found_extended = 0; _n_reg_domestic = 0; _n_reg_foreign = 0
+        _sos_found_extended = 0; _n_reg_domestic = 0; _n_reg_foreign = 0; _n_reg_unknown_dom = 0
         _n_states_same = 0; _n_states_diff = 0; _n_foreign_eq_op = 0
         _n_gap = 0; _n_gap_inactive = 0; _n_gap_no_filing = 0; _n_gap_sole_prop = 0
         _sole_prop_mask = pd.Series(dtype=bool)
         _reg_found_extended_mask = pd.Series(dtype=bool)
         _reg_domestic_mask = pd.Series(dtype=bool)
         _reg_foreign_mask = pd.Series(dtype=bool)
+        _reg_unknown_mask = pd.Series(dtype=bool)
         _states_same_mask = pd.Series(dtype=bool)
         _states_diff_mask = pd.Series(dtype=bool)
         _foreign_eq_op_mask = pd.Series(dtype=bool)
@@ -4492,9 +4604,10 @@ if tab=="🏠 Home":
         _seg["dt_ne_true_inactive"]    = _funnel[_filings_ne_true_inactive_mask]["business_id"].tolist()
         _seg["dt_ne_true_active"]      = _funnel[_filings_ne_true_active_mask]["business_id"].tolist()
         _seg["dt_ne_false"]            = _funnel[_filings_ne_match_false_mask]["business_id"].tolist()
-        # Registry Found: Domestic vs Foreign (from sos_filings[].foreign_domestic)
+        # Registry Found: Domestic vs Foreign (decision tree applied per-filing)
         _seg["reg_domestic"]           = _funnel[_reg_domestic_mask]["business_id"].tolist()
         _seg["reg_foreign"]            = _funnel[_reg_foreign_mask]["business_id"].tolist()
+        _seg["reg_unknown_dom"]        = _funnel[_reg_unknown_mask]["business_id"].tolist()
         # Row 3 — three state-comparison metrics (all from rds_warehouse_public.facts)
         _seg["states_same"]            = _funnel[_states_same_mask]["business_id"].tolist()
         _seg["foreign_eq_op"]          = _funnel[_foreign_eq_op_mask]["business_id"].tolist()
@@ -4522,7 +4635,7 @@ if tab=="🏠 Home":
         _seg = {k: [] for k in [
             "no_sos","dt_filings_empty","dt_filings_present_noreg",
             "sos_found","sos_found_extended","dt_ne_true_inactive","dt_ne_true_active","dt_ne_false",
-            "reg_domestic","reg_foreign","states_same","foreign_eq_op","states_diff",
+            "reg_domestic","reg_foreign","reg_unknown_dom","states_same","foreign_eq_op","states_diff",
             "gap_formation","gap_inactive","gap_no_filing","gap_sole_prop",
             "domestic","domestic_active","domestic_inactive","domestic_missing","no_domestic",
             "state_match","no_state_match",
@@ -5978,73 +6091,101 @@ if tab=="🏠 Home":
         "`index.ts:1421-1424` (sos_match_boolean) · `rds_warehouse_public.facts`"
     )
 
+    _DT_EXPLAIN = (
+        "**Decision Tree — how each filing is classified (per filing, per business):**\n\n"
+        "```\nFor each entry in sos_filings[]:\n\n"
+        "1. foreign_domestic = 'domestic'                        → DOMESTIC ✅ (explicit — authoritative)\n"
+        "   Set by Middesk (pid=16): registration.jurisdiction = 'domestic'\n"
+        "   Set by OC (pid=23): home_jurisdiction_code === jurisdiction_code\n\n"
+        "2. foreign_domestic = 'foreign'                         → FOREIGN  ✅ (explicit — authoritative)\n"
+        "   Set by Middesk: registration.jurisdiction = 'foreign'\n"
+        "   Set by OC: home_jurisdiction_code ≠ jurisdiction_code\n\n"
+        "3. foreign_domestic absent / null:\n"
+        "   │   (OpenCorporates lacked home_jurisdiction_code, or vendor didn't set the field)\n"
+        "   │\n"
+        "   ├── Step 1 — formation_state fact IS NOT NULL\n"
+        "   │   (rds_warehouse_public.facts name='formation_state' from Middesk businessEntityVerification)\n"
+        "   │   ├── filing.state = formation_state   → DOMESTIC (proxy) — filing in incorporation state\n"
+        "   │   └── filing.state ≠ formation_state   → FOREIGN  (proxy) — different state = foreign qual\n"
+        "   │\n"
+        "   └── Step 2 — formation_state IS NULL (OC won fact, Middesk data in alternatives[])\n"
+        "       Compare filing.state to primary_address.state (operating state)\n"
+        "       ├── filing.state = operating_state   → DOMESTIC (proxy) — filing in same state as operations\n"
+        "       │   Real example: PORFIRIO AUTO REPAIR LLC (79aa7723)\n"
+        "       │     OC won sos_filings (no foreign_domestic field)\n"
+        "       │     Middesk filing (foreign_domestic='domestic') is in alternatives[] — NOT in value[]\n"
+        "       │     formation_state=MO (from Middesk) but may be null if OC won\n"
+        "       │     filing.state=MO = operating_state=MO → DOMESTIC proxy\n"
+        "       └── filing.state ≠ operating_state   → UNKNOWN ⚠️ — cannot safely classify\n"
+        "           Neither foreign_domestic nor state comparisons give a confident answer.\n```\n\n"
+        "**⚠️ Important: `factWithHighestConfidence` affects what Redshift stores**\n"
+        "When OpenCorporates (pid=23) wins `factWithHighestConfidence` for `sos_filings`, "
+        "Middesk's filing data (which includes `foreign_domestic='domestic'`) is stored in `alternatives[]` "
+        "and is NOT accessible via `JSON_EXTRACT_PATH_TEXT(value,'value',0,...)`. "
+        "The winning vendor's data (OC, no `foreign_domestic` field) is what the SQL reads. "
+        "This is why Step 2 exists — to recover the classification from state comparison when the "
+        "explicit `foreign_domestic` field is unavailable due to vendor selection.\n\n"
+        "**Business-level result:**\n"
+        "- **DOMESTIC**: ANY filing classified as domestic (Rules 1, 3a proxy, or Step 2 proxy)\n"
+        "- **FOREIGN**: all classifiable filings are foreign (no domestic found)\n"
+        "- **UNKNOWN**: all filings unclassifiable (null foreign_domestic + null formation_state + state mismatch)\n\n"
+        "**Source:** `rds_warehouse_public.facts name='sos_filings'` · `name='formation_state'` · `name='primary_address'`\n"
+        "**Key file:** `integration-service/lib/facts/kyb/index.ts:717-987` · "
+        "`integration-service/lib/facts/sources.ts` (factWithHighestConfidence rule)"
+    )
+
     _SEG_CALC["reg_domestic"] = (
         "**What 'Domestic Filing' means:**\n"
-        "At least one entry in `sos_filings[]` has `foreign_domestic='domestic'` — meaning "
-        "a filing exists in the state where the entity was originally incorporated (its home jurisdiction).\n\n"
-        "**Source table: `rds_warehouse_public.facts` ONLY** · `name='sos_filings'`\n"
-        "No review task tables, no materialized tables.\n\n"
-        "**API JSON field:** `sos_filings[].foreign_domestic`\n"
-        "```json\n// From the sos_filings fact (rds_warehouse_public.facts name='sos_filings'):\n"
-        "{\n  'foreign_domestic': 'domestic',  // ← 'domestic' = home jurisdiction filing\n"
-        "  'active': true,\n  'state': 'FL',\n  'jurisdiction': 'us::fl'\n}\n```\n\n"
-        "**How `foreign_domestic` is set (index.ts:767-987 transformer):**\n"
-        "- **Middesk (pid=16):** `registration.jurisdiction` field from Middesk API → `'foreign'` or `'domestic'`\n"
-        "- **OpenCorporates (pid=23):** `home_jurisdiction_code === jurisdiction_code` → `'domestic'`, else `'foreign'`\n\n"
-        "**Python rule (facts only):**\n"
-        "```python\n# Source: _sos_filings_df loaded from rds_warehouse_public.facts name='sos_filings'\n"
-        "# Any filing with foreign_domestic='domestic' → business is in Domestic Filing group\n"
-        "_domestic_bids = set(\n"
-        "    _sos_filings_df[_sos_filings_df['foreign_domestic'].str.lower() == 'domestic']\n"
-        "    ['business_id'].unique()\n)\n"
-        "_reg_domestic_mask = _reg_found_extended_mask & _funnel['business_id'].isin(_domestic_bids)\n```\n\n"
-        "**Diagnostic SQL (facts only):**\n"
-        "```sql\n-- Returns businesses with at least one domestic filing in sos_filings[]\n"
-        "SELECT DISTINCT f.business_id\n"
-        "FROM rds_warehouse_public.facts f,\n"
-        "     JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing\n"
-        "WHERE f.name = 'sos_filings'\n"
-        "  AND LENGTH(f.value) < 60000\n"
-        "  AND LOWER(filing->>'foreign_domestic') = 'domestic'\n"
-        "  AND f.business_id IN (\n"
-        "    SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring\n"
-        "    WHERE DATE(created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause});\n```\n\n"
-        "**Key file:** `integration-service/lib/facts/kyb/index.ts` lines 717-987 · "
-        "`integration-service/lib/facts/kyb/types.ts:20-32` (SoSRegistration schema)"
+        "At least one `sos_filings[]` filing is classified as **domestic** using the decision tree below.\n\n"
+        + _DT_EXPLAIN +
+        "\n\n**Python rule:**\n"
+        "```python\n# A business is DOMESTIC if ANY filing resolves to 'domestic' via the decision tree.\n"
+        "# Explicit: foreign_domestic='domestic'\n"
+        "# Proxy:    foreign_domestic absent AND filing.state = formation_state\n"
+        "if _fd == 'domestic': result = 'domestic'              # Rule 1\n"
+        "elif _fd == 'foreign': result = 'foreign'              # Rule 2\n"
+        "elif _fs_bid and _fst and _fst == _fs_bid: result='domestic'  # Rule 3a\n"
+        "elif _fs_bid and _fst and _fst != _fs_bid: result='foreign'   # Rule 3b\n"
+        "else: result = 'unknown'                               # Rule 4\n"
+        "# Business is DOMESTIC if 'domestic' in any filing result.\n```"
     )
 
     _SEG_CALC["reg_foreign"] = (
         "**What 'Foreign Filing Only' means:**\n"
-        "The business has at least one SOS filing in `sos_filings[]` (registry found), but "
-        "NO entry has `foreign_domestic='domestic'` — only foreign qualification filings exist. "
-        "The domestic incorporation record (in the formation state) was NOT verified.\n\n"
-        "**Source table: `rds_warehouse_public.facts` ONLY** · `name='sos_filings'`\n"
-        "No review task tables, no materialized tables.\n\n"
+        "All classifiable `sos_filings[]` entries resolve to **foreign** using the decision tree — "
+        "no filing could be confirmed as domestic. The domestic incorporation record is NOT verified.\n\n"
         "**KYB implication:** Entity resolution gap — the business is incorporated somewhere "
-        "(typically a tax-haven state: DE/NV/WY/SD/MT/NM) but Middesk only found the foreign "
+        "(typically a tax-haven state: DE/NV/WY/SD/MT/NM) but the vendor only found the foreign "
         "qualification filing in the operating state, not the domestic incorporation.\n\n"
-        "**API JSON field:** `sos_filings[].foreign_domestic = 'foreign'`\n"
-        "```json\n// All filings have foreign_domestic='foreign' — no domestic found:\n"
-        "{'foreign_domestic': 'foreign', 'state': 'FL', 'jurisdiction': 'us::fl'}\n```\n\n"
-        "**Python rule (facts only):**\n"
-        "```python\n# Source: _sos_filings_df from rds_warehouse_public.facts name='sos_filings'\n"
-        "# Business is in Foreign Only if it has filings BUT none with foreign_domestic='domestic'\n"
-        "_foreign_only_bids_set = (\n"
-        "    set(_sf_reg['business_id'].unique()) - _domestic_bids\n)\n"
-        "_reg_foreign_mask = _reg_found_extended_mask & _funnel['business_id'].isin(_foreign_only_bids_set)\n```\n\n"
-        "**Diagnostic SQL (facts only):**\n"
-        "```sql\n-- Businesses with sos_filings BUT no domestic filing found\n"
-        "SELECT f.business_id\n"
-        "FROM rds_warehouse_public.facts f,\n"
-        "     JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing\n"
-        "WHERE f.name = 'sos_filings' AND LENGTH(f.value) < 60000\n"
-        "  AND f.business_id IN (\n"
-        "    SELECT business_id FROM rds_cases_public.rel_business_customer_monitoring\n"
-        "    WHERE DATE(created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause})\n"
-        "GROUP BY f.business_id\n"
-        "HAVING SUM(CASE WHEN LOWER(filing->>'foreign_domestic')='domestic' THEN 1 ELSE 0 END) = 0;\n```\n\n"
-        "**Key file:** `integration-service/lib/facts/kyb/index.ts` lines 799-883 · "
-        "`integration-service/lib/facts/kyb/types.ts:20-32`"
+        + _DT_EXPLAIN +
+        "\n\n**Python rule:**\n"
+        "```python\n# A business is FOREIGN ONLY if:\n"
+        "# - No filing resolved to 'domestic' (neither explicit nor proxy)\n"
+        "# - At least one filing resolved to 'foreign' (so not UNKNOWN)\n"
+        "if 'domestic' in _classification_per_filing: bucket = 'domestic'\n"
+        "elif 'foreign' in _classification_per_filing: bucket = 'foreign'  # ← this group\n"
+        "else: bucket = 'unknown'\n```"
+    )
+
+    _SEG_CALC["reg_unknown_dom"] = (
+        "**What 'Unknown Filing Type' means:**\n"
+        "All `sos_filings[]` entries for this business have:\n"
+        "- `foreign_domestic` field **absent** (vendor did not set it)\n"
+        "- `formation_state` fact **null** (no independent state-of-incorporation reference)\n\n"
+        "Without either signal, the decision tree cannot classify the filing as domestic or foreign.\n\n"
+        "**Common cause:** OpenCorporates (pid=23) only sets `foreign_domestic` when it has "
+        "`home_jurisdiction_code` to compare against `jurisdiction_code`. When OC lacks the home "
+        "jurisdiction (e.g. the company was found via address search, not a registered entity lookup), "
+        "it omits the field entirely. If Middesk (pid=16) also has no `formation_state`, both signals "
+        "are absent.\n\n"
+        "**Real example:** PORFIRIO AUTO REPAIR LLC (79aa7723)\n"
+        "```json\n// sos_filings[0] — foreign_domestic field completely absent:\n"
+        "{ 'entity_type': 'llc', 'state': 'MO', 'jurisdiction': 'us::mo', 'active': true }\n"
+        "// source: { 'platformId': 23, 'name': 'opencorporates' }\n"
+        "// formation_state: { 'value': null }\n"
+        "// primary_address: { 'state': 'MO' }\n```\n\n"
+        "**Action:** Run Direct SOS Enrichment (Block 5) or manually verify on the state SOS portal.\n\n"
+        + _DT_EXPLAIN
     )
 
     _SEG_CALC["states_same"] = (
@@ -6095,48 +6236,24 @@ if tab=="🏠 Home":
 
     _SEG_CALC["foreign_eq_op"] = (
         "**What 'Foreign Reg = Operating State' means:**\n"
-        "The business has only foreign qualification filings in `sos_filings[]` AND "
-        "the foreign filing state matches the submitted operating state (`primary_address.value.state`). "
-        "This means Middesk found the business in the operating state as a foreign qualification, "
+        "The business is classified as **FOREIGN** by the decision tree (Rule 2 explicit or Rule 3b proxy) "
+        "AND the foreign filing state matches the submitted operating state (`primary_address.value.state`). "
+        "This means the vendor found the entity in the operating state as a foreign qualification, "
         "but the domestic (formation state) incorporation record is NOT verified.\n\n"
-        "**Source tables: `rds_warehouse_public.facts` ONLY:**\n"
-        "| Column | Fact `name` | JSON path |\n|---|---|---|\n"
-        "| Filing state | `'sos_filings'` | `value[].state` (per filing) |\n"
-        "| Operating state | `'primary_address'` | `JSON_EXTRACT_PATH_TEXT(value,'value','state')` |\n\n"
+        "**How 'foreign' is determined — same decision tree as Foreign Filing Only:**\n"
+        + _DT_EXPLAIN +
+        "\n\n**Additional condition for this group:** filing state == operating state\n"
+        "(the foreign qualification was found specifically in the state the business submitted)\n\n"
         "**Python rule:**\n"
-        "```python\n# Source: _sos_filings_df from rds_warehouse_public.facts name='sos_filings'\n"
-        "# _sf_states = {business_id: set(filing_states)} for each registry-found business\n"
-        "# A business qualifies if: has NO domestic filing AND its foreign filing state == operating state\n"
+        "```python\n# Business is in foreign_eq_op if:\n"
+        "# 1. Classified as FOREIGN by decision tree (no domestic filing found)\n"
+        "# 2. AND any filing state matches the submitted operating state\n"
         "def _foreign_filing_matches_op(bid, op_st):\n"
         "    filing_states = _sf_states.get(bid, set())\n"
         "    return bool(op_st) and op_st in filing_states and bid not in _domestic_bids\n```\n\n"
-        "**KYB implication:** Middesk verified the entity exists in the operating state but as a "
-        "foreign qualification. The domestic incorporation (typically DE/NV/WY/SD/MT/NM) was NOT "
-        "searched or found. This is a meaningful entity resolution gap.\n\n"
-        "**Diagnostic SQL (facts only):**\n"
-        "```sql\n-- Businesses with a foreign filing in their operating state (no domestic filing)\n"
-        "WITH op_states AS (\n"
-        "  SELECT o.business_id,\n"
-        "    UPPER(JSON_EXTRACT_PATH_TEXT(f.value,'value','state')) AS operating_state\n"
-        "  FROM rds_cases_public.rel_business_customer_monitoring o\n"
-        "  LEFT JOIN rds_warehouse_public.facts f\n"
-        "    ON f.business_id=o.business_id AND f.name='primary_address' AND LENGTH(f.value)<60000\n"
-        "  WHERE DATE(o.created_at) BETWEEN '{date_from}' AND '{date_to}'{customer_clause}\n"
-        "),\n"
-        "filings AS (\n"
-        "  SELECT f.business_id,\n"
-        "    UPPER(filing->>'state')            AS filing_state,\n"
-        "    filing->>'foreign_domestic'        AS fd\n"
-        "  FROM rds_warehouse_public.facts f,\n"
-        "       JSON_ARRAY_ELEMENTS(f.value::json->'value') AS filing\n"
-        "  WHERE f.name='sos_filings' AND LENGTH(f.value)<60000\n"
-        ")\n"
-        "SELECT o.business_id, o.operating_state\n"
-        "FROM op_states o\n"
-        "JOIN filings fi ON fi.business_id=o.business_id AND fi.filing_state=o.operating_state AND fi.fd='foreign'\n"
-        "WHERE o.business_id NOT IN (\n"
-        "  SELECT business_id FROM filings WHERE LOWER(fd)='domestic'\n);\n```\n\n"
-        "**Key file:** `integration-service/lib/facts/kyb/index.ts` lines 717-987 (sos_filings transformer)"
+        "**KYB implication:** Vendor verified entity exists in operating state as foreign qualification. "
+        "Domestic (formation state) incorporation was NOT found. High entity resolution gap risk.\n\n"
+        "**Key file:** `integration-service/lib/facts/kyb/index.ts` lines 717-987"
     )
 
     _SEG_CALC["states_diff"] = (
@@ -6460,7 +6577,7 @@ if tab=="🏠 Home":
             f"       s.filing_name, s.registration_date\n"
             f"FROM per_biz p\n"
             f"LEFT JOIN sos_fil s ON s.business_id = p.business_id\n"
-            f"WHERE {where_clause};"
+            f"WHERE {where_clause.replace('business_id', 'p.business_id')};"
         )
 
     # ── Segment-to-SQL mapping: exact GROUP BY queries matching Python rules ─────
@@ -6485,58 +6602,27 @@ if tab=="🏠 Home":
         "sos_found_extended":  ("sos_match_boolean = 'true' OR sos_active IS NOT NULL", ""),
         "dt_ne_true_active":   ("sos_match_boolean = 'true' AND sos_active = 'true'", ""),
         "dt_ne_true_inactive": ("sos_match_boolean = 'true' AND sos_active = 'false'", ""),
-        # Domestic vs Foreign: from rds_warehouse_public.facts name='sos_filings' ONLY.
-        # sos_fil CTE in _seg_sql() uses JSON_EXTRACT_PATH_TEXT(value,'value',0,'foreign_domestic')
-        # = first element of the sos_filings[] array. Python checks ALL elements via _sos_filings_df.
-        # For businesses with ONLY one filing this is exact; for multi-filing businesses
-        # where domestic filing is NOT the first element, counts may differ slightly.
-        "reg_domestic": (
-            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
-            " AND s.foreign_domestic IS NOT NULL"
-            " AND LOWER(s.foreign_domestic) = 'domestic'",
-            ""
-        ),
-        "reg_foreign": (
-            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
-            " AND s.foreign_domestic IS NOT NULL"
-            " AND LOWER(s.foreign_domestic) != 'domestic'",
-            ""
-        ),
+        # Domestic / Foreign / Unknown — use "1=1" + business_id list, NOT WHERE on s.foreign_domestic.
+        #
+        # REASON: sos_fil CTE reads only index 0 (first filing element). Python classifies using ALL
+        # filings. A business classified as "foreign" by Python (because filing[1] is foreign) would
+        # have filing[0] = NULL in the CTE, so any WHERE on s.foreign_domestic fails and returns 0 rows.
+        # The SQL result would then be empty → fallback to stats_df → wrong columns shown.
+        #
+        # Solution: Python already computed the correct business_id sets. Pass them as an IN list.
+        # _drilldown_table() handles "1=1" segments by substituting business_id IN (...) automatically.
+        # This guarantees: (1) correct business IDs, (2) all 19 SQL columns including foreign_domestic
+        # as NULL where absent, (3) no WHERE clause fighting with the Python decision tree.
+        "reg_domestic":    ("1=1", ""),   # filtered by business_id IN (Python set)
+        "reg_foreign":     ("1=1", ""),   # filtered by business_id IN (Python set)
+        "reg_unknown_dom": ("1=1", ""),   # filtered by business_id IN (Python set)
         # Domestic Filing State = Operating State:
-        # sos_filings[].state (where foreign_domestic='domestic') == primary_address.value.state
-        # Both from rds_warehouse_public.facts.
-        # sos_fil CTE in _seg_sql() uses first filing element as proxy.
-        # This is a subset of Domestic Filing — formation_state is NOT used.
-        "states_same": (
-            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
-            " AND s.foreign_domestic IS NOT NULL"
-            " AND LOWER(s.foreign_domestic) = 'domestic'"
-            " AND s.filing_state IS NOT NULL AND s.filing_state != ''"
-            " AND operating_state IS NOT NULL AND operating_state != ''"
-            " AND UPPER(s.filing_state) = UPPER(operating_state)",
-            ""
-        ),
-        # Foreign Reg = Operating State: first filing state (from sos_fil CTE) == operating_state
-        # AND first filing is foreign (not domestic).
-        # Full check in Python uses all filing states; SQL uses first filing as proxy.
-        "foreign_eq_op": (
-            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
-            " AND s.foreign_domestic IS NOT NULL"
-            " AND LOWER(s.foreign_domestic) != 'domestic'"
-            " AND UPPER(COALESCE(s.filing_state,'')) = UPPER(COALESCE(operating_state,''))"
-            " AND operating_state IS NOT NULL AND operating_state != ''",
-            ""
-        ),
-        # Op. State Differs from All Regs: operating_state NOT IN any filing state.
-        # SQL proxy: operating_state != first filing state AND both non-null.
-        # Python checks all filing states via _sf_states dict built from _sos_filings_df.
-        "states_diff": (
-            "(sos_match_boolean = 'true' OR sos_active IS NOT NULL)"
-            " AND s.filing_state IS NOT NULL AND s.filing_state != ''"
-            " AND operating_state IS NOT NULL AND operating_state != ''"
-            " AND UPPER(COALESCE(s.filing_state,'')) != UPPER(COALESCE(operating_state,''))",
-            ""
-        ),
+        # All Row 2/3 segments use "1=1" + business_id IN list (same reason as reg_domestic/foreign):
+        # sos_fil CTE only reads index 0. Python checks ALL filings. WHERE on s.* would miss
+        # businesses where the matching filing is not at index 0.
+        "states_same":   ("1=1", ""),   # Python: domestic filing state == operating_state
+        "foreign_eq_op": ("1=1", ""),   # Python: foreign filing state == operating_state
+        "states_diff":   ("1=1", ""),   # Python: operating_state ∉ any filing state
         # Formation State Gap: formation_state = operating_state (firmographic) BUT
         # no verified domestic filing in that state (SQL proxy: no domestic sos_fil match).
         # formation_state from name='formation_state' fact; operating_state from name='primary_address'.
@@ -6655,134 +6741,89 @@ if tab=="🏠 Home":
                 try:
                     _tbl_df, _tbl_err = run_sql(_tbl_sql_clean)
                     if _tbl_df is not None and not _tbl_df.empty:
+                        # Use SQL result EXACTLY as returned — no merge, no rename, no reorder.
+                        # _seg_sql() already selects all required columns:
+                        #   per_biz CTE: business_id, sos_match_boolean, sos_match_status,
+                        #     sos_active, formation_state, formation_date, tin_submitted,
+                        #     tin_match_status, tin_match, idv_passed, naics_code,
+                        #     watchlist_hits, is_sole_prop, operating_state
+                        #   sos_fil CTE (LEFT JOIN): foreign_domestic, filing_state,
+                        #     entity_type, filing_name, registration_date
+                        # foreign_domestic will be NULL for businesses where the vendor
+                        # did not set it (e.g. OpenCorporates lacking home_jurisdiction_code).
+                        # Those NULL values appear as empty cells — exactly what the user wants.
                         _sub = _tbl_df.copy()
-                        # Enrich with sos_filings[] parsed fields (Dom/Foreign, Jurisdiction,
-                        # Entity Type, Filing Name, Registration Date, Officers, # Filings)
-                        if _sos_filings_df is not None and not _sos_filings_df.empty:
-                            _sf_ids = set(_sub["business_id"].tolist())
-                            _sf_a = (
-                                _sos_filings_df[_sos_filings_df["business_id"].isin(_sf_ids)]
-                                .groupby("business_id")
-                                .agg(
-                                    foreign_domestic=("foreign_domestic", lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
-                                    jurisdiction=("jurisdiction",     lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
-                                    entity_type=("entity_type",       lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
-                                    filing_name=("filing_name",       "first"),
-                                    registration_date=("registration_date", "min"),
-                                    has_officers=("has_officers",     "max"),
-                                    filing_state=("filing_state",     lambda x: " / ".join(sorted(set(str(v) for v in x.dropna())))),
-                                    n_filings=("filing_state",        "count"),
-                                )
-                                .reset_index()
-                            )
-                            _sub = _sub.merge(_sf_a, on="business_id", how="left")
                 except Exception:
                     _sub = None
 
             if _sub is None:
-                # Fallback: filter stats_df + enrich from funnel_df
-                _base_cols_all = [
-                    "sos_match_boolean","sos_match_status","sos_active",
-                    "formation_state","formation_date",
-                    "tin_submitted","tin_match_status","tin_match",
-                    "idv_passed","naics_code","watchlist_hits","is_sole_prop",
-                ]
-                if stats_df is not None and not stats_df.empty:
-                    _available = [c for c in _base_cols_all if c in stats_df.columns]
-                    _sub = stats_df[stats_df["business_id"].isin(bids)][
-                        ["business_id"] + _available
-                    ].copy()
-                    _missing_bids = [b for b in bids if b not in set(_sub["business_id"].tolist())]
-                    if _missing_bids and funnel_df is not None and not funnel_df.empty:
-                        _funnel_cols = ["sos_match_boolean","sos_active","formation_state"]
-                        _fb_missing = funnel_df[funnel_df["business_id"].isin(_missing_bids)][
-                            ["business_id"] + [c for c in _funnel_cols if c in funnel_df.columns]
-                        ].copy()
-                        if not _fb_missing.empty:
-                            _sub = pd.concat([_sub, _fb_missing], ignore_index=True)
-                elif funnel_df is not None and not funnel_df.empty:
-                    _funnel_base = ["sos_match_boolean","sos_active","formation_state",
-                                    "tin_submitted","tin_match_boolean","operating_state"]
-                    _sub = funnel_df[funnel_df["business_id"].isin(bids)][
-                        ["business_id"] + [c for c in _funnel_base if c in funnel_df.columns]
-                    ].copy()
-                else:
+                # SQL did not run — build ALL 19 columns from in-memory DataFrames.
+                # Same column names and order as _seg_sql() SELECT output.
+                try:
+                    _base = pd.DataFrame({"business_id": bids})
+
+                    # Columns 1-13: per_biz CTE columns from stats_df
+                    _PB_COLS = [
+                        "sos_match_boolean","sos_match_status","sos_active",
+                        "formation_state","formation_date","tin_submitted",
+                        "tin_match_status","tin_match","idv_passed",
+                        "naics_code","watchlist_hits","is_sole_prop",
+                    ]
+                    if stats_df is not None and not stats_df.empty:
+                        _avail = [c for c in _PB_COLS if c in stats_df.columns]
+                        _base = stats_df[stats_df["business_id"].isin(bids)][["business_id"]+_avail].copy()
+
+                    # Column 14: operating_state from funnel_df
+                    if funnel_df is not None and not funnel_df.empty and "operating_state" in funnel_df.columns:
+                        _os_map = funnel_df[funnel_df["business_id"].isin(bids)][["business_id","operating_state"]].drop_duplicates("business_id")
+                        _base = _base.merge(_os_map, on="business_id", how="left")
+                    if "operating_state" not in _base.columns:
+                        _base["operating_state"] = None
+
+                    # Columns 15-19: sos_fil CTE columns from _sos_filings_df
+                    # foreign_domestic = NULL where vendor did not set it (correct — show as empty)
+                    _SF_COLS = ["foreign_domestic","filing_state","entity_type","filing_name","registration_date"]
+                    for _c in _SF_COLS:
+                        _base[_c] = None
+                    if _sos_filings_df is not None and not _sos_filings_df.empty:
+                        _sf_filt = _sos_filings_df[_sos_filings_df["business_id"].isin(set(bids))].copy()
+                        if "filing_index" in _sf_filt.columns:
+                            _sf_filt = _sf_filt.sort_values("filing_index")
+                        _sf_first = (
+                            _sf_filt.groupby("business_id").first().reset_index()
+                            [["business_id"] + [c for c in _SF_COLS if c in _sf_filt.columns]]
+                        )
+                        _base = _base.drop(columns=[c for c in _SF_COLS if c in _base.columns], errors="ignore")
+                        _base = _base.merge(_sf_first, on="business_id", how="left")
+
+                    _sub = _base
+                except Exception:
                     _sub = pd.DataFrame({"business_id": bids})
 
-            if _sub is None:
-                _sub = pd.DataFrame({"business_id": bids})
+            # Clean timestamps to YYYY-MM-DD only
+            for _tc in ("formation_date","registration_date"):
+                if _tc in _sub.columns:
+                    _sub[_tc] = _sub[_tc].astype(str).str[:10].str.replace("nan","", regex=False)
 
-            _rename = {
-                # sos_filings-derived
-                "sos_match_boolean":  "SOS Match",
-                "sos_match_status":   "SOS Match Status",
-                "sos_active":         "SOS Active",
-                "formation_state":    "Formation State",
-                "formation_date":     "Formation Date",
-                "foreign_domestic":   "Dom/Foreign",
-                "jurisdiction":       "Jurisdiction(s)",
-                "entity_type":        "Entity Type",
-                "filing_name":        "Filing Name",
-                "registration_date":  "Registration Date",
-                "has_officers":       "Officers",
-                "filing_state":       "Filing State(s)",
-                "n_filings":          "# Filings",
-                # TIN facts
-                "tin_submitted":      "TIN Submitted",
-                "tin_match_status":   "TIN Status",
-                "tin_match":          "TIN Match",
-                # IDV
-                "idv_passed":         "IDV Passed",
-                # Classification
-                "naics_code":         "NAICS",
-                # Risk
-                "watchlist_hits":     "WL Hits",
-                # Sole prop
-                "is_sole_prop":       "Sole Prop",
-            }
-            _sub = _sub.rename(columns={k: v for k, v in _rename.items() if k in _sub.columns})
-
-            # Enforce exact column order — matches the SQL runner output (18 columns).
-            # Any column not yet in _sub is simply skipped.
-            _DISPLAY_ORDER = [
+            # Enforce the exact SQL column order — same as _seg_sql() SELECT output.
+            # foreign_domestic will be NULL (empty) for businesses where the vendor
+            # did not set it — this is correct and expected per the data.
+            _SQL_ORDER = [
                 "business_id",
-                "SOS Match", "SOS Match Status", "SOS Active",
-                "Formation State", "Formation Date",
-                "TIN Submitted", "TIN Status", "TIN Match",
-                "IDV Passed", "NAICS", "WL Hits", "Sole Prop",
-                "Dom/Foreign", "Filing State(s)", "Entity Type",
-                "Filing Name", "Registration Date",
+                "sos_match_boolean","sos_match_status","sos_active",
+                "formation_state","formation_date",
+                "tin_submitted","tin_match_status","tin_match",
+                "idv_passed","naics_code","watchlist_hits","is_sole_prop",
+                "operating_state",
+                "foreign_domestic","filing_state","entity_type",
+                "filing_name","registration_date",
             ]
-            _ordered_cols = [c for c in _DISPLAY_ORDER if c in _sub.columns]
-            _extra_cols_not_in_order = [c for c in _sub.columns if c not in _DISPLAY_ORDER]
-            _sub = _sub[_ordered_cols + _extra_cols_not_in_order]
+            _ordered = [c for c in _SQL_ORDER if c in _sub.columns]
+            _extra   = [c for c in _sub.columns if c not in _SQL_ORDER]
+            _sub = _sub[_ordered + _extra]
 
-            _col_cfg = {
-                "SOS Match":          st.column_config.TextColumn(help="sos_match_boolean — derived from sos_match.value==='success' (index.ts:1421)"),
-                "SOS Match Status":   st.column_config.TextColumn(help="sos_match.value.status — 'success'|'failure' (Middesk/OC/Trulioo)"),
-                "SOS Active":         st.column_config.TextColumn(help="sos_active — from sos_filings[].some(f=>f.active===true) (index.ts:1426)"),
-                "Formation State":    st.column_config.TextColumn(help="formation_state fact — from sos_filings[].state via Middesk"),
-                "Formation Date":     st.column_config.TextColumn(help="formation_date fact — from sos_filings[].filing_date via Middesk"),
-                "Dom/Foreign":        st.column_config.TextColumn(help="sos_filings[].foreign_domestic = 'domestic'|'foreign'"),
-                "Jurisdiction(s)":    st.column_config.TextColumn(help="sos_filings[].jurisdiction = 'us::fl','us::de',etc."),
-                "Entity Type":        st.column_config.TextColumn(help="sos_filings[].entity_type = 'llc'|'corporation'|'lp'|'llp' (types.ts:20-32)"),
-                "Filing Name":        st.column_config.TextColumn(help="sos_filings[].filing_name — legal name on the SOS filing"),
-                "Registration Date":  st.column_config.TextColumn(help="sos_filings[].registration_date — incorporation date"),
-                "Officers":           st.column_config.NumberColumn(help="1 = sos_filings[].officers non-empty (index.ts:767-987)"),
-                "Filing State(s)":    st.column_config.TextColumn(help="sos_filings[].state — filing jurisdiction state(s)"),
-                "# Filings":          st.column_config.NumberColumn(help="Count of entries in sos_filings[] array"),
-                "TIN Submitted":      st.column_config.TextColumn(help="tin_submitted fact — EIN provided at onboarding, masked (index.ts:399)"),
-                "TIN Status":         st.column_config.TextColumn(help="tin_match.value.status — 'success'=IRS confirmed | 'failure'=mismatch (index.ts:429)"),
-                "TIN Match":          st.column_config.TextColumn(help="tin_match_boolean — true=IRS confirmed EIN matches legal name (index.ts:482)"),
-                "IDV Passed":         st.column_config.TextColumn(help="idv_passed_boolean — Plaid biometric IDV result (index.ts:541)"),
-                "NAICS":              st.column_config.TextColumn(help="naics_code fact — '561499'=last resort fallback (aiNaicsEnrichment.ts:63)"),
-                "WL Hits":            st.column_config.NumberColumn(help="watchlist_hits — PEP/OFAC/sanctions hits (Middesk+Trulioo combined)"),
-                "Sole Prop":          st.column_config.TextColumn(help="is_sole_prop — true|false|null. null=not enough data (index.ts:552-616)"),
-                "# Filings":              st.column_config.NumberColumn(help="Count of entries in sos_filings[] array"),
-            }
             if not _sub.empty:
-                st.dataframe(_sub, use_container_width=True, hide_index=True,
-                             column_config={k: v for k, v in _col_cfg.items() if k in _sub.columns})
+                st.dataframe(_sub, use_container_width=True, hide_index=True)
             else:
                 st.dataframe(pd.DataFrame({"business_id": bids}), use_container_width=True, hide_index=True)
 
@@ -6983,13 +7024,31 @@ if tab=="🏠 Home":
     _r2c1, _r2c2 = st.columns(2)
     with _r2c1:
         kpi("↳ 🏠 Domestic Filing", f"{_n_reg_domestic:,}",
-            f"{rate(_n_reg_domestic,_sos_found_extended)} of reg-found · sos_filings[].foreign_domestic='domestic'",
+            f"{rate(_n_reg_domestic,_sos_found_extended)} of reg-found · foreign_domestic='domestic' OR filing.state=formation_state",
             "#22c55e" if _n_reg_domestic > 0 else "#64748b")
     with _r2c2:
         kpi("↳ 🌍 Foreign Filing Only", f"{_n_reg_foreign:,}",
-            f"{rate(_n_reg_foreign,_sos_found_extended)} of reg-found · no filing with foreign_domestic='domestic'",
+            f"{rate(_n_reg_foreign,_sos_found_extended)} of reg-found · foreign_domestic='foreign' OR filing.state≠formation_state",
             "#f59e0b" if _n_reg_foreign > 0 else "#64748b")
     st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── Unknown filing type warning card ──────────────────────────────────────
+    if _n_reg_unknown_dom > 0:
+        st.markdown(f"""<div style="background:#1c1205;border:1px solid #f59e0b;border-left:4px solid #f59e0b;
+             border-radius:8px;padding:10px 16px;margin:8px 0 4px 0">
+  <div style="color:#f59e0b;font-weight:700;font-size:.85rem">
+    ⚠️ {_n_reg_unknown_dom:,} {"business" if _n_reg_unknown_dom==1 else "businesses"} — Filing Type Unknown
+  </div>
+  <div style="color:#d1d5db;font-size:.79rem;margin-top:4px">
+    These businesses have SOS filings but <code>foreign_domestic</code> is <strong>absent from the JSON</strong>
+    AND <code>formation_state</code> is <strong>null</strong> — the decision tree cannot classify the filing
+    as domestic or foreign without at least one of these signals.<br/>
+    <strong>Common cause:</strong> OpenCorporates (pid=23) did not set <code>foreign_domestic</code>
+    because <code>home_jurisdiction_code</code> was unavailable, and Middesk returned no
+    <code>formation_state</code>.<br/>
+    <strong>Action:</strong> Use Block 5 — Direct SOS Enrichment or manually verify on the state SOS portal.
+  </div>
+</div>""", unsafe_allow_html=True)
 
     # ── ROW 3: Three state-comparison metrics (all from rds_warehouse_public.facts) ─
     # (a) Formation State = Operating State
@@ -7019,8 +7078,9 @@ if tab=="🏠 Home":
     # ── Drilldown expanders — one per visible card ────────────────────────────
     _drilldown_table("sos_found_extended", f"Registry Found — {_sos_found_extended:,} businesses (sos_filings[] non-empty)", _SOS_COLS)
     _drilldown_table("no_sos",             f"❌ No Registry Found — {_sos_not_found:,} businesses ((sos_match_boolean=false OR null) AND sos_active=null)", _SOS_COLS)
-    _drilldown_table("reg_domestic",       f"↳ Domestic Filing — {_n_reg_domestic:,} businesses (foreign_domestic='domestic')", _SOS_COLS)
-    _drilldown_table("reg_foreign",        f"↳ Foreign Filing Only — {_n_reg_foreign:,} businesses (no domestic filing found)", _SOS_COLS)
+    _drilldown_table("reg_domestic",       f"↳ Domestic Filing — {_n_reg_domestic:,} businesses (decision tree: domestic)", _SOS_COLS)
+    _drilldown_table("reg_foreign",        f"↳ Foreign Filing Only — {_n_reg_foreign:,} businesses (decision tree: foreign)", _SOS_COLS)
+    _drilldown_table("reg_unknown_dom",    f"⚠️ Filing Type Unknown — {_n_reg_unknown_dom:,} businesses (foreign_domestic absent + formation_state null)", _SOS_COLS)
     _drilldown_table("states_same",        f"↳ Domestic Filing State = Operating State — {_n_states_same:,} businesses", _SOS_COLS)
     _drilldown_table("foreign_eq_op",      f"↳ Foreign Reg = Operating State — {_n_foreign_eq_op:,} businesses", _SOS_COLS)
     _drilldown_table("states_diff",        f"↳ Op. State Differs from All Regs — {_n_states_diff:,} businesses", _SOS_COLS)
@@ -9106,11 +9166,13 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
         sql=_tin_sql, icon="🔍", color="#8B5CF6")
 
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 4 — KYB HEALTH RATES (condensed)
+    # SECTION 4 — KYB HEALTH RATES
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
     st.markdown("### 🩺 Section 4 — KYB Health Rates")
 
+    if stats_df is None or stats_df.empty:
+        st.warning(f"⚠️ KYB Health data unavailable. {stats_err or ''}", icon="⚠️")
     if stats_df is not None and not stats_df.empty:
         HEALTH_META = {
             "SOS Active":      ("sos_active","true","false","Middesk SOS active filing","#22c55e","#ef4444"),
@@ -9339,7 +9401,7 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
                 _drilldown_table("rf_idv_fail",     f"IDV Failed — {len(_seg.get('rf_idv_fail',[]))} businesses", _RF_COLS)
 
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 6 — WORTH SCORE DISTRIBUTION (CUSTOMER PORTFOLIO SLICE)
+    # SECTION 6 — WORTH SCORE DISTRIBUTION
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
     st.markdown("### 💰 Section 6 — Worth Score Distribution")
@@ -9385,50 +9447,17 @@ WHERE 1=1{hub_date_clause("rbcm.created_at")};"""
     _WF_ORDER = [2, 3, 4, 5, 6, 7, 8]
 
     # Load Worth Scores for the authoritative business list
-    @st.cache_data(ttl=600, show_spinner=False)
-    def _load_home_scores(bid_tuple):
-        if not bid_tuple: return None, "No business IDs"
-        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        return run_sql(f"""
-            SELECT cs.business_id,
-                   bs.weighted_score_850, bs.weighted_score_100,
-                   bs.risk_level, bs.score_decision, bs.created_at AS scored_at
-            FROM rds_manual_score_public.data_current_scores cs
-            JOIN rds_manual_score_public.business_scores bs ON bs.id=cs.score_id
-            WHERE cs.business_id IN ({bid_list})
-            ORDER BY bs.weighted_score_850 ASC;
-        """)
-
-    @st.cache_data(ttl=600, show_spinner=False)
-    def _load_home_factors(bid_tuple):
-        """Load per-category factor contributions, averaged across all scored businesses.
-        category_id is an INTEGER in business_score_factors — map via _CAT_META above.
-        """
-        if not bid_tuple: return None, "No business IDs"
-        bid_list = ",".join(f"'{b}'" for b in bid_tuple[:2000])
-        return run_sql(f"""
-            SELECT bsf.category_id,
-                   AVG(bsf.score_100)          AS avg_score_100,
-                   AVG(bsf.weighted_score_850)  AS avg_impact_pts,
-                   COUNT(DISTINCT cs.business_id) AS businesses
-            FROM rds_manual_score_public.data_current_scores cs
-            JOIN rds_manual_score_public.business_score_factors bsf ON bsf.score_id=cs.score_id
-            WHERE cs.business_id IN ({bid_list})
-            GROUP BY bsf.category_id
-            ORDER BY bsf.category_id;
-        """)
-
     with st.spinner("Loading Worth Score distribution…"):
-        _home_ws, _home_ws_err = _load_home_scores(tuple(_authoritative_bids))
-        _home_factors, _home_factors_err = _load_home_factors(tuple(_authoritative_bids))
+        _home_ws, _home_ws_err = _load_home_scores(hub_date_from, hub_date_to, hub_customer_id)
+        _home_factors, _home_factors_err = _load_home_factors(hub_date_from, hub_date_to, hub_customer_id)
 
     if _home_ws is not None and not _home_ws.empty:
         _home_ws["weighted_score_850"] = pd.to_numeric(_home_ws["weighted_score_850"], errors="coerce")
         _home_ws_clean = _home_ws.dropna(subset=["weighted_score_850"])
         _ws_n        = len(_home_ws_clean)
-        _ws_avg      = float(_home_ws_clean["weighted_score_850"].mean())
-        _ws_med      = float(_home_ws_clean["weighted_score_850"].median())
-        _ws_prob_avg = round((_ws_avg - 300) / 550, 4)   # reverse-compute avg probability
+        _ws_avg      = float(_home_ws_clean["weighted_score_850"].mean()) if _ws_n > 0 else float("nan")
+        _ws_med      = float(_home_ws_clean["weighted_score_850"].median()) if _ws_n > 0 else float("nan")
+        _ws_prob_avg = round((_ws_avg - 300) / 550, 4) if _ws_n > 0 else float("nan")
         _ws_approve  = int((_home_ws_clean["score_decision"]=="APPROVE").sum())
         _ws_review   = int((_home_ws_clean["score_decision"]=="FURTHER_REVIEW_NEEDED").sum())
         _ws_decline  = int((_home_ws_clean["score_decision"]=="DECLINE").sum())
@@ -9478,7 +9507,7 @@ Factor contributions → rds_manual_score_public.business_score_factors (one row
         with _wk7: kpi("❌ DECLINE",       f"{_ws_decline:,}",    rate(_ws_decline,_ws_n)+" <550",   "#ef4444")
 
         # ── Portfolio score gauge (mirrors per-business gauge bar) ─────────
-        _ws_pct = int((_ws_avg - 300) / 550 * 100)
+        _ws_pct = int((_ws_avg - 300) / 550 * 100) if _ws_n > 0 and not (isinstance(_ws_avg, float) and _ws_avg != _ws_avg) else 0
         st.markdown(f"""<div style="margin:12px 0">
           <div style="display:flex;justify-content:space-between;font-size:.75rem;color:#94A3B8">
             <span>300 (min)</span><span>DECLINE &lt;550</span><span>REVIEW 550–699</span><span>APPROVE ≥700</span><span>850 (max)</span>
@@ -9888,12 +9917,12 @@ ORDER BY avg_impact_pts ASC;"""
 
     # ════════════════════════════════════════════════════════════════════════
     # ════════════════════════════════════════════════════════════════════════
-    # PORTFOLIO-LEVEL KYB RISK SIGNALS (from sos_filings[] — rds_ facts only)
+    # SECTION 7 — PORTFOLIO-LEVEL KYB RISK SIGNALS (from sos_filings[] — rds_ facts only)
     # Shell Company Signal · Multi-Jurisdiction Good Standing · Entity Type Risk Mix
     # ════════════════════════════════════════════════════════════════════════
     if _sos_filings_df is not None and not _sos_filings_df.empty:
         st.markdown("---")
-        st.markdown("### 🛡️ Portfolio-Level KYB Risk Signals — from sos_filings[] fact")
+        st.markdown("### 🛡️ Section 7 — Portfolio-Level KYB Risk Signals — from sos_filings[] fact")
         st.caption(
             "All signals derived from `rds_warehouse_public.facts name='sos_filings'` — "
             "parsing `sos_filings[].jurisdiction`, `foreign_domestic`, `active`, `entity_type`, `officers`. "
@@ -10012,10 +10041,11 @@ ORDER BY avg_impact_pts ASC;"""
             },
             icon="🛡️", color="#8B5CF6")
 
-    # SECTION 7 — PORTFOLIO ANOMALY & CONTRADICTION SCANNER
+    # ════════════════════════════════════════════════════════════════════════
+    # SECTION 8 — PORTFOLIO ANOMALY & CONTRADICTION SCANNER
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("### 🔬 Section 6 — Portfolio Anomaly & Contradiction Scanner")
+    st.markdown("### 🔬 Section 8 — Portfolio Anomaly & Contradiction Scanner")
     st.caption(
         "Applies the same deterministic cross-field rules from the Check-Agent (check_agent_v2.py) "
         "across the ENTIRE portfolio at once — no per-business fact loading, no LLM calls, no new "
@@ -10027,6 +10057,59 @@ ORDER BY avg_impact_pts ASC;"""
     _SEV_COLOR = {"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b","LOW":"#22c55e","NOTICE":"#3B82F6"}
     _SEV_ICON  = {"CRITICAL":"🔴","HIGH":"🟠","MEDIUM":"🟡","LOW":"🟢","NOTICE":"🔵"}
     _SEV_PTS   = {"CRITICAL":4,"HIGH":3,"MEDIUM":2,"LOW":1,"NOTICE":1}
+
+    def _investigate_rows(bids, score_dict, flags_dict, context_label="", key_prefix="inv"):
+        """Render Investigate buttons for a list of business IDs."""
+        if not bids:
+            return
+        for _ii, _ib in enumerate(bids[:50]):
+            _il, _ir = st.columns([5, 1])
+            with _il:
+                _score_val = (score_dict or {}).get(_ib, 0)
+                _flags_val = (flags_dict or {}).get(_ib, [])
+                _ctx = context_label[:40] if context_label else ""
+                _ctx_extra = f" · score={_score_val}" if _score_val else ""
+                st.markdown(
+                    f"<span style='font-family:monospace;font-size:.78rem'>{_ib}</span>"
+                    f"<span style='color:#94a3b8;font-size:.72rem'> {_ctx}{_ctx_extra}</span>",
+                    unsafe_allow_html=True
+                )
+            with _ir:
+                if st.button("🔍", key=f"{key_prefix}_{_ii}"):
+                    st.session_state["_pending_bid"] = _ib
+                    st.rerun()
+
+    def _group_chart_and_drilldowns(keys, title, cols, prefix):
+        """Render a bar chart of business counts per anomaly rule + drilldown expanders."""
+        _rows = [(k, len(_an.get(k,[])), _an_meta.get(k,{}).get("title",k), _an_meta.get(k,{}).get("severity","MEDIUM"))
+                 for k in keys if _an.get(k)]
+        if not _rows:
+            return
+        import plotly.express as px
+        _df = pd.DataFrame(_rows, columns=["key","count","label","severity"])
+        _color_map = {"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b","LOW":"#22c55e","NOTICE":"#3B82F6"}
+        _df["color"] = _df["severity"].map(_color_map).fillna("#64748b")
+        _fig = px.bar(_df, x="count", y="label", orientation="h",
+                      text="count", color="severity",
+                      color_discrete_map=_color_map,
+                      title=title)
+        _fig.update_traces(textposition="outside")
+        _fig.update_layout(height=max(160, len(_rows)*52), showlegend=False,
+                           margin=dict(t=40,b=10,l=10,r=60))
+        st.plotly_chart(dark_chart(_fig), use_container_width=True)
+
+    def _group_chart_and_drilldowns(keys, title, cols, prefix):
+        """Bar chart of business counts per anomaly rule."""
+        _rows = [(k, len(_an.get(k,[])), _an_meta.get(k,{}).get("title",k),
+                  _an_meta.get(k,{}).get("severity","MEDIUM")) for k in keys if _an.get(k)]
+        if not _rows: return
+        _df = pd.DataFrame(_rows, columns=["key","count","label","severity"])
+        _color_map = {"CRITICAL":"#ef4444","HIGH":"#f97316","MEDIUM":"#f59e0b","LOW":"#22c55e","NOTICE":"#3B82F6"}
+        _fig = px.bar(_df, x="count", y="label", orientation="h", text="count",
+                      color="severity", color_discrete_map=_color_map, title=title)
+        _fig.update_traces(textposition="outside")
+        _fig.update_layout(height=max(160, len(_rows)*52), showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
+        st.plotly_chart(dark_chart(_fig), use_container_width=True)
 
     def _anomaly_card(title, count, total, severity, short_desc, seg_key, cols_for_table=None, meta=None):
         """Render one anomaly finding: severity badge + business ID drilldown + detail_panel."""
@@ -10502,538 +10585,10 @@ ORDER BY avg_impact_pts ASC;"""
     _n_crit   = len(_an.get("g1_tin_status_bool_mismatch",[])) + len(_an.get("g7_approve_sos_inactive",[]))
 
     # ════════════════════════════════════════════════════════════════════════
-    # 6.0  PORTFOLIO HEALTH SCORECARD
-    # ════════════════════════════════════════════════════════════════════════
-    st.markdown("#### 6.0  Portfolio Health Scorecard")
-    _h1,_h2,_h3,_h4,_h5 = st.columns(5)
-    with _h1: kpi("✅ 0 Anomalies",   f"{_n_clean:,}",  f"{_n_clean/max(total_biz,1)*100:.0f}% structurally clean", "#22c55e")
-    with _h2: kpi("⚠️ 1 Anomaly",    f"{_n_1:,}",      f"{_n_1/max(total_biz,1)*100:.0f}% isolated issue",         "#f59e0b")
-    with _h3: kpi("🔴 2–3 Anomalies",f"{_n_2_3:,}",    f"{_n_2_3/max(total_biz,1)*100:.0f}% compounded risk",      "#f97316")
-    with _h4: kpi("🔴 4+ Anomalies", f"{_n_4plus:,}",  f"{_n_4plus/max(total_biz,1)*100:.0f}% systematic failure", "#ef4444")
-    with _h5: kpi("⚡ CRITICAL",      f"{_n_crit:,}",   "highest-severity combos",                                  "#8B5CF6")
-
-    # Severity distribution bar
-    if total_biz > 0:
-        _pct_clean = _n_clean/total_biz*100
-        _pct_1     = _n_1/total_biz*100
-        _pct_23    = _n_2_3/total_biz*100
-        _pct_4p    = _n_4plus/total_biz*100
-        st.markdown(f"""<div style="margin:8px 0 16px 0">
-          <div style="display:flex;gap:0;border-radius:6px;overflow:hidden;height:18px">
-            <div style="width:{_pct_clean:.1f}%;background:#22c55e;title='Clean'" title="Clean: {_n_clean:,}"></div>
-            <div style="width:{_pct_1:.1f}%;background:#f59e0b" title="1 anomaly: {_n_1:,}"></div>
-            <div style="width:{_pct_23:.1f}%;background:#f97316" title="2-3 anomalies: {_n_2_3:,}"></div>
-            <div style="width:{_pct_4p:.1f}%;background:#ef4444" title="4+ anomalies: {_n_4plus:,}"></div>
-          </div>
-          <div style="display:flex;gap:16px;margin-top:4px;font-size:.72rem;color:#94A3B8">
-            <span>🟢 Clean: {_n_clean:,} ({_pct_clean:.0f}%)</span>
-            <span>🟡 1: {_n_1:,} ({_pct_1:.0f}%)</span>
-            <span>🟠 2-3: {_n_2_3:,} ({_pct_23:.0f}%)</span>
-            <span>🔴 4+: {_n_4plus:,} ({_pct_4p:.0f}%)</span>
-          </div>
-        </div>""", unsafe_allow_html=True)
-
-    _SOS_AN_COLS = ["sos_match_boolean","sos_match_status","sos_active","sos_match_verif","sos_domestic_verif","formation_state","tin_submitted","tin_match_status","tin_match","idv_passed","naics_code","watchlist_hits","num_bankruptcies"]
-
-    def _investigate_rows(bids: list, score_map: dict = None, flags_map: dict = None,
-                          context_label: str = "", key_prefix: str = "inv"):
-        """
-        Render one row per business ID with:
-          - Full UUID in monospace
-          - Weighted score + anomaly flags (if available)
-          - 🔍 Investigate button that sets the business ID and triggers a success toast
-        Replaces the old st.columns(4) truncated-UUID pattern used throughout Section 6.
-        """
-        if not bids:
-            return
-        for _idx, _bid in enumerate(bids):
-            _sc  = int(score_map.get(_bid, 0)) if score_map else 0
-            _flg = flags_map.get(_bid, []) if flags_map else []
-            _sev_icons = " ".join(
-                _SEV_ICON.get(_an_meta.get(k,{}).get("severity","LOW"),"⚪")
-                + " " + _an_meta.get(k,{}).get("title","")[:28]
-                for k in _flg[:3]
-            ) if _flg else context_label
-            _row_l, _row_r = st.columns([5, 1])
-            with _row_l:
-                st.markdown(
-                    f"<div style='background:#0f172a;border-left:3px solid #3B82F6;"
-                    f"border-radius:5px;padding:5px 12px;font-size:.75rem;color:#CBD5E1;margin:2px 0'>"
-                    f"<code style='color:#60A5FA;font-size:.82rem'>{_bid}</code>"
-                    + (f"&nbsp;&nbsp;<span style='color:#f59e0b'>⚡ {_sc}pts</span>" if _sc else "")
-                    + (f"&nbsp;·&nbsp;<span style='color:#94A3B8'>{_sev_icons}</span>" if _sev_icons else "")
-                    + "</div>",
-                    unsafe_allow_html=True
-                )
-            with _row_r:
-                if st.button("🔍 Investigate", key=f"{key_prefix}_{_bid[:16]}_{_idx}",
-                             help=f"Set Business ID to {_bid} and navigate to any entity tab"):
-                    st.session_state["_pending_bid"] = _bid
-                    st.session_state["_bid_just_set"] = _bid
-                    st.rerun()
-
-    # ── 6.0 Scorecard: scoring formula explanation ──────────────────────────
-    detail_panel(
-        "📊 6.0 Portfolio Health Scorecard — How Weighted Score is Calculated",
-        f"{total_biz:,} businesses · {_n_clean:,} clean · {_n_1+_n_2_3+_n_4plus:,} with anomalies",
-        what_it_means=(
-            "**What 'Weighted Score' means in the table:**\n\n"
-            "Each business gets a weighted score computed as the sum of severity points "
-            "for every deterministic rule it triggers:\n\n"
-            "| Severity | Points | Example rules |\n|---|---|---|\n"
-            "| CRITICAL | 4 pts | tin_match_status=success AND tin_match_boolean=false (data integrity bug) |\n"
-            "| HIGH | 3 pts | SOS Inactive + TIN Verified; Watchlist Hit + No Registry |\n"
-            "| MEDIUM | 2 pts | SOS Active + TIN Failed; Registry Active but Inactive per verif_results |\n"
-            "| LOW / NOTICE | 1 pt | NAICS Fallback 561499; Adverse Media + No Watchlist |\n\n"
-            "**Example:** A business that triggers 'SOS Inactive + TIN Verified' (HIGH=3pts) "
-            "AND 'NAICS Fallback 561499' (LOW=1pt) gets Weighted Score = 4, # Anomalies = 2.\n\n"
-            "**# Anomalies** = raw count of rules triggered (unweighted).\n"
-            "**Weighted Score** = sum of severity points (weighted).\n\n"
-            "**This scoring is independent of the Section 4 Red Flag score.** "
-            "Red Flags measure risk signal intensity (watchlist hits, bankruptcies, etc.). "
-            "The anomaly score measures structural KYB data *consistency failures* — "
-            "contradictions between signals that should agree with each other.\n\n"
-            "**20 rules evaluated across 7 groups (check_agent_v2.DETERMINISTIC_CHECKS):**\n"
-            "- G1 (Data Integrity): 3 impossible-state rules\n"
-            "- G2 (SOS/Registry): 3 registry inconsistency rules\n"
-            "- G3 (TIN/EIN): 1 EIN gap rule\n"
-            "- G4 (Cross-Section S1×S2): 3 Registry×TIN contradiction rules\n"
-            "- G5 (NAICS): 2 classification anomaly rules\n"
-            "- G6 (Risk Signals): 5 risk combination rules\n"
-            "- G7 (Worth Score): 3 score vs KYB consistency rules"
-        ),
-        source_table="stats_df · funnel_df (already in memory — zero new Redshift queries)",
-        source_file="check_agent_v2.py (DETERMINISTIC_CHECKS) — 20 rules across 7 groups",
-        json_obj={
-            "scoring_formula": {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "NOTICE": 1},
-            "portfolio_summary": {
-                "clean_0_anomalies": _n_clean,
-                "1_anomaly": _n_1,
-                "2_3_anomalies": _n_2_3,
-                "4plus_anomalies": _n_4plus,
-                "critical_combos": _n_crit,
-            }
-        },
-        icon="📊", color="#3B82F6"
-    )
-
-    # ── 6.0 Scorecard: per-band drilldowns (business IDs + key signals + investigate) ──
-    _scorecard_bands = [
-        ("✅ 0 Anomalies — Structurally Clean",   lambda df: df[df["anomaly_count"]==0],                     "#22c55e",
-         "No cross-field contradictions. All 20 deterministic rules pass. Weighted score = 0."),
-        ("⚠️ 1 Anomaly — Isolated Issue",          lambda df: df[df["anomaly_count"]==1],                     "#f59e0b",
-         "Exactly 1 contradiction rule triggered. Usually resolvable with one targeted action. Weighted score = 1–4pts."),
-        ("🟠 2–3 Anomalies — Compounded Risk",     lambda df: df[df["anomaly_count"].between(2,3)],           "#f97316",
-         "2–3 rules triggered simultaneously. Anomalies often share a root cause. Weighted score = 2–12pts."),
-        ("🔴 4+ Anomalies — Systematic Failure",   lambda df: df[df["anomaly_count"]>=4],                     "#ef4444",
-         "4 or more rules triggered. Systematic KYB data breakdown. Full manual review required. Weighted score = 4–80pts."),
-    ]
-    for _sc_label, _sc_fn, _sc_col, _sc_desc in _scorecard_bands:
-        _sc_sub = _sc_fn(_biz_score_df)
-        _sc_bids = _sc_sub["business_id"].tolist()
-        if not _sc_bids:
-            continue
-        with st.expander(f"👁️ Show {len(_sc_bids):,} businesses — {_sc_label}", expanded=False):
-            st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_sc_col};
-                border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
-              <span style="color:#a78bfa;font-weight:700">⚙️ Band definition · Scoring formula</span>
-            </div>""", unsafe_allow_html=True)
-            st.markdown(
-                f"{_sc_desc}\n\n"
-                f"**Weighted Score formula:** CRITICAL=4pts · HIGH=3pts · MEDIUM=2pts · LOW/NOTICE=1pt per rule triggered."
-            )
-            st.markdown("---")
-            # Table: business_id, weighted score, # anomalies, which rules triggered
-            _sc_tbl = _sc_sub[["business_id","anomaly_score","anomaly_count"]].copy()
-            _sc_tbl["Anomalies Triggered"] = _sc_tbl["business_id"].map(
-                lambda b: " · ".join(
-                    _SEV_ICON.get(_an_meta.get(k,{}).get("severity","LOW"),"⚪")
-                    + " " + _an_meta.get(k,{}).get("title","")[:30]
-                    for k in _biz_flags_s6.get(b,[])
-                ) or "None"
-            )
-            _sc_tbl = _sc_tbl.rename(columns={
-                "anomaly_score": "Weighted Score (pts)",
-                "anomaly_count": "# Anomalies"
-            })
-            st.dataframe(_sc_tbl, use_container_width=True, hide_index=True,
-                         column_config={
-                             "Weighted Score (pts)": st.column_config.NumberColumn(
-                                 help="Sum of severity points: CRITICAL=4 · HIGH=3 · MEDIUM=2 · LOW/NOTICE=1"),
-                             "# Anomalies": st.column_config.NumberColumn(
-                                 help="Raw count of contradiction rules triggered (unweighted)"),
-                         })
-            # Key KYB signals
-            if stats_df is not None and not stats_df.empty:
-                _sc_sig = stats_df[stats_df["business_id"].isin(_sc_bids)][
-                    ["business_id"] + [c for c in _SOS_AN_COLS if c in stats_df.columns]
-                ].copy().rename(columns={
-                    "sos_match_boolean":"SOS Match Bool","sos_active":"SOS Active",
-                    "tin_match":"TIN Match Bool","tin_match_status":"TIN Match Status",
-                    "naics_code":"NAICS","watchlist_hits":"WL Hits","num_bankruptcies":"BK",
-                    "formation_state":"Formation State","tin_submitted":"TIN Submitted",
-                })
-                if not _sc_sig.empty:
-                    st.markdown("**Key KYB signals for these businesses:**")
-                    st.dataframe(_sc_sig, use_container_width=True, hide_index=True)
-            # Download + investigate
-            _sc_dl = pd.DataFrame({"business_id":_sc_bids}).to_csv(index=False).encode()
-            st.download_button(f"⬇️ Download {len(_sc_bids)} IDs (CSV)", _sc_dl,
-                               f"scorecard_{_sc_label[:15].replace(' ','_')}.csv","text/csv",
-                               key=f"dl_sc_{_sc_label[:12]}")
-            st.caption("Click 🔍 Investigate to set a business ID in the filter bar, then switch to any entity tab.")
-            _investigate_rows(_sc_bids, _biz_score, _biz_flags_s6, key_prefix=f"sc_{_sc_label[:8]}")
-
-    # Helper: build summary bar chart + per-rule drilldown expanders for a group
-    def _group_chart_and_drilldowns(group_keys, group_title, cols_for_table, prefix="gc"):
-        """Horizontal bar chart of all rules in a group, then per-rule drilldown expanders."""
-        _rows = [{"Rule": _an_meta[k]["title"][:38],
-                  "Count": len(_an.get(k,[])),
-                  "Severity": _an_meta[k]["severity"],
-                  "Color": _SEV_COLOR.get(_an_meta[k]["severity"],"#64748b"),
-                  "key": k}
-                 for k in group_keys if k in _an_meta]
-        if not _rows:
-            return
-        _gdf = pd.DataFrame(_rows).sort_values("Count", ascending=True)
-        _active = _gdf[_gdf["Count"]>0]
-        if _active.empty:
-            return
-        _cmap = dict(zip(_active["Rule"], _active["Color"]))
-        _fig = px.bar(_active, x="Count", y="Rule", orientation="h",
-                      color="Rule", color_discrete_map=_cmap,
-                      text="Count", title=group_title)
-        _fig.update_traces(textposition="outside")
-        _fig.update_layout(height=max(160, len(_active)*52), showlegend=False,
-                           margin=dict(t=40,b=10,l=10,r=60))
-        st.plotly_chart(dark_chart(_fig), use_container_width=True)
-
-        # Per-rule drilldown expanders — one per bar in the chart
-        for _, _row in _active.iterrows():
-            _rk  = _row["key"]
-            _rt  = _row["Rule"]
-            _rc  = _row["Color"]
-            _rsev= _row["Severity"]
-            _rbids = _an.get(_rk, [])
-            if not _rbids:
-                continue
-            with st.expander(
-                f"👁️ {_SEV_ICON.get(_rsev,'⚪')} Show {len(_rbids):,} businesses — {_rt}",
-                expanded=False
-            ):
-                _m2 = _an_meta.get(_rk, {})
-                st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_rc};
-                    border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
-                  <span style="color:#a78bfa;font-weight:700">⚙️ How this rule is defined · Why it matters</span>
-                </div>""", unsafe_allow_html=True)
-                st.markdown(
-                    f"**{_m2.get('title','')}** ({_rsev})\n\n"
-                    f"{_m2.get('desc','')}\n\n"
-                    f"**Action:** {_m2.get('action','')}\n\n"
-                    f"**Source:** `{_m2.get('source','')}`"
-                )
-                # ── Diagnostic SQL runner for this rule ───────────────────
-                _rule_sql = _m2.get("sql","")
-                if _rule_sql:
-                    st.markdown("**▶ Inline SQL Runner** (diagnostic SQL for this rule):")
-                    _inline_sql_runner(_rule_sql, runner_key=f"{prefix}_{_rk}_rule")
-                # Also extract any SQL from _SEG_CALC for this key
-                _seg_calc_text = _SEG_CALC.get(_rk, "")
-                if _seg_calc_text:
-                    import re as _re2
-                    _extra_sqls = _re2.findall(r"```sql\s*(.*?)```", _seg_calc_text, _re2.DOTALL | _re2.IGNORECASE)
-                    for _esqi, _esq in enumerate(_extra_sqls):
-                        if _esq.strip() and _esq.strip() != _rule_sql.strip():
-                            st.markdown(f"**▶ Inline SQL Runner** (from ⚙️ explanation):")
-                            _inline_sql_runner(_esq.strip(), runner_key=f"{prefix}_{_rk}_calc_{_esqi}")
-                st.markdown("---")
-                # Business ID table with key KYB signals
-                if stats_df is not None and not stats_df.empty:
-                    _rt_sig = stats_df[stats_df["business_id"].isin(_rbids)][
-                        ["business_id"] + [c for c in cols_for_table if c in stats_df.columns]
-                    ].copy().rename(columns={
-                        "sos_match_boolean":"SOS Match Bool","sos_match_status":"SOS Match Status",
-                        "sos_active":"SOS Active","sos_match_verif":"sos_match_verif(0/1)",
-                        "sos_domestic_verif":"sos_domestic_verif(0/1)",
-                        "formation_state":"Formation State","tin_submitted":"TIN Submitted",
-                        "tin_match_status":"TIN Match Status","tin_match":"TIN Match Bool",
-                        "idv_passed":"IDV Passed","naics_code":"NAICS",
-                        "watchlist_hits":"WL Hits","num_bankruptcies":"BK",
-                        "num_judgements":"Judgements","num_liens":"Liens","adverse_media":"Adverse Media",
-                        "revenue":"Revenue",
-                    })
-                    if not _rt_sig.empty:
-                        st.dataframe(_rt_sig, use_container_width=True, hide_index=True)
-                    else:
-                        st.dataframe(pd.DataFrame({"business_id": _rbids}),
-                                     use_container_width=True, hide_index=True)
-                else:
-                    st.dataframe(pd.DataFrame({"business_id": _rbids}),
-                                 use_container_width=True, hide_index=True)
-                _dl_r = pd.DataFrame({"business_id": _rbids}).to_csv(index=False).encode()
-                st.download_button(f"⬇️ Download {len(_rbids)} IDs (CSV)", _dl_r,
-                                   f"{_rk}_bids.csv","text/csv", key=f"dl_{prefix}_{_rk}")
-                st.caption("Click 🔍 Investigate to set a business ID, then switch to any entity tab.")
-                _investigate_rows(_rbids, _biz_score, _biz_flags_s6,
-                                  context_label=_m2.get("title",""), key_prefix=f"{prefix}_{_rk}")
-
-    # (kept for backward compat — now delegates to _group_chart_and_drilldowns)
-    def _group_summary_chart(group_keys, group_title):
-        _rows = [{"Rule": _an_meta[k]["title"][:38],
-                  "Count": len(_an.get(k,[])),
-                  "Severity": _an_meta[k]["severity"],
-                  "Color": _SEV_COLOR.get(_an_meta[k]["severity"],"#64748b")}
-                 for k in group_keys if k in _an_meta]
-        if not _rows or all(r["Count"]==0 for r in _rows):
-            return None
-        _gdf = pd.DataFrame(_rows).sort_values("Count", ascending=True)
-        _cmap = dict(zip(_gdf["Rule"], _gdf["Color"]))
-        _fig = px.bar(_gdf, x="Count", y="Rule", orientation="h",
-                      color="Rule", color_discrete_map=_cmap,
-                      text="Count", title=group_title)
-        _fig.update_traces(textposition="outside")
-        _fig.update_layout(height=max(160, len(_rows)*52), showlegend=False,
-                           margin=dict(t=40,b=10,l=10,r=60))
-        return _fig
-
-    # ════════════════════════════════════════════════════════════════════════
-    # 6.1  GROUP 1: DATA INTEGRITY CONTRADICTIONS
+    # 6.1  CROSS-SECTION CONTRADICTIONS — Registry × TIN
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("#### 6.1  Data Integrity Contradictions — Impossible States")
-    st.caption("Signal combinations that should NEVER exist if the pipeline is working correctly. "
-               "These are bugs, data freshness gaps, or pipeline ordering issues — not risk signals.")
-
-    _G1_KEYS = ["g1_tin_status_bool_mismatch","g1_sos_active_match_false","g1_verif_active_false"]
-    # Chart + per-rule drilldown expanders (chart bars are interactive via expanders below)
-    _group_chart_and_drilldowns(_G1_KEYS, "Data Integrity — Contradictions by Rule", _SOS_AN_COLS, "g1")
-    # Anomaly cards (severity badge + full detail_panel)
-    for _akey in _G1_KEYS:
-        _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
-        if not _bids: continue
-        _seg[_akey] = _bids
-        _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
-        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _SOS_AN_COLS, meta=_m)
-    if not any(_an.get(k) for k in _G1_KEYS):
-        st.success("✅ No data integrity contradictions detected in this portfolio.", icon="✅")
-
-    # ════════════════════════════════════════════════════════════════════════
-    # 6.2  GROUP 2: SOS/REGISTRY ANOMALIES
-    # ════════════════════════════════════════════════════════════════════════
-    st.markdown("---")
-    st.markdown("#### 6.2  SOS/Registry Anomalies")
-    st.caption("Signal combinations where registry verification signals are internally inconsistent "
-               "or represent the worst possible registry states.")
-
-    _G2_KEYS = ["g2_found_but_inactive","g2_domestic_no_submitted","g2_verif_match_false"]
-
-    # ── Build registry state donut data from funnel_df (always available) ──────
-    _smb_g2  = _fdf["sos_match_boolean"].astype(str).str.lower().str.strip() if not _fdf.empty and "sos_match_boolean" in _fdf.columns else pd.Series(dtype=str)
-    _sact_g2 = _fdf["sos_active"].astype(str).str.lower().str.strip() if not _fdf.empty and "sos_active" in _fdf.columns else pd.Series(dtype=str)
-    _reg_active   = int(((_smb_g2=="true") & (_sact_g2=="true")).sum()) if not _smb_g2.empty else 0
-    _reg_inactive = int(((_smb_g2=="true") & (_sact_g2=="false")).sum()) if not _smb_g2.empty else 0
-    _reg_no_reg   = int((_smb_g2=="false").sum()) if not _smb_g2.empty else 0
-    _reg_null     = int((_smb_g2.isin(["","none","nan"])).sum()) if not _smb_g2.empty else 0
-    _reg_dist = pd.DataFrame({
-        "State": ["Registry Active","Registry Inactive","No Registry (false)","Unknown/Null"],
-        "Count": [_reg_active, _reg_inactive, _reg_no_reg, _reg_null]
-    })
-    _reg_dist = _reg_dist[_reg_dist["Count"]>0]
-
-    # ── Check if any G2 anomalies exist to decide layout ─────────────────────
-    _g2_any = any(_an.get(k) for k in _G2_KEYS)
-
-    if _g2_any:
-        # Anomalies found: Left = rule chart + drilldowns, Right = registry donut
-        _gc1, _gc2 = st.columns([2, 1])
-        with _gc1:
-            _group_chart_and_drilldowns(_G2_KEYS, "SOS/Registry — Anomalies by Rule", _SOS_AN_COLS, "g2")
-        with _gc2:
-            if not _reg_dist.empty:
-                fig_reg_donut = px.pie(_reg_dist, names="State", values="Count", hole=0.5,
-                                       title="Registry State Distribution",
-                                       color="State",
-                                       color_discrete_map={"Registry Active":"#22c55e",
-                                                           "Registry Inactive":"#ef4444",
-                                                           "No Registry (false)":"#f97316",
-                                                           "Unknown/Null":"#64748b"})
-                fig_reg_donut.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
-                st.plotly_chart(dark_chart(fig_reg_donut), use_container_width=True)
-    else:
-        # No anomalies: show the registry donut full-width alongside a rules status table
-        _nc1, _nc2 = st.columns([1, 1])
-        with _nc1:
-            if not _reg_dist.empty:
-                fig_reg_donut = px.pie(_reg_dist, names="State", values="Count", hole=0.5,
-                                       title="Registry State Distribution",
-                                       color="State",
-                                       color_discrete_map={"Registry Active":"#22c55e",
-                                                           "Registry Inactive":"#ef4444",
-                                                           "No Registry (false)":"#f97316",
-                                                           "Unknown/Null":"#64748b"})
-                fig_reg_donut.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=10))
-                st.plotly_chart(dark_chart(fig_reg_donut), use_container_width=True)
-        with _nc2:
-            # Rules status table — show all 3 rules with PASS status
-            _rules_status = pd.DataFrame([
-                {"Rule": _an_meta[k]["title"], "Severity": _an_meta[k]["severity"],
-                 "Status": "✅ No businesses triggered", "Count": 0}
-                for k in _G2_KEYS if k in _an_meta
-            ])
-            st.markdown("**SOS/Registry Rules Status — All Clear:**")
-            st.dataframe(_rules_status, use_container_width=True, hide_index=True,
-                         column_config={
-                             "Rule": st.column_config.TextColumn(width="large"),
-                             "Status": st.column_config.TextColumn(),
-                             "Count": st.column_config.NumberColumn(),
-                         })
-            detail_panel(
-                "✅ 6.2 SOS/Registry Anomalies — All Rules Clear",
-                f"0 anomalies across {len(_G2_KEYS)} rules · {total_biz:,} businesses checked",
-                what_it_means=(
-                    "All 3 SOS/Registry anomaly rules returned 0 businesses. "
-                    "This means:\n\n"
-                    "**Rule 1 — Registry Found but SOS Inactive:** No businesses with "
-                    "sos_match_boolean=true AND sos_active=false. All found registries are currently active.\n\n"
-                    "**Rule 2 — sos_domestic_verif=1 but sos_match_verif=0:** "
-                    "No inconsistency in clients.verification_results between domestic and submitted-active flags.\n\n"
-                    "**Rule 3 — sos_match_verif=1 but sos_match_boolean=false:** "
-                    "No freshness gap between Redshift verification_results and the Facts API.\n\n"
-                    "**Source:** check_agent_v2.DETERMINISTIC_CHECKS · "
-                    "index.ts:1421 (sos_match_boolean) · verification_results.sql:36-51"
-                ),
-                source_table="stats_df · funnel_df (clients.verification_results)",
-                source_file="check_agent_v2.py (g2_found_but_inactive, g2_domestic_no_submitted, g2_verif_match_false)",
-                json_obj={k: {"count": 0, "severity": _an_meta.get(k,{}).get("severity","")} for k in _G2_KEYS},
-                icon="✅", color="#22c55e"
-            )
-
-    # Anomaly cards (only rendered when anomalies exist)
-    for _akey in _G2_KEYS:
-        _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
-        if not _bids: continue
-        _seg[_akey] = _bids
-        _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
-        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _SOS_AN_COLS, meta=_m)
-    if not _g2_any:
-        st.success("✅ No SOS/registry anomalies detected in this portfolio.", icon="✅")
-
-    # ════════════════════════════════════════════════════════════════════════
-    # 6.3  GROUP 3: TIN/EIN ANOMALIES
-    # ════════════════════════════════════════════════════════════════════════
-    st.markdown("---")
-    st.markdown("#### 6.3  TIN/EIN Anomalies")
-    st.caption("EIN verification gaps — submitted but never checked, or contradicting signal derivations.")
-
-    _TIN_AN_COLS = ["tin_submitted","tin_match_status","tin_match","sos_match_boolean","sos_active","formation_state","naics_code"]
-
-    # TIN outcome bar + pie (left/right) then per-outcome drilldown expanders below
-    if not _sdf.empty:
-        _tin_pass_bids  = _sdf[_s("tin_match")=="true"]["business_id"].tolist()
-        _tin_fail_bids  = _sdf[_s("tin_match")=="false"]["business_id"].tolist()
-        _tin_nc_bids    = _sdf[_s("tin_match").isin(["","none","nan"])]["business_id"].tolist()
-        _tin_dist_data  = {
-            "TIN Pass (tin_match_boolean=true)":  len(_tin_pass_bids),
-            "TIN Fail (tin_match_boolean=false)": len(_tin_fail_bids),
-            "TIN Not Checked (null)":             len(_tin_nc_bids),
-        }
-        _tin_dist_df = pd.DataFrame(list(_tin_dist_data.items()), columns=["Outcome","Count"])
-        _tin_dist_df = _tin_dist_df[_tin_dist_df["Count"]>0]
-        _TIN_COLOR_MAP = {
-            "TIN Pass (tin_match_boolean=true)":  "#22c55e",
-            "TIN Fail (tin_match_boolean=false)":  "#ef4444",
-            "TIN Not Checked (null)":              "#64748b",
-        }
-        if not _tin_dist_df.empty:
-            _tc1, _tc2 = st.columns([1.5, 1])
-            with _tc1:
-                fig_tin_bar = px.bar(_tin_dist_df, x="Count", y="Outcome", orientation="h",
-                                     color="Outcome", color_discrete_map=_TIN_COLOR_MAP,
-                                     text="Count", title="TIN/EIN Outcome Distribution (portfolio)")
-                fig_tin_bar.update_traces(textposition="outside")
-                fig_tin_bar.update_layout(height=220, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
-                st.plotly_chart(dark_chart(fig_tin_bar), use_container_width=True)
-            with _tc2:
-                fig_tin_pie = px.pie(_tin_dist_df, names="Outcome", values="Count", hole=0.5,
-                                     title="TIN Outcome Mix", color="Outcome",
-                                     color_discrete_map=_TIN_COLOR_MAP)
-                fig_tin_pie.update_layout(height=220, margin=dict(t=40,b=10,l=10,r=10))
-                st.plotly_chart(dark_chart(fig_tin_pie), use_container_width=True)
-
-        # Per-outcome drilldown expanders — one per bar in the chart
-        _tin_outcome_drilldowns = [
-            ("tin_pass_drilldown",  "TIN Pass (tin_match_boolean=true)",  "#22c55e", _tin_pass_bids,
-             "IRS confirmed the EIN matches the submitted legal name. "
-             "Source: index.ts:482 — tin_match_boolean=true when tin_match.value==='success'.\n\n"
-             "**Action:** No action needed — TIN verification complete."),
-            ("tin_fail_drilldown",  "TIN Fail (tin_match_boolean=false)", "#ef4444", _tin_fail_bids,
-             "IRS returned a mismatch. Most common cause: DBA/trade name submitted instead of legal name on EIN cert (CP-575/147C). "
-             "Source: index.ts:429 — tin_match.value.status='failure' from Middesk IRS lookup.\n\n"
-             "**Action:** Request IRS EIN letter (CP-575 or 147C). Compare legal name to submitted name."),
-            ("tin_nc_drilldown",    "TIN Not Checked (tin_match_boolean=null)", "#64748b", _tin_nc_bids,
-             "No IRS EIN check result exists. Either no EIN was submitted, or the Middesk TIN task never completed. "
-             "Source: index.ts:482 — tin_match_boolean is only written when tin_match has a value.\n\n"
-             "**Sub-split:** businesses with tin_submitted non-null → Middesk task pending/failed. "
-             "Businesses with tin_submitted=null → no EIN given at onboarding.\n\n"
-             "**Action:** Check tin_submitted fact. If present, investigate Middesk review task status."),
-        ]
-        for _tk, _tl, _tc, _tbids, _tdesc in _tin_outcome_drilldowns:
-            if not _tbids: continue
-            with st.expander(f"👁️ Show {len(_tbids):,} businesses — {_tl}", expanded=False):
-                st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_tc};
-                    border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
-                  <span style="color:#a78bfa;font-weight:700">⚙️ What this outcome means · How calculated</span>
-                </div>""", unsafe_allow_html=True)
-                st.markdown(_tdesc)
-                st.markdown("---")
-                if stats_df is not None and not stats_df.empty:
-                    _ts = stats_df[stats_df["business_id"].isin(_tbids)][
-                        ["business_id"] + [c for c in _TIN_AN_COLS if c in stats_df.columns]
-                    ].rename(columns={
-                        "tin_submitted":"TIN Submitted","tin_match_status":"TIN Match Status",
-                        "tin_match":"TIN Match Bool","sos_match_boolean":"SOS Match Bool",
-                        "sos_active":"SOS Active","formation_state":"Formation State","naics_code":"NAICS",
-                    })
-                    st.dataframe(_ts, use_container_width=True, hide_index=True)
-                else:
-                    st.dataframe(pd.DataFrame({"business_id":_tbids}), use_container_width=True, hide_index=True)
-                _tdl = pd.DataFrame({"business_id":_tbids}).to_csv(index=False).encode()
-                st.download_button(f"⬇️ Download {len(_tbids)} IDs (CSV)", _tdl,
-                                   f"{_tk}.csv","text/csv", key=f"dl_{_tk}")
-                st.caption("Click 🔍 Investigate to set a business ID, then switch to any entity tab.")
-                _investigate_rows(_tbids, _biz_score, _biz_flags_s6,
-                                  context_label=_tl, key_prefix=f"tin_{_tk}")
-            detail_panel(
-                f"🔐 TIN/EIN: {_tl}",
-                f"{len(_tbids):,} businesses · {len(_tbids)/max(total_biz,1)*100:.1f}% of portfolio",
-                what_it_means=_tdesc,
-                source_table="rds_warehouse_public.facts (tin_match_boolean, tin_match, tin_submitted)",
-                source_file="integration-service/lib/facts/kyb/index.ts lines 399-491",
-                json_obj={"outcome": _tl, "count": len(_tbids),
-                          "business_ids_sample": _tbids[:5]},
-                icon="🔐", color=_tc
-            )
-
-    # Anomaly rules (TIN submitted not checked + CRITICAL mismatch cross-ref)
-    _G3_KEYS = ["g3_tin_submitted_not_checked"]
-    _group_chart_and_drilldowns(_G3_KEYS, "TIN/EIN — Anomaly Rules", _TIN_AN_COLS, "g3")
-    for _akey in _G3_KEYS:
-        _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
-        if not _bids: continue
-        _seg[_akey] = _bids
-        _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
-        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _TIN_AN_COLS, meta=_m)
-    if _an.get("g1_tin_status_bool_mismatch"):
-        st.info(f"ℹ️ CRITICAL: {len(_an['g1_tin_status_bool_mismatch']):,} businesses with tin_match_status=success "
-                "but tin_match_boolean=false — shown in **6.1 Data Integrity Contradictions** above.")
-    if not _an.get("g3_tin_submitted_not_checked") and not _an.get("g1_tin_status_bool_mismatch"):
-        st.success("✅ No TIN/EIN anomalies detected.", icon="✅")
-
-    # ════════════════════════════════════════════════════════════════════════
-    # 6.4  GROUP 4: CROSS-SECTION CONTRADICTIONS (S1 × S2)
-    # ════════════════════════════════════════════════════════════════════════
-    st.markdown("---")
-    st.markdown("#### 6.4  Cross-Section Contradictions — Registry × TIN")
+    st.markdown("#### 6.1  Cross-Section Contradictions — Registry × TIN")
     st.caption("Where SOS verification (Section 1) and TIN verification (Section 2) signals diverge — "
                "the two independent KYB verification paths producing inconsistent results.")
 
@@ -11211,61 +10766,1018 @@ ORDER BY avg_impact_pts ASC;"""
         st.success("✅ No Registry × TIN contradictions detected.", icon="✅")
 
     # ════════════════════════════════════════════════════════════════════════
-    # 6.5  GROUP 5: NAICS & CLASSIFICATION ANOMALIES
+    # 6.2  NAICS/MCC CLASSIFICATION INTELLIGENCE
+    # ════════════════════════════════════════════════════════════════════════
+    # Source: rds_warehouse_public.facts (naics_code, mcc_code, mcc_code_found,
+    #         mcc_code_from_naics) + rds_cases_public.rel_naics_mcc / core_naics_code / core_mcc_code
+    # Lineage: businessDetails/index.ts (sources + weights) · aiNaicsEnrichment.ts (561499 fallback)
+    # All SQL uses the correct rds_ schema — NO clients.* or datascience.* tables.
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("#### 6.5  NAICS Classification Anomalies")
-    st.caption("Industry classification gaps that affect Worth Score accuracy and MCC code validity. "
-               "NAICS=561499 is the hardcoded NAICS_OF_LAST_RESORT (aiNaicsEnrichment.ts:63).")
+    st.markdown("#### 6.2  NAICS/MCC Classification Intelligence")
+    st.caption(
+        "Multi-source NAICS/MCC industry classification analysis. "
+        "Source: `rds_warehouse_public.facts` · `rds_cases_public.*` tables. "
+        "All signals derived from `alternatives[]` array — the same positional JSON extraction "
+        "used for `sos_filings` analysis. No materialized tables."
+    )
 
     _NAICS_AN_COLS = ["naics_code","sos_match_boolean","sos_active","tin_match","formation_state","revenue","watchlist_hits"]
     _G5_KEYS = ["g5_naics_fallback","g5_naics_fb_sos_found"]
 
-    # NAICS distribution chart
+    # ── Build NAICS/MCC analytics from live Redshift queries ──────────────────
+    # These queries run only when the app is live (is_live=True)
+    _naics_cov_df   = None   # Coverage: real / fallback / missing
+    _naics_vendor_df = None  # Winning vendor distribution
+    _naics_mcc_pair_df = None  # Canonical pair status
+    _naics_concordance_df = None  # Pairwise vendor concordance
+    _user_override_df = None  # User vs vendor override status
+    _user_override_vendor_df = None  # Override breakdown by winner vendor
+
+    _cust_clause = hub_cust_clause("rbcm")
+    _date_filter = (
+        f"DATE(rbcm.created_at) BETWEEN '{hub_date_from}' AND '{hub_date_to}'"
+        if hub_date_from else "1=1"
+    )
+    _onboarded_cte = (
+        f"WITH onboarded AS (\n"
+        f"  SELECT DISTINCT rbcm.business_id\n"
+        f"  FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+        f"  WHERE {_date_filter}{_cust_clause}\n"
+        f")\n"
+    )
+
+    if is_live:
+        # ── Analysis 1: NAICS Coverage Distribution ───────────────────────────
+        _sql_cov = _onboarded_cte + """
+SELECT
+  CASE
+    WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value')='561499'         THEN 'Fallback 561499'
+    WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NULL
+      OR JSON_EXTRACT_PATH_TEXT(f.value,'value')=''               THEN 'Missing'
+    ELSE 'Real NAICS Code'
+  END AS naics_status,
+  COUNT(DISTINCT f.business_id) AS businesses,
+  ROUND(100.0*COUNT(DISTINCT f.business_id)/SUM(COUNT(DISTINCT f.business_id)) OVER (),2) AS pct
+FROM rds_warehouse_public.facts f
+JOIN onboarded o ON o.business_id=f.business_id
+WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+GROUP BY 1 ORDER BY businesses DESC;"""
+        _naics_cov_df, _ = run_sql(_sql_cov)
+
+        # ── Analysis 2: Winning Vendor Distribution ───────────────────────────
+        _sql_vendor = _onboarded_cte + """
+SELECT
+  CASE JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')
+    WHEN '16' THEN 'Middesk'        WHEN '23' THEN 'OpenCorporates'
+    WHEN '24' THEN 'ZoomInfo'       WHEN '17' THEN 'Equifax'
+    WHEN '38' THEN 'Trulioo'        WHEN '31' THEN 'AI Enrichment'
+    WHEN '0'  THEN 'User Submitted' ELSE 'Other'
+  END AS winning_vendor,
+  COUNT(*) AS businesses_won,
+  SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value')='561499' THEN 1 ELSE 0 END) AS fallback_count,
+  ROUND(100.0*SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value')='561499' THEN 1 ELSE 0 END)/COUNT(*),2) AS fallback_pct
+FROM rds_warehouse_public.facts f
+JOIN onboarded o ON o.business_id=f.business_id
+WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+GROUP BY 1 ORDER BY businesses_won DESC;"""
+        _naics_vendor_df, _ = run_sql(_sql_vendor)
+
+        # ── Analysis 3: NAICS-MCC Canonical Pair Check (1-to-many, pre-built CTE) ──
+        _sql_pair = _onboarded_cte + """
+,naics_f AS (
+  SELECT f.business_id, JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_naics
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+),
+mcc_f AS (
+  SELECT f.business_id, JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_mcc
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code' AND LENGTH(f.value)<60000
+),
+canonical_pairs AS (
+  SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+  FROM rds_cases_public.rel_naics_mcc r
+  JOIN rds_cases_public.core_naics_code nc ON nc.id=r.naics_id
+  JOIN rds_cases_public.core_mcc_code mc   ON mc.id=r.mcc_id
+)
+SELECT
+  CASE
+    WHEN n.final_naics='561499' OR m.final_mcc='5614' THEN 'Fallback Pair'
+    WHEN n.final_naics IS NULL OR n.final_naics=''     THEN 'NAICS Missing'
+    WHEN m.final_mcc  IS NULL OR m.final_mcc=''        THEN 'MCC Missing'
+    WHEN cp.naics_code IS NOT NULL                      THEN 'Canonical Pair'
+    ELSE 'Non-Canonical Pair'
+  END AS pair_status,
+  COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER (),2) AS pct
+FROM naics_f n
+LEFT JOIN mcc_f m            ON m.business_id  = n.business_id
+LEFT JOIN canonical_pairs cp ON cp.naics_code  = n.final_naics AND cp.mcc_code = m.final_mcc
+GROUP BY 1 ORDER BY businesses DESC;"""
+        _naics_mcc_pair_df, _ = run_sql(_sql_pair)
+
+        # ── Analysis 4: Pairwise Vendor Concordance (alternatives[] parsing) ──
+        _sql_concordance = _onboarded_cte + """
+,naics_raw AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')                    AS win_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')                                  AS win_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','source','platformId') AS a0_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','value')               AS a0_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','source','platformId') AS a1_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','value')               AS a1_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','source','platformId') AS a2_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','value')               AS a2_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','3','source','platformId') AS a3_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','3','value')               AS a3_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','4','source','platformId') AS a4_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','4','value')               AS a4_naics
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+),
+per_vendor AS (
+  SELECT business_id, win_naics AS final_naics,
+    MAX(CASE WHEN win_pid='23' THEN win_naics WHEN a0_pid='23' THEN a0_naics
+             WHEN a1_pid='23' THEN a1_naics  WHEN a2_pid='23' THEN a2_naics
+             WHEN a3_pid='23' THEN a3_naics  WHEN a4_pid='23' THEN a4_naics END) AS oc_naics,
+    MAX(CASE WHEN win_pid='17' THEN win_naics WHEN a0_pid='17' THEN a0_naics
+             WHEN a1_pid='17' THEN a1_naics  WHEN a2_pid='17' THEN a2_naics
+             WHEN a3_pid='17' THEN a3_naics  WHEN a4_pid='17' THEN a4_naics END) AS equifax_naics,
+    MAX(CASE WHEN win_pid='24' THEN win_naics WHEN a0_pid='24' THEN a0_naics
+             WHEN a1_pid='24' THEN a1_naics  WHEN a2_pid='24' THEN a2_naics
+             WHEN a3_pid='24' THEN a3_naics  WHEN a4_pid='24' THEN a4_naics END) AS zoominfo_naics
+  FROM naics_raw GROUP BY business_id, win_naics
+)
+SELECT 'OC vs Equifax' AS pair,
+  CASE
+    WHEN oc_naics IS NULL AND equifax_naics IS NULL     THEN 'both_null'
+    WHEN oc_naics IS NULL AND equifax_naics IS NOT NULL THEN 'oc_null_equifax_found'
+    WHEN oc_naics IS NOT NULL AND equifax_naics IS NULL THEN 'oc_found_equifax_null'
+    WHEN oc_naics = equifax_naics                       THEN 'exact_6_digit'
+    WHEN LEFT(oc_naics,4)=LEFT(equifax_naics,4)         THEN 'same_4_digit_group'
+    WHEN LEFT(oc_naics,3)=LEFT(equifax_naics,3)         THEN 'same_3_digit_subsector'
+    WHEN LEFT(oc_naics,2)=LEFT(equifax_naics,2)         THEN 'same_2_digit_sector'
+    ELSE 'different_sector'
+  END AS concordance_level,
+  COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER (),2) AS pct
+FROM per_vendor GROUP BY 2 ORDER BY businesses DESC;"""
+        _naics_concordance_df, _ = run_sql(_sql_concordance)
+
+        # ── Analysis 5: User vs Vendor Override ──────────────────────────────
+        _sql_override = _onboarded_cte + """
+,naics_raw AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS win_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_naics,
+    COALESCE(
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','value') END,
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','value') END,
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','value') END
+    ) AS user_naics_in_alt,
+    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')='0'
+         THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END AS user_naics_winner
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+)
+SELECT
+  CASE
+    WHEN user_naics_winner IS NOT NULL              THEN 'user_won'
+    WHEN user_naics_in_alt IS NOT NULL
+     AND user_naics_in_alt != final_naics           THEN 'user_overridden'
+    WHEN user_naics_in_alt IS NOT NULL
+     AND user_naics_in_alt = final_naics            THEN 'user_agreed_with_winner'
+    ELSE                                                 'no_user_submission'
+  END AS override_status,
+  COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER (),2) AS pct
+FROM naics_raw GROUP BY 1 ORDER BY businesses DESC;"""
+        _user_override_df, _ = run_sql(_sql_override)
+
+        # ── Analysis 6: User Override — by Winner Vendor ─────────────────────
+        _sql_override_vendor = _onboarded_cte + """
+,naics_raw AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS win_pid,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_naics,
+    COALESCE(
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','0','value') END,
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','1','value') END,
+      CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','source')='0'
+           THEN JSON_EXTRACT_PATH_TEXT(f.value,'alternatives','2','value') END
+    ) AS user_naics_in_alt,
+    CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')='0'
+         THEN JSON_EXTRACT_PATH_TEXT(f.value,'value') END AS user_naics_winner
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+),
+classified AS (
+  SELECT *,
+    CASE
+      WHEN user_naics_winner IS NOT NULL                   THEN 'user_won'
+      WHEN user_naics_in_alt IS NOT NULL
+       AND user_naics_in_alt != final_naics                THEN 'user_overridden'
+      WHEN user_naics_in_alt IS NOT NULL
+       AND user_naics_in_alt = final_naics                 THEN 'user_agreed_with_winner'
+      ELSE 'no_user_submission'
+    END AS override_status,
+    CASE win_pid
+      WHEN '23' THEN 'OpenCorporates' WHEN '17' THEN 'Equifax'
+      WHEN '24' THEN 'ZoomInfo'       WHEN '16' THEN 'Middesk'
+      WHEN '38' THEN 'Trulioo'        WHEN '31' THEN 'AI Enrichment'
+      WHEN '0'  THEN 'User (self)'    ELSE 'Other'
+    END AS winner_vendor
+  FROM naics_raw
+)
+SELECT override_status, winner_vendor,
+  COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER (PARTITION BY override_status),2) AS pct_within_status
+FROM classified
+WHERE override_status IN ('user_agreed_with_winner','user_overridden')
+GROUP BY 1,2 ORDER BY override_status, businesses DESC;"""
+        _user_override_vendor_df, _ = run_sql(_sql_override_vendor)
+
+    # ── RENDER ALL ANALYSES ────────────────────────────────────────────────────
+
+    # ── A1: Coverage Distribution ─────────────────────────────────────────────
+    st.markdown("##### 📊 A1 — NAICS Classification Coverage")
+    st.caption(
+        "Three-bucket view: Real NAICS (any 6-digit code except 561499) / "
+        "Fallback 561499 (NAICS_OF_LAST_RESORT from aiNaicsEnrichment.ts:63) / Missing (null). "
+        "Source: `rds_warehouse_public.facts name='naics_code'`."
+    )
+
     if not _sdf.empty and "naics_code" in _sdf.columns:
         _naics_col = _s("naics_code")
         _n_fallback = int((_naics_col == "561499").sum())
         _n_missing  = int(_naics_col.isin(["","none","nan"]).sum())
         _n_real     = len(_sdf) - _n_fallback - _n_missing
-        _naics_dist = pd.DataFrame({
+    else:
+        _n_real = _n_fallback = _n_missing = 0
+
+    _a1c1, _a1c2, _a1c3, _a1c4 = st.columns(4)
+    _port = max(len(_sdf), 1)
+    for _col, _lbl, _val, _color in [
+        (_a1c1, "📋 Total Businesses", len(_sdf), "#3B82F6"),
+        (_a1c2, "✅ Real NAICS", _n_real, "#22c55e"),
+        (_a1c3, "⚠️ Fallback 561499", _n_fallback, "#ef4444"),
+        (_a1c4, "❓ Missing", _n_missing, "#64748b"),
+    ]:
+        with _col:
+            kpi(_lbl, f"{_val:,}", rate(_val, _port), _color)
+
+    if _naics_cov_df is not None and not _naics_cov_df.empty:
+        _a1_r1, _a1_r2 = st.columns([1,1])
+        with _a1_r1:
+            _cov_color = {"Real NAICS Code":"#22c55e","Fallback 561499":"#ef4444","Missing":"#64748b"}
+            _fig_cov = px.pie(_naics_cov_df, names="naics_status", values="businesses", hole=0.5,
+                              title="NAICS Coverage Distribution",
+                              color="naics_status", color_discrete_map=_cov_color)
+            _fig_cov.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(_fig_cov), use_container_width=True)
+        with _a1_r2:
+            st.dataframe(_naics_cov_df, use_container_width=True, hide_index=True)
+    elif not _sdf.empty:
+        _dist_df = pd.DataFrame({
             "NAICS Status": ["Real NAICS Code","Fallback 561499","Missing"],
             "Count": [_n_real, _n_fallback, _n_missing],
+            "Pct": [rate(_n_real,_port), rate(_n_fallback,_port), rate(_n_missing,_port)],
         })
-        _naics_dist = _naics_dist[_naics_dist["Count"]>0]
-        if not _naics_dist.empty:
-            _nc1, _nc2 = st.columns([1, 1])
-            with _nc1:
-                fig_naics_pie = px.pie(_naics_dist, names="NAICS Status", values="Count", hole=0.5,
-                                       title="NAICS Classification Coverage",
-                                       color="NAICS Status",
-                                       color_discrete_map={"Real NAICS Code":"#22c55e",
-                                                           "Fallback 561499":"#ef4444",
-                                                           "Missing":"#64748b"})
-                fig_naics_pie.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
-                st.plotly_chart(dark_chart(fig_naics_pie), use_container_width=True)
-            with _nc2:
-                # NAICS gap type breakdown
-                _g2_n = len(_an.get("g5_naics_fb_sos_found",[]))
-                _g_all = len(_an.get("g5_naics_fallback",[]))
-                _gap_df = pd.DataFrame({
-                    "Gap Type": ["G2: Registry Found\n+ NAICS=561499\n(most fixable)",
-                                 "G1/G3: No Registry\nor No Website"],
-                    "Count": [_g2_n, max(0, _g_all - _g2_n)],
-                })
-                _gap_df = _gap_df[_gap_df["Count"]>0]
-                if not _gap_df.empty:
-                    fig_gap = px.bar(_gap_df, x="Count", y="Gap Type", orientation="h",
-                                     color="Gap Type",
-                                     color_discrete_map={
-                                         "G2: Registry Found\n+ NAICS=561499\n(most fixable)":"#f59e0b",
-                                         "G1/G3: No Registry\nor No Website":"#ef4444"
-                                     },
-                                     text="Count",
-                                     title=f"NAICS Fallback Gap Types ({_g_all:,} total)")
-                    fig_gap.update_traces(textposition="outside")
-                    fig_gap.update_layout(height=260, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
-                    st.plotly_chart(dark_chart(fig_gap), use_container_width=True)
+        _fig_cov2 = px.pie(_dist_df[_dist_df["Count"]>0], names="NAICS Status", values="Count",
+                           hole=0.5, title="NAICS Coverage (from stats_df)",
+                           color="NAICS Status",
+                           color_discrete_map={"Real NAICS Code":"#22c55e","Fallback 561499":"#ef4444","Missing":"#64748b"})
+        _fig_cov2.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
+        st.plotly_chart(dark_chart(_fig_cov2), use_container_width=True)
 
+    detail_panel("📊 A1 NAICS Coverage",
+        f"Real:{_n_real:,} · Fallback:{_n_fallback:,} · Missing:{_n_missing:,}",
+        what_it_means=(
+            "**Three-bucket NAICS classification status:**\n\n"
+            "- **Real NAICS Code**: any 6-digit NAICS except 561499\n"
+            "- **Fallback 561499**: hardcoded `NAICS_OF_LAST_RESORT` — all vendor signals were null "
+            "and AI returned last-resort value (`aiNaicsEnrichment.ts:63`)\n"
+            "- **Missing**: `naics_code` fact is null/empty — vendor was not called or returned no value\n\n"
+            "**Source:** `rds_warehouse_public.facts name='naics_code'`\n"
+            "**Key file:** `integration-service-main/lib/facts/businessDetails/index.ts:278-322`"
+        ),
+        source_table="rds_warehouse_public.facts name='naics_code'",
+        sql=_sql_cov if is_live else "-- Run with is_live=True",
+        icon="📊", color="#22c55e")
+
+    # ── A2: Winning Vendor Distribution ────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 🏭 A2 — Winning Vendor Distribution")
+    st.caption(
+        "For each business: which vendor's NAICS candidate was selected as the final winner? "
+        "Also shows fallback rate per vendor — which vendor produces the most 561499 outputs. "
+        "Source: `source.platformId` field in `rds_warehouse_public.facts name='naics_code'`."
+    )
+    if _naics_vendor_df is not None and not _naics_vendor_df.empty:
+        _a2c1, _a2c2 = st.columns([3,2])
+        with _a2c1:
+            _fig_vendor = px.bar(_naics_vendor_df, x="businesses_won", y="winning_vendor",
+                                 orientation="h", text="businesses_won",
+                                 color="fallback_pct",
+                                 color_continuous_scale=["#22c55e","#f59e0b","#ef4444"],
+                                 title="NAICS Wins by Vendor (color = fallback rate %)")
+            _fig_vendor.update_traces(textposition="outside")
+            _fig_vendor.update_layout(height=300, margin=dict(t=40,b=10,l=10,r=60))
+            st.plotly_chart(dark_chart(_fig_vendor), use_container_width=True)
+        with _a2c2:
+            st.dataframe(_naics_vendor_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Run with live Redshift connection to see vendor distribution.", icon="ℹ️")
+
+    detail_panel("🏭 A2 Vendor Distribution",
+        "Which vendor wins NAICS classification most often?",
+        what_it_means=(
+            "**Platform ID map (from integration-service):**\n\n"
+            "| ID | Vendor | Weight |\n|---|---|---|\n"
+            "| 16 | Middesk | default |\n"
+            "| 23 | OpenCorporates | default |\n"
+            "| 24 | ZoomInfo | default |\n"
+            "| 17 | Equifax | default |\n"
+            "| 31 | AI Enrichment | **0.1** (lowest) |\n"
+            "| 0 | User Submitted | **0.2** |\n\n"
+            "A high fallback_pct for a vendor means that vendor's match is returning 561499 often. "
+            "High AI Enrichment wins + high fallback = zero vendor signal coverage.\n\n"
+            "**Source:** `JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId')` from "
+            "`rds_warehouse_public.facts name='naics_code'`"
+        ),
+        source_table="rds_warehouse_public.facts name='naics_code' (source.platformId)",
+        sql=_sql_vendor if is_live else "-- Run with is_live=True",
+        icon="🏭", color="#8B5CF6")
+
+    # ── A3: NAICS-MCC Canonical Pair Check ────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 🔗 A3 — NAICS-MCC Canonical Pair Status")
+    st.caption(
+        "Checks whether the final NAICS-MCC pair is a known-valid combination in `rel_naics_mcc`. "
+        "Uses a pre-built canonical_pairs CTE (not a correlated subquery) to handle the 1-to-many "
+        "mapping correctly — a single NAICS can map to multiple valid MCCs. "
+        "Note: MCC is almost always derived from NAICS via `mcc_code_from_naics`, "
+        "so NAICS quality directly determines MCC quality."
+    )
+    if _naics_mcc_pair_df is not None and not _naics_mcc_pair_df.empty:
+        _a3c1, _a3c2 = st.columns([2,3])
+        _pair_colors = {
+            "Canonical Pair":"#22c55e","Fallback Pair":"#ef4444",
+            "Non-Canonical Pair":"#f59e0b","NAICS Missing":"#64748b","MCC Missing":"#475569"
+        }
+        with _a3c1:
+            _fig_pair = px.pie(_naics_mcc_pair_df, names="pair_status", values="businesses",
+                               hole=0.45, title="NAICS-MCC Pair Classification",
+                               color="pair_status", color_discrete_map=_pair_colors)
+            _fig_pair.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(_fig_pair), use_container_width=True)
+        with _a3c2:
+            st.dataframe(_naics_mcc_pair_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Run with live Redshift connection to see NAICS-MCC pair analysis.", icon="ℹ️")
+
+    detail_panel("🔗 A3 NAICS-MCC Canonical Pair",
+        "Is the NAICS-MCC combination valid per rel_naics_mcc?",
+        what_it_means=(
+            "**What 'canonical' means:**\n\n"
+            "A canonical pair is a NAICS + MCC combination officially recognized in "
+            "`rds_cases_public.rel_naics_mcc` — Worth's source of truth for valid NAICS-MCC mappings.\n\n"
+            "- NAICS `722511` (Full-Service Restaurants) + MCC `5812` (Eating Places) → **canonical** ✅\n"
+            "- NAICS `722511` (Full-Service Restaurants) + MCC `5045` (Computers) → **non-canonical** ⚠️\n\n"
+            "**Five pair statuses:**\n\n"
+            "| Status | Definition | Underwriting Implication |\n|---|---|---|\n"
+            "| Canonical Pair | Both codes exist AND combination is in `rel_naics_mcc` | ✅ Valid — proceed |\n"
+            "| Fallback Pair | NAICS=561499 or MCC=5614 — generic fallback defaults | 🔴 Unreliable — investigate |\n"
+            "| Non-Canonical Pair | Both exist but combination not in mapping | ⚠️ Review needed |\n"
+            "| NAICS Missing | No NAICS fact found | 🔴 No classification available |\n"
+            "| MCC Missing | No MCC fact found | ⚠️ MCC derivation failed |\n\n"
+            "**Why non-canonical pairs happen:**\n"
+            "1. Vendor returned codes from inconsistent sources (parent vs operating entity)\n"
+            "2. Niche industry not yet in the mapping table\n"
+            "3. User submitted a NAICS that doesn't match vendor-derived MCC\n"
+            "4. AI NAICS did not produce a matching MCC via `rel_naics_mcc` lookup\n\n"
+            "**Critical insight:** MCC is derived from NAICS via `mcc_code_from_naics` → "
+            "`internalGetNaicsCode(final_naics)` → `rel_naics_mcc` lookup. "
+            "If NAICS is wrong, MCC will also be wrong. Fix NAICS → fix MCC downstream.\n\n"
+            "**Source:** `rds_warehouse_public.facts name='naics_code'` + `name='mcc_code'` · "
+            "`rds_cases_public.rel_naics_mcc` · `rds_cases_public.core_naics_code` · `rds_cases_public.core_mcc_code`\n"
+            "**Key file:** `integration-service-main/lib/facts/businessDetails/index.ts:351-387`"
+        ),
+        source_table="rds_warehouse_public.facts + rds_cases_public.rel_naics_mcc",
+        sql=_sql_pair if is_live else "-- Run with is_live=True",
+        icon="🔗", color="#3B82F6")
+
+    # ── A3b: Non-Canonical Breakdown by Winner ─────────────────────────────────
+    st.markdown("##### 🔍 A3b — Non-Canonical Pairs: Who Won NAICS × Who Won MCC?")
+    st.caption(
+        "For businesses with a non-canonical NAICS-MCC pair: which vendor won the NAICS fact "
+        "AND which vendor won the MCC fact? Identifies whether user submissions or specific vendors "
+        "are driving the mismatch. Source: `source.platformId` from both `naics_code` and `mcc_code` facts."
+    )
+
+    _naics_noncanon_df = None
+    _sql_noncanon = _onboarded_cte + """
+,naics_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS naics_win_pid
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+),
+mcc_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_mcc,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS mcc_win_pid
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code' AND LENGTH(f.value)<60000
+),
+canonical_pairs AS (
+  SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+  FROM rds_cases_public.rel_naics_mcc r
+  JOIN rds_cases_public.core_naics_code nc ON nc.id=r.naics_id
+  JOIN rds_cases_public.core_mcc_code   mc ON mc.id=r.mcc_id
+),
+classified AS (
+  SELECT n.business_id, n.naics_win_pid, m.mcc_win_pid,
+    CASE
+      WHEN n.final_naics='561499' OR m.final_mcc='5614' THEN 'fallback_pair'
+      WHEN n.final_naics IS NULL OR n.final_naics=''     THEN 'naics_missing'
+      WHEN m.final_mcc   IS NULL OR m.final_mcc=''      THEN 'mcc_missing'
+      WHEN cp.naics_code IS NOT NULL                     THEN 'canonical_pair'
+      ELSE 'noncanonical_pair'
+    END AS pair_status
+  FROM naics_f n
+  LEFT JOIN mcc_f m           ON m.business_id  = n.business_id
+  LEFT JOIN canonical_pairs cp ON cp.naics_code = n.final_naics
+                               AND cp.mcc_code  = m.final_mcc
+)
+SELECT
+  CASE naics_win_pid
+    WHEN '23' THEN 'OpenCorporates' WHEN '17' THEN 'Equifax'
+    WHEN '24' THEN 'ZoomInfo'       WHEN '16' THEN 'Middesk'
+    WHEN '38' THEN 'Trulioo'        WHEN '31' THEN 'AI Enrichment'
+    WHEN '0'  THEN 'User Submitted' WHEN '-1' THEN 'Calculated'
+    ELSE 'Other (' || naics_win_pid || ')'
+  END AS naics_winner,
+  CASE mcc_win_pid
+    WHEN '23' THEN 'OpenCorporates' WHEN '17' THEN 'Equifax'
+    WHEN '24' THEN 'ZoomInfo'       WHEN '16' THEN 'Middesk'
+    WHEN '38' THEN 'Trulioo'        WHEN '31' THEN 'AI Enrichment'
+    WHEN '0'  THEN 'User Submitted' WHEN '-1' THEN 'Calculated'
+    ELSE 'Other (' || mcc_win_pid || ')'
+  END AS mcc_winner,
+  COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER (),2) AS pct
+FROM classified
+WHERE pair_status='noncanonical_pair'
+GROUP BY 1,2 ORDER BY businesses DESC;"""
+
+    if is_live:
+        _naics_noncanon_df, _ = run_sql(_sql_noncanon)
+
+    if _naics_noncanon_df is not None and not _naics_noncanon_df.empty:
+        _a3b_c1, _a3b_c2 = st.columns([3, 2])
+        with _a3b_c1:
+            # Heatmap-style: NAICS winner on Y, MCC winner as color label
+            _fig_nc = px.bar(_naics_noncanon_df, x="businesses", y="naics_winner",
+                             color="mcc_winner", text="businesses", orientation="h",
+                             title=f"Non-Canonical Pairs — NAICS Winner × MCC Winner ({_naics_noncanon_df['businesses'].sum():,} total)",
+                             barmode="stack")
+            _fig_nc.update_traces(textposition="inside")
+            _fig_nc.update_layout(height=320, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(_fig_nc), use_container_width=True)
+        with _a3b_c2:
+            st.dataframe(_naics_noncanon_df, use_container_width=True, hide_index=True)
+
+        # Analyst interpretation
+        _n_user_naics = int(_naics_noncanon_df[_naics_noncanon_df["naics_winner"]=="User Submitted"]["businesses"].sum()) \
+            if "User Submitted" in _naics_noncanon_df["naics_winner"].values else 0
+        _n_ai_naics   = int(_naics_noncanon_df[_naics_noncanon_df["naics_winner"]=="AI Enrichment"]["businesses"].sum()) \
+            if "AI Enrichment" in _naics_noncanon_df["naics_winner"].values else 0
+        _total_nc     = int(_naics_noncanon_df["businesses"].sum())
+
+        if _total_nc > 0:
+            st.markdown(f"""<div style="background:#1c1a2e;border-left:3px solid #a78bfa;
+                border-radius:6px;padding:10px 14px;margin:8px 0;font-size:.83rem;color:#cbd5e1">
+  <strong style="color:#a78bfa">📊 Analyst Interpretation:</strong><br/><br/>
+  Total non-canonical pairs: <strong>{_total_nc:,}</strong><br/>
+  User Submitted won NAICS: <strong>{_n_user_naics:,}</strong> ({round(100*_n_user_naics/max(_total_nc,1),1)}%) — 
+  {'⚠️ User input is a significant driver of mismatches — consider raising vendor weight' if _n_user_naics > _total_nc*0.2 else '✅ User submissions are NOT the primary driver of mismatches'}<br/>
+  AI Enrichment won NAICS: <strong>{_n_ai_naics:,}</strong> ({round(100*_n_ai_naics/max(_total_nc,1),1)}%) — 
+  {'⚠️ AI classification is producing inconsistent NAICS-MCC pairs — review AI enrichment quality' if _n_ai_naics > _total_nc*0.3 else '✅ AI Enrichment is NOT the primary driver'}<br/><br/>
+  <em>Note: MCC winner is often "Calculated (-1)" because MCC is derived from NAICS via 
+  <code>rel_naics_mcc</code> lookup, not directly provided by vendors.</em>
+</div>""", unsafe_allow_html=True)
+    elif is_live:
+        st.success("✅ No non-canonical NAICS-MCC pairs detected in this portfolio.", icon="✅")
+    else:
+        st.info("Run with live Redshift connection to see non-canonical pair breakdown.", icon="ℹ️")
+
+    detail_panel("🔍 A3b Non-Canonical Breakdown",
+        "Who drove the NAICS-MCC mismatch — user or vendor?",
+        what_it_means=(
+            "**Why this analysis matters:**\n\n"
+            "Non-canonical pairs mean NAICS and MCC both exist but their combination is not in "
+            "`rel_naics_mcc`. This breakdown identifies WHO is responsible:\n\n"
+            "| NAICS Winner | MCC Winner | Interpretation |\n|---|---|---|\n"
+            "| User Submitted | AI Enrichment / Calculated | User's NAICS + derived MCC don't match — "
+            "user may have entered an incorrect or niche code |\n"
+            "| AI Enrichment | Calculated | AI NAICS did not produce a canonical MCC via `rel_naics_mcc` "
+            "— AI quality issue |\n"
+            "| OpenCorporates | Calculated | OC NAICS is inconsistent with derived MCC — "
+            "possible OC data quality issue |\n"
+            "| Equifax | Calculated | Equifax NAICS does not map to a canonical MCC — "
+            "investigate Equifax data quality |\n\n"
+            "**MCC winner is usually Calculated (-1)** because MCC is almost never provided directly "
+            "by vendors — it is derived from NAICS via `mcc_code_from_naics` → "
+            "`internalGetNaicsCode(final_naics)` → `rel_naics_mcc` lookup.\n\n"
+            "**Action thresholds:**\n"
+            "- User Submitted > 20% of non-canonical: raise vendor weights or add user-input validation\n"
+            "- AI Enrichment > 30% of non-canonical: review AI prompt quality and `rel_naics_mcc` coverage\n\n"
+            "**Source:** `rds_warehouse_public.facts name='naics_code'` + `name='mcc_code'` (source.platformId) · "
+            "`rds_cases_public.rel_naics_mcc`"
+        ),
+        source_table="rds_warehouse_public.facts (naics_code + mcc_code source.platformId) + rds_cases_public.rel_naics_mcc",
+        sql=_sql_noncanon if is_live else "-- Run with is_live=True",
+        icon="🔍", color="#a78bfa")
+
+    # ── A3c: User NAICS in non-canonical — are they in the mapping? ────────────
+    st.markdown("---")
+    st.markdown("##### 🗂️ A3c — User-Submitted NAICS: Mapping Coverage Check")
+    st.caption(
+        "For user-won non-canonical pairs: are the user-submitted NAICS codes even present in "
+        "`rel_naics_mcc`? Surprising finding: 100% of top codes exist in the mapping — "
+        "the problem is NOT missing mapping entries."
+    )
+
+    _naics_user_mapping_df = None
+    _sql_user_mapping = _onboarded_cte + """
+,naics_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS naics_win_pid
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+),
+mcc_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_mcc
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code' AND LENGTH(f.value)<60000
+),
+canonical_pairs AS (
+  SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+  FROM rds_cases_public.rel_naics_mcc r
+  JOIN rds_cases_public.core_naics_code nc ON nc.id=r.naics_id
+  JOIN rds_cases_public.core_mcc_code   mc ON mc.id=r.mcc_id
+),
+classified AS (
+  SELECT n.business_id, n.final_naics
+  FROM naics_f n
+  LEFT JOIN mcc_f m            ON m.business_id  = n.business_id
+  LEFT JOIN canonical_pairs cp ON cp.naics_code  = n.final_naics
+                               AND cp.mcc_code   = m.final_mcc
+  WHERE (n.final_naics != '561499' OR n.final_naics IS NULL)
+    AND (m.final_mcc != '5614' OR m.final_mcc IS NULL)
+    AND n.final_naics IS NOT NULL AND n.final_naics != ''
+    AND m.final_mcc   IS NOT NULL AND m.final_mcc   != ''
+    AND cp.naics_code IS NULL
+    AND n.naics_win_pid = '0'
+),
+naics_in_mapping AS (
+  SELECT DISTINCT nc.code AS naics_code
+  FROM rds_cases_public.core_naics_code nc
+  JOIN rds_cases_public.rel_naics_mcc r ON r.naics_id = nc.id
+)
+SELECT c.final_naics AS user_naics, COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER(),2) AS pct,
+  CASE WHEN nim.naics_code IS NOT NULL THEN 'exists_in_mapping'
+       ELSE 'missing_from_mapping' END AS mapping_status
+FROM classified c
+LEFT JOIN naics_in_mapping nim ON nim.naics_code = c.final_naics
+GROUP BY c.final_naics, nim.naics_code ORDER BY businesses DESC LIMIT 30;"""
+
+    if is_live:
+        _naics_user_mapping_df, _ = run_sql(_sql_user_mapping)
+
+    if _naics_user_mapping_df is not None and not _naics_user_mapping_df.empty:
+        _n_exists = int((_naics_user_mapping_df["mapping_status"]=="exists_in_mapping").sum())
+        _n_missing = int((_naics_user_mapping_df["mapping_status"]=="missing_from_mapping").sum())
+        _3c1, _3c2, _3c3 = st.columns(3)
+        with _3c1: kpi("📋 Top 30 User NAICS", f"{len(_naics_user_mapping_df):,}", "non-canonical cases", "#3B82F6")
+        with _3c2: kpi("✅ Exists in Mapping", f"{_n_exists:,}", "codes in rel_naics_mcc", "#22c55e")
+        with _3c3: kpi("❌ Missing from Mapping", f"{_n_missing:,}", "codes NOT in rel_naics_mcc", "#ef4444")
+
+        _color_map = {"exists_in_mapping":"#22c55e","missing_from_mapping":"#ef4444"}
+        _fig_um = px.bar(_naics_user_mapping_df.head(20), x="businesses", y="user_naics",
+                         color="mapping_status", orientation="h", text="businesses",
+                         color_discrete_map=_color_map,
+                         title="Top 20 User NAICS in Non-Canonical Pairs (color = mapping status)")
+        _fig_um.update_traces(textposition="outside")
+        _fig_um.update_layout(height=480, showlegend=True, margin=dict(t=40,b=10,l=10,r=80))
+        st.plotly_chart(dark_chart(_fig_um), use_container_width=True)
+
+        if _n_missing == 0:
+            st.warning(
+                "⚠️ **Surprising finding:** All top user-submitted NAICS codes EXIST in `rel_naics_mcc`. "
+                "The problem is NOT missing mapping entries — see root causes below.",
+                icon="⚠️"
+            )
+
+    st.markdown("""<div style="background:#1c1a2e;border-left:3px solid #f59e0b;border-radius:6px;
+        padding:12px 16px;margin:8px 0;font-size:.83rem;color:#cbd5e1">
+  <strong style="color:#f59e0b">📊 Root Cause Analysis — Two Distinct Problems:</strong><br/><br/>
+  <strong>Root Cause 1 — Truncated NAICS inputs (~37% of user non-canonical cases)</strong><br/>
+  Users submit partial codes: <code>722</code> instead of <code>722511</code>, <code>81211</code> instead of <code>812111</code>.<br/>
+  The mapping has <code>722511 → 5812</code> but NOT <code>722 → 5812</code>.<br/>
+  Pattern: 3-digit spike (sector level) and 5-digit spike (one digit short). 4-digit very rare → intentional, not random typos.<br/>
+  <strong>Fix: Frontend validation enforcing exactly 6 digits.</strong><br/><br/>
+  <strong>Root Cause 2 — AI overrides canonical mapping (~63% of valid-6-digit cases)</strong><br/>
+  <code>mcc_code = mcc_code_found ?? mcc_code_from_naics</code><br/>
+  <code>??</code> means AI wins whenever it returns a result. AI fires on nearly every business → always overrides the canonical table.<br/>
+  For NAICS <code>811111</code>, AI returns 7 different MCCs across businesses (7531, 7539, 7542...) while canonical table says <code>7538</code>.<br/>
+  <strong>Fix: Swap priority — <code>inferredMcc?.value ?? foundMcc?.value</code> (canonical wins, AI is fallback).</strong>
+</div>""", unsafe_allow_html=True)
+
+    detail_panel("🗂️ A3c User NAICS Mapping Coverage",
+        "Are user-submitted NAICS codes in rel_naics_mcc?",
+        what_it_means=(
+            "**Surprising finding:** 100% of top user-submitted NAICS codes exist in `rel_naics_mcc`. "
+            "The problem is NOT a mapping coverage gap.\n\n"
+            "**Two root causes identified:**\n\n"
+            "**1. Truncated NAICS inputs (~37%):** Users submit partial codes (`722`, `81211`) that exist "
+            "in the mapping as full codes but not as partial codes. "
+            "Fix: `validation.ts` — enforce `value.length === 6`.\n\n"
+            "**2. AI overrides canonical (~63%):** `mcc_code = mcc_code_found ?? mcc_code_from_naics` "
+            "means AI always wins. AI returns context-dependent, non-deterministic MCCs that differ from "
+            "the canonical `rel_naics_mcc` mapping. Fix: swap to `inferredMcc?.value ?? foundMcc?.value`.\n\n"
+            "**Source:** `rds_warehouse_public.facts name='naics_code'` · `rds_cases_public.rel_naics_mcc`"
+        ),
+        source_table="rds_warehouse_public.facts + rds_cases_public.rel_naics_mcc",
+        sql=_sql_user_mapping if is_live else "-- Run with is_live=True",
+        icon="🗂️", color="#f59e0b")
+
+    # ── A3d: NAICS Length Distribution ────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 📏 A3d — User NAICS Code Length Distribution (Truncation Check)")
+    st.caption(
+        "How widespread is the truncated NAICS input problem? "
+        "Production finding: ~37% of user non-canonical cases are partial codes (2-5 digits). "
+        "Source: `rds_warehouse_public.facts name='naics_code'` + `LEN()` on user-submitted values."
+    )
+
+    _naics_length_df = None
+    _sql_length = _onboarded_cte + """
+,naics_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value')               AS final_naics,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS naics_win_pid
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000
+),
+mcc_f AS (
+  SELECT f.business_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_mcc
+  FROM rds_warehouse_public.facts f
+  JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code' AND LENGTH(f.value)<60000
+),
+canonical_pairs AS (
+  SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+  FROM rds_cases_public.rel_naics_mcc r
+  JOIN rds_cases_public.core_naics_code nc ON nc.id=r.naics_id
+  JOIN rds_cases_public.core_mcc_code   mc ON mc.id=r.mcc_id
+),
+user_noncanonical AS (
+  SELECT n.final_naics
+  FROM naics_f n
+  LEFT JOIN mcc_f m            ON m.business_id  = n.business_id
+  LEFT JOIN canonical_pairs cp ON cp.naics_code  = n.final_naics
+                               AND cp.mcc_code   = m.final_mcc
+  WHERE n.naics_win_pid = '0' AND cp.naics_code IS NULL
+    AND (n.final_naics != '561499' OR n.final_naics IS NULL)
+    AND (m.final_mcc   != '5614'   OR m.final_mcc IS NULL)
+    AND n.final_naics IS NOT NULL AND n.final_naics != ''
+    AND m.final_mcc   IS NOT NULL AND m.final_mcc   != ''
+)
+SELECT LEN(final_naics) AS naics_length, COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER(),2) AS pct,
+  CASE LEN(final_naics)
+    WHEN 6 THEN 'valid_6_digit'
+    WHEN 5 THEN 'truncated_5_digit'
+    WHEN 4 THEN 'truncated_4_digit'
+    WHEN 3 THEN 'truncated_3_digit'
+    WHEN 2 THEN 'truncated_2_digit'
+    ELSE 'other' END AS validity
+FROM user_noncanonical
+GROUP BY 1 ORDER BY businesses DESC;"""
+
+    if is_live:
+        _naics_length_df, _ = run_sql(_sql_length)
+
+    if _naics_length_df is not None and not _naics_length_df.empty:
+        _len_colors = {"valid_6_digit":"#22c55e","truncated_5_digit":"#f59e0b",
+                       "truncated_3_digit":"#ef4444","truncated_4_digit":"#f97316","truncated_2_digit":"#dc2626"}
+        _3d1, _3d2 = st.columns([2,3])
+        with _3d1:
+            _fig_len = px.bar(_naics_length_df, x="businesses", y="validity",
+                              orientation="h", text="pct", color="validity",
+                              color_discrete_map=_len_colors,
+                              title="NAICS Length Distribution (User Non-Canonical)")
+            _fig_len.update_traces(texttemplate="%{text}%", textposition="outside")
+            _fig_len.update_layout(height=280, showlegend=False, margin=dict(t=40,b=10,l=10,r=80))
+            st.plotly_chart(dark_chart(_fig_len), use_container_width=True)
+        with _3d2:
+            st.dataframe(_naics_length_df, use_container_width=True, hide_index=True)
+            _n_truncated = int(_naics_length_df[_naics_length_df["naics_length"]!=6]["businesses"].sum())
+            _n_valid6    = int(_naics_length_df[_naics_length_df["naics_length"]==6]["businesses"].sum())
+            _total_l     = int(_naics_length_df["businesses"].sum())
+            if _total_l > 0:
+                st.markdown(f"""<div style="background:#1c1a2e;border-left:3px solid #22c55e;
+                    border-radius:6px;padding:10px 14px;margin:8px 0;font-size:.82rem">
+  Truncated codes (< 6 digits): <strong>{_n_truncated:,}</strong> ({round(100*_n_truncated/max(_total_l,1),1)}%) — 
+  {'⚠️ Significant truncation problem — add frontend validation' if _n_truncated > _total_l*0.2 else '✅ Truncation is minor'}<br/>
+  Valid 6-digit but non-canonical: <strong>{_n_valid6:,}</strong> ({round(100*_n_valid6/max(_total_l,1),1)}%) — 
+  AI MCC override is the root cause (see A3e below)
+</div>""", unsafe_allow_html=True)
+    else:
+        st.info("Run with live Redshift connection to see NAICS length distribution.", icon="ℹ️")
+
+    detail_panel("📏 A3d NAICS Length Distribution",
+        "How many user-submitted NAICS codes are truncated (< 6 digits)?",
+        what_it_means=(
+            "**Production findings:**\n\n"
+            "- ~18.3% are 5-digit (e.g. `81211`, `32621`) — one digit short\n"
+            "- ~17.2% are 3-digit (e.g. `722`, `459`) — sector/subsector level\n"
+            "- ~62.7% are valid 6-digit — but still non-canonical due to AI MCC override\n"
+            "- 4-digit very rare → confirms intentional partial submission, not random typos\n\n"
+            "**Frontend fix (microsites/.../validation.ts):**\n"
+            "```typescript\n"
+            "// Current (too permissive):\nvalue.length >= 2 && value.length <= 6\n\n"
+            "// Fix:\nvalue.length === 6  // NAICS must be exactly 6 digits\n```\n\n"
+            "**Impact:** Fixing frontend validation eliminates ~37% of user non-canonical pairs.\n\n"
+            "**Source:** `rds_warehouse_public.facts name='naics_code'` `LEN()` on user-submitted values"
+        ),
+        source_table="rds_warehouse_public.facts name='naics_code' (user platformId=0)",
+        sql=_sql_length if is_live else "-- Run with is_live=True",
+        icon="📏", color="#f59e0b")
+
+    # ── A3e: AI vs Canonical MCC Divergence ───────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 🤖 A3e — AI vs Canonical MCC Divergence")
+    st.caption(
+        "For valid 6-digit user NAICS in non-canonical pairs: is the AI overriding the canonical table? "
+        "Production verdict: AI is responsible for 99.7% of valid-6-digit non-canonical pairs. "
+        "Root cause: `mcc_code = mcc_code_found ?? mcc_code_from_naics` — AI always wins."
+    )
+
+    _naics_ai_div_df = None
+    _sql_ai_div = _onboarded_cte + """
+,naics_f AS (SELECT f.business_id,
+  JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_naics,
+  JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS naics_win_pid
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='naics_code' AND LENGTH(f.value)<60000),
+mcc_f AS (SELECT f.business_id,
+  JSON_EXTRACT_PATH_TEXT(f.value,'value') AS final_mcc
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code' AND LENGTH(f.value)<60000),
+ai_mcc_f AS (SELECT f.business_id,
+  JSON_EXTRACT_PATH_TEXT(f.value,'value') AS ai_mcc
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code_found' AND LENGTH(f.value)<60000),
+canonical_derived_f AS (SELECT f.business_id,
+  JSON_EXTRACT_PATH_TEXT(f.value,'value') AS canonical_derived_mcc
+  FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id=f.business_id
+  WHERE f.name='mcc_code_from_naics' AND LENGTH(f.value)<60000),
+canonical_pairs AS (
+  SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+  FROM rds_cases_public.rel_naics_mcc r
+  JOIN rds_cases_public.core_naics_code nc ON nc.id=r.naics_id
+  JOIN rds_cases_public.core_mcc_code   mc ON mc.id=r.mcc_id
+),
+user_noncanonical_6 AS (
+  SELECT n.final_naics, m.final_mcc AS actual_mcc, ai.ai_mcc, cd.canonical_derived_mcc
+  FROM naics_f n
+  LEFT JOIN mcc_f m              ON m.business_id  = n.business_id
+  LEFT JOIN ai_mcc_f ai          ON ai.business_id = n.business_id
+  LEFT JOIN canonical_derived_f cd ON cd.business_id = n.business_id
+  LEFT JOIN canonical_pairs cp   ON cp.naics_code  = n.final_naics AND cp.mcc_code = m.final_mcc
+  WHERE n.naics_win_pid='0' AND cp.naics_code IS NULL AND LEN(n.final_naics)=6
+    AND n.final_naics != '561499'
+    AND (m.final_mcc != '5614' OR m.final_mcc IS NULL)
+    AND n.final_naics IS NOT NULL AND n.final_naics != ''
+    AND m.final_mcc   IS NOT NULL AND m.final_mcc   != ''
+)
+SELECT
+  CASE
+    WHEN ai_mcc IS NOT NULL AND ai_mcc = actual_mcc      THEN 'AI_won_over_canonical'
+    WHEN ai_mcc IS NULL AND canonical_derived_mcc = actual_mcc THEN 'canonical_derived_only'
+    WHEN ai_mcc IS NOT NULL AND canonical_derived_mcc IS NOT NULL
+      AND ai_mcc != canonical_derived_mcc                THEN 'AI_and_canonical_disagree'
+    ELSE 'other'
+  END AS derivation_scenario,
+  COUNT(*) AS businesses,
+  ROUND(100.0*COUNT(*)/SUM(COUNT(*)) OVER(),2) AS pct
+FROM user_noncanonical_6
+GROUP BY 1 ORDER BY businesses DESC;"""
+
+    if is_live:
+        _naics_ai_div_df, _ = run_sql(_sql_ai_div)
+
+    if _naics_ai_div_df is not None and not _naics_ai_div_df.empty:
+        _3e1, _3e2 = st.columns([2,3])
+        _div_colors = {"AI_won_over_canonical":"#ef4444","canonical_derived_only":"#22c55e",
+                       "AI_and_canonical_disagree":"#f59e0b","other":"#64748b"}
+        with _3e1:
+            _fig_div = px.pie(_naics_ai_div_df, names="derivation_scenario", values="businesses",
+                              hole=0.45, title="MCC Derivation Scenario",
+                              color="derivation_scenario", color_discrete_map=_div_colors)
+            _fig_div.update_layout(height=260, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(_fig_div), use_container_width=True)
+        with _3e2:
+            st.dataframe(_naics_ai_div_df, use_container_width=True, hide_index=True)
+            _ai_won = int(_naics_ai_div_df[_naics_ai_div_df["derivation_scenario"]=="AI_won_over_canonical"]["businesses"].sum())
+            _total_e = int(_naics_ai_div_df["businesses"].sum())
+            if _ai_won > _total_e * 0.5:
+                st.error(
+                    f"🔴 **AI is overriding canonical table for {round(100*_ai_won/max(_total_e,1),1)}% of cases.** "
+                    f"Root cause: `mcc_code = mcc_code_found ?? mcc_code_from_naics` (AI wins by default). "
+                    f"**Fix:** Swap to `inferredMcc?.value ?? foundMcc?.value` in `businessDetails/index.ts`.",
+                    icon="🔴"
+                )
+    else:
+        st.info("Run with live Redshift connection to see AI vs canonical divergence.", icon="ℹ️")
+
+    detail_panel("🤖 A3e AI vs Canonical MCC",
+        "Is the AI overriding the canonical rel_naics_mcc table?",
+        what_it_means=(
+            "**The MCC priority chain (businessDetails/index.ts:427-431):**\n"
+            "```typescript\n// Three internal MCC facts, all platformId=-1:\n"
+            "mcc_code_found        = AI NAICS Enrichment (OpenAI gpt-4o-mini)\n"
+            "mcc_code_from_naics   = rel_naics_mcc canonical lookup\n"
+            "mcc_code (final)      = mcc_code_found ?? mcc_code_from_naics\n\n"
+            "// ?? means: AI wins whenever it returns a result\n```\n\n"
+            "**Production verdict:** AI responsible for ~99.7% of valid-6-digit non-canonical pairs.\n\n"
+            "**Fix (1-line change in businessDetails/index.ts):**\n"
+            "```typescript\n// Current (AI wins):\nreturn foundMcc?.value ?? inferredMcc?.value;\n\n"
+            "// Fix (canonical wins, AI is fallback):\nreturn inferredMcc?.value ?? foundMcc?.value;\n```\n\n"
+            "**Impact:** This single change fixes ~63% of all valid-NAICS non-canonical pairs.\n\n"
+            "**Source:** `rds_warehouse_public.facts name='mcc_code_found'` (AI) · "
+            "`name='mcc_code_from_naics'` (canonical) · `name='mcc_code'` (final)\n"
+            "**Key file:** `integration-service/lib/facts/businessDetails/index.ts:427-431`"
+        ),
+        source_table="rds_warehouse_public.facts name='mcc_code_found' + 'mcc_code_from_naics'",
+        sql=_sql_ai_div if is_live else "-- Run with is_live=True",
+        icon="🤖", color="#ef4444")
+
+    # ── A4: Pairwise Vendor Concordance ────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 🤝 A4 — Pairwise Vendor Concordance (OC vs Equifax)")
+    st.caption(
+        "When OpenCorporates and Equifax both provide a NAICS candidate for the same business, "
+        "how often do they agree? Parsed from `alternatives[]` array in `rds_warehouse_public.facts`. "
+        "Coverage gaps split: `oc_null_equifax_found` vs `oc_found_equifax_null` — shows which vendor "
+        "has better industry data coverage."
+    )
+    if _naics_concordance_df is not None and not _naics_concordance_df.empty:
+        _conc_color = {
+            "exact_6_digit":"#22c55e","same_4_digit_group":"#84cc16",
+            "same_3_digit_subsector":"#f59e0b","same_2_digit_sector":"#f97316",
+            "different_sector":"#ef4444","both_null":"#64748b",
+            "oc_null_equifax_found":"#475569","oc_found_equifax_null":"#334155"
+        }
+        _a4c1, _a4c2 = st.columns([3,2])
+        with _a4c1:
+            _fig_conc = px.bar(_naics_concordance_df, x="businesses", y="concordance_level",
+                               orientation="h", text="businesses",
+                               color="concordance_level", color_discrete_map=_conc_color,
+                               title="OC vs Equifax — NAICS Concordance Level")
+            _fig_conc.update_traces(textposition="outside")
+            _fig_conc.update_layout(height=340, showlegend=False, margin=dict(t=40,b=10,l=10,r=80))
+            st.plotly_chart(dark_chart(_fig_conc), use_container_width=True)
+        with _a4c2:
+            st.dataframe(_naics_concordance_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Run with live Redshift connection to see vendor concordance.", icon="ℹ️")
+
+    detail_panel("🤝 A4 Vendor Concordance",
+        "Do OpenCorporates and Equifax agree on NAICS?",
+        what_it_means=(
+            "**Concordance levels (OC vs Equifax):**\n\n"
+            "| Level | Meaning | Action |\n|---|---|---|\n"
+            "| both_null | Neither vendor has NAICS | Pure AI/user fallback — investigate coverage |\n"
+            "| oc_null_equifax_found | Only Equifax has NAICS | OC coverage gap |\n"
+            "| oc_found_equifax_null | Only OC has NAICS | Equifax coverage gap |\n"
+            "| exact_6_digit | Full agreement | High trust — strong signal |\n"
+            "| same_4_digit_group | Same industry group | Acceptable |\n"
+            "| same_3_digit_subsector | Same subsector | Acceptable with review |\n"
+            "| same_2_digit_sector | Same broad sector | Detail conflict — investigate |\n"
+            "| different_sector | Completely different | Material conflict — flag for review |\n\n"
+            "**SQL approach:** Positional `JSON_EXTRACT_PATH_TEXT` on `alternatives[0..4]` — "
+            "same pattern as `_load_sos_filings_for_bids`. Each alternative has "
+            "`source.platformId` extracted via nested path "
+            "`'alternatives','N','source','platformId'`.\n\n"
+            "**Source:** `rds_warehouse_public.facts name='naics_code'` alternatives[] array"
+        ),
+        source_table="rds_warehouse_public.facts name='naics_code' (alternatives[])",
+        sql=_sql_concordance if is_live else "-- Run with is_live=True",
+        icon="🤝", color="#f59e0b")
+
+    # ── A5: User vs Vendor Override ─────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 👤 A5 — User vs Vendor Override Analysis")
+    st.caption(
+        "When a user submits a NAICS code (platformId=0, businessDetails source, weight=0.2), "
+        "how often does a vendor override it? Parsed from `alternatives[]` for platformId=0. "
+        "Four outcomes: user_won / user_overridden / user_agreed_with_winner / no_user_submission."
+    )
+    if _user_override_df is not None and not _user_override_df.empty:
+        _a5c1, _a5c2 = st.columns([2,3])
+        _override_colors = {
+            "user_won":"#22c55e","user_agreed_with_winner":"#84cc16",
+            "user_overridden":"#ef4444","no_user_submission":"#64748b"
+        }
+        with _a5c1:
+            _fig_ov = px.pie(_user_override_df, names="override_status", values="businesses",
+                             hole=0.45, title="User NAICS Submission Outcomes",
+                             color="override_status", color_discrete_map=_override_colors)
+            _fig_ov.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
+            st.plotly_chart(dark_chart(_fig_ov), use_container_width=True)
+        with _a5c2:
+            st.dataframe(_user_override_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("Run with live Redshift connection to see user override analysis.", icon="ℹ️")
+
+    # ── A5b: Override by Winner Vendor ─────────────────────────────────────────
+    if _user_override_vendor_df is not None and not _user_override_vendor_df.empty:
+        st.markdown("**↳ When user was overridden or agreed — which vendor won?**")
+        _a5b_overridden = _user_override_vendor_df[_user_override_vendor_df["override_status"]=="user_overridden"]
+        _a5b_agreed     = _user_override_vendor_df[_user_override_vendor_df["override_status"]=="user_agreed_with_winner"]
+        _a5b_c1, _a5b_c2 = st.columns(2)
+        with _a5b_c1:
+            if not _a5b_overridden.empty:
+                _fig_ov2 = px.bar(_a5b_overridden, x="businesses", y="winner_vendor",
+                                  orientation="h", text="businesses",
+                                  color_discrete_sequence=["#ef4444"],
+                                  title="User Overridden — by Which Vendor")
+                _fig_ov2.update_traces(textposition="outside")
+                _fig_ov2.update_layout(height=250, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
+                st.plotly_chart(dark_chart(_fig_ov2), use_container_width=True)
+            else:
+                st.success("No user override cases found.", icon="✅")
+        with _a5b_c2:
+            if not _a5b_agreed.empty:
+                _fig_ov3 = px.bar(_a5b_agreed, x="businesses", y="winner_vendor",
+                                  orientation="h", text="businesses",
+                                  color_discrete_sequence=["#22c55e"],
+                                  title="User Agreed with Winner — by Which Vendor")
+                _fig_ov3.update_traces(textposition="outside")
+                _fig_ov3.update_layout(height=250, showlegend=False, margin=dict(t=40,b=10,l=10,r=60))
+                st.plotly_chart(dark_chart(_fig_ov3), use_container_width=True)
+            else:
+                st.success("No user-agreed cases found.", icon="✅")
+        st.dataframe(_user_override_vendor_df, use_container_width=True, hide_index=True)
+
+    detail_panel("👤 A5 User Override",
+        "How often do vendors override user-submitted NAICS?",
+        what_it_means=(
+            "**User-submitted NAICS** is `businessDetails` source (platformId=0) with weight=0.2. "
+            "It appears in `alternatives[]` when a vendor wins, or as the main value when user wins.\n\n"
+            "**Four outcomes:**\n\n"
+            "| Status | Meaning |\n|---|---|\n"
+            "| user_won | User's NAICS had highest score — accepted as final |\n"
+            "| user_overridden | User submitted but vendor scored higher — user NAICS ignored |\n"
+            "| user_agreed_with_winner | User submitted the same value as the winning vendor |\n"
+            "| no_user_submission | User did not submit a NAICS |\n\n"
+            "**Override breakdown by winner vendor** shows which vendor is most often responsible "
+            "for overriding user input. If AI Enrichment frequently overrides users, "
+            "the user weight (0.2) may be too low relative to AI weight (0.1).\n\n"
+            "**Source:** `rds_warehouse_public.facts name='naics_code'` — "
+            "winner `source.platformId` + `alternatives[].source` (platformId=0 = user)\n"
+            "**Key file:** `integration-service-main/lib/facts/businessDetails/index.ts:322` (weight=0.2)"
+        ),
+        source_table="rds_warehouse_public.facts name='naics_code' (alternatives[] platformId=0)",
+        sql=_sql_override if is_live else "-- Run with is_live=True",
+        icon="👤", color="#f97316")
+
+    # ── Existing anomaly rules (G5) ────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### ⚠️ Anomaly Rules — NAICS Classification Gaps")
     _group_chart_and_drilldowns(_G5_KEYS, "NAICS — Classification Anomalies by Rule", _NAICS_AN_COLS, "g5")
     for _akey in _G5_KEYS:
         _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
@@ -11277,10 +11789,10 @@ ORDER BY avg_impact_pts ASC;"""
         st.success("✅ No NAICS classification anomalies detected.", icon="✅")
 
     # ════════════════════════════════════════════════════════════════════════
-    # 6.6  GROUP 6: RISK SIGNAL COMBINATIONS
+    # 6.3  RISK SIGNAL COMBINATIONS
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("#### 6.6  Risk Signal Combinations")
+    st.markdown("#### 6.3  Risk Signal Combinations")
     st.caption("Cross-signal risk combinations where two or more adverse signals co-occur — "
                "the severity of each signal amplifies the other.")
 
@@ -11325,402 +11837,36 @@ ORDER BY avg_impact_pts ASC;"""
     if not any(_an.get(k) for k in _G6_KEYS):
         st.success("✅ No high-severity risk signal combinations detected.", icon="✅")
 
-    # ════════════════════════════════════════════════════════════════════════
-    # 6.7  GROUP 7: WORTH SCORE ANOMALIES (S5 × KYB signals)
-    # ════════════════════════════════════════════════════════════════════════
-    st.markdown("---")
-    st.markdown("#### 6.7  Worth Score Anomalies — Score vs KYB Signal Consistency")
-    st.caption("Where the ML model decision (APPROVE/DECLINE) is inconsistent with the KYB signal picture. "
-               "The score is not wrong — but these businesses need an additional human review layer.")
-
-    _WS_AN_COLS = ["sos_match_boolean","sos_active","tin_match","tin_match_status",
-                   "naics_code","watchlist_hits","num_bankruptcies","revenue","formation_state"]
-    _G7_KEYS = ["g7_approve_sos_inactive","g7_decline_kyb_clean","g7_not_scored"]
-
-    # Score vs KYB purity chart
-    if _home_ws is not None and not _home_ws.empty and not _sdf.empty:
-        _ws_dec = _home_ws_clean[["business_id","score_decision","weighted_score_850"]].copy() if not _home_ws_clean.empty else pd.DataFrame()
-        if not _ws_dec.empty:
-            _scored_bids_set = set(_ws_dec["business_id"].tolist())
-            # KYB purity per business
-            def _kyb_purity(bid):
-                _r = _sdf[_sdf["business_id"]==bid]
-                if _r.empty: return "Unknown"
-                _sos = str(_r["sos_active"].iloc[0] if "sos_active" in _r.columns else "").lower()
-                _tin = str(_r["tin_match"].iloc[0] if "tin_match" in _r.columns else "").lower()
-                _wl  = pd.to_numeric(_r["watchlist_hits"].iloc[0] if "watchlist_hits" in _r.columns else 0, errors="coerce") or 0
-                _bk  = pd.to_numeric(_r["num_bankruptcies"].iloc[0] if "num_bankruptcies" in _r.columns else 0, errors="coerce") or 0
-                if _wl > 0 or _bk > 0: return "KYB Critical"
-                if _sos=="false" or _tin=="false": return "KYB Issues"
-                if _sos=="true" and _tin=="true": return "KYB Clean"
-                return "KYB Partial"
-            _ws_dec["KYB Purity"] = _ws_dec["business_id"].map(_kyb_purity)
-            _ws_purity_ct = _ws_dec.groupby(["score_decision","KYB Purity"]).size().reset_index(name="Businesses")
-            _wsc1, _wsc2 = st.columns([1.5, 1])
-            with _wsc1:
-                fig_ws_purity = px.bar(
-                    _ws_purity_ct, x="score_decision", y="Businesses",
-                    color="KYB Purity", barmode="stack",
-                    color_discrete_map={"KYB Clean":"#22c55e","KYB Partial":"#f59e0b",
-                                        "KYB Issues":"#f97316","KYB Critical":"#ef4444","Unknown":"#64748b"},
-                    title="Score Decision × KYB Purity",
-                    category_orders={"score_decision":["APPROVE","FURTHER_REVIEW_NEEDED","DECLINE"]},
-                )
-                fig_ws_purity.update_layout(height=280, margin=dict(t=40,b=10,l=10,r=10))
-                st.plotly_chart(dark_chart(fig_ws_purity), use_container_width=True)
-            with _wsc2:
-                # Score distribution for APPROVE + KYB Critical
-                _crit_approve = _ws_dec[(_ws_dec["score_decision"]=="APPROVE") & (_ws_dec["KYB Purity"]=="KYB Critical")]
-                if not _crit_approve.empty:
-                    st.markdown(f"""<div style="background:#1E293B;border-left:4px solid #ef4444;border-radius:8px;padding:10px 14px;margin:4px 0">
-                      <div style="color:#ef4444;font-weight:700;font-size:.84rem">🔴 CRITICAL: {len(_crit_approve):,} APPROVE + KYB Critical</div>
-                      <div style="color:#CBD5E1;font-size:.76rem;margin-top:4px">These businesses scored APPROVE (≥700) but have watchlist hits or bankruptcies. Compliance review required regardless of score.</div>
-                    </div>""", unsafe_allow_html=True)
-                _decline_clean = _ws_dec[(_ws_dec["score_decision"]=="DECLINE") & (_ws_dec["KYB Purity"]=="KYB Clean")]
-                if not _decline_clean.empty:
-                    st.markdown(f"""<div style="background:#1E293B;border-left:4px solid #f97316;border-radius:8px;padding:10px 14px;margin:4px 0">
-                      <div style="color:#f97316;font-weight:700;font-size:.84rem">🟠 {len(_decline_clean):,} DECLINE + KYB Clean</div>
-                      <div style="color:#CBD5E1;font-size:.76rem;margin-top:4px">Score declined but all KYB checks pass. Decline is driven by missing financial data (no Plaid). Manual review candidate.</div>
-                    </div>""", unsafe_allow_html=True)
-
-    _group_chart_and_drilldowns(_G7_KEYS, "Worth Score Anomalies — by Rule", _WS_AN_COLS, "g7")
-    for _akey in _G7_KEYS:
-        _m = _an_meta.get(_akey,{}); _bids = _an.get(_akey,[])
-        if not _bids: continue
-        _seg[_akey] = _bids
-        _SEG_CALC[_akey] = f"**{_m['title']}**\n\n{_m['desc']}\n\n**Action:** {_m['action']}\n\n**Source:** `{_m['source']}`"
-        _anomaly_card(_m["title"], len(_bids), total_biz, _m["severity"], _m["desc"], _akey, _WS_AN_COLS, meta=_m)
-
-    # ════════════════════════════════════════════════════════════════════════
-    # 6.8  ANOMALY ACCUMULATION TRIAGE
-    # ════════════════════════════════════════════════════════════════════════
-    st.markdown("---")
-    st.markdown("#### 6.8  Anomaly Accumulation Triage — Portfolio Synthesis")
-    st.caption(
-        "Per-business anomaly count (weighted by severity: CRITICAL=4, HIGH=3, MEDIUM=2, NOTICE/LOW=1). "
-        "Distinct from Section 4 Red Flag score — this ranking is based on structural KYB "
-        "data consistency failures, not risk signal scores."
-    )
-
-    # Shared columns for all 6.8 drilldown tables
-    _S6_COLS = [
-        "sos_match_boolean","sos_match_status","sos_active",
-        "sos_match_verif","sos_domestic_verif",
-        "formation_state","tin_submitted","tin_match_status","tin_match",
-        "idv_passed","naics_code","watchlist_hits","num_bankruptcies","num_judgements","num_liens",
-    ]
+    # _ALL_AN_KEYS: all anomaly keys across G4+G5+G6 registered in _an_meta above
     _ALL_AN_KEYS = list(_an_meta.keys())
 
-    if not _biz_score_df.empty and _biz_score_df["anomaly_score"].max() > 0:
+    # ── Top 10 most anomalous businesses ──────────────────────────────────
+    st.markdown("---")
+    st.markdown("##### 🔴 Top 10 Highest-Anomaly Businesses (by weighted score)")
+    st.caption("Ranked by weighted anomaly score (CRITICAL=4, HIGH=3, MEDIUM=2, LOW/NOTICE=1). "
+               "Distinct from Section 4 Red Flag ranking — this reflects structural KYB data inconsistencies.")
 
-        # ── Histogram + per-band drilldowns ──────────────────────────────────
-        st.markdown("##### 📊 Per-Business Anomaly Count Distribution")
-        st.caption("Each bar = number of businesses with that many simultaneous anomalies. "
-                   "Expand each bar's drilldown to see which businesses and which anomalies they trigger.")
-
-        _hist_df = _biz_score_df.groupby("anomaly_count")["business_id"].count().reset_index()
-        _hist_df.columns = ["Anomaly Count","Businesses"]
-        _band_colors = {0:"#22c55e",1:"#f59e0b",2:"#f97316",3:"#ef4444",4:"#7f1d1d"}
-        _hist_df["Color"] = _hist_df["Anomaly Count"].map(lambda x: _band_colors.get(min(x,4),"#7f1d1d"))
-        _cmap = dict(zip(_hist_df["Anomaly Count"].astype(str), _hist_df["Color"]))
-        fig_hist = px.bar(
-            _hist_df, x="Anomaly Count", y="Businesses",
-            title="Per-Business Anomaly Count Distribution",
-            color=_hist_df["Anomaly Count"].astype(str),
-            color_discrete_map=_cmap,
-            text="Businesses"
-        )
-        fig_hist.update_traces(textposition="outside")
-        fig_hist.update_layout(height=320, margin=dict(t=40,b=10,l=10,r=10), showlegend=False)
-        st.plotly_chart(dark_chart(fig_hist), use_container_width=True)
-
-        # ── Per-band drilldown expanders ──────────────────────────────────────
-        for _band_n, _band_row in _hist_df.iterrows():
-            _cnt = int(_band_row["Anomaly Count"])
-            _n_biz = int(_band_row["Businesses"])
-            _bids_in_band = _biz_score_df[_biz_score_df["anomaly_count"]==_cnt]["business_id"].tolist()
-            _col = _band_colors.get(min(_cnt,4),"#7f1d1d")
-            _label_map = {0:"✅ Structurally Clean",1:"⚠️ 1 Anomaly — Isolated Issue",
-                          2:"🟠 2 Anomalies — Compounded Risk",3:"🔴 3 Anomalies — High Concern"}
-            _band_label = _label_map.get(_cnt,f"🔴 {_cnt} Anomalies — Systematic Failure")
-
-            with st.expander(
-                f"👁️ Show {_n_biz:,} businesses with exactly {_cnt} anomal{'y' if _cnt==1 else 'ies'} — {_band_label}",
-                expanded=False
-            ):
-                # ⚙️ How this band is calculated
-                st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_col};
-                    border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
-                  <span style="color:#a78bfa;font-weight:700">⚙️ What 'exactly {_cnt} anomal{'y' if _cnt==1 else 'ies'}' means</span>
-                </div>""", unsafe_allow_html=True)
-                st.markdown(
-                    f"These {_n_biz:,} businesses each trigger exactly **{_cnt}** of the 20 deterministic "
-                    f"cross-field rules evaluated across Groups 1–7. "
-                    f"**Weighted score per business:** each anomaly is weighted by severity "
-                    f"(CRITICAL=4 · HIGH=3 · MEDIUM=2 · NOTICE/LOW=1). "
-                    f"A business with {_cnt} anomaly/ies can have a weighted score ranging from "
-                    f"{_cnt}–{_cnt*4} points depending on severity mix.\n\n"
-                    f"**Anomaly count ≠ Red Flag score (Section 4).** "
-                    f"Red Flags measure risk signals (watchlist, BK, etc.). "
-                    f"This count measures structural KYB data consistency failures."
-                )
-                st.markdown("---")
-
-                # Table of businesses in this band + their anomaly flags + key signals
-                if _bids_in_band:
-                    _band_tbl = _biz_score_df[_biz_score_df["business_id"].isin(_bids_in_band)][
-                        ["business_id","anomaly_score","anomaly_count"]
-                    ].copy()
-                    # Add which anomalies each business triggers
-                    for _ak in _ALL_AN_KEYS:
-                        _band_tbl[_an_meta[_ak]["title"][:18]] = _band_tbl["business_id"].isin(
-                            _an.get(_ak,[])
-                        ).map({True:"✅",False:""})
-                    _band_tbl = _band_tbl.rename(columns={"anomaly_score":"Weighted Score","anomaly_count":"# Anomalies"})
-                    # Only show anomaly columns that have at least one ✅ in this band
-                    _vis_cols = ["business_id","Weighted Score","# Anomalies"] + [
-                        c for c in _band_tbl.columns
-                        if c not in ("business_id","Weighted Score","# Anomalies")
-                        and (_band_tbl[c]=="✅").any()
-                    ]
-                    st.dataframe(_band_tbl[_vis_cols], use_container_width=True, hide_index=True)
-
-                    # Key signals from stats_df for this band
-                    if stats_df is not None and not stats_df.empty:
-                        _sig_sub = stats_df[stats_df["business_id"].isin(_bids_in_band)][
-                            ["business_id"] + [c for c in _S6_COLS if c in stats_df.columns]
-                        ].copy()
-                        _sig_sub = _sig_sub.rename(columns={
-                            "sos_match_boolean":"SOS Match Bool","sos_match_status":"SOS Match Status",
-                            "sos_active":"SOS Active","sos_match_verif":"sos_match_verif(0/1)",
-                            "sos_domestic_verif":"sos_domestic_verif(0/1)",
-                            "formation_state":"Formation State","tin_submitted":"TIN Submitted",
-                            "tin_match_status":"TIN Match Status","tin_match":"TIN Match Bool",
-                            "idv_passed":"IDV Passed","naics_code":"NAICS Code",
-                            "watchlist_hits":"Watchlist Hits","num_bankruptcies":"Bankruptcies",
-                            "num_judgements":"Judgements","num_liens":"Liens",
-                        })
-                        if not _sig_sub.empty:
-                            st.markdown("**Key KYB signals for this band:**")
-                            st.dataframe(_sig_sub, use_container_width=True, hide_index=True)
-
-                    # Download
-                    _dl = pd.DataFrame({"business_id":_bids_in_band}).to_csv(index=False).encode()
-                    st.download_button(
-                        f"⬇️ Download {_n_biz} business IDs (CSV)",
-                        _dl, f"anomaly_band_{_cnt}.csv", "text/csv",
-                        key=f"dl_band_{_cnt}"
-                    )
-
-                    # Investigate buttons for this band
-                    st.caption("Click 🔍 Investigate to set a business ID, then switch to any entity tab.")
-                    _investigate_rows(_bids_in_band, _biz_score, _biz_flags_s6,
-                                      context_label=_band_label, key_prefix=f"band{_cnt}")
-
-            # detail_panel must be OUTSIDE st.expander — Streamlit forbids nested expanders
-            detail_panel(
-                f"📊 Anomaly Band: {_cnt} anomal{'y' if _cnt==1 else 'ies'} — {_n_biz:,} businesses",
-                f"{_n_biz:,} businesses · {_n_biz/max(total_biz,1)*100:.1f}% of portfolio · {_band_label}",
-                what_it_means=(
-                    f"**Band definition:** Businesses with exactly {_cnt} simultaneous "
-                    f"cross-field KYB anomalies detected by the 20 deterministic rules.\n\n"
-                    f"**Severity interpretation:**\n"
-                    f"- 0 anomalies → structurally clean, no cross-field contradictions\n"
-                    f"- 1 anomaly → isolated issue, typically resolvable with one action\n"
-                    f"- 2–3 anomalies → compounded risk, needs investigation before decision\n"
-                    f"- 4+ anomalies → systematic KYB failure, full manual review required\n\n"
-                    f"**Weighted score range for {_cnt} anomal{'y' if _cnt==1 else 'ies'}:** "
-                    f"{_cnt}–{_cnt*4} points\n\n"
-                    f"**Rules evaluated:** 20 deterministic rules across 7 groups "
-                    f"(check_agent_v2.DETERMINISTIC_CHECKS). Zero LLM. Zero new Redshift queries."
-                ),
-                source_table="stats_df · funnel_df (already in memory — zero new queries)",
-                source_file="check_agent_v2.py (DETERMINISTIC_CHECKS)",
-                json_obj={
-                    "band_anomaly_count": _cnt,
-                    "businesses_in_band": _n_biz,
-                    "pct_of_portfolio": f"{_n_biz/max(total_biz,1)*100:.1f}%",
-                    "business_ids": _bids_in_band[:10],
-                    "severity_label": _band_label,
-                },
-                icon="📊", color=_col
-            )
-
-        # ── Top 10 most anomalous businesses ──────────────────────────────────
-        st.markdown("---")
-        st.markdown("##### 🔴 Top 10 Highest-Anomaly Businesses (by weighted score)")
-        st.caption("Ranked by weighted anomaly score (CRITICAL=4, HIGH=3, MEDIUM=2, LOW/NOTICE=1). "
-                   "Distinct from Section 4 Red Flag ranking — this reflects structural KYB data inconsistencies.")
-
+    if not _biz_score_df.empty:
         _top10 = _biz_score_df[_biz_score_df["anomaly_score"]>0].head(10).copy()
         for _ak in _ALL_AN_KEYS:
             _top10[_ak] = _top10["business_id"].isin(_an.get(_ak,[])).map({True:"✅",False:""})
 
-        _display_cols = ["business_id","anomaly_score","anomaly_count"] + [
+        # Exclude Weighted Score and # Anomalies columns — show only business_id + anomaly flags
+        # Use full anomaly title (no truncation) so column names are readable
+        _display_cols = ["business_id"] + [
             k for k in _ALL_AN_KEYS if _top10[k].any()
         ]
         _col_rename = {
-            k: _an_meta[k]["title"][:20]+"…" if len(_an_meta[k]["title"])>20 else _an_meta[k]["title"]
+            k: _an_meta[k]["title"]  # full title, no truncation
             for k in _ALL_AN_KEYS if k in _display_cols
         }
-        _col_rename.update({"anomaly_score":"Weighted Score","anomaly_count":"# Anomalies"})
         _top10_disp = _top10[[c for c in _display_cols if c in _top10.columns]].rename(columns=_col_rename)
-        st.dataframe(_top10_disp, use_container_width=True, hide_index=True)
+        st.dataframe(_top10_disp, use_container_width=True, hide_index=True,
+                     column_config={"business_id": st.column_config.TextColumn("Business ID", width="medium")})
 
         # Per-business investigate rows — full UUID + score + anomaly names + button
         st.caption("Each row: full UUID · weighted score · triggered anomalies · 🔍 Investigate button")
         _investigate_rows(_top10["business_id"].tolist(), _biz_score, _biz_flags_s6, key_prefix="top10_s6")
-
-        # ── Co-occurrence heatmap + per-cell drilldowns ───────────────────────
-        st.markdown("---")
-        st.markdown("##### 🔥 Anomaly Co-Occurrence Heatmap")
-        st.caption(
-            "Diagonal = individual anomaly count (businesses triggering that anomaly). "
-            "Off-diagonal = businesses triggering BOTH anomalies simultaneously. "
-            "Expand any combination below the heatmap to see which businesses and why."
-        )
-
-        _active_keys = [k for k in _ALL_AN_KEYS if _an.get(k)]
-        if len(_active_keys) >= 2:
-            _biz_set = {k: set(_an.get(k,[])) for k in _active_keys}
-            _cooc_data = {}
-            for _k1 in _active_keys:
-                for _k2 in _active_keys:
-                    _cooc_data[(_k1,_k2)] = _biz_set[_k1] & _biz_set[_k2]
-
-            _cooc = pd.DataFrame(
-                {_k2: [len(_cooc_data[(_k1,_k2)]) for _k1 in _active_keys] for _k2 in _active_keys},
-                index=_active_keys
-            )
-            _short_labels = {k: _an_meta[k]["title"][:22] for k in _active_keys}
-            _cooc.index   = [_short_labels[k] for k in _active_keys]
-            _cooc.columns = [_short_labels[k] for k in _active_keys]
-
-            fig_cooc = px.imshow(
-                _cooc.astype(float),
-                title="Anomaly Co-Occurrence (businesses triggering both)",
-                color_continuous_scale=["#0f172a","#1e3a5f","#2563eb","#ef4444"],
-                text_auto=True, aspect="auto"
-            )
-            fig_cooc.update_layout(
-                height=max(350, len(_active_keys)*42),
-                margin=dict(t=50,b=30,l=10,r=10)
-            )
-            st.plotly_chart(dark_chart(fig_cooc), use_container_width=True)
-
-            # ── Per-cell drilldown expanders (only non-zero off-diagonal) ─────
-            st.markdown("**🔍 Drilldown by Co-Occurrence Pair — click to see which businesses trigger both:**")
-
-            _shown_pairs = set()
-            for _k1 in _active_keys:
-                for _k2 in _active_keys:
-                    if _k1 == _k2:
-                        continue  # diagonal — already shown in the anomaly cards above
-                    _pair_key = tuple(sorted([_k1, _k2]))
-                    if _pair_key in _shown_pairs:
-                        continue
-                    _shown_pairs.add(_pair_key)
-                    _both_bids = list(_cooc_data[(_k1, _k2)])
-                    if not _both_bids:
-                        continue
-
-                    _t1 = _an_meta[_k1]["title"]
-                    _t2 = _an_meta[_k2]["title"]
-                    _s1 = _an_meta[_k1]["severity"]
-                    _s2 = _an_meta[_k2]["severity"]
-                    _sev_pair = "CRITICAL" if "CRITICAL" in (_s1,_s2) else "HIGH" if "HIGH" in (_s1,_s2) else "MEDIUM"
-                    _col_pair = _SEV_COLOR.get(_sev_pair,"#64748b")
-
-                    # Register this pair as a segment so _drilldown_table can show it
-                    _pair_seg_key = f"cooc_{_pair_key[0][:12]}_{_pair_key[1][:12]}"
-                    _seg[_pair_seg_key] = _both_bids
-                    _SEG_CALC[_pair_seg_key] = (
-                        f"**Co-occurrence: '{_t1}' AND '{_t2}'**\n\n"
-                        f"These {len(_both_bids):,} businesses simultaneously trigger BOTH anomalies:\n\n"
-                        f"**Anomaly 1 — {_SEV_ICON.get(_s1,'⚪')} {_s1}: {_t1}**\n"
-                        f"{_an_meta[_k1].get('desc','')}\n\n"
-                        f"**Anomaly 2 — {_SEV_ICON.get(_s2,'⚪')} {_s2}: {_t2}**\n"
-                        f"{_an_meta[_k2].get('desc','')}\n\n"
-                        f"**Why co-occurrence matters:** When two anomalies appear simultaneously, "
-                        f"they often share a root cause (e.g. a vendor integration failure that leaves "
-                        f"multiple fact fields empty) or represent compounded risk (e.g. dissolved entity "
-                        f"with valid EIN — the combination is more concerning than either signal alone).\n\n"
-                        f"**Source:** `{_an_meta[_k1].get('source','')}` · `{_an_meta[_k2].get('source','')}`"
-                    )
-
-                    with st.expander(
-                        f"👁️ {len(_both_bids):,} businesses with BOTH: '{_t1[:30]}' AND '{_t2[:30]}'",
-                        expanded=False
-                    ):
-                        st.markdown(f"""<div style="background:#0c1a2e;border-left:3px solid {_col_pair};
-                            border-radius:6px;padding:8px 14px;margin:4px 0 10px 0;font-size:.78rem">
-                          <span style="color:#a78bfa;font-weight:700">⚙️ Why these two anomalies co-occur</span>
-                        </div>""", unsafe_allow_html=True)
-                        st.markdown(_SEG_CALC[_pair_seg_key])
-                        st.markdown("---")
-
-                        # Business IDs table with their anomaly flags and key signals
-                        _pair_tbl = pd.DataFrame({"business_id": _both_bids})
-                        _pair_tbl["Weighted Score"] = _pair_tbl["business_id"].map(
-                            lambda b: _biz_score.get(b, 0)
-                        )
-                        _pair_tbl["# Anomalies"] = _pair_tbl["business_id"].map(
-                            lambda b: len(_biz_flags_s6.get(b, []))
-                        )
-                        _pair_tbl["All Anomalies"] = _pair_tbl["business_id"].map(
-                            lambda b: " · ".join(
-                                _an_meta.get(k,{}).get("title","")[:20]
-                                for k in _biz_flags_s6.get(b,[])
-                            )
-                        )
-                        st.dataframe(_pair_tbl, use_container_width=True, hide_index=True)
-
-                        # Key KYB signals from stats_df
-                        if stats_df is not None and not stats_df.empty:
-                            _psig = stats_df[stats_df["business_id"].isin(_both_bids)][
-                                ["business_id"] + [c for c in _S6_COLS if c in stats_df.columns]
-                            ].rename(columns={
-                                "sos_match_boolean":"SOS Match Bool","sos_match_status":"SOS Match Status",
-                                "sos_active":"SOS Active","sos_match_verif":"sos_match_verif(0/1)",
-                                "sos_domestic_verif":"sos_domestic_verif(0/1)",
-                                "formation_state":"Formation State","tin_submitted":"TIN Submitted",
-                                "tin_match_status":"TIN Match Status","tin_match":"TIN Match Bool",
-                                "idv_passed":"IDV Passed","naics_code":"NAICS","watchlist_hits":"WL Hits",
-                                "num_bankruptcies":"BK","num_judgements":"Judgements","num_liens":"Liens",
-                            })
-                            if not _psig.empty:
-                                st.dataframe(_psig, use_container_width=True, hide_index=True)
-
-                        # Download + investigate buttons
-                        _dl_pair = pd.DataFrame({"business_id":_both_bids}).to_csv(index=False).encode()
-                        st.download_button(
-                            f"⬇️ Download {len(_both_bids)} IDs (CSV)",
-                            _dl_pair,
-                            f"cooc_{_k1[:8]}_{_k2[:8]}.csv", "text/csv",
-                            key=f"dl_cooc_{_pair_seg_key}"
-                        )
-                        st.caption("Click 🔍 Investigate to set a business ID, then switch to any entity tab.")
-                        _investigate_rows(_both_bids, _biz_score, _biz_flags_s6,
-                                          context_label=f"{_t1[:20]} × {_t2[:20]}",
-                                          key_prefix=f"cooc_{_pair_seg_key}")
-
-                    # detail_panel OUTSIDE expander — Streamlit forbids nested expanders
-                    detail_panel(
-                        f"🔥 Co-Occurrence: {_t1[:25]} × {_t2[:25]}",
-                        f"{len(_both_bids):,} businesses trigger both · Pair severity: {_sev_pair}",
-                        what_it_means=_SEG_CALC[_pair_seg_key],
-                        source_table="stats_df · funnel_df (in memory)",
-                        source_file=f"{_an_meta[_k1].get('source','')} · {_an_meta[_k2].get('source','')}",
-                        json_obj={
-                            "anomaly_1": _t1, "source_1": _an_meta[_k1].get("source",""),
-                            "anomaly_2": _t2, "source_2": _an_meta[_k2].get("source",""),
-                            "co_occurring_businesses": len(_both_bids),
-                            "business_ids_sample": _both_bids[:5],
-                            "pair_severity": _sev_pair,
-                            "action": f"{_an_meta[_k1].get('action','')} | {_an_meta[_k2].get('action','')}",
-                        },
-                        icon="🔥", color=_col_pair
-                    )
 
         detail_panel("🔬 Portfolio Anomaly Triage — Section 6.8",
             f"{len(_biz_score_df[_biz_score_df['anomaly_score']>0]):,} businesses with ≥1 anomaly · "
@@ -11757,10 +11903,10 @@ ORDER BY avg_impact_pts ASC;"""
         st.success("✅ No anomalies detected across the portfolio. All KYB signals are internally consistent.", icon="✅")
 
     # ════════════════════════════════════════════════════════════════════════
-    # SECTION 7 — RECENTLY ONBOARDED + TOP 10 AT RISK
+    # SECTION 9 — RECENTLY ONBOARDED + TOP 10 AT RISK
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("---")
-    st.markdown("### 🕐 Section 7 — Recently Onboarded Businesses")
+    st.markdown("### 🕐 Section 9 — Recently Onboarded Businesses")
     st.markdown("*Most recently seen in the facts table — ordered by first_seen DESC.*")
 
     recent_10 = recent_df.head(10).copy()
