@@ -133,32 +133,22 @@ analyst_note(
     ],
 )
 
-# ── Pair status donut ──────────────────────────────────────────────────────────
-col_donut, col_table = st.columns([2, 3])
-with col_donut:
-    STATUS_COLORS_MAP = {
-        "Canonical Pair ✅":     "#22c55e",
-        "Non-Canonical Pair ⚠️": "#f59e0b",
-        "Fallback / Invalid":    "#ef4444",
-        "NAICS Missing":         "#64748b",
-        "MCC Missing":           "#475569",
-    }
-    summary["color"] = summary["Status"].map(STATUS_COLORS_MAP).fillna("#334155")
-    fig_d = go.Figure(go.Pie(
-        labels=summary["Status"], values=summary["Count"],
-        marker_colors=summary["color"].tolist(),
-        textinfo="label+percent", hole=0.42,
-        hovertemplate="<b>%{label}</b><br>Businesses: %{value:,}<br>Share: %{percent}<extra></extra>",
-    ))
-    fig_d.update_layout(height=320, margin=dict(l=0,r=0,t=10,b=0),
-                         paper_bgcolor="#0f172a", font_color="#cbd5e1",
-                         showlegend=False)
-    st.plotly_chart(fig_d, use_container_width=True, key="pair_donut")
+STATUS_COLORS_MAP = {
+    "Canonical Pair ✅":     "#22c55e",
+    "Non-Canonical Pair ⚠️": "#f59e0b",
+    "Fallback / Invalid":    "#ef4444",
+    "NAICS Missing":         "#64748b",
+    "MCC Missing":           "#475569",
+}
 
-with col_table:
-    st.markdown("**Status breakdown**")
-    st.dataframe(summary, use_container_width=True, hide_index=True,
-                 column_config={"Count": st.column_config.NumberColumn(format="%d")})
+# ── Status breakdown table (no color column) ───────────────────────────────────
+st.markdown("**Status breakdown**")
+st.dataframe(
+    summary[["Status", "Count", "Pct"]],   # ← explicitly exclude color column
+    use_container_width=True,
+    hide_index=True,
+    column_config={"Count": st.column_config.NumberColumn(format="%d")},
+)
 
 sql_panel("Overall pair status classification",
           f"""\
@@ -198,15 +188,18 @@ st.markdown("---")
 
 # ── By customer ────────────────────────────────────────────────────────────────
 section_header("👥 Canonical Pair Status by Customer",
-               "Compare quality across all customers — which customer has the worst non-canonical rate?")
+               "Each row = one customer. Sorted by Canonical % ascending (worst first). "
+               "Linked to sidebar date filter; select a specific customer in the sidebar to drill in.")
 
 with st.spinner("Loading per-customer pair status…"):
     by_cust = load_canonical_pair_by_customer(f_from, f_to)
 
-if by_cust is not None and not by_cust.empty:
-    # Pivot to wide format for comparison
+if by_cust is None or by_cust.empty:
+    no_data("Could not load per-customer canonical pair data.")
+else:
+    # Pivot: one row per customer, one column per status
     pivot = by_cust.pivot_table(
-        index=["customer_id","customer_name"],
+        index=["customer_id", "customer_name"],
         columns="pair_status",
         values="businesses",
         aggfunc="sum",
@@ -214,69 +207,60 @@ if by_cust is not None and not by_cust.empty:
     ).reset_index()
     pivot.columns.name = None
 
-    # Add total and canonical %
-    status_cols = [c for c in pivot.columns if c not in ("customer_id","customer_name")]
+    # Totals and canonical %
+    status_cols = [c for c in pivot.columns if c not in ("customer_id", "customer_name")]
     pivot["Total"] = pivot[status_cols].sum(axis=1)
-    if "Canonical Pair" in pivot.columns:
-        pivot["Canonical %"] = (pivot["Canonical Pair"] / pivot["Total"] * 100).round(1)
-    else:
-        pivot["Canonical %"] = 0.0
-
+    canonical_col = next((c for c in pivot.columns if "Canonical Pair" in c and "Non" not in c), None)
+    pivot["Canonical %"] = (
+        (pivot[canonical_col] / pivot["Total"] * 100).round(1)
+        if canonical_col else 0.0
+    )
     pivot = pivot.sort_values("Canonical %", ascending=True)
 
-    # Stacked bar by customer
-    fig_cust = go.Figure()
-    for status, color in STATUS_COLORS_MAP.items():
-        col = status.replace(" ✅","").replace(" ⚠️","")
-        # try both name variants
-        match = next((c for c in pivot.columns if col in c), None)
-        if match:
-            fig_cust.add_trace(go.Bar(
-                name=status,
-                y=pivot["customer_name"],
-                x=pivot[match],
-                orientation="h",
-                marker_color=color,
-                hovertemplate=f"<b>%{{y}}</b><br>{status}: %{{x:,}}<extra></extra>",
-            ))
-    fig_cust.update_layout(
-        barmode="stack",
-        height=max(300, len(pivot) * 48 + 60),
-        margin=dict(l=0, r=20, t=10, b=0),
-        paper_bgcolor="#0f172a", plot_bgcolor="#0f172a", font_color="#cbd5e1",
-        xaxis=dict(showgrid=True, gridcolor="#1e293b", title="Businesses"),
-        yaxis=dict(showgrid=False),
-        legend=dict(bgcolor="#0f172a", font=dict(color="#94a3b8")),
-    )
-    st.plotly_chart(fig_cust, use_container_width=True, key="pair_by_cust_bar")
+    # If sidebar has a customer selected, filter the table
+    if f_cust:
+        pivot = pivot[pivot["customer_id"] == f_cust]
 
-    analyst_note(
-        "How to read the by-customer chart",
-        "Stacked bars show how many businesses per customer fall into each pair status. "
-        "Customers sorted by <strong>Canonical %</strong> (lowest first) — the worst are at the top. "
-        "A customer dominated by grey/orange/red has severe NAICS+MCC quality issues. "
-        "A customer dominated by green has clean canonical classifications.",
-        level="info",
-    )
-
-    # Summary table
-    st.markdown("**Per-customer summary table**")
-    display_cols = ["customer_name","Total","Canonical %"] + [
-        c for c in pivot.columns
-        if c not in ("customer_id","customer_name","Total","Canonical %")
+    # Build display: customer_name | Canonical % | Total | one col per status (no customer_id, no color)
+    ordered_status = [
+        "Canonical Pair ✅", "Non-Canonical Pair ⚠️",
+        "Fallback / Invalid", "NAICS Missing", "MCC Missing",
+    ]
+    display_cols = ["customer_name", "Total", "Canonical %"] + [
+        c for c in ordered_status if c in pivot.columns
     ]
     display_cols = [c for c in display_cols if c in pivot.columns]
-    st.dataframe(pivot[display_cols].sort_values("Canonical %", ascending=True),
-                 use_container_width=True, hide_index=True,
-                 column_config={
-                     "Total": st.column_config.NumberColumn(format="%d"),
-                     "Canonical %": st.column_config.NumberColumn(format="%.1f%%"),
-                 })
-    st.download_button("⬇️ Download by-customer table",
-                       pivot[display_cols].to_csv(index=False).encode(),
-                       "canonical_by_customer.csv","text/csv", key="dl_cust_pairs")
-else:
-    no_data("Could not load per-customer canonical pair data.")
+    display_df = pivot[display_cols].copy()
+    display_df.rename(columns={"customer_name": "Customer"}, inplace=True)
+
+    col_cfg = {"Total": st.column_config.NumberColumn(format="%d"),
+               "Canonical %": st.column_config.NumberColumn(format="%.1f%%")}
+    for sc in ordered_status:
+        if sc in display_df.columns:
+            col_cfg[sc] = st.column_config.NumberColumn(format="%d")
+
+    st.dataframe(display_df, use_container_width=True, hide_index=True, column_config=col_cfg)
+
+    analyst_note(
+        "How to read the by-customer table",
+        "Each row is one customer. <strong>Canonical %</strong> = % of that customer's businesses "
+        "with a valid NAICS+MCC pair in <code>rel_naics_mcc</code>. "
+        "Sorted ascending — lowest quality at the top. "
+        "Customers with high <strong>Non-Canonical</strong> or <strong>Fallback</strong> counts "
+        "are most at risk for classification complaints.",
+        level="info",
+        bullets=[
+            "Low Canonical % → this customer has many businesses with wrong/mismatched NAICS+MCC combinations",
+            "High NAICS Missing → P0 null wins are suppressing NAICS data for this customer",
+            "High Fallback / Invalid → AI catch-all (561499) dominating this customer's classification",
+        ],
+    )
+
+    st.download_button(
+        "⬇️ Download by-customer table",
+        display_df.to_csv(index=False).encode(),
+        "canonical_by_customer.csv", "text/csv", key="dl_cust_pairs",
+    )
 
 st.markdown("---")
 
