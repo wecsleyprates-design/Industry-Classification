@@ -58,44 +58,69 @@ def _get_api_base() -> str:
 # ── Sign-in ────────────────────────────────────────────────────────────────────
 
 def _sign_in() -> dict:
-    """POST /customer/sign-in → returns full response data dict."""
+    """Try admin sign-in first, fall back to customer sign-in.
+
+    admin.joinworth.com uses the admin endpoint (POST /admin/sign-in).
+    The customer endpoint (POST /customer/sign-in) is for external customers,
+    not Worth AI internal users.
+    """
     email, password = _get_credentials()
-    resp = requests.post(
-        f"{AUTH_BASE}/customer/sign-in",
-        json={"email": email, "password": password},
-        timeout=15,
+
+    # Try admin endpoint first (internal Worth AI users / admin portal)
+    for endpoint in ["/admin/sign-in", "/customer/sign-in"]:
+        resp = requests.post(
+            f"{AUTH_BASE}{endpoint}",
+            json={"email": email, "password": password},
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            data = resp.json().get("data", {})
+            id_token      = data.get("id_token")
+            refresh_token = data.get("refresh_token")
+            if id_token:
+                return {"id_token": id_token, "refresh_token": refresh_token or ""}
+        # 400 = wrong credentials for this endpoint type → try next
+        elif resp.status_code not in (400, 401, 403):
+            try:
+                detail = resp.json().get("message", resp.text[:200])
+            except Exception:
+                detail = resp.text[:200]
+            raise RuntimeError(f"Worth API sign-in failed ({resp.status_code}): {detail}")
+
+    # Both endpoints returned 400/401 — credentials are genuinely wrong
+    try:
+        detail = resp.json().get("message", "Incorrect username or password.")
+    except Exception:
+        detail = "Incorrect username or password."
+    raise RuntimeError(
+        f"Worth API sign-in failed: {detail}\n\n"
+        "Check your credentials in .streamlit/secrets.toml:\n"
+        "  WORTH_EMAIL    = 'your@worthai.com'\n"
+        "  WORTH_PASSWORD = 'yourpassword'\n"
+        "Both /admin/sign-in and /customer/sign-in were tried."
     )
-    if resp.status_code != 200:
-        try:
-            detail = resp.json().get("message", resp.text[:200])
-        except Exception:
-            detail = resp.text[:200]
-        raise RuntimeError(f"Worth API sign-in failed ({resp.status_code}): {detail}")
-    data = resp.json().get("data", {})
-    # id_token is used as Bearer — NOT access_token (deprecated)
-    id_token      = data.get("id_token")
-    refresh_token = data.get("refresh_token")
-    if not id_token:
-        raise RuntimeError("Worth API sign-in succeeded but no id_token in response.")
-    return {"id_token": id_token, "refresh_token": refresh_token}
 
 
 def _refresh_token(refresh_token: str) -> dict:
-    """POST /customer/refresh-token → returns new id_token."""
-    resp = requests.post(
-        f"{AUTH_BASE}/customer/refresh-token",
-        json={"refresh_token": refresh_token},
-        timeout=15,
-    )
-    if resp.status_code != 200:
-        # If refresh fails, fall back to full sign-in
-        return _sign_in()
-    data = resp.json().get("data", {})
-    id_token = data.get("id_token")
-    if not id_token:
-        return _sign_in()
-    return {"id_token": id_token,
-            "refresh_token": data.get("refresh_token", refresh_token)}
+    """Refresh the id_token. Tries admin refresh first, then customer.
+    Falls back to full sign-in if both fail."""
+    for endpoint in ["/refresh-token/admin", "/refresh-token/customer"]:
+        try:
+            resp = requests.post(
+                f"{AUTH_BASE}{endpoint}",
+                json={"refresh_token": refresh_token},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                data = resp.json().get("data", {})
+                id_token = data.get("id_token")
+                if id_token:
+                    return {"id_token": id_token,
+                            "refresh_token": data.get("refresh_token", refresh_token)}
+        except Exception:
+            pass
+    # All refresh attempts failed — do a full sign-in
+    return _sign_in()
 
 
 # ── Token management ───────────────────────────────────────────────────────────
