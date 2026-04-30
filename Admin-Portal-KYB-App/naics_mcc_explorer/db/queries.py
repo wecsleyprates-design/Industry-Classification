@@ -1,16 +1,18 @@
 """All SQL query functions for the NAICS/MCC Explorer.
 
 Rules:
-- Only rds_** tables used for facts data.
-- LENGTH(f.value) < 60000 guard on every facts join (Redshift VARCHAR limit).
-- JSON_EXTRACT_PATH_TEXT with nested paths for new-schema records.
-- Filters applied via WITH onboarded AS (...) CTE — no IN (list) size limits.
+- Facts data: rds_** tables only (rds_warehouse_public.facts, rds_cases_public.*)
+- Customer names: datascience.billing_prices (paying clients, non-null client column)
+  Fallback: rds_auth_public.data_customers → customer_id only
+- LENGTH(f.value) < 60000 on every facts join (Redshift VARCHAR limit)
+- JSON_EXTRACT_PATH_TEXT with nested paths for new-schema records
+- Filters via WITH onboarded AS (...) CTE — no IN (list) size limits
 
-Platform -1 / "unknown" explanation:
-  Older fact records use the schema {"source": {"name": "AINaicsEnrichment"}} —
-  a human-readable string, not a numeric platformId. COALESCE(...) returns NULL
-  for these, which becomes 'unknown' in GROUP BY. These are displayed as
-  "Legacy Schema (P?)" in the UI.
+datascience.billing_prices:
+  Used ONLY for paying client name lookup.
+  Key columns: customer_id, client (human-readable name).
+  Filter: WHERE bp.client IS NOT NULL to exclude non-paying/unnamed customers.
+  This is the same source used in NAICS/MCC Investigation queries.
 """
 from __future__ import annotations
 
@@ -45,11 +47,12 @@ def _onboarded_cte(date_from=None, date_to=None, customer_id=None, business_id=N
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_customers(date_from=None, date_to=None) -> pd.DataFrame:
-    """Distinct customers with human-readable names and business counts.
+    """Paying clients with human-readable names and business counts.
 
-    Primary source: rds_auth_public.data_customers (same as kyb_hub_app_v2.py).
-    Fallback: customer_id only if the join fails.
-    Columns returned: customer_id, customer_name, business_count
+    Priority 1: datascience.billing_prices (bp.client = paying client name, non-null)
+    Priority 2: rds_auth_public.data_customers (internal name)
+    Priority 3: raw customer_id only
+    Columns: customer_id, customer_name, business_count
     """
     parts = ["1=1"]
     if date_from:
@@ -58,13 +61,32 @@ def load_customers(date_from=None, date_to=None) -> pd.DataFrame:
         parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
     where = " AND ".join(parts)
 
-    # Primary: join to rds_auth_public.data_customers for human-readable names
+    # Primary: datascience.billing_prices — paying client names
     try:
         df = run_query(f"""
             SELECT
                 rbcm.customer_id,
-                dc.name                             AS customer_name,
-                COUNT(DISTINCT rbcm.business_id)    AS business_count
+                bp.client                            AS customer_name,
+                COUNT(DISTINCT rbcm.business_id)     AS business_count
+            FROM rds_cases_public.rel_business_customer_monitoring rbcm
+            JOIN datascience.billing_prices bp ON bp.customer_id = rbcm.customer_id
+            WHERE {where}
+              AND bp.client IS NOT NULL
+            GROUP BY rbcm.customer_id, bp.client
+            ORDER BY business_count DESC, bp.client
+        """)
+        if df is not None and not df.empty and "customer_name" in df.columns:
+            return df
+    except Exception:
+        pass
+
+    # Fallback 1: rds_auth_public.data_customers
+    try:
+        df = run_query(f"""
+            SELECT
+                rbcm.customer_id,
+                dc.name                              AS customer_name,
+                COUNT(DISTINCT rbcm.business_id)     AS business_count
             FROM rds_cases_public.rel_business_customer_monitoring rbcm
             JOIN rds_auth_public.data_customers dc ON dc.id = rbcm.customer_id
             WHERE {where}
@@ -76,13 +98,12 @@ def load_customers(date_from=None, date_to=None) -> pd.DataFrame:
     except Exception:
         pass
 
-    # Fallback: customer_id as the name
+    # Fallback 2: raw customer_id
     try:
         df = run_query(f"""
-            SELECT
-                rbcm.customer_id,
-                rbcm.customer_id                    AS customer_name,
-                COUNT(DISTINCT rbcm.business_id)    AS business_count
+            SELECT rbcm.customer_id,
+                   rbcm.customer_id AS customer_name,
+                   COUNT(DISTINCT rbcm.business_id) AS business_count
             FROM rds_cases_public.rel_business_customer_monitoring rbcm
             WHERE {where}
             GROUP BY rbcm.customer_id
@@ -659,4 +680,222 @@ def load_overview(date_from=None, date_to=None, customer_id=None) -> pd.DataFram
             ON f.business_id = o.business_id
             AND f.name IN ('naics_code', 'mcc_code')
             AND LENGTH(f.value) < 60000
+    """)
+
+
+# ── Customer Intelligence (Page 8) ────────────────────────────────────────────
+
+def _billing_cte(date_from=None, date_to=None, client_name=None) -> str:
+    """CTE that joins billing_prices for paying client names.
+    Returns per-business rows with customer_id and client (name).
+    """
+    parts = ["1=1", "bp.client IS NOT NULL"]
+    if date_from:
+        parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
+    if date_to:
+        parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
+    if client_name:
+        safe = client_name.replace("'", "''")
+        parts.append(f"bp.client = '{safe}'")
+    where = " AND ".join(parts)
+    return (
+        "WITH clients AS (\n"
+        "  SELECT DISTINCT rbcm.business_id, rbcm.customer_id, bp.client\n"
+        "  FROM rds_cases_public.rel_business_customer_monitoring rbcm\n"
+        "  JOIN datascience.billing_prices bp ON bp.customer_id = rbcm.customer_id\n"
+        f"  WHERE {where}\n"
+        ")\n"
+    )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_paying_clients(date_from=None, date_to=None) -> pd.DataFrame:
+    """Paying clients from datascience.billing_prices (non-null client only)."""
+    parts = ["bp.client IS NOT NULL"]
+    if date_from:
+        parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
+    if date_to:
+        parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
+    where = " AND ".join(parts)
+    try:
+        df = run_query(f"""
+            SELECT DISTINCT bp.client, rbcm.customer_id,
+                   COUNT(DISTINCT rbcm.business_id) AS business_count
+            FROM rds_cases_public.rel_business_customer_monitoring rbcm
+            JOIN datascience.billing_prices bp ON bp.customer_id = rbcm.customer_id
+            WHERE {where}
+            GROUP BY bp.client, rbcm.customer_id
+            ORDER BY business_count DESC
+        """)
+        return df if df is not None else pd.DataFrame(columns=["client","customer_id","business_count"])
+    except Exception:
+        return pd.DataFrame(columns=["client","customer_id","business_count"])
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_client_platform_distribution(date_from=None, date_to=None, client_name=None) -> pd.DataFrame:
+    """Per paying-client winner + alternative platform distribution for naics_code.
+    Returns: client, winning_platform_id, businesses, avg_confidence, null_wins
+    """
+    cte = _billing_cte(date_from, date_to, client_name)
+    return run_query(cte + """
+        SELECT
+            c.client,
+            COALESCE(JSON_EXTRACT_PATH_TEXT(f.value, 'source', 'platformId'), 'unknown') AS winning_platform_id,
+            COUNT(DISTINCT f.business_id)                                                 AS businesses,
+            AVG(CAST(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence'),'0') AS FLOAT)) AS avg_confidence,
+            SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NULL THEN 1 ELSE 0 END) AS null_wins
+        FROM rds_warehouse_public.facts f
+        JOIN clients c ON c.business_id = f.business_id
+        WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
+        GROUP BY c.client, winning_platform_id
+        ORDER BY c.client, businesses DESC
+    """)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_client_naics_length(date_from=None, date_to=None, client_name=None) -> pd.DataFrame:
+    """Per client: NAICS digit length distribution (winner and P0 applicant input).
+    Helps identify truncation bugs (P0 writes 54161 instead of 541612).
+    Returns: client, winning_platform_id, naics_length, business_count
+    """
+    cte = _billing_cte(date_from, date_to, client_name)
+    return run_query(cte + """
+        SELECT
+            c.client,
+            COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId'),'unknown') AS winning_platform_id,
+            CASE
+                WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NULL THEN 'null'
+                ELSE CAST(LENGTH(JSON_EXTRACT_PATH_TEXT(f.value,'value')) AS VARCHAR)
+            END AS naics_length,
+            COUNT(DISTINCT f.business_id) AS business_count
+        FROM rds_warehouse_public.facts f
+        JOIN clients c ON c.business_id = f.business_id
+        WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
+        GROUP BY c.client, winning_platform_id, naics_length
+        ORDER BY c.client, business_count DESC
+    """)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_client_applicant_vs_vendor(date_from=None, date_to=None, client_name=None,
+                                    limit: int = 1000) -> pd.DataFrame:
+    """Per business: what P0 (applicant) submitted vs what vendors returned.
+    Captures the full raw JSON for alternatives parsing.
+    Returns rows where P0 won — these are the ghost assigner cases.
+    """
+    cte = _billing_cte(date_from, date_to, client_name)
+    return run_query(cte + f"""
+        SELECT
+            c.client,
+            f.business_id,
+            JSON_EXTRACT_PATH_TEXT(f.value,'value')                                        AS p0_winning_value,
+            COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence'),'')             AS p0_confidence,
+            JSON_EXTRACT_PATH_TEXT(f.value,'source','updatedAt')                           AS p0_updated_at,
+            f.received_at,
+            f.value                                                                         AS raw_json
+        FROM rds_warehouse_public.facts f
+        JOIN clients c ON c.business_id = f.business_id
+        WHERE f.name = 'naics_code'
+          AND LENGTH(f.value) < 60000
+          AND COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId'),'x') = '0'
+        ORDER BY f.received_at DESC
+        LIMIT {limit}
+    """)
+
+
+# ── Classification Accuracy & Misidentification (Page 9) ───────────────────────
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_misidentification_signals(date_from=None, date_to=None,
+                                   client_name=None) -> pd.DataFrame:
+    """Per business: detect proxy error signals for NAICS misidentification.
+
+    Signal definitions:
+      ghost_null_win  : P0 won with value=null AND alternatives[] has specific codes
+      ghost_overrides : P0 won AND alternatives have different specific code from P24/P17/P22
+      catchall_with_alt: winner=561499 AND alternatives have specific non-catchall codes
+      digit_error     : winning value length != 6 (data type/truncation bug)
+      sector_mismatch : winner sector (2-digit) differs from ALL vendor alternatives' sectors
+
+    Returns one row per business with all signal flags + raw JSON for analysis.
+    """
+    cte = _billing_cte(date_from, date_to, client_name)
+    return run_query(cte + """
+        SELECT
+            c.client,
+            f.business_id,
+            JSON_EXTRACT_PATH_TEXT(f.value,'value')                                        AS winning_naics,
+            COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId'),'unknown')      AS winning_platform_id,
+            COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence'),'0')            AS winning_confidence,
+            LEFT(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value'),''),2)                   AS winning_sector,
+            CASE
+                WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NULL THEN 'null_winner'
+                WHEN LENGTH(JSON_EXTRACT_PATH_TEXT(f.value,'value')) != 6 THEN 'digit_error'
+                WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') = '561499' THEN 'catchall'
+                ELSE 'specific'
+            END AS winner_quality,
+            f.received_at,
+            f.value AS raw_json
+        FROM rds_warehouse_public.facts f
+        JOIN clients c ON c.business_id = f.business_id
+        WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
+        ORDER BY f.received_at DESC
+    """)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_platform_error_rate_by_client(date_from=None, date_to=None,
+                                       client_name=None) -> pd.DataFrame:
+    """Per client × platform: estimate error rate using proxy signals.
+    'Potential error' = winner is P0/AI/catch-all BUT alternatives contain specific vendor codes.
+    Returns: client, winning_platform_id, total_wins, potential_errors, error_proxy_pct
+    """
+    cte = _billing_cte(date_from, date_to, client_name)
+    return run_query(cte + """
+        SELECT
+            c.client,
+            COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId'),'unknown') AS winning_platform_id,
+            COUNT(DISTINCT f.business_id)                                              AS total_wins,
+            SUM(CASE
+                WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NULL THEN 1
+                WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') = '561499' THEN 1
+                WHEN LENGTH(JSON_EXTRACT_PATH_TEXT(f.value,'value')) != 6 THEN 1
+                ELSE 0
+            END)                                                                       AS flagged_wins,
+            ROUND(100.0 * SUM(CASE
+                WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NULL THEN 1
+                WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') = '561499' THEN 1
+                WHEN LENGTH(JSON_EXTRACT_PATH_TEXT(f.value,'value')) != 6 THEN 1
+                ELSE 0
+            END) / NULLIF(COUNT(DISTINCT f.business_id), 0), 1)                       AS flag_pct
+        FROM rds_warehouse_public.facts f
+        JOIN clients c ON c.business_id = f.business_id
+        WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
+        GROUP BY c.client, winning_platform_id
+        ORDER BY c.client, total_wins DESC
+    """)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_sector_mismatch_by_client(date_from=None, date_to=None,
+                                   client_name=None) -> pd.DataFrame:
+    """Per client × 2-digit sector: how many businesses have winner in that sector,
+    and how many of those have sector-disagreeing alternatives (proxy for misidentification).
+    Returns: client, winning_sector, naics_description_approx, businesses, with_sector_mismatch
+    """
+    cte = _billing_cte(date_from, date_to, client_name)
+    return run_query(cte + """
+        SELECT
+            c.client,
+            LEFT(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value'),'??'), 2) AS winning_sector,
+            COUNT(DISTINCT f.business_id)                                    AS businesses,
+            SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') = '561499' THEN 1 ELSE 0 END) AS catchall_count,
+            AVG(CAST(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence'),'0') AS FLOAT)) AS avg_confidence
+        FROM rds_warehouse_public.facts f
+        JOIN clients c ON c.business_id = f.business_id
+        WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
+          AND JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NOT NULL
+        GROUP BY c.client, winning_sector
+        ORDER BY c.client, businesses DESC
     """)
