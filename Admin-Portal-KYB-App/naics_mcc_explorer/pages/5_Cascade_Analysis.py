@@ -194,8 +194,8 @@ analyst_note(
     bullets=[
         f"<strong>Tier 1 ({len(t1):,})</strong>: Fix industry code only — the AI already assigned a valid payment category independently. Safe to correct the industry code without touching the payment category.",
         f"<strong>Tier 1b ({len(t1b):,})</strong>: Fix industry code only — payment category looks correct but no AI backup exists. Verify the payment category source before making changes.",
-        f"<strong>Tier 2 ({len(t2):,})</strong>: Fix both industry code and payment category — the generic payment code (7399) came from the bad industry code and needs to be corrected too.",
-        f"<strong>Tier 3 ({len(t3):,})</strong>: Most work required — fix the industry code AND re-run the AI payment category classification to produce a new result.",
+        f"<strong>Tier 2 ({len(t2):,})</strong>: Fix both — the generic `mcc_code` (7399) was derived from the wrong NAICS code and needs to be corrected too.",
+        f"<strong>Tier 3 ({len(t3):,})</strong>: Most work required — fix the NAICS code AND re-run `mcc_code_found` AI classification to produce a new result.",
     ],
 )
 st.markdown("---")

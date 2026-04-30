@@ -206,8 +206,10 @@ with st.expander("🕐 Timing Analysis — Why the business's own submission win
         "When a business submits its onboarding form, the system immediately records that submission with the highest score (1.0). "
         "External data providers like ZoomInfo and SERP run separately and return their results about 4 minutes later. "
         "By the time they return, the form submission has already won. "
-        "If the <strong>Winner Updated At</strong> timestamp is ~4 minutes before the other sources' timestamps, "
-        "this confirms the pattern for this specific business.",
+        "The <strong>Winner Updated At</strong> shows when the winning source last updated its value. "
+        "The <strong>Fact Received At</strong> shows when the fact record was saved to the database. "
+        "⚠️ Note: many older records store alternative sources as a plain number (e.g. source=24) without a timestamp — "
+        "those will show blank in the Timestamp column, but the fact was still received.",
         level="warning",
     )
     for fn in FACT_NAMES:
@@ -216,13 +218,25 @@ with st.expander("🕐 Timing Analysis — Why the business's own submission win
         r = row.iloc[0]
         raw = r.get("raw_json","")
         alts = parse_alternatives(raw)
-        winner_ts = str(r.get("winner_updated_at",""))
-        if alts or winner_ts:
-            st.markdown(f"**`{fn}`**")
-            timing = []
-            if winner_ts:
-                timing.append({"Role":"🏆 Winner","Platform":platform_label(r["eff_pid"]),"Timestamp":winner_ts})
-            for a in alts:
-                timing.append({"Role":"🥈 Alternative","Platform":a["alt_platform"],"Timestamp":a["alt_updated_at"]})
-            if timing:
-                st.dataframe(pd.DataFrame(timing), hide_index=True, use_container_width=True)
+        winner_ts      = str(r.get("winner_updated_at","")).strip()
+        fact_received  = str(r.get("received_at","")).strip()
+
+        st.markdown(f"**`{fn}`**")
+        timing = []
+        # Winner row — use updatedAt if available, otherwise received_at
+        winner_display_ts = winner_ts if winner_ts else f"(fact received: {fact_received})"
+        timing.append({
+            "Role":      "🏆 Winner",
+            "Platform":  platform_label(r["eff_pid"]),
+            "Source Updated At": winner_ts or "—",
+            "Fact Received At":  fact_received or "—",
+        })
+        for a in alts:
+            timing.append({
+                "Role":      "🥈 Other source",
+                "Platform":  a["alt_platform"],
+                "Source Updated At": str(a["alt_updated_at"]).strip() or "— (older format, no timestamp stored)",
+                "Fact Received At":  "—",
+            })
+        if timing:
+            st.dataframe(pd.DataFrame(timing), hide_index=True, use_container_width=True)

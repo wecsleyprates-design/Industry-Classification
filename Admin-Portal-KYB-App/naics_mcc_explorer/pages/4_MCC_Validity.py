@@ -30,10 +30,10 @@ st.markdown("# 💳 MCC Code Validity & Source Analysis")
 st.markdown(
     "MCC (Merchant Category Code) is a 4-digit payment industry code. "
     "Worth AI generates it in one of two ways:\n\n"
-    "- **AI-assigned MCC** — the AI reads the business name and description and picks the most fitting payment category code\n"
-    "- **Industry-derived MCC** — the system converts the business's industry code (NAICS) into a payment category code using an official mapping table\n\n"
-    "The AI-assigned code takes priority. If no AI code exists, the industry-derived code is used. "
-    "**If the industry code (NAICS) is missing or wrong, the industry-derived payment category will also be wrong.**"
+    "- **`mcc_code_found`** — the AI reads the business name and description and picks the most fitting payment category code directly\n"
+    "- **`mcc_code_from_naics`** — the system converts the business's NAICS industry code into a payment category code using an official mapping table\n\n"
+    "The AI-assigned `mcc_code_found` takes priority. If no AI code exists, `mcc_code_from_naics` is used as the fallback. "
+    "**If the NAICS code is missing or wrong, the `mcc_code_from_naics` will also be wrong.**"
 )
 platform_legend_panel()
 st.markdown("---")
@@ -91,8 +91,8 @@ section_header("📊 MCC Coverage & Validity")
 
 c1,c2,c3,c4 = st.columns(4)
 with c1: kpi("Businesses w/ mcc_code", f"{n_final:,}", f"of {total_biz:,} total", "#3b82f6")
-with c2: kpi("AI-Assigned Only",       f"{n_ai:,}",    "AI picked the category directly", "#8b5cf6")
-with c3: kpi("Industry-Derived Only", f"{n_naics_d:,}","Converted from industry code (NAICS)", "#6366f1")
+with c2: kpi("mcc_code_found only",       f"{n_ai:,}",    "AI assigned the code directly", "#8b5cf6")
+with c3: kpi("mcc_code_from_naics only", f"{n_naics_d:,}","Converted from NAICS industry code", "#6366f1")
 with c4: kpi("Both Paths Ran",         f"{n_both:,}",  "AI + NAICS-derived",        "#22c55e")
 st.markdown("")
 c5,c6,c7,c8 = st.columns(4)
@@ -103,14 +103,14 @@ with c8: kpi("⬜ Null mcc_code",       f"{n_null:,}",  "No winning value",     
 
 analyst_note(
     "Interpreting MCC coverage metrics",
-    "The payment category code (MCC) is produced in two independent ways and the best one wins. "
-    "The AI-assigned code takes priority; the industry-derived code is the backup.",
+    "The final `mcc_code` fact is produced in two independent ways and the best one wins. "
+    "`mcc_code_found` (AI-assigned) takes priority; `mcc_code_from_naics` is the backup.",
     level="info",
     bullets=[
-        "<strong>AI Only</strong>: the AI assigned a code directly — not affected by the industry code quality",
-        "<strong>Industry-Derived Only</strong>: code came from converting the industry code — if the industry code is wrong, this code is wrong too",
-        "<strong>Both methods ran</strong>: AI won (higher priority). Industry-derived code stored as a backup reference",
-        "<strong>Neither</strong>: business has no payment category at all — cannot be used in payment routing or risk rules",
+        "<strong>mcc_code_found only</strong>: the AI assigned the code directly — not affected by NAICS quality",
+        "<strong>mcc_code_from_naics only</strong>: code came from converting the NAICS code — if NAICS is wrong, this code is wrong too",
+        "<strong>Both ran</strong>: AI won (higher priority). mcc_code_from_naics stored as a backup reference",
+        "<strong>Neither</strong>: business has no MCC at all — cannot be used in payment routing or risk rules",
         f"<strong>Code 5614 (AI error)</strong>: {n_5614:,} businesses received code 5614, which is not a valid payment category. The AI returns this as a last resort when it cannot identify the business type. These businesses need their payment category reassigned.",
     ],
 )
@@ -122,7 +122,7 @@ col_d, col_b = st.columns(2)
 
 with col_d:
     src_df = pd.DataFrame({
-        "Category":["AI Direct Only","NAICS-Derived Only","Both Paths","No MCC"],
+        "Category":["mcc_code_found only","mcc_code_from_naics only","Both ran","No MCC"],
         "Count":   [n_ai, n_naics_d, n_both, n_neither],
         "Color":   ["#8b5cf6","#3b82f6","#22c55e","#64748b"],
     }).query("Count > 0")
@@ -137,7 +137,7 @@ with col_d:
     st.plotly_chart(fig_d, use_container_width=True, key="mcc_src_donut")
     analyst_note(
         "What this donut reveals",
-        "A large <strong>NAICS-Derived Only</strong> slice means MCC quality is directly chained to NAICS quality. "
+        "A large <strong>mcc_code_from_naics only</strong> slice means MCC quality is directly chained to NAICS quality. "
         "Every NAICS bug cascades into a wrong MCC. "
         "A large <strong>No MCC</strong> slice means those businesses are invisible to payment-level risk rules.",
         level="warning",
@@ -213,7 +213,7 @@ else:
 st.markdown("---")
 
 # ── AI vs NAICS-derived confidence ────────────────────────────────────────────
-section_header("📊 AI-Direct vs NAICS-Derived Confidence",
+section_header("📊 mcc_code_found vs mcc_code_from_naics — Score Comparison",
                "Compares the confidence distribution of the two MCC derivation paths")
 
 if not mcc_found.empty and not mcc_fromnaics.empty:
@@ -228,21 +228,21 @@ if not mcc_found.empty and not mcc_fromnaics.empty:
 
     c1, c2, c3, c4 = st.columns(4)
     with c1: kpi("AI Avg Confidence",    f"{ai_avg:.3f}", f"{len(mcc_found):,} records", "#8b5cf6")
-    with c2: kpi("NAICS-Derived Avg",    f"{nd_avg:.3f}", f"{len(mcc_fromnaics):,} records", "#3b82f6")
+    with c2: kpi("mcc_code_from_naics Avg", f"{nd_avg:.3f}", f"{len(mcc_fromnaics):,} records", "#3b82f6")
     with c3: kpi("AI Zero-Confidence",   f"{ai_zero:,}",  "records with conf=0", "#ef4444" if ai_zero>0 else "#22c55e")
-    with c4: kpi("NAICS-Derived Zero",   f"{nd_zero:,}",  "records with conf=0", "#ef4444" if nd_zero>0 else "#22c55e")
+    with c4: kpi("mcc_code_from_naics Zero", f"{nd_zero:,}", "records with score=0 (normal for lookup)", "#22c55e")
 
     analyst_note(
         "What the confidence scores mean for MCC",
-        "The <strong>AI-assigned method</strong> produces a confidence score showing how certain the AI was about its choice. "
+        "<strong>mcc_code_found</strong> (AI-assigned) produces a confidence score showing how certain the AI was. "
         "A score near 1.0 means high certainty; near 0 means low certainty or no result. "
-        "The <strong>industry-derived method</strong> always shows a confidence of zero — this is expected and normal, "
-        "because it is a direct lookup (it converts a code using a table, not a prediction).",
+        "<strong>mcc_code_from_naics</strong> always shows a score of zero — this is expected and normal, "
+        "because it is a direct table lookup (it converts a code mechanically, not a prediction).",
         level="info",
         bullets=[
-            "Many AI records at confidence 0 → the AI was uncertain or returned no result for those businesses",
-            "Industry-derived at confidence 0 → this is correct behavior — the conversion table does not produce confidence scores",
-            "Both methods averaging near 0.15 → the AI fallback is running for most businesses, meaning data vendors did not provide industry codes",
+            "Many mcc_code_found records at score 0 → the AI was uncertain or returned no result for those businesses",
+            "mcc_code_from_naics at score 0 → correct behavior — the NAICS→MCC conversion table does not produce confidence scores",
+            "Both averaging near 0.15 → the AI fallback (mcc_code_found) is running for most businesses because data vendors did not provide NAICS codes",
         ],
     )
 
@@ -253,9 +253,9 @@ if not mcc_found.empty and not mcc_fromnaics.empty:
     nd_hist  = pd.cut(mcc_fromnaics["conf_f"], bins=bins, labels=labels[1:], right=False).value_counts().sort_index()
 
     fig_conf = go.Figure()
-    fig_conf.add_trace(go.Bar(name="AI-Assigned MCC",
+    fig_conf.add_trace(go.Bar(name="mcc_code_found (AI-assigned)",
                                x=ai_hist.index.astype(str), y=ai_hist.values, marker_color="#8b5cf6"))
-    fig_conf.add_trace(go.Bar(name="Industry-Derived MCC (via NAICS conversion)",
+    fig_conf.add_trace(go.Bar(name="mcc_code_from_naics (NAICS conversion)",
                                x=nd_hist.index.astype(str), y=nd_hist.values, marker_color="#3b82f6"))
     fig_conf.update_layout(
         barmode="group", height=300, margin=dict(l=0,r=0,t=10,b=0),
