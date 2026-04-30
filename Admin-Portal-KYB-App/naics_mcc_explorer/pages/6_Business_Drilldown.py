@@ -58,6 +58,12 @@ bid_input = st.text_input(
     placeholder="e.g. 6a65f7bd-f1a5-42f9-9a8f-666b20009b24",
     key="drill_bid",
 )
+st.caption(
+    "💡 Use the **inner business ID** from the Admin Portal. "
+    "In the URL `admin.joinworth.com/businesses/{A}/cases/{B}/kyb/...`, "
+    "use **{A}** (the first UUID, under `/businesses/`). "
+    "This is the same ID stored in `rds_warehouse_public.facts`."
+)
 
 if not bid_input.strip():
     st.info("Enter a Business ID above to begin the drilldown.", icon="👆")

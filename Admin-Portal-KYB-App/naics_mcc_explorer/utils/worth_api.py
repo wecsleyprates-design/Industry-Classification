@@ -191,9 +191,15 @@ def get_business_details(business_id: str) -> dict:
         resp = requests.get(url, headers=headers, timeout=15)
 
     if resp.status_code == 404:
-        raise RuntimeError(f"Business `{business_id}` not found in Worth AI.")
+        raise RuntimeError(
+            f"Business `{business_id}` not found via the Details API.\n\n"
+            "Make sure you are using the correct business ID:\n"
+            "• In the Admin Portal URL: admin.joinworth.com/businesses/{ID}/cases/{...}/kyb/...\n"
+            "• Use the FIRST UUID (after /businesses/) — this is the same ID in rds_warehouse_public.facts\n"
+            "• The SECOND UUID (after /cases/) is the case ID and will not work here."
+        )
     if resp.status_code == 403:
-        raise RuntimeError("Access denied. Your account may not have `businesses:read` permission.")
+        raise RuntimeError("Access denied. Your admin account may not have permission to read this business.")
     if resp.status_code != 200:
         try:
             detail = resp.json().get("message", resp.text[:200])
