@@ -49,5 +49,5 @@ in the `factWithHighestConfidence` arbitration rule. Fix: `sources.ts:151` → l
 when no confident classification is possible. Also produced by P0 when businesses
 submit their own industry code on the onboarding form.
 
-**MCC cascade:** `mcc_code_from_naics` (Path 2) derives directly from the winning NAICS code
-via `rds_cases_public.rel_naics_mcc`. If NAICS is null or 561499, Path 2 produces null or 7399.
+**MCC derivation:** `mcc_code_from_naics` derives directly from the winning NAICS code
+via `rds_cases_public.rel_naics_mcc`. If NAICS is null or 561499, `mcc_code_from_naics` produces null or 7399.
