@@ -143,6 +143,36 @@ def render_sidebar() -> dict:
         f"📌 `{len(cust_df) if not cust_df.empty else 0:,}` customers matched"
     )
 
+    # ── Cache status ──────────────────────────────────────────────────────────
+    st.sidebar.markdown("---")
+    try:
+        from db.cache_manager import cache_exists, get_cache_meta
+        if cache_exists():
+            meta = get_cache_meta()
+            snap = meta.get("snapshot_date","")[:16].replace("T"," ")
+            n_biz = meta.get("total_businesses", 0)
+            st.sidebar.markdown(
+                f"<div style='background:#0d2818;border:1px solid #22c55e;border-radius:6px;"
+                f"padding:8px 10px;font-size:.78rem'>"
+                f"<div style='color:#22c55e;font-weight:700'>🗄️ Local Cache Active</div>"
+                f"<div style='color:#6ee7b7'>Data as of: {snap}</div>"
+                f"<div style='color:#6ee7b7'>{n_biz:,} businesses</div>"
+                f"</div>",
+                unsafe_allow_html=True
+            )
+        else:
+            st.sidebar.markdown(
+                "<div style='background:#1c1207;border:1px solid #f59e0b;border-radius:6px;"
+                "padding:8px 10px;font-size:.78rem'>"
+                "<div style='color:#f59e0b;font-weight:700'>📡 No Local Cache</div>"
+                "<div style='color:#fcd34d'>Reading live from Redshift</div>"
+                "<div style='color:#fcd34d'>Run the refresh script to build cache</div>"
+                "</div>",
+                unsafe_allow_html=True
+            )
+    except Exception:
+        pass
+
     return {
         "date_from":   df_from,
         "date_to":     df_to,

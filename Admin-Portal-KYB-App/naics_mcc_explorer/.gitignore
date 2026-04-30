@@ -1,2 +1,4 @@
 __pycache__
 *.pyc
+facts_cache.sqlite
+scripts/__pycache__/
