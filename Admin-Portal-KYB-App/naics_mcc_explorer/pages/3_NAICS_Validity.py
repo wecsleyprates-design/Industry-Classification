@@ -27,10 +27,10 @@ f_biz  = filters["business_id"]
 
 st.markdown("# 🔢 NAICS Code Validity Analysis")
 st.markdown(
-    "Validates every NAICS winning value in two steps: "
-    "**Step 1 — format** (must be exactly 6 numeric digits), "
-    "**Step 2 — lookup** (must exist in `rds_cases_public.core_naics_code`). "
-    "Also shows the **alternatives[]** each business received — comparing winner vs non-winning platforms."
+    "Validates every winning industry code (NAICS) in two steps: "
+    "**Step 1 — format check** (must be exactly 6 digits, numbers only), "
+    "**Step 2 — reference check** (must exist in Worth's official industry code list). "
+    "Also shows the values that other data sources submitted but didn't win — useful for spotting cases where a valid code existed but was overridden."
 )
 platform_legend_panel()
 st.markdown("---")
@@ -95,7 +95,7 @@ analyst_note(
     level="info",
     bullets=[
         "✅ <strong>Valid</strong>: correct format, in lookup table — pipeline working",
-        "⚠️ <strong>Catch-all 561499</strong>: valid format, real code, but a generic catch-all — 'All Other Business Support Services'. Assigned when AI has no better answer. High volume here signals the arbitration bug.",
+        "⚠️ <strong>Generic placeholder (561499)</strong>: valid format, recognized code, but it means 'we don't know what this business does' — assigned when no specific industry could be identified. High volume here signals the data scoring problem.",
         "🟠 <strong>Not in lookup</strong>: 6-digit number but not a recognized NAICS code — likely a typo or invented value",
         "❌ <strong>Invalid format</strong>: wrong number of digits, non-numeric, or truncated — data corruption",
         "⬜ <strong>Null winner</strong>: platform won arbitration but wrote null — no usable classification at all",
@@ -105,7 +105,7 @@ analyst_note(
 # ── Validity bar chart ────────────────────────────────────────────────────────
 section_header("📊 Validity Category Breakdown")
 cat_df = pd.DataFrame({
-    "Category": ["✅ Valid","⚠️ Catch-all (561499)","🟠 Not in Lookup","❌ Invalid Format","⬜ Null"],
+    "Category": ["✅ Valid","⚠️ Generic placeholder (561499)","🟠 Not in reference list","❌ Wrong format","⬜ Missing"],
     "Count": [n_valid, n_ca, n_not_lk, n_inv, n_null],
     "Color": [STATUS_COLORS["valid"], STATUS_COLORS["catch_all"],
               STATUS_COLORS["not_in_lookup"], STATUS_COLORS["invalid_format"], STATUS_COLORS["null"]],
@@ -176,9 +176,10 @@ st.dataframe(display, use_container_width=True, hide_index=True,
 analyst_note(
     "How to read the alternatives columns",
     "The <strong>Alternative Values</strong> column shows the NAICS codes that <em>other platforms</em> returned "
-    "for this business — separated by <code>|</code>. These are the values that <em>lost</em> the confidence race "
-    "to the winner. If the winner is <code>null</code> (P0) but an alternative shows a valid 6-digit code from ZoomInfo, "
-    "that is direct evidence of the arbitration bug suppressing real data.",
+    "for this business — separated by <code>|</code>. These are the values that other data sources returned "
+    "but that didn't win the score comparison. "
+    "If the winner is <em>blank</em> (from the business's own submission) but another source shows a valid 6-digit code from ZoomInfo, "
+    "that is direct evidence that a valid industry code existed but was overridden.",
     level="warning",
 )
 
@@ -187,21 +188,21 @@ st.download_button("⬇️ Download CSV", display.to_csv(index=False).encode(),
 st.markdown("---")
 
 # ── P0 null wins ──────────────────────────────────────────────────────────────
-section_header("⬜ P0 Null-Value Wins — Ghost Assigner locking out real data")
+section_header("⬜ Blank Submissions Overriding Real Data")
 p0_null_df = df[(df["eff_pid"]=="0") & (df["naics_value"].isna() | (df["naics_value"].astype(str).str.strip()==""))].copy()
 if p0_null_df.empty:
-    st.success("✅ No P0 null wins found.")
+    st.success("✅ No cases of blank submissions overriding real data found.")
 else:
-    st.warning(f"⚠️ **{len(p0_null_df):,} businesses** have a null NAICS winner from P0 (Applicant Entry). "
-               "Real vendor data was available in alternatives but lost the race.")
+    st.warning(f"⚠️ **{len(p0_null_df):,} businesses** have no industry code — the business submitted a blank form field, "
+               "which overrode real data from ZoomInfo, SERP, or Equifax. "
+               "Check the 'Alternative Values' column to see what the data vendors actually returned.")
     disp = p0_null_df[["business_id","customer_id","confidence","received_at","alt_values","alt_platforms"]].copy()
-    disp.columns = ["Business ID","Customer ID","P0 Confidence","Received At","Alt NAICS Values","Alt Platforms"]
+    disp.columns = ["Business ID","Customer ID","Submission Score","Received At","Other Sources' Values","Other Sources"]
     st.dataframe(disp, use_container_width=True, hide_index=True)
     analyst_note("Why these businesses have null NAICS",
-        "P0 (Applicant Entry) wrote <code>value: null, confidence: 1</code> when the business left the "
-        "industry field blank on their onboarding form. Because confidence=1 is the maximum, all real "
-        "vendor data (ZoomInfo, SERP) ended up in <code>alternatives[]</code> and was never promoted to winner. "
-        "Check the <strong>Alt NAICS Values</strong> column — those are the real codes that should have won.",
+        "When a business leaves the industry field blank on the onboarding form, the system records that blank submission "
+        "with the highest possible score (1.0). Because it has the highest score, it wins over ZoomInfo and SERP — even though it contains nothing. "
+        "Check the <strong>Other Sources' Values</strong> column to see the real industry codes that were available but didn't win.",
         level="danger",
         action="Fix `sources.ts:151` confidence from 1 to 0.1. Then trigger a facts refresh for these business IDs.")
 

@@ -26,11 +26,11 @@ f_from, f_to = filters["date_from"], filters["date_to"]
 f_cust = filters["customer_id"]
 f_biz  = filters["business_id"]
 
-st.markdown("# 🔭 Fact Explorer")
+st.markdown("# 🔭 Data Explorer")
 st.markdown(
-    "Explore the **winning platform, value, and confidence** for any fact type — "
-    "plus the full `alternatives[]` array showing every platform that submitted a value, "
-    "even those that lost the confidence race. This is the raw evidence of how arbitration played out."
+    "Explore which data source provided the winning value for any data type — "
+    "plus every other source that also submitted a value, even those that didn't win. "
+    "This is the complete picture of what each data source returned and why one won over the others."
 )
 platform_legend_panel()
 st.markdown("---")
@@ -70,14 +70,14 @@ avg_conf = df["confidence_f"].mean()
 c1,c2,c3,c4,c5 = st.columns(5)
 with c1: kpi("Total Records", f"{total:,}", color="#3b82f6")
 with c2: kpi("Null Winners", f"{n_null:,}", f"{100*n_null/total:.1f}%", "#ef4444" if n_null>0 else "#22c55e")
-with c3: kpi("P0 Wins", f"{n_p0:,}", f"{100*n_p0/total:.1f}% Ghost Assigner", "#f97316" if n_p0>0 else "#22c55e")
+with c3: kpi("Form Submission Wins", f"{n_p0:,}", f"{100*n_p0/total:.1f}% — business's own form overriding vendors", "#f97316" if n_p0>0 else "#22c55e")
 with c4: kpi("Legacy Schema", f"{n_legacy:,}", "old source.name format", "#94a3b8")
 with c5: kpi("Avg Confidence", f"{avg_conf:.3f}", "", "#6366f1")
 
 analyst_note(
     "What these metrics mean",
     "<strong>Null Winners</strong>: A platform won the race but its value is null — the worst outcome. "
-    "Downstream processes get no classification. Usually caused by P0 writing <code>value: null, confidence: 1</code> "
+    "Downstream processes receive no classification for that business. Usually caused by the business submitting a blank form field, which was recorded with the maximum score and overrode real data from vendors. "
     "before vendors return.<br><br>"
     "<strong>Legacy Schema</strong>: These records use the old JSON format where source is stored as "
     "<code>{\"name\": \"AINaicsEnrichment\"}</code> instead of <code>{\"platformId\": 31}</code>. "
@@ -85,7 +85,7 @@ analyst_note(
     level="info",
     bullets=[
         "Null Winners % above 5% = significant pipeline problem",
-        "P0 Wins % above 20% = arbitration bug causing real data loss",
+        "Form submissions winning above 20% = the scoring configuration issue is significantly reducing data quality",
         "Avg Confidence well below 0.8 = AI or low-confidence sources dominating",
     ],
 )
@@ -110,7 +110,7 @@ with col_pie:
     st.plotly_chart(fig_pie, use_container_width=True, key="fe_pie")
 
 with col_alt:
-    st.markdown("**Who appears in alternatives[]?** (lost the race but submitted a value)")
+    st.markdown("**Which sources submitted a value but didn't win?**")
     alt_counts: dict[str, int] = {}
     for raw in df["raw_json"].dropna():
         for a in parse_alternatives(raw):
@@ -134,26 +134,26 @@ with col_alt:
                                xaxis=dict(showgrid=False), yaxis=dict(showgrid=False))
         st.plotly_chart(fig_alt, use_container_width=True, key="fe_alt")
     else:
-        st.info("No alternatives[] data found — records may be in legacy schema format.")
+        st.info("No other sources found for this selection — either only one source returned data, or the records use an older data format.")
 
 analyst_note(
     "Winning vs Alternatives — what the gap reveals",
     "A platform appearing many times in <strong>alternatives</strong> but few times as <strong>winner</strong> "
-    "means it is consistently losing the confidence race to another platform — likely P0. "
-    "For example, if ZoomInfo (P24) appears in 3,000 alternatives but only wins 200 times, "
-    "it means ZoomInfo returned valid data for 3,000 businesses but was overruled 2,800 times.",
+    "means it is consistently submitting values but losing to another source — often the business's own form submission. "
+    "For example, if ZoomInfo appears in 3,000 non-winner lists but only wins 200 times, "
+    "it means ZoomInfo returned valid data for 3,000 businesses but was overridden 2,800 times.",
     level="warning",
     bullets=[
-        "ZoomInfo (P24) in many alternatives but few wins → P0 is suppressing real data",
-        "AI (P31) winning but also in many alternatives → AI is the fallback and often loses to itself",
-        "No alternatives at all → legacy schema or single-platform fact",
+        "ZoomInfo in many non-winner lists but few wins → the business's own submission is overriding ZoomInfo's real data",
+        "AI in both winners and non-winners → AI is the fallback when vendors fail, but sometimes also loses to the form submission",
+        "No other sources at all → only one source returned data, or an older data format is being used",
     ],
 )
 st.markdown("---")
 
 # ── Records table with alternatives expanded ───────────────────────────────────
 section_header("📋 Fact Records — Winner + Alternatives")
-st.caption("Click any row's expander to see its full alternatives[] array.")
+st.caption("Select a Business ID below to see the full list of values submitted by each data source.")
 
 display_cols = {
     "business_id": "Business ID",
@@ -192,7 +192,7 @@ if bid_pick and bid_pick != "— select —":
             alt_disp.columns = ["Platform","Platform ID","Value","Confidence","Updated At"]
             st.dataframe(alt_disp, hide_index=True, use_container_width=True)
         else:
-            st.info("No alternatives in raw JSON (may be legacy schema).")
+            st.info("No other sources found — either only one source submitted data, or this record uses an older format.")
 
         with st.expander("🔬 Raw JSON"):
             try:

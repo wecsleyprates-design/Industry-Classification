@@ -33,24 +33,22 @@ f_from, f_to = filters["date_from"], filters["date_to"]
 f_cust = filters["customer_id"]
 f_biz  = filters["business_id"]
 
-st.markdown("# 🔗 Canonical NAICS → MCC Mapping Analysis")
+st.markdown("# 🔗 Industry-to-Payment Category Mapping Analysis")
 st.markdown(
-    "**Source of truth:** `rds_cases_public.rel_naics_mcc` — Worth's own canonical NAICS→MCC mapping table. "
-    "This table is used by `integration-service/lib/facts/businessDetails/index.ts` (L359-374) "
-    "to derive `mcc_code_from_naics`. "
-    "A **canonical pair** = the business's winning NAICS+MCC combination exists in this table. "
-    "A **non-canonical pair** = the combination is not in the mapping — either wrong, or the AI "
-    "overrode it with a different MCC."
+    "Worth AI maintains an **official mapping table** that defines which payment category codes (MCC) "
+    "correspond to which industry codes (NAICS). "
+    "When a business's industry code converts to a payment category through this table, the result is considered correct. "
+    "When the combination is **not in the table** — either the industry code is wrong, or the AI assigned a different payment category directly — it's flagged for review."
 )
 platform_legend_panel()
 st.markdown("---")
 
 # ── Canonical mapping reference table ─────────────────────────────────────────
-with st.expander("📚 View the canonical NAICS→MCC mapping table (rel_naics_mcc)"):
-    with st.spinner("Loading canonical pairs…"):
+with st.expander("📚 View the official industry-to-payment-category mapping table"):
+    with st.spinner("Loading mapping table…"):
         pairs_df = load_canonical_pairs()
     if pairs_df is not None and not pairs_df.empty:
-        st.caption(f"**{len(pairs_df):,} canonical NAICS→MCC pairs** in `rds_cases_public.rel_naics_mcc`")
+        st.caption(f"**{len(pairs_df):,} recognized industry + payment category combinations** in Worth's official mapping table")
         search = st.text_input("Search by NAICS or MCC code", "", key="pairs_search")
         if search:
             pairs_df = pairs_df[
@@ -115,21 +113,17 @@ with c5: kpi("⬜ Missing Code", f"{n_naics_miss + n_mcc_miss:,}",
              f"NAICS missing: {n_naics_miss:,} | MCC missing: {n_mcc_miss:,}", "#64748b")
 
 analyst_note(
-    "What canonical pairs mean — and why non-canonical is a problem",
-    "The canonical mapping in <code>rel_naics_mcc</code> is Worth's source of truth for "
-    "which NAICS codes map to which MCCs. When a business has a canonical pair, the system "
-    "derived the MCC correctly from the NAICS via the lookup table. "
-    "When the pair is <strong>non-canonical</strong>, one of two things happened: "
-    "(1) the winning NAICS is wrong/catch-all → the derived MCC is also wrong, or "
-    "(2) the AI direct MCC (<code>mcc_code_found</code>) overrode the NAICS-derived MCC "
-    "with a different value not in the canonical table.",
+    "What these statuses mean",
+    "Worth's official mapping table defines which industry code and payment category code belong together. "
+    "When a business has both codes and they appear together in the table, the classification is correct. "
+    "When they don't appear together, it means either the industry code is wrong, or the AI assigned a different payment category directly.",
     level="info",
     bullets=[
-        "✅ <strong>Canonical Pair</strong>: NAICS+MCC exists in rel_naics_mcc — system working correctly",
-        "⚠️ <strong>Non-Canonical</strong>: combination not in mapping — investigate whether NAICS or MCC is wrong",
-        "❌ <strong>Fallback/Invalid</strong>: 561499 NAICS (catch-all) or 5614 MCC (AI bug) — both need re-enrichment",
-        "⬜ <strong>NAICS Missing</strong>: no winning NAICS fact at all — P0 null win or fact never written",
-        "⬜ <strong>MCC Missing</strong>: NAICS exists but MCC not derived — usually because NAICS is null or not in mapping",
+        "✅ <strong>Recognized combination</strong>: industry code + payment category appear together in the official mapping — classification is correct",
+        "⚠️ <strong>Unrecognized combination</strong>: these two codes don't appear together in the mapping — investigate whether the industry code or payment category is wrong",
+        "❌ <strong>Generic / Invalid</strong>: industry code is the generic placeholder (561499) or payment category is the invalid AI code (5614) — both need to be corrected",
+        "⬜ <strong>Industry code missing</strong>: no industry code was assigned at all — usually because the business submitted a blank form field",
+        "⬜ <strong>Payment category missing</strong>: industry code exists but payment category was never derived — usually because the industry code is not in the mapping table",
     ],
 )
 
@@ -242,18 +236,17 @@ else:
     st.dataframe(display_df, use_container_width=True, hide_index=True, column_config=col_cfg)
 
     analyst_note(
-        "How to read the by-customer table",
-        "Each row is one customer. <strong>Canonical %</strong> = % of that customer's businesses "
-        "with a valid NAICS+MCC pair in <code>rel_naics_mcc</code>. "
-        "Sorted ascending — lowest quality at the top. "
-        "Customers with high <strong>Non-Canonical</strong> or <strong>Fallback</strong> counts "
-        "are most at risk for classification complaints.",
-        level="info",
-        bullets=[
-            "Low Canonical % → this customer has many businesses with wrong/mismatched NAICS+MCC combinations",
-            "High NAICS Missing → P0 null wins are suppressing NAICS data for this customer",
-            "High Fallback / Invalid → AI catch-all (561499) dominating this customer's classification",
-        ],
+    "How to read this table",
+    "Each row is one customer. <strong>Canonical %</strong> = % of that customer's businesses "
+    "with a correctly recognized industry + payment category combination. "
+    "Sorted with the worst quality at the top. "
+    "Customers with high unrecognized or generic/invalid counts are most likely to receive classification complaints.",
+    level="info",
+    bullets=[
+        "Low Canonical % → many of this customer's businesses have mismatched or wrong codes",
+        "High 'Industry code missing' → blank form submissions are overriding real vendor data for this customer",
+        "High 'Generic / Invalid' → the generic placeholder code (561499) is dominating this customer's portfolio",
+    ],
     )
 
     st.download_button(
@@ -272,9 +265,9 @@ non_canon = status_df[
 ].copy()
 
 if non_canon.empty:
-    st.success("✅ No non-canonical or fallback pairs found for the selected filters.")
+    st.success("✅ No unrecognized or invalid combinations found for the selected filters.")
 else:
-    st.info(f"Showing {len(non_canon):,} businesses with non-canonical or fallback NAICS+MCC pairs.")
+    st.info(f"Showing {len(non_canon):,} businesses with unrecognized combinations or generic/invalid codes.")
     disp = non_canon[[
         "business_id","final_naics","naics_platform_label","final_mcc","pair_status"
     ]].copy()

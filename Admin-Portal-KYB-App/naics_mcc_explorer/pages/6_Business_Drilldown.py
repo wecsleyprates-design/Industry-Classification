@@ -82,7 +82,7 @@ for fn in FACT_NAMES:
     pname = platform_label(pid)
     if _null := (val is None or str(val).strip() in ("","None","null")):
         flag = "⬜ Null winner"
-        note = f"P0 wrote null with confidence {conf:.2f} — real vendor data locked out." if pid=="0" else f"No value written by {pname}."
+        note = f"Business submitted a blank field (score: {conf:.2f}) — this overrode real vendor data." if pid=="0" else f"No value provided by {pname}."
         issues_found.append(f"`{fn}` has a null winner from {pname}")
     elif fn=="naics_code":
         status, reason = validate_naics(val, naics_lookup)
@@ -153,7 +153,7 @@ for tab, fn in zip(tabs, FACT_NAMES):
                 unsafe_allow_html=True)
 
         # Alternatives table
-        st.markdown("**Non-winning alternatives (`alternatives[]`):**")
+        st.markdown("**Other data sources that also submitted a value (but didn't win):**")
         alts = parse_alternatives(raw)
         if alts:
             alt_df = pd.DataFrame(alts)
@@ -161,13 +161,13 @@ for tab, fn in zip(tabs, FACT_NAMES):
             st.dataframe(alt_df, hide_index=True, use_container_width=True)
             analyst_note(
                 f"Alternatives for `{fn}`",
-                "These platforms submitted a value but lost the confidence arbitration race. "
-                "If the winner is null or invalid, check whether any alternative has a valid value — "
-                "that would confirm the arbitration bug is actively suppressing real data for this business.",
+                "These data sources also submitted a value but scored lower than the winner. "
+                "If the winner is blank or invalid, check whether any of these alternatives has a valid value — "
+                "that confirms real data was available but was overridden for this business.",
                 level="warning" if (val is None or str(val).strip() in ("","None","null")) else "info",
             )
         else:
-            st.caption("No alternatives found (may be legacy schema or single-platform fact).")
+            st.caption("No other sources found — either only one source submitted data, or this record uses an older format.")
 
         with st.expander("🔬 Raw JSON"):
             try:
@@ -200,14 +200,14 @@ st.dataframe(tl.sort_values("Received At",ascending=False), hide_index=True, use
 
 # ── Ghost Assigner timing ──────────────────────────────────────────────────────
 st.markdown("---")
-with st.expander("🕐 Ghost Assigner Timing Analysis — P0 runs first, vendors come ~4 min later"):
+with st.expander("🕐 Timing Analysis — Why the business's own submission wins before vendors respond"):
     analyst_note(
-        "The ~4-minute timing pattern",
-        "P0 (Applicant Entry) always writes its fact immediately when the business submits their onboarding form. "
-        "Real vendors (ZoomInfo, SERP) run asynchronously and return ~4 minutes later. "
-        "By the time vendors return, P0 has already claimed the winner slot with confidence=1. "
-        "If the <strong>Winner Updated At</strong> timestamp is ~4 minutes before alternative timestamps, "
-        "this confirms the ghost assigner pattern for this specific business.",
+        "The ~4-minute timing gap",
+        "When a business submits its onboarding form, the system immediately records that submission with the highest score (1.0). "
+        "External data providers like ZoomInfo and SERP run separately and return their results about 4 minutes later. "
+        "By the time they return, the form submission has already won. "
+        "If the <strong>Winner Updated At</strong> timestamp is ~4 minutes before the other sources' timestamps, "
+        "this confirms the pattern for this specific business.",
         level="warning",
     )
     for fn in FACT_NAMES:

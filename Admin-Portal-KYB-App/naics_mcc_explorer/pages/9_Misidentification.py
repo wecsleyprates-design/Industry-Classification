@@ -98,13 +98,13 @@ with st.expander("📖 Proxy Error Signal Definitions — How we detect misident
     st.markdown("""
 | Signal | Name | Definition | Severity |
 |---|---|---|---|
-| S1 | **Null Winner** | P0 won with `value: null` — no classification at all | 🔴 Critical |
-| S2 | **Format Error** | Winning value is not a 6-digit number (e.g. `54161`, `0`, `abc`) | 🔴 Critical |
-| S3 | **Catch-all Won** | Winner = `561499` (AI last resort) — not meaningful for risk decisioning | 🟠 High |
-| S4 | **Ghost Override** | P0 won AND trusted vendors (P24/P17/P22) have a *different* code in alternatives | 🟠 High |
-| S5 | **Sector Mismatch** | Winner's 2-digit sector ≠ all vendor alternative sectors — broad misidentification | 🔴 Critical |
-| S6 | **Vendor Consensus Ignored** | 2+ vendors agree on same code, but winner is different | 🟡 Medium |
-| S7 | **Catch-all w/ Specific Alt** | Winner = 561499 but alternatives have specific valid codes | 🟠 High |
+| S1 | **Blank winner** | Business submitted a blank form field and it won — no industry code assigned | 🔴 Critical |
+| S2 | **Wrong format** | Winning code is not a valid 6-digit number (e.g. `54161`, `0`, text) | 🔴 Critical |
+| S3 | **Generic placeholder won** | Winner = `561499` (the AI's last resort when it doesn't know) — not useful for risk decisioning | 🟠 High |
+| S4 | **Form overrides vendors** | Business's form submission won AND external providers (ZoomInfo/Equifax/SERP) had a *different* code | 🟠 High |
+| S5 | **Wrong industry sector** | Winner's broad industry (2-digit category) is completely different from what all external providers suggested — like the Employment Agency vs Professional Services case | 🔴 Critical |
+| S6 | **Multiple vendors agree, but their code wasn't used** | 2+ external providers returned the same code, but the winner is something different | 🟡 Medium |
+| S7 | **Generic placeholder, but specific code was available** | Winner = 561499 but external providers had specific valid codes | 🟠 High |
 
 **Example: Employment Agency complaint**
 - Business expected: `561311` (Employment Placement Agencies, sector 56)
@@ -370,20 +370,20 @@ else:
                  f"{100*n_catchall/total_biz:.1f}%", "#f59e0b")
 
     analyst_note(
-        "Understanding the signal counts",
-        "These counts are <strong>proxy signals</strong> — indicators of likely misidentification, "
-        "not confirmed errors. The most actionable: "
-        "<strong>S5 (sector mismatch)</strong> is where complaints like the Employment Agency case originate — "
-        "the winner is in a completely different broad industry than what vendors suggest. "
-        "<strong>S6 (vendor consensus ignored)</strong> is the strongest signal: "
-        "when 2+ independent vendors agree on a code and the winner is something else, "
+    "Understanding the signal counts",
+        "These are <strong>indicators of likely misidentification</strong>, not confirmed errors. "
+        "The most actionable: "
+        "<strong>S5 (wrong industry sector)</strong> is where complaints like the Employment Agency case originate — "
+        "the winner places the business in a completely different industry than what all external providers suggested. "
+        "<strong>S6 (multiple vendors agree but weren't used)</strong> is the strongest signal: "
+        "when 2+ independent providers return the same code and the winner is something different, "
         "the winner is almost certainly wrong.",
         level="warning",
         bullets=[
-            f"S5 Sector Mismatch ({n_sector:,}): winner's sector ≠ ALL vendor alternative sectors → investigate per-client",
-            f"S6 Vendor Consensus Ignored ({n_consensus:,}): 2+ vendors agree, winner differs → strongest error proxy",
-            f"S4 Ghost Override ({n_ghost:,}): P0 beat a vendor with different code → fix sources.ts:148",
-            f"S3 Catch-all ({n_catchall:,}): 561499 won → re-enrichment needed",
+            f"S5 Wrong Sector ({n_sector:,}): winner's industry doesn't match what any external provider suggested — investigate per client",
+            f"S6 Vendors Agree But Ignored ({n_consensus:,}): multiple providers returned the same code but it wasn't used — strongest misidentification indicator",
+            f"S4 Form Overrides Vendors ({n_ghost:,}): business's form submission won over a vendor with a different code — fix the scoring configuration",
+            f"S3 Generic Placeholder ({n_catchall:,}): 561499 won — the system could not determine the industry — re-classification needed",
         ],
     )
 

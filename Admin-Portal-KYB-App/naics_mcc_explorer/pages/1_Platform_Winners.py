@@ -32,11 +32,13 @@ f_from, f_to = filters["date_from"], filters["date_to"]
 f_cust = filters["customer_id"]
 f_biz  = filters["business_id"]
 
-st.markdown("# 🏆 Platform Winner Distribution")
+st.markdown("# 🏆 Data Source Winner Distribution")
 st.markdown(
-    "Which platform **wins the confidence arbitration race** for NAICS and MCC facts? "
-    "Trusted vendors (ZoomInfo P24, Equifax P17, SERP P22) should dominate. "
-    "**P0 (Ghost Assigner)** and **P-1 (Calculated/Dependent)** dominating is a quality signal."
+    "When multiple data sources provide an industry code for the same business, the system picks the one with the highest score. "
+    "This page shows which source is winning that comparison. "
+    "Trusted external providers (ZoomInfo, Equifax, SERP) should be winning for most businesses. "
+    "**When the business's own submission wins, it means no external provider's result was used — "
+    "which is a data quality risk.** The 'Automatically computed' category winning for payment categories is normal and expected."
 )
 platform_legend_panel()
 st.markdown("---")
@@ -123,17 +125,17 @@ for pair in [("naics_code","mcc_code"), ("mcc_code_found","mcc_code_from_naics")
 
 analyst_note(
     "How to read these charts",
-    "Each bar = businesses where that platform <strong>won</strong> the confidence race. "
-    "Expected winners: <strong>ZoomInfo (P24)</strong> for NAICS, "
-    "<strong>Calculated/Dependent (P-1)</strong> for MCC (because mcc_code is always derived, never from a vendor). "
-    "Red flag: <strong>P0 (Applicant Entry)</strong> in top 2 for NAICS.",
+    "Each bar = number of businesses where that source had the highest score and became the winner. "
+    "For industry codes (NAICS), <strong>ZoomInfo, Equifax, or SERP</strong> should be winning most of the time. "
+    "For payment categories (MCC), <strong>Automatically Computed</strong> winning is normal — payment categories are always derived, never submitted directly by a vendor. "
+    "⚠️ Red flag: <strong>Business's own submission</strong> in the top 2 for industry codes means the onboarding form data is overriding real vendor data.",
     level="info",
     bullets=[
-        "🟢 Green = external vendor (ZoomInfo, SERP, Equifax) — expected winners for NAICS",
-        "🟣 Purple = AI enrichment (P31) — acceptable fallback when vendors fail",
-        "🔴 Red (P0) = self-reported onboarding — should NEVER lead for NAICS",
-        "⚫ Grey (P-1) = calculated/dependent — NORMAL and expected for mcc_code, mcc_code_from_naics",
-        "🟡 Unknown = old-schema records (source stored as name string, no platformId field)",
+        "🟢 Green = external data provider (ZoomInfo, SERP, Equifax) — these should dominate for industry codes",
+        "🟣 Orange/Purple = AI classification — acceptable backup when data providers don't return a result",
+        "🔴 Red = business's own submission — should not be winning when real data providers are available",
+        "⚫ Grey = automatically computed (derived from another code) — normal and expected for payment categories",
+        "🟡 Unknown = records in an older data format where the source name is stored differently",
     ],
 )
 sql_panel("Platform Winner Distribution", f"""\
@@ -166,7 +168,7 @@ for fn in FACTS_TO_SHOW:
                         "Avg Confidence":r["avg_confidence"]})
 if p0_rows:
     total_p0 = sum(r["P0 Wins"] for r in p0_rows)
-    st.error(f"⚠️ Ghost Assigner (P0) winning for {total_p0:,} fact records across monitored fact types.", icon="🚨")
+    st.error(f"⚠️ The business's own submission is winning for {total_p0:,} records across monitored data types — real vendor data is being overridden.", icon="🚨")
     c1,c2,c3 = st.columns(3)
     naics_p0 = next((r for r in p0_rows if r["Fact"]=="naics_code"),{})
     mcc_p0   = next((r for r in p0_rows if r["Fact"]=="mcc_code"),{})
@@ -178,11 +180,14 @@ if p0_rows:
                  column_config={"P0 Wins": st.column_config.NumberColumn(format="%d"),
                                 "Null Wins": st.column_config.NumberColumn(format="%d"),
                                 "Avg Confidence": st.column_config.NumberColumn(format="%.3f")})
-    analyst_note("Root cause", "Hardcoded <code>confidence:1</code> in "
-        "<code>integration-service/lib/facts/sources.ts:151</code> (businessDetails). "
-        "Fix: lower to <code>0.1</code>. One change repairs thousands of businesses on next facts refresh.",
+    analyst_note("Why this happens",
+        "The system assigns a score of 1.0 (the maximum) to whatever the business types on the onboarding form. "
+        "External providers like ZoomInfo typically score 0.8 or lower. "
+        "Since the onboarding form always has the highest score, it wins — "
+        "even when its value is blank, and even when ZoomInfo returned a perfectly valid industry code. "
+        "This is a configuration issue: the form submission score is set too high.",
         level="danger",
-        action="sources.ts:151 → confidence: 1  →  confidence: 0.1")
+        action="Engineering fix: lower the score assigned to form submissions from 1.0 to 0.1. This single change will allow ZoomInfo and SERP to win for thousands of businesses on the next data refresh.")
 else:
     st.success("✅ No P0 wins detected for the selected filters.")
 st.markdown("---")
@@ -203,10 +208,10 @@ for tab, fn in zip(tabs, FACTS_TO_SHOW):
         is_dependent = fn in DEPENDENT_FACT_NAMES
         if is_dependent:
             analyst_note(
-                f"`{fn}` is a Calculated/Dependent fact (P-1)",
-                f"<code>{fn}</code> is derived internally by the Fact Engine — it is never sourced from a vendor. "
-                f"<strong>Seeing P-1 (Calculated/Dependent) as the winner is correct and expected.</strong> "
-                f"Its value depends on upstream facts: if <code>naics_code</code> is wrong, this fact is also wrong.",
+                f"`{fn}` is automatically computed",
+                f"<code>{fn}</code> is always calculated by the system — no external data provider ever directly supplies this value. "
+                f"<strong>Seeing 'Automatically Computed' as the winner here is correct and expected.</strong> "
+                f"Its value depends on the industry code (NAICS): if the industry code is wrong, this payment category will also be wrong.",
                 level="info",
             )
         display = df[["platform_name","platform_id","business_count","pct_of_total",
@@ -218,15 +223,15 @@ for tab, fn in zip(tabs, FACTS_TO_SHOW):
                      column_config={"Business Count": st.column_config.NumberColumn(format="%d"),
                                     "Null Wins": st.column_config.NumberColumn(format="%d"),
                                     "Avg Confidence": st.column_config.NumberColumn(format="%.3f")})
-        st.caption("🟢 Vendor  🟣 AI  🔴 Applicant Entry (P0)  ⚫ Calculated/Dependent (P-1)  ⚫ Unknown")
+        st.caption("🟢 External data provider  🟣 AI classification  🔴 Business's own submission  ⚫ Automatically computed  ⚫ Unknown")
 
         analyst_note(
             f"Interpreting the `{fn}` winner table",
-            "<strong>Avg Confidence</strong>: average confidence score for that platform's wins. "
-            "P0 always shows ~1.0 by design (the bug). "
-            "ZoomInfo typically ~0.8–1.0. AI enrichment (P31) ~0.15. "
-            "P-1 (calculated) shows 0.0 because dependent facts have no confidence score — this is normal. "
-            "<strong>Null Wins</strong>: platform won but wrote an empty value — worst outcome.",
+            "<strong>Avg Score</strong>: average score for that source's wins. "
+            "The business's own submission always shows 1.0 — that is the configuration issue causing the override problem. "
+            "ZoomInfo typically scores 0.8–1.0. AI classification scores ~0.15. "
+            "Automatically Computed shows 0.0 — this is normal because computed values don't have a score. "
+            "<strong>Blank Wins</strong>: this source won the comparison but provided no value — the worst possible outcome.",
             level="info",
         )
         st.markdown("---")

@@ -25,11 +25,12 @@ f_from, f_to = filters["date_from"], filters["date_to"]
 f_cust = filters["customer_id"]
 f_biz  = filters["business_id"]
 
-st.markdown("# ⛓️ NAICS → MCC Cascade Analysis")
+st.markdown("# ⛓️ Industry Code → Payment Category: Ripple Effect Analysis")
 st.markdown(
-    "When NAICS is null or wrong, MCC breaks too — because `mcc_code_from_naics` (Path 2) "
-    "derives from the winning NAICS code. This page traces that cascade and classifies every "
-    "business into a **backfill tier** based on how much remediation is needed."
+    "When a business's **industry code (NAICS) is missing or wrong**, its **payment category (MCC) breaks too**. "
+    "That's because the payment category is automatically derived by converting the industry code using a mapping table. "
+    "A bad input produces a bad output. "
+    "This page shows how many businesses are affected, and groups them by how much work is needed to fix them."
 )
 platform_legend_panel()
 st.markdown("---")
@@ -84,50 +85,51 @@ n_no_mcc     = int(df[(df["naics_null"] | df["naics_catchall"]) & df["mcc_null"]
 n_double_bad = int(df[df["naics_catchall"] & df["mcc_catchall"]].shape[0])
 
 # ── KPIs ──────────────────────────────────────────────────────────────────────
-section_header("📊 Cascade Summary")
+section_header("📊 Impact Summary")
 c1,c2,c3,c4,c5,c6 = st.columns(6)
 with c1: kpi("Total Businesses", f"{total:,}", color="#3b82f6")
 with c2: kpi("✅ Healthy", f"{n_healthy:,}", f"Valid NAICS + valid MCC ({100*n_healthy/total:.1f}%)", "#22c55e")
 with c3: kpi("Null NAICS", f"{n_null_naics:,}", f"{100*n_null_naics/total:.1f}% of portfolio", "#ef4444")
-with c4: kpi("Catch-all NAICS", f"{n_ca_naics:,}", "561499 → MCC also degraded", "#f59e0b")
+with c4: kpi("Generic Industry Code", f"{n_ca_naics:,}", "Code 561499 — no specific industry determined", "#f59e0b")
 with c5: kpi("AI-Protected MCC", f"{n_ai_prot:,}", "null NAICS but AI caught MCC anyway", "#8b5cf6")
-with c6: kpi("🔴 Double Catch-all", f"{n_double_bad:,}", "561499 NAICS + 7399 MCC — both wrong", "#ef4444")
+with c6: kpi("🔴 Both Codes Generic", f"{n_double_bad:,}", "Generic industry (561499) AND generic payment (7399) — highest priority", "#ef4444")
 
 analyst_note(
-    "Understanding the cascade metrics",
-    "The cascade works like this: NAICS is assigned first → MCC is derived from NAICS (Path 2). "
-    "If NAICS is null or 561499, Path 2 produces null or 7399. Path 1 (AI direct MCC) runs independently "
-    "and can rescue businesses — which is why some null-NAICS businesses still have valid MCCs.",
+    "How to read these numbers",
+    "The industry code (NAICS) is assigned first. The payment category (MCC) is then derived from it using a conversion table. "
+    "If the industry code is missing or generic, the conversion produces a generic or missing payment category too. "
+    "However, the AI payment category assignment runs independently and can sometimes produce a valid result "
+    "even when the industry code is wrong — those businesses are shown as 'AI-rescued'.",
     level="info",
     bullets=[
-        f"<strong>{n_healthy:,} healthy</strong>: valid NAICS + valid MCC — pipeline working correctly",
-        f"<strong>{n_null_naics:,} null NAICS</strong>: P0 wrote null with confidence:1 — real vendor data suppressed",
-        f"<strong>{n_ca_naics:,} catch-all NAICS</strong>: 561499 assigned — generic code feeding into MCC",
-        f"<strong>{n_ai_prot:,} AI-protected</strong>: NAICS broken but AI independently produced a valid MCC — resilient",
-        f"<strong>{n_double_bad:,} double catch-all</strong>: 561499→7399 — both codes meaningless — highest priority fix",
+        f"<strong>{n_healthy:,} fully classified</strong>: valid industry code AND valid payment category — everything working correctly",
+        f"<strong>{n_null_naics:,} missing industry code</strong>: the business submitted nothing (or submitted a blank), and the data vendor's result was overridden by the submission",
+        f"<strong>{n_ca_naics:,} generic industry code (561499)</strong>: no specific industry was determined — payment category conversion is unreliable",
+        f"<strong>{n_ai_prot:,} AI-rescued</strong>: industry code is missing/wrong, but the AI independently assigned a valid payment category — payment category is likely OK",
+        f"<strong>{n_double_bad:,} both codes generic</strong>: industry code (561499) AND payment category (7399) are both generic placeholders — highest priority for correction",
     ],
 )
 st.markdown("---")
 
 # ── Funnel ────────────────────────────────────────────────────────────────────
-section_header("🌊 Cascade Funnel — How Bad NAICS Flows Into Broken MCC")
+section_header("🌊 Impact Funnel — How a Wrong Industry Code Breaks the Payment Category")
 
 analyst_note(
-    "How to read the funnel",
+    "How to read this funnel",
     "Each stage is a subset of the one above it. Read top to bottom: "
-    "<strong>Total businesses</strong> → of those, how many have a bad NAICS → "
-    "of those bad-NAICS businesses, how many were rescued by AI MCC (Path 1) → "
-    "how many ended up with no MCC at all → how many have the worst outcome: "
-    "both NAICS=561499 and MCC=7399.",
+    "start with all businesses → narrow to those with a missing or generic industry code → "
+    "of those, how many were saved by the AI independently assigning a valid payment category → "
+    "how many ended up with no payment category at all → "
+    "how many have the worst outcome: both the industry code (561499) and payment category (7399) are generic placeholders.",
     level="info",
 )
 
 fig_f = go.Figure(go.Funnel(
     y=["Total businesses in scope",
-       "With null or catch-all NAICS",
+       "With missing or generic industry code",
        "Of those: MCC AI-protected",
        "Of those: No MCC at all",
-       "Double catch-all (561499→7399)"],
+       "Both industry AND payment codes are generic (561499+7399)"],
     x=[total, n_bad_naics, n_ai_prot, n_no_mcc, n_double_bad],
     textinfo="value+percent initial",
     marker=dict(color=["#3b82f6","#f59e0b","#8b5cf6","#ef4444","#dc2626"]),
@@ -164,7 +166,7 @@ t3  = df[df["naics_catchall"] & df["mcc_null"]]
 tier_data = [
     ("Tier 1 — NAICS fix only (AI-protected MCC)",     len(t1),  "#22c55e", "Fix NAICS only — MCC already correct via AI"),
     ("Tier 1b — NAICS fix only (specific MCC, no AI)", len(t1b), "#84cc16", "Fix NAICS; investigate MCC source before touching"),
-    ("Tier 2 — NAICS + MCC fix (7399 catch-all)",      len(t2),  "#f59e0b", "Fix both NAICS and MCC"),
+    ("Tier 2 — Fix both industry code and payment category",      len(t2),  "#f59e0b", "Fix both industry code and payment category"),
     ("Tier 3 — NAICS + re-trigger AI (no MCC at all)", len(t3),  "#ef4444", "Fix NAICS + re-trigger AI enrichment"),
 ]
 tier_df = pd.DataFrame(tier_data, columns=["Tier","Businesses","Color","Action"])
@@ -186,23 +188,23 @@ with col_tbl:
     st.dataframe(tier_df[["Tier","Businesses","Action"]], hide_index=True, use_container_width=True)
 
 analyst_note(
-    "Backfill execution order",
-    "Fix in order from <strong>lowest risk → highest complexity</strong>.",
+    "Recommended fix order — start with the easiest, lowest-risk group first",
+    "Fix in order from <strong>least work → most work</strong>.",
     level="info",
     bullets=[
-        f"<strong>Tier 1 ({len(t1):,})</strong>: NAICS fix only — AI already saved MCC. Safe to fix NAICS without touching MCC.",
-        f"<strong>Tier 1b ({len(t1b):,})</strong>: NAICS fix only — MCC is specific but no AI backup. Investigate MCC source first.",
-        f"<strong>Tier 2 ({len(t2):,})</strong>: Fix both NAICS and MCC. Overwrite mcc_code and mcc_code_from_naics after NAICS fixed.",
-        f"<strong>Tier 3 ({len(t3):,})</strong>: Most complex. Fix NAICS then re-trigger AI enrichment to produce a new mcc_code_found.",
+        f"<strong>Tier 1 ({len(t1):,})</strong>: Fix industry code only — the AI already assigned a valid payment category independently. Safe to correct the industry code without touching the payment category.",
+        f"<strong>Tier 1b ({len(t1b):,})</strong>: Fix industry code only — payment category looks correct but no AI backup exists. Verify the payment category source before making changes.",
+        f"<strong>Tier 2 ({len(t2):,})</strong>: Fix both industry code and payment category — the generic payment code (7399) came from the bad industry code and needs to be corrected too.",
+        f"<strong>Tier 3 ({len(t3):,})</strong>: Most work required — fix the industry code AND re-run the AI payment category classification to produce a new result.",
     ],
 )
 st.markdown("---")
 
 # ── Full cascade table with NAICS + MCC + timestamps + alternatives ────────────
-section_header("📋 Per-Business Cascade Table",
-               "Includes NAICS winner + alternatives, MCC (final/AI/NAICS-derived), and all received timestamps.")
+section_header("📋 Per-Business Detail Table",
+               "Industry code + payment category for every business, including all data sources that submitted values and their timestamps.")
 
-with st.expander("Show full per-business cascade data"):
+with st.expander("Show full per-business data"):
     display = df[[
         "business_id","customer_id",
         "naics_value","naics_platform_name","naics_received_at",

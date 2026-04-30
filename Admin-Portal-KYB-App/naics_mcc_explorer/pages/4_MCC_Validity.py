@@ -28,10 +28,12 @@ f_biz  = filters["business_id"]
 
 st.markdown("# 💳 MCC Code Validity & Source Analysis")
 st.markdown(
-    "MCC codes are **derived, not directly sourced**. Two paths:\n\n"
-    "- **Path 1** (`mcc_code_found`) — AI classifies the business directly from name/description\n"
-    "- **Path 2** (`mcc_code_from_naics`) — NAICS→MCC lookup table applied to the winning NAICS\n\n"
-    "The final `mcc_code` fact prefers Path 1 over Path 2. If NAICS is null or 561499, Path 2 is also broken."
+    "MCC (Merchant Category Code) is a 4-digit payment industry code. "
+    "Worth AI generates it in one of two ways:\n\n"
+    "- **AI-assigned MCC** — the AI reads the business name and description and picks the most fitting payment category code\n"
+    "- **Industry-derived MCC** — the system converts the business's industry code (NAICS) into a payment category code using an official mapping table\n\n"
+    "The AI-assigned code takes priority. If no AI code exists, the industry-derived code is used. "
+    "**If the industry code (NAICS) is missing or wrong, the industry-derived payment category will also be wrong.**"
 )
 platform_legend_panel()
 st.markdown("---")
@@ -89,28 +91,27 @@ section_header("📊 MCC Coverage & Validity")
 
 c1,c2,c3,c4 = st.columns(4)
 with c1: kpi("Businesses w/ mcc_code", f"{n_final:,}", f"of {total_biz:,} total", "#3b82f6")
-with c2: kpi("AI Direct Only",         f"{n_ai:,}",    "mcc_code_found only",       "#8b5cf6")
-with c3: kpi("NAICS-Derived Only",     f"{n_naics_d:,}","mcc_code_from_naics only", "#6366f1")
+with c2: kpi("AI-Assigned Only",       f"{n_ai:,}",    "AI picked the category directly", "#8b5cf6")
+with c3: kpi("Industry-Derived Only", f"{n_naics_d:,}","Converted from industry code (NAICS)", "#6366f1")
 with c4: kpi("Both Paths Ran",         f"{n_both:,}",  "AI + NAICS-derived",        "#22c55e")
 st.markdown("")
 c5,c6,c7,c8 = st.columns(4)
 with c5: kpi("✅ Valid MCC",           f"{n_valid:,}",  f"{100*n_valid/n_final:.1f}%" if n_final else "", "#22c55e")
-with c6: kpi("⚠️ Catch-all 7399",     f"{n_ca:,}",    f"{100*n_ca/n_final:.1f}%" if n_final else "",   "#f59e0b")
-with c7: kpi("❌ Invalid MCC (5614)",  f"{n_5614:,}",  "AI prompt bug fallback",    "#ef4444")
+with c6: kpi("⚠️ Generic Fallback 7399", f"{n_ca:,}", f"{100*n_ca/n_final:.1f}% — no specific category found" if n_final else "", "#f59e0b")
+with c7: kpi("❌ Invalid Code (5614)",  f"{n_5614:,}",  "Not a real payment category — AI error",    "#ef4444")
 with c8: kpi("⬜ Null mcc_code",       f"{n_null:,}",  "No winning value",          "#64748b")
 
 analyst_note(
     "Interpreting MCC coverage metrics",
-    "The three MCC facts work together: <code>mcc_code_found</code> (AI-direct) wins when available; "
-    "otherwise <code>mcc_code_from_naics</code> (NAICS lookup) is used. "
-    "The final <code>mcc_code</code> reflects whichever path succeeded.",
+    "The payment category code (MCC) is produced in two independent ways and the best one wins. "
+    "The AI-assigned code takes priority; the industry-derived code is the backup.",
     level="info",
     bullets=[
-        "<strong>AI Direct Only</strong>: AI classified the business independently — not dependent on NAICS quality",
-        "<strong>NAICS-Derived Only</strong>: MCC came from the NAICS→MCC mapping — if NAICS is wrong, MCC is wrong",
-        "<strong>Both Paths</strong>: both ran — AI likely won (higher priority). NAICS-derived stored as backup",
-        "<strong>Neither</strong>: business has no MCC at all — invisible to any MCC-based risk rule",
-        f"<strong>5614 (AI bug)</strong>: {n_5614:,} businesses — AI prompt fallback assigns 5614 (Educational Services, invalid MCC) when it cannot classify. These need MCC re-enrichment.",
+        "<strong>AI Only</strong>: the AI assigned a code directly — not affected by the industry code quality",
+        "<strong>Industry-Derived Only</strong>: code came from converting the industry code — if the industry code is wrong, this code is wrong too",
+        "<strong>Both methods ran</strong>: AI won (higher priority). Industry-derived code stored as a backup reference",
+        "<strong>Neither</strong>: business has no payment category at all — cannot be used in payment routing or risk rules",
+        f"<strong>Code 5614 (AI error)</strong>: {n_5614:,} businesses received code 5614, which is not a valid payment category. The AI returns this as a last resort when it cannot identify the business type. These businesses need their payment category reassigned.",
     ],
 )
 st.markdown("---")
@@ -160,12 +161,12 @@ with col_b:
                          xaxis=dict(showgrid=True, gridcolor="#1e293b"),
                          yaxis=dict(showgrid=False, type="category"))
     st.plotly_chart(fig_t, use_container_width=True, key="mcc_top20")
-    st.caption("🟢 Valid  🟡 Catch-all (7399)  🔴 Known invalid (5614)  🔵 Not in lookup  ⚫ Null")
+    st.caption("🟢 Valid  🟡 Generic fallback (7399 — no specific category)  🔴 Invalid code (5614 — AI error)  🔵 Not in reference table  ⚫ Missing")
     analyst_note(
         "Reading the Top MCC chart",
         "Codes should be specific industry codes (e.g. 8011=Physicians, 5812=Restaurants). "
-        "<strong>7399</strong> (Business Services NEC) is the catch-all — a meaningless code for risk decisioning. "
-        "<strong>5614</strong> in the top codes is a critical signal of the AI prompt bug affecting many businesses.",
+        "<strong>7399</strong> (Business Services, Not Elsewhere Classified) is a generic fallback — it means no specific payment category was found. Businesses with this code cannot be accurately categorized for payment routing or risk decisioning. "
+        "<strong>5614</strong> appearing frequently is a serious data quality issue — this code is not recognized by payment networks and was produced by an AI error.",
         level="info",
     )
 
@@ -185,29 +186,30 @@ st.markdown("---")
 
 # ── 5614 callout ───────────────────────────────────────────────────────────────
 if n_5614 > 0:
-    st.error(f"🚨 **{n_5614:,} businesses have MCC = `5614`** — AI prompt bug.", icon="🚨")
+    st.error(f"🚨 **{n_5614:,} businesses have payment category code 5614** — this is not a valid code. The AI assigned it as a last resort when it could not identify the business type.", icon="🚨")
     analyst_note(
-        "What is MCC 5614 and why is it a problem?",
-        "<strong>5614 is not a valid Visa/Mastercard MCC</strong>. It maps to 'Educational Services' in some "
-        "non-standard lists but is not recognized by major payment networks. The AI returns it as a fallback "
-        "when it cannot confidently classify the business. Businesses tagged 5614 will fail MCC-based "
-        "routing, interchange, and risk rules.",
+        "Why is code 5614 a problem?",
+        "Code <strong>5614</strong> is not recognized by Visa, Mastercard, or any major payment network. "
+        "It does not belong to any standard merchant category. The AI assigned it as a last resort when it "
+        "could not determine what type of business it was looking at. "
+        "Any business with this code will likely fail payment routing, interchange fee calculation, and risk scoring rules "
+        "that rely on having a valid payment category.",
         level="danger",
         bullets=[
-            f"{n_5614:,} businesses currently have 5614 as their winning MCC",
-            "This is an AI prompt engineering bug — the model's fallback output is an invalid code",
-            "These businesses need mcc_code re-enrichment — AI needs to re-run with a corrected prompt",
+            f"{n_5614:,} businesses currently have this invalid code",
+            "Root cause: the AI's fallback output is not a real payment category code",
+            "Fix: re-run the AI classification for these businesses with an updated prompt",
         ],
-        action="Re-trigger AI MCC enrichment for all 5614 businesses. Fix the AI prompt to not return 5614.",
+        action="Re-run payment category classification for all businesses with code 5614.",
     )
     bug_df = mcc_final[mcc_final["mcc_value"]=="5614"][[
         "business_id","customer_id","platform_name","confidence","received_at","alt_values","alt_platforms"
     ]].copy()
     bug_df.columns = ["Business ID","Customer ID","Platform","Confidence","Received At","Alt MCC Values","Alt Platforms"]
-    with st.expander(f"View {n_5614:,} businesses with MCC=5614"):
+    with st.expander(f"View {n_5614:,} businesses with invalid code 5614"):
         st.dataframe(bug_df, hide_index=True, use_container_width=True)
 else:
-    st.success("✅ No 5614 MCC codes found.")
+    st.success("✅ No businesses with invalid code 5614 found in this selection.")
 st.markdown("---")
 
 # ── AI vs NAICS-derived confidence ────────────────────────────────────────────
@@ -232,17 +234,15 @@ if not mcc_found.empty and not mcc_fromnaics.empty:
 
     analyst_note(
         "What the confidence scores mean for MCC",
-        "For <code>mcc_code_found</code> (AI direct): confidence reflects how certain the AI was. "
-        "A high proportion of <strong>zero-confidence</strong> records means the AI ran but returned no result — "
-        "or the record uses the old schema (no confidence field). "
-        "For <code>mcc_code_from_naics</code> (NAICS-derived): confidence is typically null or zero because "
-        "the NAICS→MCC lookup is deterministic — it doesn't have a confidence score, it just maps the code. "
-        "So a large zero-confidence bar in NAICS-derived is <strong>expected and normal</strong>.",
+        "The <strong>AI-assigned method</strong> produces a confidence score showing how certain the AI was about its choice. "
+        "A score near 1.0 means high certainty; near 0 means low certainty or no result. "
+        "The <strong>industry-derived method</strong> always shows a confidence of zero — this is expected and normal, "
+        "because it is a direct lookup (it converts a code using a table, not a prediction).",
         level="info",
         bullets=[
-            "AI (mcc_code_found) confidence clusters near 0 = AI returned a low-confidence result or old schema records",
-            "NAICS-derived confidence near 0 = normal — lookup tables don't produce confidence scores",
-            "Both averaging near 0.15 = AI fallback dominating (P31 runs with confidence 0.15)",
+            "Many AI records at confidence 0 → the AI was uncertain or returned no result for those businesses",
+            "Industry-derived at confidence 0 → this is correct behavior — the conversion table does not produce confidence scores",
+            "Both methods averaging near 0.15 → the AI fallback is running for most businesses, meaning data vendors did not provide industry codes",
         ],
     )
 
@@ -253,9 +253,9 @@ if not mcc_found.empty and not mcc_fromnaics.empty:
     nd_hist  = pd.cut(mcc_fromnaics["conf_f"], bins=bins, labels=labels[1:], right=False).value_counts().sort_index()
 
     fig_conf = go.Figure()
-    fig_conf.add_trace(go.Bar(name="AI Direct (mcc_code_found)",
+    fig_conf.add_trace(go.Bar(name="AI-Assigned MCC",
                                x=ai_hist.index.astype(str), y=ai_hist.values, marker_color="#8b5cf6"))
-    fig_conf.add_trace(go.Bar(name="NAICS-Derived (mcc_code_from_naics)",
+    fig_conf.add_trace(go.Bar(name="Industry-Derived MCC (via NAICS conversion)",
                                x=nd_hist.index.astype(str), y=nd_hist.values, marker_color="#3b82f6"))
     fig_conf.update_layout(
         barmode="group", height=300, margin=dict(l=0,r=0,t=10,b=0),
