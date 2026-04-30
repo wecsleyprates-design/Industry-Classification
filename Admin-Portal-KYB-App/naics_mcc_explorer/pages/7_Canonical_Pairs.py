@@ -56,8 +56,8 @@ with st.expander("📚 View the canonical NAICS→MCC mapping table (rel_naics_m
             pairs_df = pairs_df[
                 pairs_df["naics_code"].str.contains(search, na=False) |
                 pairs_df["mcc_code"].str.contains(search, na=False) |
-                pairs_df.get("naics_title", pd.Series(dtype=str)).str.contains(search, case=False, na=False) |
-                pairs_df.get("mcc_title", pd.Series(dtype=str)).str.contains(search, case=False, na=False)
+                pairs_df.get("naics_label", pd.Series(dtype=str)).str.contains(search, case=False, na=False) |
+                pairs_df.get("mcc_label", pd.Series(dtype=str)).str.contains(search, case=False, na=False)
             ]
         st.dataframe(pairs_df, use_container_width=True, hide_index=True)
         st.download_button("⬇️ Download full mapping table",
@@ -69,9 +69,9 @@ with st.expander("📚 View the canonical NAICS→MCC mapping table (rel_naics_m
 sql_panel("Canonical pairs lookup",
           """SELECT DISTINCT
     nc.code  AS naics_code,
-    nc.title AS naics_title,
+    nc.label AS naics_label,
     mc.code  AS mcc_code,
-    mc.title AS mcc_title
+    mc.label AS mcc_label
 FROM rds_cases_public.rel_naics_mcc r
 JOIN rds_cases_public.core_naics_code nc ON nc.id = r.naics_id
 JOIN rds_cases_public.core_mcc_code   mc ON mc.id = r.mcc_id

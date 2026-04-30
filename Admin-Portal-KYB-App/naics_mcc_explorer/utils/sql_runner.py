@@ -105,10 +105,28 @@ def sql_panel(
 
 
 def platform_legend_panel() -> None:
-    """Collapsible platform ID legend."""
-    from utils.platform_map import PLATFORM_LEGEND
-    with st.expander("📖 Platform ID Legend — what does each platform mean?"):
+    """Collapsible platform ID legend + schema reference."""
+    from utils.platform_map import PLATFORM_LEGEND, NAICS_MCC_DERIVATION
+    with st.expander("📖 Platform ID Legend + Schema Reference"):
         st.markdown(PLATFORM_LEGEND)
+        st.markdown("---")
+        st.markdown("**NAICS/MCC derivation chain** (from `businessDetails/index.ts`):")
+        st.code(NAICS_MCC_DERIVATION, language=None)
+        st.markdown("---")
+        st.markdown("**Redshift table reference:**")
+        st.markdown(
+            "| Table | Key columns | Purpose |\n"
+            "|---|---|---|\n"
+            "| `rds_warehouse_public.facts` | `business_id`, `name`, `value` (JSON) | All facts: `naics_code`, `mcc_code`, etc. One row per (business_id, name) |\n"
+            "| `rds_cases_public.core_naics_code` | `id` (PK), `code`, **`label`** | NAICS taxonomy — column is `label` NOT `title` |\n"
+            "| `rds_cases_public.core_mcc_code` | `id` (PK), `code`, **`label`** | MCC list — column is `label` NOT `title` |\n"
+            "| `rds_cases_public.rel_naics_mcc` | `naics_id`→core_naics_code.id, `mcc_id`→core_mcc_code.id | Canonical NAICS→MCC mapping |\n"
+            "| `rds_cases_public.core_business_industries` | `id` (PK), `name` | 2-digit NAICS sector names |\n"
+            "| `rds_cases_public.data_businesses` | `id`, `naics_id`, `mcc_id`, `industry` | Static business record (admin-set values) |\n"
+            "| `rds_cases_public.rel_business_customer_monitoring` | `business_id`, `customer_id`, `created_at` | Date + customer anchor. NO `updated_at` column. |\n"
+            "| `rds_auth_public.data_customers` | `id` (UUID PK), `name` | Customer name lookup |\n"
+        )
+        st.markdown("---")
         st.markdown(
             "**Important: platformId = -1 means 'Calculated/Dependent', NOT a legacy schema bug.**\n\n"
             "Facts with `platformId: -1` are computed by the Fact Engine from other facts. "
