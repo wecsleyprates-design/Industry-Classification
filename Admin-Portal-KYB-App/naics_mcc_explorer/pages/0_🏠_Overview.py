@@ -42,6 +42,21 @@ st.markdown(
     "Internal monitoring dashboard for NAICS and MCC fact quality across the Worth AI platform. "
     "Use the sidebar filters to scope by customer, business, and date range."
 )
+
+analyst_note(
+    "About data freshness — why 'Row Created' dates may look old",
+    "All data in this app comes from <code>rds_warehouse_public.facts</code>, a live federated "
+    "table backed by the same PostgreSQL database the integration service writes to in real time. "
+    "The data is current — not a snapshot or a stale copy. "
+    "Two types of timestamps appear throughout the app:<br><br>"
+    "<strong>Last Updated (source.updatedAt)</strong>: when the winning data source last wrote its value. "
+    "This is the real freshness timestamp — extracted from inside the fact's JSON blob. "
+    "It matches what the Admin Portal shows.<br><br>"
+    "<strong>Row Created (received_at)</strong>: when the Redshift row was first written. "
+    "This does NOT update when a fact's value is refreshed, so it can appear old even when the data is fully current. "
+    "Use <strong>Last Updated</strong> for freshness assessment, not Row Created.",
+    level="info",
+)
 st.markdown("---")
 
 # ── Overview KPIs ──────────────────────────────────────────────────────────────

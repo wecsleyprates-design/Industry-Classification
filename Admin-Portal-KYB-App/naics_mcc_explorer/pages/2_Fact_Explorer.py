@@ -162,7 +162,8 @@ display_cols = {
     "winning_value":"Winning Value",
     "confidence_f": "Confidence",
     "winner_updated_at":"Winner Updated At",
-    "received_at":  "Received At",
+    "winner_updated_at":  "Last Updated (source.updatedAt)",
+    "received_at":        "Row Created (received_at)",
 }
 display = df[[c for c in display_cols if c in df.columns]].copy()
 display = display.rename(columns=display_cols)
@@ -170,7 +171,8 @@ display = display.rename(columns=display_cols)
 # Show condensed table
 st.dataframe(display, use_container_width=True, hide_index=True,
              column_config={"Confidence": st.column_config.NumberColumn(format="%.3f"),
-                            "Received At": st.column_config.DatetimeColumn()})
+                            "Last Updated (source.updatedAt)": st.column_config.TextColumn(),
+                            "Row Created (received_at)": st.column_config.DatetimeColumn()})
 
 # Inline alternatives expander for selected business
 st.markdown("**🔍 Inspect alternatives for a specific business:**")

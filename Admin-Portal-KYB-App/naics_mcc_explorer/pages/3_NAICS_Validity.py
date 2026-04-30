@@ -160,18 +160,18 @@ filtered = df[df["validity_status"].isin(status_filter)] if status_filter else d
 
 display = filtered[[
     "business_id","customer_id","naics_value","platform_name","confidence",
-    "winner_updated_at","received_at","status_icon","validity_status","validity_reason",
+    "winner_updated_at","status_icon","validity_status","validity_reason",
     "alt_values","alt_platforms","alt_confidences",
 ]].copy()
 display.columns = [
     "Business ID","Customer ID","NAICS (Winner)","Winning Platform","Confidence",
-    "Winner Updated At","Received At","","Status","Reason",
+    "Last Updated (source.updatedAt)","","Status","Reason",
     "Alternative Values","Alternative Platforms","Alt Confidences",
 ]
 
 st.dataframe(display, use_container_width=True, hide_index=True,
              column_config={"Confidence": st.column_config.NumberColumn(format="%.3f"),
-                            "Received At": st.column_config.DatetimeColumn()})
+                            "Last Updated (source.updatedAt)": st.column_config.TextColumn()})
 
 analyst_note(
     "How to read the alternatives columns",
@@ -196,8 +196,8 @@ else:
     st.warning(f"⚠️ **{len(p0_null_df):,} businesses** have no industry code — the business submitted a blank form field, "
                "which overrode real data from ZoomInfo, SERP, or Equifax. "
                "Check the 'Alternative Values' column to see what the data vendors actually returned.")
-    disp = p0_null_df[["business_id","customer_id","confidence","received_at","alt_values","alt_platforms"]].copy()
-    disp.columns = ["Business ID","Customer ID","Submission Score","Received At","Other Sources' Values","Other Sources"]
+    disp = p0_null_df[["business_id","customer_id","confidence","winner_updated_at","alt_values","alt_platforms"]].copy()
+    disp.columns = ["Business ID","Customer ID","Submission Score","Last Updated","Other Sources' Values","Other Sources"]
     st.dataframe(disp, use_container_width=True, hide_index=True)
     analyst_note("Why these businesses have null NAICS",
         "When a business leaves the industry field blank on the onboarding form, the system records that blank submission "

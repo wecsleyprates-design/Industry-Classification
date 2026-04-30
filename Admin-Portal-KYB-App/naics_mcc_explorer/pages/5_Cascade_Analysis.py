@@ -205,27 +205,33 @@ section_header("📋 Per-Business Detail Table",
                "Industry code + payment category for every business, including all data sources that submitted values and their timestamps.")
 
 with st.expander("Show full per-business data"):
-    display = df[[
-        "business_id","customer_id",
-        "naics_value","naics_platform_name","naics_received_at",
-        "naics_alt_values","naics_alt_platforms",
-        "mcc_value","mcc_received_at",
-        "mcc_found_value","mcc_found_received_at",
-        "mcc_from_naics_value","mcc_from_naics_received_at",
-        "mcc_platform_name",
-    ]].copy()
-    display["naics_status"] = df["naics_value"].apply(lambda v: validate_naics(v, naics_lookup)[0])
-    display["mcc_status"]   = df["mcc_value"].apply(lambda v: validate_mcc(v, mcc_lookup)[0])
-    display.columns = [
-        "Business ID","Customer ID",
-        "NAICS (Winner)","NAICS Platform","NAICS Received At",
-        "NAICS Alt Values","NAICS Alt Platforms",
-        "MCC (Final)","MCC Received At",
-        "MCC AI","MCC AI Received At",
-        "MCC NAICS-Derived","MCC NAICS-Derived Received At",
-        "MCC Platform",
-        "NAICS Status","MCC Status",
-    ]
+    # Map to available columns (column names changed to _updated_at)
+    def _safe_col(name, fallback=None):
+        if name in df.columns: return name
+        if fallback and fallback in df.columns: return fallback
+        return None
+
+    cols_map = {
+        "business_id":              "Business ID",
+        "customer_id":              "Customer ID",
+        "naics_value":              "NAICS (Winner)",
+        "naics_platform_name":      "NAICS Platform",
+        "naics_updated_at":         "NAICS Last Updated",
+        "naics_alt_values":         "NAICS Other Sources",
+        "naics_alt_platforms":      "NAICS Other Platforms",
+        "mcc_value":                "MCC (Final)",
+        "mcc_updated_at":           "MCC Last Updated",
+        "mcc_found_value":          "mcc_code_found (AI)",
+        "mcc_found_updated_at":     "mcc_code_found Last Updated",
+        "mcc_from_naics_value":     "mcc_code_from_naics",
+        "mcc_from_naics_updated_at":"mcc_from_naics Last Updated",
+        "mcc_platform_name":        "MCC Platform",
+    }
+    present = {k: v for k, v in cols_map.items() if k in df.columns}
+    display = df[list(present.keys())].copy()
+    display.columns = list(present.values())
+    display["NAICS Status"] = df["naics_value"].apply(lambda v: validate_naics(v, naics_lookup)[0])
+    display["MCC Status"]   = df["mcc_value"].apply(lambda v: validate_mcc(v, mcc_lookup)[0])
     st.dataframe(display, hide_index=True, use_container_width=True)
     st.download_button("⬇️ Download CSV", display.to_csv(index=False).encode(),
                        "cascade.csv","text/csv")

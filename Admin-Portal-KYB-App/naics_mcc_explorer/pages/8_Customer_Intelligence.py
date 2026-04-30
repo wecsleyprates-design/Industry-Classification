@@ -364,11 +364,11 @@ else:
     # Display table
     display = p0_df[[
         "client","business_id","p0_winning_value","p0_confidence",
-        "vendor_alt_values","vendor_alt_platforms","p0_updated_at","received_at","agreement"
+        "vendor_alt_values","vendor_alt_platforms","p0_updated_at","agreement"
     ]].copy()
     display.columns = [
         "Client","Business ID","P0 Submitted NAICS","P0 Confidence",
-        "Vendor Alternatives","Vendor Platforms","P0 Updated At","Received At","Agreement"
+        "Vendor Alternatives","Vendor Platforms","Submission Last Updated","Agreement"
     ]
     st.dataframe(display, use_container_width=True, hide_index=True)
     st.download_button("⬇️ Download P0 vs Vendor data",

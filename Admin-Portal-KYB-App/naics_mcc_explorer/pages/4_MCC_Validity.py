@@ -203,9 +203,9 @@ if n_5614 > 0:
         action="Re-run payment category classification for all businesses with code 5614.",
     )
     bug_df = mcc_final[mcc_final["mcc_value"]=="5614"][[
-        "business_id","customer_id","platform_name","confidence","received_at","alt_values","alt_platforms"
+        "business_id","customer_id","platform_name","confidence","winner_updated_at","alt_values","alt_platforms"
     ]].copy()
-    bug_df.columns = ["Business ID","Customer ID","Platform","Confidence","Received At","Alt MCC Values","Alt Platforms"]
+    bug_df.columns = ["Business ID","Customer ID","Platform","Confidence","Last Updated","Alt MCC Values","Alt Platforms"]
     with st.expander(f"View {n_5614:,} businesses with invalid code 5614"):
         st.dataframe(bug_df, hide_index=True, use_container_width=True)
 else:
@@ -270,16 +270,16 @@ st.markdown("---")
 section_header("📋 Final MCC Records — Winner + Alternatives")
 display_f = mcc_final[[
     "business_id","customer_id","mcc_value","platform_name","confidence",
-    "winner_updated_at","received_at","validity_status","validity_reason",
+    "winner_updated_at","validity_status","validity_reason",
     "alt_values","alt_platforms","alt_confidences",
 ]].copy()
 display_f.columns = [
     "Business ID","Customer ID","MCC (Winner)","Platform","Confidence",
-    "Winner Updated At","Received At","Status","Reason",
+    "Last Updated (source.updatedAt)","Status","Reason",
     "Alternative MCC Values","Alternative Platforms","Alt Confidences",
 ]
 st.dataframe(display_f, use_container_width=True, hide_index=True,
              column_config={"Confidence": st.column_config.NumberColumn(format="%.3f"),
-                            "Received At": st.column_config.DatetimeColumn()})
+                            "Last Updated (source.updatedAt)": st.column_config.TextColumn()})
 st.download_button("⬇️ Download CSV", display_f.to_csv(index=False).encode(),
                    "mcc_validity.csv","text/csv")

@@ -421,21 +421,25 @@ def load_cascade_summary(date_from=None, date_to=None,
                 THEN COALESCE(JSON_EXTRACT_PATH_TEXT(f.value, 'source', 'platformId'),
                               'unknown') END)                                       AS naics_platform,
             MAX(CASE WHEN f.name = 'naics_code'
-                THEN f.received_at::VARCHAR END)                                    AS naics_received_at,
+                THEN COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','updatedAt'),
+                              f.received_at::VARCHAR) END)                          AS naics_updated_at,
             MAX(CASE WHEN f.name = 'naics_code'
                 THEN f.value END)                                                   AS naics_raw_json,
             MAX(CASE WHEN f.name = 'mcc_code'
                 THEN JSON_EXTRACT_PATH_TEXT(f.value, 'value') END)                 AS mcc_value,
             MAX(CASE WHEN f.name = 'mcc_code'
-                THEN f.received_at::VARCHAR END)                                    AS mcc_received_at,
+                THEN COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','updatedAt'),
+                              f.received_at::VARCHAR) END)                          AS mcc_updated_at,
             MAX(CASE WHEN f.name = 'mcc_code_found'
                 THEN JSON_EXTRACT_PATH_TEXT(f.value, 'value') END)                 AS mcc_found_value,
             MAX(CASE WHEN f.name = 'mcc_code_found'
-                THEN f.received_at::VARCHAR END)                                    AS mcc_found_received_at,
+                THEN COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','updatedAt'),
+                              f.received_at::VARCHAR) END)                          AS mcc_found_updated_at,
             MAX(CASE WHEN f.name = 'mcc_code_from_naics'
                 THEN JSON_EXTRACT_PATH_TEXT(f.value, 'value') END)                 AS mcc_from_naics_value,
             MAX(CASE WHEN f.name = 'mcc_code_from_naics'
-                THEN f.received_at::VARCHAR END)                                    AS mcc_from_naics_received_at,
+                THEN COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','updatedAt'),
+                              f.received_at::VARCHAR) END)                          AS mcc_from_naics_updated_at,
             MAX(CASE WHEN f.name = 'mcc_code'
                 THEN COALESCE(JSON_EXTRACT_PATH_TEXT(f.value, 'source', 'platformId'),
                               'unknown') END)                                       AS mcc_platform
@@ -520,15 +524,18 @@ def load_fact_drilldown(fact_name: str, date_from=None, date_to=None,
             MAX(CASE WHEN mf.name = 'mcc_code'
                 THEN JSON_EXTRACT_PATH_TEXT(mf.value, 'value') END)                AS mcc_code,
             MAX(CASE WHEN mf.name = 'mcc_code'
-                THEN mf.received_at::VARCHAR END)                                   AS mcc_received_at,
+                THEN COALESCE(JSON_EXTRACT_PATH_TEXT(mf.value,'source','updatedAt'),
+                              mf.received_at::VARCHAR) END)                         AS mcc_updated_at,
             MAX(CASE WHEN mf.name = 'mcc_code_found'
                 THEN JSON_EXTRACT_PATH_TEXT(mf.value, 'value') END)                AS mcc_code_found,
             MAX(CASE WHEN mf.name = 'mcc_code_found'
-                THEN mf.received_at::VARCHAR END)                                   AS mcc_found_received_at,
+                THEN COALESCE(JSON_EXTRACT_PATH_TEXT(mf.value,'source','updatedAt'),
+                              mf.received_at::VARCHAR) END)                         AS mcc_found_updated_at,
             MAX(CASE WHEN mf.name = 'mcc_code_from_naics'
                 THEN JSON_EXTRACT_PATH_TEXT(mf.value, 'value') END)                AS mcc_code_from_naics,
             MAX(CASE WHEN mf.name = 'mcc_code_from_naics'
-                THEN mf.received_at::VARCHAR END)                                   AS mcc_from_naics_received_at,
+                THEN COALESCE(JSON_EXTRACT_PATH_TEXT(mf.value,'source','updatedAt'),
+                              mf.received_at::VARCHAR) END)                         AS mcc_from_naics_updated_at,
             MAX(CASE WHEN mf.name = 'mcc_description'
                 THEN JSON_EXTRACT_PATH_TEXT(mf.value, 'value') END)                AS mcc_description,
             MAX(CASE WHEN mf.name = 'naics_description'
