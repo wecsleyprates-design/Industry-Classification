@@ -159,27 +159,27 @@ def fetch_naics_lookup(rconn) -> dict[str, str]:
     """Returns {code: label} for all NAICS codes."""
     with rconn.cursor() as cur:
         cur.execute("SELECT CAST(code AS VARCHAR), COALESCE(label,'') FROM rds_cases_public.core_naics_code WHERE code IS NOT NULL")
-        return {r[0].strip(): r[1] for r in cur.fetchall()}
+        return {str(r[0]).strip(): str(r[1]) for r in cur.fetchall()}
 
 
 def fetch_mcc_lookup(rconn) -> dict[str, str]:
     """Returns {code: label} for all MCC codes."""
     with rconn.cursor() as cur:
         cur.execute("SELECT CAST(code AS VARCHAR), COALESCE(label,'') FROM rds_cases_public.core_mcc_code WHERE code IS NOT NULL")
-        return {r[0].strip(): r[1] for r in cur.fetchall()}
+        return {str(r[0]).strip(): str(r[1]) for r in cur.fetchall()}
 
 
 def fetch_canonical_pairs(rconn) -> set[tuple[str, str]]:
     """Returns set of (naics_code, mcc_code) canonical pairs."""
     with rconn.cursor() as cur:
         cur.execute("""
-            SELECT DISTINCT nc.code, mc.code
+            SELECT DISTINCT CAST(nc.code AS VARCHAR), CAST(mc.code AS VARCHAR)
             FROM rds_cases_public.rel_naics_mcc r
             JOIN rds_cases_public.core_naics_code nc ON nc.id = r.naics_id
             JOIN rds_cases_public.core_mcc_code   mc ON mc.id = r.mcc_id
             WHERE nc.code IS NOT NULL AND mc.code IS NOT NULL
         """)
-        return {(r[0].strip(), r[1].strip()) for r in cur.fetchall()}
+        return {(str(r[0]).strip(), str(r[1]).strip()) for r in cur.fetchall()}
 
 
 def fetch_sector_lookup(rconn) -> dict[str, str]:
@@ -187,7 +187,7 @@ def fetch_sector_lookup(rconn) -> dict[str, str]:
     try:
         with rconn.cursor() as cur:
             cur.execute("SELECT CAST(sector_code AS VARCHAR), name FROM rds_cases_public.core_business_industries WHERE sector_code IS NOT NULL")
-            return {str(r[0]).strip(): r[1] for r in cur.fetchall()}
+            return {str(r[0]).strip(): str(r[1]) for r in cur.fetchall()}
     except Exception:
         return {}
 
