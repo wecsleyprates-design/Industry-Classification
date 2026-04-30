@@ -229,9 +229,14 @@ def extract_fact(details: dict, fact_name: str) -> dict | None:
 
 
 def extract_classification_facts(details: dict) -> dict[str, dict]:
-    """Extract all NAICS/MCC classification facts from a details response.
+    """Extract NAICS/MCC classification facts from the API details response.
 
-    Returns a dict keyed by fact name with the full fact object.
+    Preserves the full Admin Portal JSON format for each fact, including:
+      name, value, schema, source (with platformId, confidence, updatedAt, name),
+      override, dependencies, description, ruleApplied, isNormalized, alternatives[]
+      + flat source.confidence / source.platformId / source.name fields
+
+    Returns a dict keyed by fact name with the complete fact object.
     """
     CLASSIFICATION_FACT_NAMES = [
         "naics_code",
@@ -243,8 +248,18 @@ def extract_classification_facts(details: dict) -> dict[str, dict]:
         "industry",
         "classification_codes",
     ]
-    return {
-        name: details[name]
-        for name in CLASSIFICATION_FACT_NAMES
-        if name in details and details[name] is not None
-    }
+    result = {}
+    for name in CLASSIFICATION_FACT_NAMES:
+        fact = details.get(name)
+        if fact is None:
+            continue
+        # Ensure the fact object preserves all Admin Portal fields
+        if isinstance(fact, dict):
+            # Add flat source.* fields if not already present (mirror Admin Portal format)
+            src = fact.get("source") or {}
+            if isinstance(src, dict):
+                fact.setdefault("source.confidence", src.get("confidence"))
+                fact.setdefault("source.platformId",  src.get("platformId"))
+                fact.setdefault("source.name",        src.get("name"))
+        result[name] = fact
+    return result
