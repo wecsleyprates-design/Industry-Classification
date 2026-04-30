@@ -1,4 +1,4 @@
-"""Page 1 — Platform Winner Distribution."""
+"""Page 1 — Platform Winner Distribution with drilldown tables."""
 from __future__ import annotations
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -7,11 +7,18 @@ import streamlit as st
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
+import json
 
-from utils.filters import render_sidebar, kpi, section_header, no_data
-from utils.platform_map import PLATFORM_MAP, platform_label, platform_color, pid_type
+from utils.filters import render_sidebar, kpi, section_header, no_data, parse_alternatives
+from utils.platform_map import (
+    PLATFORM_MAP, platform_label, platform_color, pid_type,
+    DEPENDENT_FACT_NAMES, CLASSIFICATION_FACTS,
+)
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
-from db.queries import load_platform_winners, load_platform_winner_values, _onboarded_cte
+from db.queries import (
+    load_platform_winners, load_platform_winner_values,
+    load_fact_drilldown, _onboarded_cte,
+)
 
 st.set_page_config(page_title="Platform Winners", page_icon="🏆", layout="wide")
 st.markdown("""<style>
@@ -27,215 +34,339 @@ f_biz  = filters["business_id"]
 
 st.markdown("# 🏆 Platform Winner Distribution")
 st.markdown(
-    "Shows which platform **wins the confidence arbitration race** for NAICS and MCC facts. "
-    "When multiple platforms provide the same fact, the one with the highest `confidence` score wins. "
-    "The goal is for trusted vendors (ZoomInfo, Equifax, SERP) to dominate — "
-    "not self-reported applicant data (P0) or AI fallbacks (P31)."
+    "Which platform **wins the confidence arbitration race** for NAICS and MCC facts? "
+    "Trusted vendors (ZoomInfo P24, Equifax P17, SERP P22) should dominate. "
+    "**P0 (Ghost Assigner)** and **P-1 (Calculated/Dependent)** dominating is a quality signal."
 )
-
 platform_legend_panel()
 st.markdown("---")
 
 FACTS_TO_SHOW = ["naics_code", "mcc_code", "mcc_code_found", "mcc_code_from_naics"]
 
+
+def _make_bar(df: pd.DataFrame, title: str, chart_key: str) -> None:
+    """Horizontal bar chart with NO overlapping text — values shown outside bars."""
+    df = df.sort_values("business_count", ascending=True).copy()
+    df["label"] = df["business_count"].apply(lambda v: f"{v:,}") + "  (" + df["pct_of_total"] + ")"
+
+    fig = go.Figure(go.Bar(
+        x=df["business_count"],
+        y=df["platform_name"],
+        orientation="h",
+        marker_color=df["color"].tolist(),
+        # textposition="outside" clips when bars are wide; use customdata + hovertemplate instead
+        customdata=df["label"],
+        hovertemplate="<b>%{y}</b><br>%{customdata}<extra></extra>",
+    ))
+    # Add text annotations positioned to the right of the axis (never inside the bar)
+    max_val = df["business_count"].max() if not df.empty else 1
+    annotations = []
+    for _, row in df.iterrows():
+        annotations.append(dict(
+            x=row["business_count"] + max_val * 0.02,
+            y=row["platform_name"],
+            text=f"  {row['business_count']:,} ({row['pct_of_total']})",
+            showarrow=False,
+            xanchor="left",
+            font=dict(color="#94a3b8", size=11),
+        ))
+
+    fig.update_layout(
+        title=dict(text=title, font=dict(color="#cbd5e1", size=13)),
+        height=max(260, len(df) * 42 + 60),
+        margin=dict(l=0, r=180, t=40, b=20),
+        paper_bgcolor="#0f172a", plot_bgcolor="#0f172a", font_color="#cbd5e1",
+        xaxis=dict(showgrid=True, gridcolor="#1e293b", color="#334155",
+                   range=[0, max_val * 1.35]),
+        yaxis=dict(showgrid=False, color="#94a3b8"),
+        annotations=annotations,
+    )
+    st.plotly_chart(fig, use_container_width=True, key=chart_key)
+
+
+# ── Load all four facts ────────────────────────────────────────────────────────
 all_winners: dict[str, pd.DataFrame] = {}
 for fn in FACTS_TO_SHOW:
     with st.spinner(f"Loading {fn}…"):
         df = load_platform_winners(fn, f_from, f_to, f_cust, f_biz)
-    if not df.empty:
-        # Merge legacy_source_name into platform_id display
+    if df is not None and not df.empty:
         df["platform_id"] = df.apply(
-            lambda r: r["platform_id"] if str(r["platform_id"]) not in ("unknown", "", "None")
-                      else (r.get("legacy_source_name") or "unknown"),
-            axis=1
+            lambda r: r["platform_id"] if str(r["platform_id"]) not in ("unknown","","None")
+                      else (r.get("legacy_source_name") or "unknown"), axis=1
         ).astype(str)
         df["platform_name"] = df["platform_id"].apply(platform_label)
         df["color"]         = df["platform_id"].apply(platform_color)
         df["type"]          = df["platform_id"].apply(pid_type)
         df["avg_confidence"] = pd.to_numeric(df["avg_confidence"], errors="coerce").fillna(0.0).round(3)
         total = df["business_count"].sum()
-        df["pct_of_total"] = df["business_count"].apply(lambda v: f"{100*v/total:.1f}%" if total else "—")
-    all_winners[fn] = df
+        df["pct_of_total"]   = df["business_count"].apply(
+            lambda v: f"{100*v/total:.1f}%" if total else "—")
+    all_winners[fn] = df if df is not None else pd.DataFrame()
 
-# ── NAICS vs MCC side-by-side ──────────────────────────────────────────────────
-section_header("📊 NAICS vs MCC — Side-by-Side Platform Winner Comparison",
-               "Compare who wins for NAICS vs MCC. Dramatic differences indicate arbitration problems.")
+# ── NAICS vs MCC side-by-side comparison ──────────────────────────────────────
+section_header("📊 NAICS vs MCC — Side-by-Side Winner Comparison",
+               "Dramatic differences between NAICS and MCC winners indicate arbitration or derivation problems.")
 
-for fact_pair in [("naics_code", "mcc_code"), ("mcc_code_found", "mcc_code_from_naics")]:
+for pair in [("naics_code","mcc_code"), ("mcc_code_found","mcc_code_from_naics")]:
     col_a, col_b = st.columns(2)
-    for fact, col in zip(fact_pair, [col_a, col_b]):
+    for fact, col in zip(pair, [col_a, col_b]):
         with col:
-            st.markdown(f"**`{fact}`**")
             df = all_winners.get(fact, pd.DataFrame())
             if df.empty:
                 no_data(f"No data for `{fact}`")
-                continue
-            df_s = df.sort_values("business_count", ascending=True)
-            fig = go.Figure(go.Bar(
-                x=df_s["business_count"],
-                y=df_s["platform_name"],
-                orientation="h",
-                marker_color=df_s["color"].tolist(),
-                text=df_s.apply(lambda r: f"{r['business_count']:,} ({r['pct_of_total']})", axis=1),
-                textposition="outside",
-                hovertemplate="<b>%{y}</b><br>Businesses: %{x:,}<extra></extra>",
-            ))
-            fig.update_layout(
-                height=max(220, len(df_s)*38+40), margin=dict(l=0, r=80, t=10, b=0),
-                paper_bgcolor="#0f172a", plot_bgcolor="#0f172a", font_color="#cbd5e1",
-                xaxis=dict(showgrid=True, gridcolor="#1e293b"),
-                yaxis=dict(showgrid=False),
-            )
-            st.plotly_chart(fig, use_container_width=True, key=f"pw_{fact}")
+            else:
+                _make_bar(df, f"`{fact}`", f"pw_{fact}")
 
 analyst_note(
-    "How to read this chart",
-    "Each bar = number of businesses where that platform <strong>won</strong> the confidence race for that fact. "
-    "A healthy distribution has <strong>ZoomInfo (P24)</strong> or <strong>SERP (P22)</strong> dominating NAICS, "
-    "and <strong>AI MCC Enrichment</strong> or NAICS-derived dominating MCC. "
-    "Red flags: P0 (Applicant Entry) in top 2, or Legacy Schema dominating.",
+    "How to read these charts",
+    "Each bar = businesses where that platform <strong>won</strong> the confidence race. "
+    "Expected winners: <strong>ZoomInfo (P24)</strong> for NAICS, "
+    "<strong>Calculated/Dependent (P-1)</strong> for MCC (because mcc_code is always derived, never from a vendor). "
+    "Red flag: <strong>P0 (Applicant Entry)</strong> in top 2 for NAICS.",
     level="info",
     bullets=[
-        "🟢 <strong>Green bars</strong> = external vendors — trusted, expected to win",
-        "🟣 <strong>Purple bars</strong> = AI enrichment — acceptable fallback when vendors fail",
-        "🔴 <strong>Red bar (P0)</strong> = self-reported onboarding data — should NEVER be a top winner",
-        "⚫ <strong>Grey (Legacy/Unknown)</strong> = old schema records — source is in raw JSON source.name field",
+        "🟢 Green = external vendor (ZoomInfo, SERP, Equifax) — expected winners for NAICS",
+        "🟣 Purple = AI enrichment (P31) — acceptable fallback when vendors fail",
+        "🔴 Red (P0) = self-reported onboarding — should NEVER lead for NAICS",
+        "⚫ Grey (P-1) = calculated/dependent — NORMAL and expected for mcc_code, mcc_code_from_naics",
+        "🟡 Unknown = old-schema records (source stored as name string, no platformId field)",
     ],
 )
-
-# SQL panel
-_pw_sql = f"""
-{_onboarded_cte(f_from, f_to, f_cust, f_biz)}
+sql_panel("Platform Winner Distribution", f"""\
+{_onboarded_cte(f_from, f_to, f_cust, f_biz)}\
 SELECT
-    COALESCE(JSON_EXTRACT_PATH_TEXT(f.value, 'source', 'platformId'), 'unknown') AS platform_id,
-    JSON_EXTRACT_PATH_TEXT(f.value, 'source', 'name')                            AS legacy_source_name,
-    COUNT(DISTINCT f.business_id)                                                 AS business_count,
+    COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId'),'unknown') AS platform_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','name')                           AS legacy_source_name,
+    COUNT(DISTINCT f.business_id)                                             AS business_count,
     AVG(CAST(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence'),'0') AS FLOAT)) AS avg_confidence,
     SUM(CASE WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NULL THEN 1 ELSE 0 END) AS null_value_count
 FROM rds_warehouse_public.facts f
 JOIN onboarded o ON o.business_id = f.business_id
-WHERE f.name = 'naics_code'   -- change to mcc_code etc.
+WHERE f.name = 'naics_code'   -- change to mcc_code, mcc_code_found, mcc_code_from_naics
   AND LENGTH(f.value) < 60000
-GROUP BY 1, 2
-ORDER BY 3 DESC"""
-sql_panel("Platform Winner Distribution", _pw_sql, key_suffix="pw")
+GROUP BY 1, 2  ORDER BY 3 DESC""", key_suffix="pw")
 st.markdown("---")
 
-# ── P0 Ghost Assigner ──────────────────────────────────────────────────────────
-section_header("🚨 Ghost Assigner (P0 — Applicant Entry) Analysis",
-               "platformId=0 hardcodes confidence:1, always beating real vendors in arbitration")
-
+# ── P0 Ghost Assigner ─────────────────────────────────────────────────────────
+section_header("🚨 Ghost Assigner (P0) Analysis")
 p0_rows = []
 for fn in FACTS_TO_SHOW:
     df = all_winners.get(fn, pd.DataFrame())
     if df.empty: continue
-    p0 = df[df["platform_id"] == "0"]
+    p0 = df[df["platform_id"]=="0"]
     if not p0.empty:
         r = p0.iloc[0]
-        p0_rows.append({"Fact": fn, "P0 Wins": int(r["business_count"]),
-                        "% of Total": r["pct_of_total"],
-                        "Null Value Count": int(r.get("null_value_count", 0)),
-                        "Avg Confidence": r["avg_confidence"]})
-
+        p0_rows.append({"Fact":fn,"P0 Wins":int(r["business_count"]),
+                        "% of Total":r["pct_of_total"],
+                        "Null Wins":int(r.get("null_value_count",0)),
+                        "Avg Confidence":r["avg_confidence"]})
 if p0_rows:
-    p0_df = pd.DataFrame(p0_rows)
-    total_p0 = p0_df["P0 Wins"].sum()
-    st.error(f"⚠️ **Ghost Assigner (P0) is winning for {total_p0:,} fact records.** "
-             "Self-reported onboarding data is beating real vendor data.", icon="🚨")
-
-    c1, c2, c3 = st.columns(3)
-    naics_p0 = next((r for r in p0_rows if r["Fact"]=="naics_code"), {})
-    mcc_p0   = next((r for r in p0_rows if r["Fact"]=="mcc_code"), {})
+    total_p0 = sum(r["P0 Wins"] for r in p0_rows)
+    st.error(f"⚠️ Ghost Assigner (P0) winning for {total_p0:,} fact records across monitored fact types.", icon="🚨")
+    c1,c2,c3 = st.columns(3)
+    naics_p0 = next((r for r in p0_rows if r["Fact"]=="naics_code"),{})
+    mcc_p0   = next((r for r in p0_rows if r["Fact"]=="mcc_code"),{})
     with c1: kpi("P0 NAICS Wins", str(naics_p0.get("P0 Wins","—")), naics_p0.get("% of Total",""), "#ef4444")
     with c2: kpi("P0 MCC Wins",   str(mcc_p0.get("P0 Wins","—")),   mcc_p0.get("% of Total",""), "#ef4444")
-    with c3: kpi("P0 Null-Value Wins", f"{sum(r['Null Value Count'] for r in p0_rows):,}",
-                 "P0 wrote null + confidence:1 → real data lost", "#f97316")
-    st.markdown("")
-    st.dataframe(p0_df, use_container_width=True, hide_index=True,
+    with c3: kpi("P0 Null-Value Wins", f"{sum(r['Null Wins'] for r in p0_rows):,}",
+                 "P0 wrote null + confidence:1", "#f97316")
+    st.dataframe(pd.DataFrame(p0_rows), use_container_width=True, hide_index=True,
                  column_config={"P0 Wins": st.column_config.NumberColumn(format="%d"),
-                                "Null Value Count": st.column_config.NumberColumn(format="%d"),
+                                "Null Wins": st.column_config.NumberColumn(format="%d"),
                                 "Avg Confidence": st.column_config.NumberColumn(format="%.3f")})
-
-    analyst_note(
-        "Why P0 wins — and why it matters",
-        "The <code>businessDetails</code> writer in <code>integration-service/lib/facts/sources.ts:151</code> "
-        "has <code>confidence: 1</code> hardcoded. The arbitration rule "
-        "(<code>factWithHighestConfidence</code> in <code>rules.ts</code>) picks the highest confidence — "
-        "so P0 always wins vs ZoomInfo (~0.8) and SERP (~0.3). "
-        "When a business submits <code>null</code> for their industry code on the onboarding form, "
-        "P0 persists <code>value: null, confidence: 1</code> before any vendor responds (~4 min earlier). "
-        "ZoomInfo returns a real code 4 minutes later — but loses the race.",
+    analyst_note("Root cause", "Hardcoded <code>confidence:1</code> in "
+        "<code>integration-service/lib/facts/sources.ts:151</code> (businessDetails). "
+        "Fix: lower to <code>0.1</code>. One change repairs thousands of businesses on next facts refresh.",
         level="danger",
-        bullets=[
-            "P0 runs <strong>~4 minutes before</strong> any real vendor",
-            "P0 writes <code>confidence: 1</code> — highest possible — even for null values",
-            "ZoomInfo returns confidence ~0.8, SERP ~0.3 → always lose to P0",
-            f"<strong>{sum(r['Null Value Count'] for r in p0_rows):,} businesses</strong> have a NULL winning value from P0 — real data was suppressed",
-        ],
-        action="Lower `confidence` for `businessDetails` in `sources.ts:151` from `1` to `0.1`. "
-               "This single change will cause ZoomInfo and SERP to win for thousands of businesses on next facts refresh.",
-    )
-    st.code("// integration-service/lib/facts/sources.ts:151\n"
-            "businessDetails: {\n"
-            "    confidence: 1,   // ← THE BUG — change to 0.1\n"
-            "    platformId: 0,\n"
-            "}", language="typescript")
+        action="sources.ts:151 → confidence: 1  →  confidence: 0.1")
 else:
     st.success("✅ No P0 wins detected for the selected filters.")
-
-sql_panel("P0 Ghost Assigner — null wins",
-          f"""{_onboarded_cte(f_from, f_to, f_cust, f_biz)}
-SELECT f.business_id, o.customer_id,
-       JSON_EXTRACT_PATH_TEXT(f.value,'value') AS winning_value,
-       JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence') AS confidence,
-       f.received_at
-FROM rds_warehouse_public.facts f
-JOIN onboarded o ON o.business_id = f.business_id
-WHERE f.name = 'naics_code'
-  AND LENGTH(f.value) < 60000
-  AND COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId'),'x') = '0'
-  AND JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NULL
-ORDER BY f.received_at DESC""", key_suffix="p0null")
 st.markdown("---")
 
-# ── Full stats table ───────────────────────────────────────────────────────────
-section_header("📋 Full Platform Stats by Fact Type")
+# ── Full stats table + winning values + drilldown ──────────────────────────────
+section_header("📋 Full Platform Stats, Top Values & Business Drilldown")
 tabs = st.tabs([f"`{fn}`" for fn in FACTS_TO_SHOW])
+
 for tab, fn in zip(tabs, FACTS_TO_SHOW):
     with tab:
         df = all_winners.get(fn, pd.DataFrame())
         if df.empty:
-            no_data()
+            no_data(f"No data for `{fn}`")
             continue
-        display = df[["platform_name","platform_id","business_count","pct_of_total","avg_confidence","null_value_count","type"]].copy()
-        display.columns = ["Platform","ID","Business Count","% of Total","Avg Confidence","Null Wins","Type"]
-        st.dataframe(display.sort_values("Business Count",ascending=False),
+
+        # ── Winner stats table ──────────────────────────────────────────────
+        st.markdown(f"**Platform winner stats for `{fn}`**")
+        is_dependent = fn in DEPENDENT_FACT_NAMES
+        if is_dependent:
+            analyst_note(
+                f"`{fn}` is a Calculated/Dependent fact (P-1)",
+                f"<code>{fn}</code> is derived internally by the Fact Engine — it is never sourced from a vendor. "
+                f"<strong>Seeing P-1 (Calculated/Dependent) as the winner is correct and expected.</strong> "
+                f"Its value depends on upstream facts: if <code>naics_code</code> is wrong, this fact is also wrong.",
+                level="info",
+            )
+        display = df[["platform_name","platform_id","business_count","pct_of_total",
+                       "avg_confidence","null_value_count","type"]].copy()
+        display.columns = ["Platform","ID","Business Count","% of Total",
+                           "Avg Confidence","Null Wins","Type"]
+        st.dataframe(display.sort_values("Business Count", ascending=False),
                      use_container_width=True, hide_index=True,
                      column_config={"Business Count": st.column_config.NumberColumn(format="%d"),
                                     "Null Wins": st.column_config.NumberColumn(format="%d"),
                                     "Avg Confidence": st.column_config.NumberColumn(format="%.3f")})
-        st.caption("🟢 Vendor  🟣 AI  🔴 Applicant Entry (P0)  ⚫ Legacy/Unknown")
+        st.caption("🟢 Vendor  🟣 AI  🔴 Applicant Entry (P0)  ⚫ Calculated/Dependent (P-1)  ⚫ Unknown")
 
         analyst_note(
             f"Interpreting the `{fn}` winner table",
-            "The <strong>Avg Confidence</strong> column shows the average confidence score for that platform's wins. "
-            "A value near 1.0 means the platform almost always won with high confidence — "
-            "which is <em>suspicious</em> for P0 (always 1.0 by design) but expected for ZoomInfo. "
-            "<strong>Null Wins</strong> = how many times that platform won but wrote an empty value "
-            "(the worst outcome — a winner with no useful data).",
+            "<strong>Avg Confidence</strong>: average confidence score for that platform's wins. "
+            "P0 always shows ~1.0 by design (the bug). "
+            "ZoomInfo typically ~0.8–1.0. AI enrichment (P31) ~0.15. "
+            "P-1 (calculated) shows 0.0 because dependent facts have no confidence score — this is normal. "
+            "<strong>Null Wins</strong>: platform won but wrote an empty value — worst outcome.",
             level="info",
         )
+        st.markdown("---")
 
-        with st.expander("📊 Top 30 winning values for this fact"):
-            with st.spinner("Loading…"):
+        # ── Top winning values bar chart ────────────────────────────────────
+        with st.expander(f"📊 Top 30 winning values for `{fn}`", expanded=True):
+            with st.spinner("Loading value distribution…"):
                 vdf = load_platform_winner_values(fn, f_from, f_to, f_cust, f_biz)
-            if not vdf.empty:
+            if vdf is not None and not vdf.empty:
                 vdf["platform_name"] = vdf["platform_id"].apply(platform_label)
-                fig2 = px.bar(vdf.head(30), x="fact_value", y="business_count",
-                              color="platform_name",
-                              color_discrete_map={platform_label(p): platform_color(p) for p in vdf["platform_id"].unique()},
-                              labels={"fact_value":"Code","business_count":"Businesses","platform_name":"Platform"},
-                              title=f"Top winning values — {fn}")
-                fig2.update_layout(paper_bgcolor="#0f172a",plot_bgcolor="#0f172a",
-                                   font_color="#cbd5e1",height=320,xaxis=dict(type="category"))
+                vdf = vdf.head(30)
+                fig2 = px.bar(
+                    vdf, x="fact_value", y="business_count",
+                    color="platform_name",
+                    color_discrete_map={platform_label(p): platform_color(p)
+                                        for p in vdf["platform_id"].unique()},
+                    labels={"fact_value":"Code","business_count":"Businesses",
+                            "platform_name":"Platform"},
+                    title=f"Top winning values — {fn}",
+                )
+                fig2.update_layout(
+                    height=340, margin=dict(l=0, r=20, t=40, b=60),
+                    paper_bgcolor="#0f172a", plot_bgcolor="#0f172a", font_color="#cbd5e1",
+                    xaxis=dict(type="category", tickangle=-45),
+                    legend=dict(bgcolor="#0f172a", font=dict(color="#94a3b8")),
+                )
                 st.plotly_chart(fig2, use_container_width=True, key=f"vals_{fn}")
+                st.caption(
+                    "X-axis = code value. Y-axis = number of businesses where that code is the winning value. "
+                    "Color = which platform produced that winning value."
+                )
+                if fn == "naics_code":
+                    analyst_note(
+                        "Reading the NAICS distribution",
+                        "A healthy distribution shows a spread of specific 6-digit codes. "
+                        "Red flags: a single code (especially <code>561499</code> — catch-all) "
+                        "dominating, or most bars coloured red (P0 winning). "
+                        "Short codes (5 digits or fewer) indicate the data type bug "
+                        "(P0 writes integers without zero-padding).",
+                        level="warning" if any(str(v) == "561499" for v in vdf["fact_value"]) else "info",
+                    )
+                elif fn in ("mcc_code", "mcc_code_from_naics"):
+                    analyst_note(
+                        "Reading the MCC distribution",
+                        "<code>5614</code> at the top is the AI prompt bug fallback — an invalid MCC. "
+                        "<code>7399</code> is the catch-all 'Business Services NEC'. "
+                        "Both in the top 5 is a major quality signal. "
+                        "A healthy MCC distribution has domain-specific codes "
+                        "(e.g. 8011=Physicians, 5812=Restaurants, 7538=Auto Service).",
+                        level="danger" if any(str(v) in ("5614","7399") for v in vdf["fact_value"][:5]) else "info",
+                    )
+            else:
+                no_data()
+        st.markdown("---")
+
+        # ── Business drilldown table ────────────────────────────────────────
+        with st.expander(f"🔍 Business Drilldown — NAICS + all MCC codes for `{fn}` winners"):
+            st.caption(
+                "Shows winning value, alternatives[], all MCC variants (final/AI/NAICS-derived) "
+                "and timestamps for each business."
+            )
+            limit_dd = st.number_input("Row limit", 50, 2000, 300, 50, key=f"dd_lim_{fn}")
+            with st.spinner("Loading drilldown data…"):
+                dd = load_fact_drilldown(fn, f_from, f_to, f_cust, f_biz, int(limit_dd))
+
+            if dd is None or dd.empty:
+                no_data()
+            else:
+                dd["winning_platform"] = dd["winning_platform_id"].apply(platform_label)
+
+                # Parse alternatives
+                def _alt_val_str(raw):
+                    alts = parse_alternatives(raw)
+                    return " | ".join(
+                        f"{a['alt_value']} ({a['alt_platform']})" for a in alts
+                    ) if alts else ""
+
+                dd["alternatives"] = dd["raw_json"].apply(_alt_val_str)
+
+                display_dd = dd[[
+                    "business_id","customer_id",
+                    "winning_value","winning_platform","winning_confidence",
+                    "alternatives",
+                    "winner_updated_at","winner_received_at",
+                    "mcc_code","mcc_received_at",
+                    "mcc_code_found","mcc_found_received_at",
+                    "mcc_code_from_naics","mcc_from_naics_received_at",
+                    "naics_description","mcc_description",
+                ]].copy()
+                display_dd.columns = [
+                    "Business ID","Customer ID",
+                    "Winner Value","Winner Platform","Winner Confidence",
+                    "Alternatives (Value | Platform)",
+                    "Winner Updated At","Winner Received At",
+                    "MCC (Final)","MCC Received At",
+                    "MCC AI (found)","MCC AI Received At",
+                    "MCC NAICS-Derived","MCC NAICS-Derived Received At",
+                    "NAICS Description","MCC Description",
+                ]
+                st.dataframe(display_dd, use_container_width=True, hide_index=True,
+                             column_config={
+                                 "Winner Confidence": st.column_config.NumberColumn(format="%.3f"),
+                             })
+
+                analyst_note(
+                    "How to read the drilldown table",
+                    "Each row = one business. "
+                    "<strong>Winner Value</strong> = the NAICS (or MCC) code that won arbitration. "
+                    "<strong>Alternatives</strong> = all other platforms that submitted a value (format: value (platform)). "
+                    "If Winner Value is null but Alternatives shows a valid code → "
+                    "the arbitration bug suppressed real data for this business. "
+                    "<strong>MCC columns</strong> show the cascade: "
+                    "MCC (Final) = mcc_code_found ?? mcc_code_from_naics. "
+                    "If Winner Value = 561499, expect MCC NAICS-Derived = 7399.",
+                    level="info",
+                )
+                st.download_button(
+                    f"⬇️ Download {fn} drilldown",
+                    display_dd.to_csv(index=False).encode(),
+                    f"{fn}_drilldown.csv", "text/csv",
+                    key=f"dl_dd_{fn}",
+                )
+
+        sql_panel(f"Business drilldown SQL — {fn}",
+                  f"""\
+{_onboarded_cte(f_from, f_to, f_cust, f_biz)}\
+SELECT o.business_id, o.customer_id,
+    JSON_EXTRACT_PATH_TEXT(f.value,'value') AS winning_value,
+    COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId'),'unknown') AS platform_id,
+    COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence'),'')  AS confidence,
+    JSON_EXTRACT_PATH_TEXT(f.value,'source','updatedAt')                AS updated_at,
+    f.received_at,
+    MAX(CASE WHEN mf.name='mcc_code'          THEN JSON_EXTRACT_PATH_TEXT(mf.value,'value') END) AS mcc_code,
+    MAX(CASE WHEN mf.name='mcc_code_found'    THEN JSON_EXTRACT_PATH_TEXT(mf.value,'value') END) AS mcc_code_found,
+    MAX(CASE WHEN mf.name='mcc_code_from_naics' THEN JSON_EXTRACT_PATH_TEXT(mf.value,'value') END) AS mcc_from_naics,
+    MAX(CASE WHEN mf.name='naics_description' THEN JSON_EXTRACT_PATH_TEXT(mf.value,'value') END) AS naics_desc,
+    MAX(CASE WHEN mf.name='mcc_description'   THEN JSON_EXTRACT_PATH_TEXT(mf.value,'value') END) AS mcc_desc
+FROM rds_warehouse_public.facts f
+JOIN onboarded o ON o.business_id = f.business_id
+LEFT JOIN rds_warehouse_public.facts mf
+    ON mf.business_id = f.business_id
+    AND mf.name IN ('mcc_code','mcc_code_found','mcc_code_from_naics','naics_description','mcc_description')
+    AND LENGTH(mf.value) < 60000
+WHERE f.name = '{fn}' AND LENGTH(f.value) < 60000
+GROUP BY o.business_id, o.customer_id, f.value, f.received_at
+ORDER BY f.received_at DESC LIMIT 500""",
+                  key_suffix=f"dd_sql_{fn}")

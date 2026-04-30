@@ -35,24 +35,26 @@ def render_sidebar() -> dict:
     df_to   = str(date_to)
 
     # ── Customer (derived from date range, shown as Name + ID) ────────────
-    st.sidebar.markdown("**👥 Customer**")
+    st.sidebar.markdown("**👥 Customer Name**")
     with st.sidebar:
         with st.spinner("Loading customers…"):
             cust_df = load_customers(df_from, df_to)
 
     customer_id = None
     if not cust_df.empty:
-        # Build display label "Name (id)" or just "id" if name == id
+        # Build "Name (count biz)" label when name != id, else just id
         def _label(row):
-            name = str(row.get("customer_name", "")).strip()
-            cid  = str(row.get("customer_id", "")).strip()
-            return f"{name} ({cid})" if name and name != cid else cid
+            name  = str(row.get("customer_name", "")).strip()
+            cid   = str(row.get("customer_id", "")).strip()
+            count = row.get("business_count", "")
+            if name and name != cid:
+                return f"{name}  ({count:,} biz)" if count else f"{name}"
+            return f"{cid}  ({count:,} biz)" if count else cid
 
         cust_df["display"] = cust_df.apply(_label, axis=1)
         options = ["All Customers"] + cust_df["display"].tolist()
-        selected = st.sidebar.selectbox("Customer Name / ID", options, key="g_customer_sel")
+        selected = st.sidebar.selectbox("Customer Name", options, key="g_customer_sel")
         if selected != "All Customers":
-            # Recover the raw customer_id from the selected display label
             matched = cust_df[cust_df["display"] == selected]
             if not matched.empty:
                 customer_id = matched.iloc[0]["customer_id"]

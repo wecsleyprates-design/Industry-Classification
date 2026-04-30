@@ -45,27 +45,52 @@ def _onboarded_cte(date_from=None, date_to=None, customer_id=None, business_id=N
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_customers(date_from=None, date_to=None) -> pd.DataFrame:
-    """Distinct customers in the date range.
-    Uses customer_id directly — no join to a customers name table,
-    as rds_cases_public.customers does not exist in this cluster."""
+    """Distinct customers with human-readable names and business counts.
+
+    Primary source: rds_auth_public.data_customers (same as kyb_hub_app_v2.py).
+    Fallback: customer_id only if the join fails.
+    Columns returned: customer_id, customer_name, business_count
+    """
     parts = ["1=1"]
     if date_from:
         parts.append(f"DATE(rbcm.created_at) >= '{date_from}'")
     if date_to:
         parts.append(f"DATE(rbcm.created_at) <= '{date_to}'")
     where = " AND ".join(parts)
+
+    # Primary: join to rds_auth_public.data_customers for human-readable names
     try:
         df = run_query(f"""
-            SELECT DISTINCT
+            SELECT
                 rbcm.customer_id,
-                rbcm.customer_id AS customer_name
+                dc.name                             AS customer_name,
+                COUNT(DISTINCT rbcm.business_id)    AS business_count
+            FROM rds_cases_public.rel_business_customer_monitoring rbcm
+            JOIN rds_auth_public.data_customers dc ON dc.id = rbcm.customer_id
+            WHERE {where}
+            GROUP BY rbcm.customer_id, dc.name
+            ORDER BY business_count DESC, dc.name
+        """)
+        if df is not None and not df.empty and "customer_name" in df.columns:
+            return df
+    except Exception:
+        pass
+
+    # Fallback: customer_id as the name
+    try:
+        df = run_query(f"""
+            SELECT
+                rbcm.customer_id,
+                rbcm.customer_id                    AS customer_name,
+                COUNT(DISTINCT rbcm.business_id)    AS business_count
             FROM rds_cases_public.rel_business_customer_monitoring rbcm
             WHERE {where}
-            ORDER BY rbcm.customer_id
+            GROUP BY rbcm.customer_id
+            ORDER BY business_count DESC
         """)
-        return df if df is not None else pd.DataFrame(columns=["customer_id","customer_name"])
+        return df if df is not None else pd.DataFrame(columns=["customer_id","customer_name","business_count"])
     except Exception:
-        return pd.DataFrame(columns=["customer_id","customer_name"])
+        return pd.DataFrame(columns=["customer_id","customer_name","business_count"])
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -428,6 +453,172 @@ def load_business_customer(business_id: str) -> pd.DataFrame:
         FROM rds_cases_public.rel_business_customer_monitoring rbcm
         WHERE rbcm.business_id = '{business_id}'
         GROUP BY rbcm.customer_id
+    """)
+
+
+# ── Platform-fact drilldown (winner + all MCC variants for the same business) ──
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_fact_drilldown(fact_name: str, date_from=None, date_to=None,
+                        customer_id=None, business_id=None,
+                        limit: int = 500) -> pd.DataFrame:
+    """Per-business drilldown: winning value + all MCC variants + raw JSON for alternatives.
+
+    Returns one row per business with:
+      - winning NAICS (or MCC) value, platform, confidence, updated_at, received_at
+      - mcc_code (final), mcc_code_found (AI), mcc_code_from_naics (NAICS-derived)
+      - raw_json for alternatives[] parsing
+    """
+    cte = _onboarded_cte(date_from, date_to, customer_id, business_id)
+    return run_query(cte + f"""
+        SELECT
+            o.business_id,
+            o.customer_id,
+            -- Winning fact
+            JSON_EXTRACT_PATH_TEXT(f.value, 'value')                               AS winning_value,
+            COALESCE(JSON_EXTRACT_PATH_TEXT(f.value, 'source', 'platformId'),
+                     'unknown')                                                     AS winning_platform_id,
+            JSON_EXTRACT_PATH_TEXT(f.value, 'source', 'name')                      AS winning_platform_name_legacy,
+            COALESCE(JSON_EXTRACT_PATH_TEXT(f.value, 'source', 'confidence'),
+                     '')                                                            AS winning_confidence,
+            COALESCE(JSON_EXTRACT_PATH_TEXT(f.value, 'source', 'updatedAt'),
+                     '')                                                            AS winner_updated_at,
+            f.received_at                                                           AS winner_received_at,
+            f.value                                                                 AS raw_json,
+            -- MCC variants (always joined regardless of selected fact)
+            MAX(CASE WHEN mf.name = 'mcc_code'
+                THEN JSON_EXTRACT_PATH_TEXT(mf.value, 'value') END)                AS mcc_code,
+            MAX(CASE WHEN mf.name = 'mcc_code'
+                THEN mf.received_at::VARCHAR END)                                   AS mcc_received_at,
+            MAX(CASE WHEN mf.name = 'mcc_code_found'
+                THEN JSON_EXTRACT_PATH_TEXT(mf.value, 'value') END)                AS mcc_code_found,
+            MAX(CASE WHEN mf.name = 'mcc_code_found'
+                THEN mf.received_at::VARCHAR END)                                   AS mcc_found_received_at,
+            MAX(CASE WHEN mf.name = 'mcc_code_from_naics'
+                THEN JSON_EXTRACT_PATH_TEXT(mf.value, 'value') END)                AS mcc_code_from_naics,
+            MAX(CASE WHEN mf.name = 'mcc_code_from_naics'
+                THEN mf.received_at::VARCHAR END)                                   AS mcc_from_naics_received_at,
+            MAX(CASE WHEN mf.name = 'mcc_description'
+                THEN JSON_EXTRACT_PATH_TEXT(mf.value, 'value') END)                AS mcc_description,
+            MAX(CASE WHEN mf.name = 'naics_description'
+                THEN JSON_EXTRACT_PATH_TEXT(mf.value, 'value') END)                AS naics_description
+        FROM rds_warehouse_public.facts f
+        JOIN onboarded o ON o.business_id = f.business_id
+        LEFT JOIN rds_warehouse_public.facts mf
+            ON mf.business_id = f.business_id
+            AND mf.name IN ('mcc_code', 'mcc_code_found', 'mcc_code_from_naics',
+                            'mcc_description', 'naics_description')
+            AND LENGTH(mf.value) < 60000
+        WHERE f.name = '{fact_name}'
+          AND LENGTH(f.value) < 60000
+        GROUP BY
+            o.business_id, o.customer_id,
+            f.value, f.received_at
+        ORDER BY f.received_at DESC
+        LIMIT {limit}
+    """)
+
+
+# ── Canonical pair analysis ─────────────────────────────────────────────────────
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_canonical_pair_status(date_from=None, date_to=None,
+                               customer_id=None) -> pd.DataFrame:
+    """For each business: classify NAICS+MCC as canonical, non-canonical, etc.
+    Uses rds_cases_public.rel_naics_mcc as the ground truth mapping.
+    Same approach as kyb_hub_app_v2.py Section 6.2."""
+    cte = _onboarded_cte(date_from, date_to, customer_id)
+    return run_query(cte + """
+        , naics_f AS (
+            SELECT f.business_id,
+                   JSON_EXTRACT_PATH_TEXT(f.value, 'value') AS final_naics,
+                   COALESCE(JSON_EXTRACT_PATH_TEXT(f.value, 'source', 'platformId'), 'unknown') AS naics_platform
+            FROM rds_warehouse_public.facts f
+            JOIN onboarded o ON o.business_id = f.business_id
+            WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
+        ),
+        mcc_f AS (
+            SELECT f.business_id,
+                   JSON_EXTRACT_PATH_TEXT(f.value, 'value') AS final_mcc
+            FROM rds_warehouse_public.facts f
+            JOIN onboarded o ON o.business_id = f.business_id
+            WHERE f.name = 'mcc_code' AND LENGTH(f.value) < 60000
+        ),
+        canonical_pairs AS (
+            SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+            FROM rds_cases_public.rel_naics_mcc r
+            JOIN rds_cases_public.core_naics_code nc ON nc.id = r.naics_id
+            JOIN rds_cases_public.core_mcc_code   mc ON mc.id = r.mcc_id
+        )
+        SELECT
+            n.business_id,
+            n.final_naics,
+            n.naics_platform,
+            m.final_mcc,
+            CASE
+                WHEN n.final_naics = '561499' OR m.final_mcc = '5614' THEN 'Fallback / Invalid'
+                WHEN n.final_naics IS NULL OR n.final_naics = ''      THEN 'NAICS Missing'
+                WHEN m.final_mcc   IS NULL OR m.final_mcc   = ''      THEN 'MCC Missing'
+                WHEN cp.naics_code IS NOT NULL                         THEN 'Canonical Pair ✅'
+                ELSE 'Non-Canonical Pair ⚠️'
+            END AS pair_status,
+            CASE WHEN cp.naics_code IS NOT NULL THEN 1 ELSE 0 END AS is_canonical
+        FROM naics_f n
+        LEFT JOIN mcc_f m ON m.business_id = n.business_id
+        LEFT JOIN canonical_pairs cp
+            ON cp.naics_code = n.final_naics AND cp.mcc_code = m.final_mcc
+    """)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_canonical_pair_by_customer(date_from=None, date_to=None) -> pd.DataFrame:
+    """Canonical pair status aggregated by customer, with customer name."""
+    cte = _onboarded_cte(date_from, date_to)
+    return run_query(cte + """
+        , naics_f AS (
+            SELECT f.business_id,
+                   JSON_EXTRACT_PATH_TEXT(f.value, 'value') AS final_naics
+            FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id = f.business_id
+            WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
+        ),
+        mcc_f AS (
+            SELECT f.business_id,
+                   JSON_EXTRACT_PATH_TEXT(f.value, 'value') AS final_mcc
+            FROM rds_warehouse_public.facts f JOIN onboarded o ON o.business_id = f.business_id
+            WHERE f.name = 'mcc_code' AND LENGTH(f.value) < 60000
+        ),
+        canonical_pairs AS (
+            SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+            FROM rds_cases_public.rel_naics_mcc r
+            JOIN rds_cases_public.core_naics_code nc ON nc.id = r.naics_id
+            JOIN rds_cases_public.core_mcc_code   mc ON mc.id = r.mcc_id
+        ),
+        classified AS (
+            SELECT o.customer_id, n.business_id,
+                CASE
+                    WHEN n.final_naics='561499' OR m.final_mcc='5614' THEN 'Fallback / Invalid'
+                    WHEN n.final_naics IS NULL OR n.final_naics=''    THEN 'NAICS Missing'
+                    WHEN m.final_mcc   IS NULL OR m.final_mcc=''      THEN 'MCC Missing'
+                    WHEN cp.naics_code IS NOT NULL                     THEN 'Canonical Pair'
+                    ELSE 'Non-Canonical Pair'
+                END AS pair_status
+            FROM naics_f n
+            JOIN onboarded o ON o.business_id = n.business_id
+            LEFT JOIN mcc_f m ON m.business_id = n.business_id
+            LEFT JOIN canonical_pairs cp
+                ON cp.naics_code = n.final_naics AND cp.mcc_code = m.final_mcc
+        )
+        SELECT
+            c.customer_id,
+            COALESCE(dc.name, c.customer_id) AS customer_name,
+            c.pair_status,
+            COUNT(DISTINCT c.business_id)    AS businesses,
+            ROUND(100.0 * COUNT(DISTINCT c.business_id)
+                / SUM(COUNT(DISTINCT c.business_id)) OVER (PARTITION BY c.customer_id), 1) AS pct
+        FROM classified c
+        LEFT JOIN rds_auth_public.data_customers dc ON dc.id = c.customer_id
+        GROUP BY c.customer_id, dc.name, c.pair_status
+        ORDER BY c.customer_id, businesses DESC
     """)
 
 
