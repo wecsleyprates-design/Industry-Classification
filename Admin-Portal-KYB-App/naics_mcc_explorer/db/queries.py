@@ -821,53 +821,59 @@ def load_misidentification_signals(date_from=None, date_to=None,
     Joins core_naics_code and core_mcc_code to add human-readable labels.
     No row limit — returns all businesses in the filtered set.
     """
+    # Redshift does NOT support correlated subqueries in JOIN ON clauses.
+    # Solution: pre-aggregate all MCC facts per business into a CTE,
+    # then join the mcc_code value to core_mcc_code.
     cte = _billing_cte(date_from, date_to, client_name)
     return run_query(cte + """
+        , mcc_agg AS (
+            -- Pre-aggregate all MCC fact values per business to avoid correlated subquery
+            SELECT
+                mf.business_id,
+                MAX(CASE WHEN mf.name = 'mcc_code'
+                    THEN JSON_EXTRACT_PATH_TEXT(mf.value,'value') END)          AS mcc_code,
+                MAX(CASE WHEN mf.name = 'mcc_code_from_naics'
+                    THEN JSON_EXTRACT_PATH_TEXT(mf.value,'value') END)          AS mcc_code_from_naics,
+                MAX(CASE WHEN mf.name = 'mcc_code_found'
+                    THEN JSON_EXTRACT_PATH_TEXT(mf.value,'value') END)          AS mcc_code_found
+            FROM rds_warehouse_public.facts mf
+            JOIN clients c ON c.business_id = mf.business_id
+            WHERE mf.name IN ('mcc_code','mcc_code_from_naics','mcc_code_found')
+              AND LENGTH(mf.value) < 60000
+            GROUP BY mf.business_id
+        )
         SELECT
             c.client,
             f.business_id,
-            JSON_EXTRACT_PATH_TEXT(f.value,'value')                                        AS winning_naics,
-            COALESCE(nc.label, '')                                                          AS naics_description,
-            COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId'),'unknown')      AS winning_platform_id,
-            COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence'),'0')            AS winning_confidence,
-            LEFT(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value'),''),2)                   AS winning_sector,
+            JSON_EXTRACT_PATH_TEXT(f.value,'value')                             AS winning_naics,
+            COALESCE(nc.label, '')                                              AS naics_description,
+            COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId'),'unknown') AS winning_platform_id,
+            COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence'),'0') AS winning_confidence,
+            LEFT(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value'),''),2)        AS winning_sector,
             CASE
                 WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') IS NULL THEN 'null_winner'
                 WHEN LENGTH(JSON_EXTRACT_PATH_TEXT(f.value,'value')) != 6 THEN 'digit_error'
                 WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') = '561499' THEN 'catchall'
                 ELSE 'specific'
-            END AS winner_quality,
-            -- MCC facts (final + from_naics)
-            MAX(CASE WHEN mf.name = 'mcc_code'
-                THEN JSON_EXTRACT_PATH_TEXT(mf.value,'value') END)                         AS mcc_code,
-            MAX(CASE WHEN mf.name = 'mcc_code_from_naics'
-                THEN JSON_EXTRACT_PATH_TEXT(mf.value,'value') END)                         AS mcc_code_from_naics,
-            MAX(CASE WHEN mf.name = 'mcc_code_found'
-                THEN JSON_EXTRACT_PATH_TEXT(mf.value,'value') END)                         AS mcc_code_found,
-            -- MCC description (from mcc_code fact)
-            COALESCE(mc.label, '')                                                          AS mcc_description,
-            f.received_at,
-            f.value AS raw_json
+            END                                                                 AS winner_quality,
+            ma.mcc_code,
+            ma.mcc_code_from_naics,
+            ma.mcc_code_found,
+            COALESCE(mc.label, '')                                              AS mcc_description,
+            COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','updatedAt'),
+                     f.received_at::VARCHAR)                                    AS winner_updated_at,
+            f.value                                                             AS raw_json
         FROM rds_warehouse_public.facts f
         JOIN clients c ON c.business_id = f.business_id
         LEFT JOIN rds_cases_public.core_naics_code nc
             ON nc.code = JSON_EXTRACT_PATH_TEXT(f.value,'value')
-        LEFT JOIN rds_warehouse_public.facts mf
-            ON mf.business_id = f.business_id
-            AND mf.name IN ('mcc_code','mcc_code_from_naics','mcc_code_found')
-            AND LENGTH(mf.value) < 60000
+        LEFT JOIN mcc_agg ma ON ma.business_id = f.business_id
         LEFT JOIN rds_cases_public.core_mcc_code mc
-            ON mc.code = (
-                SELECT JSON_EXTRACT_PATH_TEXT(mf2.value,'value')
-                FROM rds_warehouse_public.facts mf2
-                WHERE mf2.business_id = f.business_id
-                  AND mf2.name = 'mcc_code'
-                  AND LENGTH(mf2.value) < 60000
-                LIMIT 1
-            )
+            ON mc.code = ma.mcc_code
         WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
         GROUP BY c.client, f.business_id, f.value, f.received_at,
-                 nc.label, mc.label
+                 nc.label, mc.label, ma.mcc_code, ma.mcc_code_from_naics,
+                 ma.mcc_code_found
         ORDER BY c.client, f.received_at DESC
     """)
 

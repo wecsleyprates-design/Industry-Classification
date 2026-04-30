@@ -59,10 +59,12 @@ bid_input = st.text_input(
     key="drill_bid",
 )
 st.caption(
-    "💡 Use the **inner business ID** from the Admin Portal. "
-    "In the URL `admin.joinworth.com/businesses/{A}/cases/{B}/kyb/...`, "
-    "use **{A}** (the first UUID, under `/businesses/`). "
-    "This is the same ID stored in `rds_warehouse_public.facts`."
+    "💡 From the Admin Portal URL "
+    "`admin.joinworth.com/businesses/`**{A}**`/cases/{B}/kyb/...` — "
+    "use **{A}** (the first UUID after `/businesses/`). "
+    "The tab you're on (Background, Business Registration, etc.) doesn't matter — "
+    "it's always the same business ID. "
+    "This matches the `business_id` in `rds_warehouse_public.facts`."
 )
 
 if not bid_input.strip():
