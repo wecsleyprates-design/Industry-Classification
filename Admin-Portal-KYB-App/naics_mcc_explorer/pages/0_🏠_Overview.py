@@ -6,7 +6,7 @@ shared sidebar renderer and stored in st.session_state for use by all pages.
 """
 
 import sys, os
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import streamlit as st
 import plotly.graph_objects as go
@@ -17,13 +17,6 @@ from utils.filters import render_sidebar, kpi, section_header, no_data
 from utils.platform_map import PLATFORM_MAP, platform_label, platform_color, CATCH_ALL_NAICS, CATCH_ALL_MCC
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
 from db.queries import load_overview, load_platform_winners, _onboarded_cte
-
-st.set_page_config(
-    page_title="NAICS/MCC Quality Explorer",
-    page_icon="🔬",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
 
 # ── Dark theme override ────────────────────────────────────────────────────────
 st.markdown("""

@@ -533,11 +533,11 @@ def load_fact_drilldown(fact_name: str, date_from=None, date_to=None,
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_canonical_pair_status(date_from=None, date_to=None,
-                               customer_id=None) -> pd.DataFrame:
+                               customer_id=None, business_id=None) -> pd.DataFrame:
     """For each business: classify NAICS+MCC as canonical, non-canonical, etc.
     Uses rds_cases_public.rel_naics_mcc as the ground truth mapping.
     Same approach as kyb_hub_app_v2.py Section 6.2."""
-    cte = _onboarded_cte(date_from, date_to, customer_id)
+    cte = _onboarded_cte(date_from, date_to, customer_id, business_id)
     return run_query(cte + """
         , naics_f AS (
             SELECT f.business_id,

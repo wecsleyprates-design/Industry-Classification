@@ -45,43 +45,47 @@ FACTS_TO_SHOW = ["naics_code", "mcc_code", "mcc_code_found", "mcc_code_from_naic
 
 
 def _make_bar(df: pd.DataFrame, title: str, chart_key: str) -> None:
-    """Horizontal bar chart with NO overlapping text — values shown outside bars."""
-    df = df.sort_values("business_count", ascending=True).copy()
-    df["label"] = df["business_count"].apply(lambda v: f"{v:,}") + "  (" + df["pct_of_total"] + ")"
+    """Horizontal bar chart — labels in a separate column so they never overlap bars.
+
+    Strategy: render the bar chart WITHOUT any text on the bars, then show the
+    label (count + pct) in a plain st.dataframe column next to it. This is the
+    only reliable cross-platform solution — Plotly annotation positioning depends
+    on the rendered pixel width which varies by screen/font.
+    """
+    df = df.sort_values("business_count", ascending=False).copy()
+
+    max_val = int(df["business_count"].max()) if not df.empty else 1
 
     fig = go.Figure(go.Bar(
         x=df["business_count"],
         y=df["platform_name"],
         orientation="h",
         marker_color=df["color"].tolist(),
-        # textposition="outside" clips when bars are wide; use customdata + hovertemplate instead
-        customdata=df["label"],
-        hovertemplate="<b>%{y}</b><br>%{customdata}<extra></extra>",
+        hovertemplate="<b>%{y}</b><br>Count: %{x:,}<extra></extra>",
     ))
-    # Add text annotations positioned to the right of the axis (never inside the bar)
-    max_val = df["business_count"].max() if not df.empty else 1
-    annotations = []
-    for _, row in df.iterrows():
-        annotations.append(dict(
-            x=row["business_count"] + max_val * 0.02,
-            y=row["platform_name"],
-            text=f"  {row['business_count']:,} ({row['pct_of_total']})",
-            showarrow=False,
-            xanchor="left",
-            font=dict(color="#94a3b8", size=11),
-        ))
-
     fig.update_layout(
         title=dict(text=title, font=dict(color="#cbd5e1", size=13)),
-        height=max(260, len(df) * 42 + 60),
-        margin=dict(l=0, r=180, t=40, b=20),
+        height=max(240, len(df) * 44 + 60),
+        margin=dict(l=0, r=20, t=40, b=20),
         paper_bgcolor="#0f172a", plot_bgcolor="#0f172a", font_color="#cbd5e1",
         xaxis=dict(showgrid=True, gridcolor="#1e293b", color="#334155",
-                   range=[0, max_val * 1.35]),
+                   range=[0, max_val * 1.05]),
         yaxis=dict(showgrid=False, color="#94a3b8"),
-        annotations=annotations,
     )
     st.plotly_chart(fig, use_container_width=True, key=chart_key)
+
+    # Companion label table — shows count + % clearly, no overlap possible
+    label_df = df[["platform_name", "business_count", "pct_of_total", "avg_confidence"]].copy()
+    label_df.columns = ["Platform", "Count", "% of Total", "Avg Confidence"]
+    st.dataframe(
+        label_df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Count":          st.column_config.NumberColumn(format="%d"),
+            "Avg Confidence": st.column_config.NumberColumn(format="%.3f"),
+        },
+    )
 
 
 # ── Load all four facts ────────────────────────────────────────────────────────
@@ -282,9 +286,11 @@ for tab, fn in zip(tabs, FACTS_TO_SHOW):
         with st.expander(f"🔍 Business Drilldown — NAICS + all MCC codes for `{fn}` winners"):
             st.caption(
                 "Shows winning value, alternatives[], all MCC variants (final/AI/NAICS-derived) "
-                "and timestamps for each business."
+                "and timestamps for each business. Use the Platform filter to focus on a specific platform."
             )
-            limit_dd = st.number_input("Row limit", 50, 2000, 300, 50, key=f"dd_lim_{fn}")
+            dd_col1, dd_col2 = st.columns([2, 1])
+            with dd_col2:
+                limit_dd = st.number_input("Row limit", 50, 2000, 300, 50, key=f"dd_lim_{fn}")
             with st.spinner("Loading drilldown data…"):
                 dd = load_fact_drilldown(fn, f_from, f_to, f_cust, f_biz, int(limit_dd))
 
@@ -292,6 +298,18 @@ for tab, fn in zip(tabs, FACTS_TO_SHOW):
                 no_data()
             else:
                 dd["winning_platform"] = dd["winning_platform_id"].apply(platform_label)
+
+                # ── Platform filter ──────────────────────────────────────────
+                with dd_col1:
+                    platform_options = ["All Platforms"] + sorted(dd["winning_platform"].unique().tolist())
+                    selected_platform = st.selectbox(
+                        "Filter by Platform", platform_options, key=f"dd_pid_{fn}"
+                    )
+                if selected_platform != "All Platforms":
+                    dd = dd[dd["winning_platform"] == selected_platform]
+                if dd.empty:
+                    no_data(f"No records for platform '{selected_platform}'.")
+                    continue
 
                 # Parse alternatives
                 def _alt_val_str(raw):
