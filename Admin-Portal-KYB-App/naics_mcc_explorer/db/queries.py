@@ -88,21 +88,128 @@ def load_businesses(date_from=None, date_to=None, customer_id=None) -> pd.DataFr
 
 
 # ── Lookup tables ──────────────────────────────────────────────────────────────
+# Confirmed table structure from kyb_hub_app_v2.py usage:
+#   core_naics_code: id (PK), code (6-digit string), title (human-readable)
+#   core_mcc_code:   id (PK), code (4-digit string), title (human-readable)
+#   rel_naics_mcc:   naics_id (FK→core_naics_code.id), mcc_id (FK→core_mcc_code.id)
+# Source: rds_cases_public schema (Redshift federated from RDS PostgreSQL)
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_naics_lookup() -> set[str]:
-    df = run_query("SELECT DISTINCT CAST(code AS VARCHAR) AS code FROM rds_cases_public.core_naics_code")
-    if df.empty:
+    """Returns set of valid 6-digit NAICS code strings."""
+    try:
+        df = run_query("""
+            SELECT DISTINCT CAST(code AS VARCHAR) AS code
+            FROM rds_cases_public.core_naics_code
+            WHERE code IS NOT NULL
+        """)
+        if df is None or df.empty:
+            return set()
+        return set(df["code"].dropna().astype(str).str.strip())
+    except Exception:
         return set()
-    return set(df["code"].dropna().astype(str).str.strip())
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_naics_lookup_full() -> pd.DataFrame:
+    """Returns DataFrame with code + title for NAICS codes."""
+    try:
+        df = run_query("""
+            SELECT CAST(code AS VARCHAR) AS code,
+                   COALESCE(title, '') AS title
+            FROM rds_cases_public.core_naics_code
+            WHERE code IS NOT NULL
+            ORDER BY code
+        """)
+        return df if df is not None else pd.DataFrame(columns=["code","title"])
+    except Exception:
+        # title column may not exist — fall back to code only
+        try:
+            df = run_query("SELECT DISTINCT CAST(code AS VARCHAR) AS code FROM rds_cases_public.core_naics_code WHERE code IS NOT NULL")
+            if df is not None and not df.empty:
+                df["title"] = ""
+                return df
+        except Exception:
+            pass
+        return pd.DataFrame(columns=["code","title"])
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_mcc_lookup() -> set[str]:
-    df = run_query("SELECT DISTINCT CAST(code AS VARCHAR) AS code FROM rds_cases_public.core_mcc_code")
-    if df.empty:
+    """Returns set of valid 4-digit MCC code strings."""
+    try:
+        df = run_query("""
+            SELECT DISTINCT CAST(code AS VARCHAR) AS code
+            FROM rds_cases_public.core_mcc_code
+            WHERE code IS NOT NULL
+        """)
+        if df is None or df.empty:
+            return set()
+        return set(df["code"].dropna().astype(str).str.strip())
+    except Exception:
         return set()
-    return set(df["code"].dropna().astype(str).str.strip())
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_mcc_lookup_full() -> pd.DataFrame:
+    """Returns DataFrame with code + title for MCC codes."""
+    try:
+        df = run_query("""
+            SELECT CAST(code AS VARCHAR) AS code,
+                   COALESCE(title, '') AS title
+            FROM rds_cases_public.core_mcc_code
+            WHERE code IS NOT NULL
+            ORDER BY code
+        """)
+        return df if df is not None else pd.DataFrame(columns=["code","title"])
+    except Exception:
+        try:
+            df = run_query("SELECT DISTINCT CAST(code AS VARCHAR) AS code FROM rds_cases_public.core_mcc_code WHERE code IS NOT NULL")
+            if df is not None and not df.empty:
+                df["title"] = ""
+                return df
+        except Exception:
+            pass
+        return pd.DataFrame(columns=["code","title"])
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_canonical_pairs() -> pd.DataFrame:
+    """Returns all canonical NAICS→MCC pairs from rel_naics_mcc with labels.
+    Used to check whether a NAICS+MCC combination is a known-valid mapping.
+    Source: rds_cases_public.rel_naics_mcc JOIN core_naics_code JOIN core_mcc_code
+    This is the same query used by kyb_hub_app_v2.py lines 10860-10862."""
+    try:
+        df = run_query("""
+            SELECT DISTINCT
+                nc.code  AS naics_code,
+                COALESCE(nc.title, '') AS naics_title,
+                mc.code  AS mcc_code,
+                COALESCE(mc.title, '') AS mcc_title
+            FROM rds_cases_public.rel_naics_mcc r
+            JOIN rds_cases_public.core_naics_code nc ON nc.id = r.naics_id
+            JOIN rds_cases_public.core_mcc_code   mc ON mc.id = r.mcc_id
+            WHERE nc.code IS NOT NULL AND mc.code IS NOT NULL
+            ORDER BY nc.code, mc.code
+        """)
+        return df if df is not None else pd.DataFrame(columns=["naics_code","naics_title","mcc_code","mcc_title"])
+    except Exception:
+        # Fall back without title columns
+        try:
+            df = run_query("""
+                SELECT DISTINCT nc.code AS naics_code, mc.code AS mcc_code
+                FROM rds_cases_public.rel_naics_mcc r
+                JOIN rds_cases_public.core_naics_code nc ON nc.id = r.naics_id
+                JOIN rds_cases_public.core_mcc_code   mc ON mc.id = r.mcc_id
+                WHERE nc.code IS NOT NULL AND mc.code IS NOT NULL
+            """)
+            if df is not None and not df.empty:
+                df["naics_title"] = ""
+                df["mcc_title"]   = ""
+                return df
+        except Exception:
+            pass
+        return pd.DataFrame(columns=["naics_code","naics_title","mcc_code","mcc_title"])
 
 
 # ── Platform Winner Distribution ───────────────────────────────────────────────
