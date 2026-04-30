@@ -164,19 +164,26 @@ def is_configured() -> bool:
 # ── API calls ──────────────────────────────────────────────────────────────────
 
 def get_business_details(business_id: str) -> dict:
-    """GET /verification/businesses/{businessID}/details
+    """GET /facts/business/{businessId}/details
 
-    Returns the full fact picture for a business — same data as the Admin Portal.
-    Response contains naics_code, mcc_code, mcc_code_found, mcc_code_from_naics,
-    naics_description, mcc_description, industry, and all alternatives[] with
-    source.platformId, source.confidence, source.updatedAt, ruleApplied.
+    This is the exact endpoint the Admin Portal calls (integration.service.ts line 390):
+        `${MICROSERVICE.INTEGRATION}/facts/business/${businessId}/details`
+
+    Returns the full fact picture — naics_code, mcc_code, mcc_code_found,
+    mcc_code_from_naics, naics_description, mcc_description, industry,
+    alternatives[], source.platformId, source.confidence, source.updatedAt,
+    ruleApplied — identical to what the Admin Portal shows.
+
+    businessId = the FIRST UUID in the Admin Portal URL:
+        admin.joinworth.com/businesses/{THIS_ONE}/cases/{not_this}/kyb/...
+    This ID is the same as business_id in rds_warehouse_public.facts.
 
     Raises RuntimeError on auth failure or network error.
     """
-    token    = get_valid_token()
-    base     = _get_api_base()
-    url      = f"{base}/verification/businesses/{business_id}/details"
-    headers  = {
+    token   = get_valid_token()
+    base    = _get_api_base()
+    url     = f"{base}/facts/business/{business_id}/details"
+    headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type":  "application/json",
     }
@@ -184,7 +191,7 @@ def get_business_details(business_id: str) -> dict:
     resp = requests.get(url, headers=headers, timeout=15)
 
     if resp.status_code == 401:
-        # Token may have just expired — force re-auth and retry once
+        # Token expired mid-session — force re-auth and retry once
         st.session_state.pop(_EXPIRY_KEY, None)
         token = get_valid_token()
         headers["Authorization"] = f"Bearer {token}"
@@ -192,23 +199,23 @@ def get_business_details(business_id: str) -> dict:
 
     if resp.status_code == 404:
         raise RuntimeError(
-            f"Business `{business_id}` not found via the Details API.\n\n"
-            "Make sure you are using the correct business ID:\n"
-            "• In the Admin Portal URL: admin.joinworth.com/businesses/{ID}/cases/{...}/kyb/...\n"
-            "• Use the FIRST UUID (after /businesses/) — this is the same ID in rds_warehouse_public.facts\n"
-            "• The SECOND UUID (after /cases/) is the case ID and will not work here."
+            f"Business `{business_id}` not found.\n\n"
+            "Use the FIRST UUID from the Admin Portal URL:\n"
+            "admin.joinworth.com/businesses/**{THIS_UUID}**/cases/{...}/kyb/..."
         )
     if resp.status_code == 403:
-        raise RuntimeError("Access denied. Your admin account may not have permission to read this business.")
+        raise RuntimeError(
+            "Access denied. Your admin account may not have permission to read this business."
+        )
     if resp.status_code != 200:
         try:
             detail = resp.json().get("message", resp.text[:200])
         except Exception:
             detail = resp.text[:200]
-        raise RuntimeError(f"Details API error ({resp.status_code}): {detail}")
+        raise RuntimeError(f"Facts Details API error ({resp.status_code}): {detail}")
 
     payload = resp.json()
-    # Response shape: {"status": "success", "data": { ... facts ... }}
+    # Response: {"status": "success", "data": { naics_code: {...}, mcc_code: {...}, ... }}
     return payload.get("data", payload)
 
 
