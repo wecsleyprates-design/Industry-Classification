@@ -146,6 +146,49 @@ else:
         )
         st.plotly_chart(fig, use_container_width=True, key="ci_dist_stacked")
 
+        # ── Percentage breakdown table below the stacked bar ────────────────
+        st.markdown("**Platform win share by client — percentage breakdown**")
+        st.caption(
+            "Each row = one client. Columns = platforms. Values = % of that client's "
+            "NAICS assignments won by each platform. "
+            "Red > 50% in any row = that client has a significant scoring configuration issue."
+        )
+        pct_pivot = dist_df.copy()
+        client_totals = dist_df.groupby("client")["businesses"].sum().rename("total")
+        pct_pivot = pct_pivot.merge(client_totals, on="client")
+        pct_pivot["pct"] = (pct_pivot["businesses"] / pct_pivot["total"] * 100).round(1)
+        pct_table = pct_pivot.pivot_table(
+            index="client",
+            columns="platform_name",
+            values="pct",
+            fill_value=0.0,
+        ).reset_index()
+        pct_table.columns.name = None
+        pct_table["Total Businesses"] = pivot["Total"].values if len(pivot) == len(pct_table) else [
+            dist_df[dist_df["client"]==c]["businesses"].sum() for c in pct_table["client"]
+        ]
+        pct_table = pct_table.sort_values("Total Businesses", ascending=False)
+        pct_table.rename(columns={"client": "Client"}, inplace=True)
+
+        # Move Total Businesses to second column
+        cols_order = ["Client","Total Businesses"] + [
+            c for c in pct_table.columns if c not in ("Client","Total Businesses")
+        ]
+        pct_table = pct_table[[c for c in cols_order if c in pct_table.columns]]
+
+        # Build column_config with % format for platform cols
+        pct_col_cfg = {"Total Businesses": st.column_config.NumberColumn(format="%d")}
+        for col in pct_table.columns:
+            if col not in ("Client","Total Businesses"):
+                pct_col_cfg[col] = st.column_config.NumberColumn(format="%.1f%%")
+
+        st.dataframe(pct_table, use_container_width=True, hide_index=True, column_config=pct_col_cfg)
+        st.download_button(
+            "⬇️ Download platform % table",
+            pct_table.to_csv(index=False).encode(),
+            "platform_pct_by_client.csv","text/csv", key="dl_pct_table"
+        )
+
     analyst_note(
         "What this reveals per client",
         "Clients dominated by <strong>red (P0 Applicant Entry)</strong> have the worst data quality — "
@@ -236,13 +279,13 @@ st.markdown("---")
 section_header("🔍 Section 3 — Applicant Submission vs Vendor Alternatives",
                "What P0 (the business itself) submitted, vs what ZoomInfo/Equifax/SERP returned in alternatives[].")
 
-with st.spinner("Loading P0 applicant data…"):
-    p0_df = load_client_applicant_vs_vendor(f_from, f_to, client_filter, limit=500)
+with st.spinner("Loading applicant submission data…"):
+    p0_df = load_client_applicant_vs_vendor(f_from, f_to, client_filter)  # no row limit
 
 if p0_df is None or p0_df.empty:
-    st.success("✅ No P0 wins found for the selected filters.")
+    st.success("✅ No cases where the business's own submission won for the selected filters.")
 else:
-    st.info(f"Showing **{len(p0_df):,} businesses** where P0 (Applicant Entry) won the NAICS race.")
+    st.info(f"Showing all **{len(p0_df):,} businesses** where the business's own submission won the NAICS score comparison.")
 
     # Parse alternatives from raw JSON
     def _parse_vendor_alts(raw):

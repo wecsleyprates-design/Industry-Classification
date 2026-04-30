@@ -779,7 +779,7 @@ def load_client_naics_length(date_from=None, date_to=None, client_name=None) -> 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_client_applicant_vs_vendor(date_from=None, date_to=None, client_name=None,
-                                    limit: int = 1000) -> pd.DataFrame:
+                                    limit: int = 10000) -> pd.DataFrame:
     """Per business: what P0 (applicant) submitted vs what vendors returned.
     Captures the full raw JSON for alternatives parsing.
     Returns rows where P0 won — these are the ghost assigner cases.
@@ -809,16 +809,10 @@ def load_client_applicant_vs_vendor(date_from=None, date_to=None, client_name=No
 @st.cache_data(ttl=300, show_spinner=False)
 def load_misidentification_signals(date_from=None, date_to=None,
                                    client_name=None) -> pd.DataFrame:
-    """Per business: detect proxy error signals for NAICS misidentification.
+    """Per business: proxy error signals for NAICS misidentification + NAICS/MCC descriptions.
 
-    Signal definitions:
-      ghost_null_win  : P0 won with value=null AND alternatives[] has specific codes
-      ghost_overrides : P0 won AND alternatives have different specific code from P24/P17/P22
-      catchall_with_alt: winner=561499 AND alternatives have specific non-catchall codes
-      digit_error     : winning value length != 6 (data type/truncation bug)
-      sector_mismatch : winner sector (2-digit) differs from ALL vendor alternatives' sectors
-
-    Returns one row per business with all signal flags + raw JSON for analysis.
+    Joins core_naics_code and core_mcc_code to add human-readable labels.
+    No row limit — returns all businesses in the filtered set.
     """
     cte = _billing_cte(date_from, date_to, client_name)
     return run_query(cte + """
@@ -826,6 +820,7 @@ def load_misidentification_signals(date_from=None, date_to=None,
             c.client,
             f.business_id,
             JSON_EXTRACT_PATH_TEXT(f.value,'value')                                        AS winning_naics,
+            COALESCE(nc.label, '')                                                          AS naics_description,
             COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId'),'unknown')      AS winning_platform_id,
             COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence'),'0')            AS winning_confidence,
             LEFT(COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'value'),''),2)                   AS winning_sector,
@@ -835,12 +830,38 @@ def load_misidentification_signals(date_from=None, date_to=None,
                 WHEN JSON_EXTRACT_PATH_TEXT(f.value,'value') = '561499' THEN 'catchall'
                 ELSE 'specific'
             END AS winner_quality,
+            -- MCC facts (final + from_naics)
+            MAX(CASE WHEN mf.name = 'mcc_code'
+                THEN JSON_EXTRACT_PATH_TEXT(mf.value,'value') END)                         AS mcc_code,
+            MAX(CASE WHEN mf.name = 'mcc_code_from_naics'
+                THEN JSON_EXTRACT_PATH_TEXT(mf.value,'value') END)                         AS mcc_code_from_naics,
+            MAX(CASE WHEN mf.name = 'mcc_code_found'
+                THEN JSON_EXTRACT_PATH_TEXT(mf.value,'value') END)                         AS mcc_code_found,
+            -- MCC description (from mcc_code fact)
+            COALESCE(mc.label, '')                                                          AS mcc_description,
             f.received_at,
             f.value AS raw_json
         FROM rds_warehouse_public.facts f
         JOIN clients c ON c.business_id = f.business_id
+        LEFT JOIN rds_cases_public.core_naics_code nc
+            ON nc.code = JSON_EXTRACT_PATH_TEXT(f.value,'value')
+        LEFT JOIN rds_warehouse_public.facts mf
+            ON mf.business_id = f.business_id
+            AND mf.name IN ('mcc_code','mcc_code_from_naics','mcc_code_found')
+            AND LENGTH(mf.value) < 60000
+        LEFT JOIN rds_cases_public.core_mcc_code mc
+            ON mc.code = (
+                SELECT JSON_EXTRACT_PATH_TEXT(mf2.value,'value')
+                FROM rds_warehouse_public.facts mf2
+                WHERE mf2.business_id = f.business_id
+                  AND mf2.name = 'mcc_code'
+                  AND LENGTH(mf2.value) < 60000
+                LIMIT 1
+            )
         WHERE f.name = 'naics_code' AND LENGTH(f.value) < 60000
-        ORDER BY f.received_at DESC
+        GROUP BY c.client, f.business_id, f.value, f.received_at,
+                 nc.label, mc.label
+        ORDER BY c.client, f.received_at DESC
     """)
 
 

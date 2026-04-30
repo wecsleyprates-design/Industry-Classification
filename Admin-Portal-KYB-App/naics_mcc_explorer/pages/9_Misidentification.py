@@ -289,8 +289,9 @@ st.markdown("---")
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 3: SIGNAL 4/5 — GHOST OVERRIDE + SECTOR MISMATCH (alternatives)
 # ═══════════════════════════════════════════════════════════════════════════════
-section_header("🔬 Section 3 — Deep Misidentification Signals (Ghost Override + Sector Mismatch)",
-               "Per-business: detect where the winner conflicts with vendor alternatives at sector level.")
+section_header("🔬 Section 3 — Deep Misidentification Signals",
+               "Per-business: detects where the winning code conflicts with vendor alternatives. "
+               "Includes NAICS description, MCC codes, industry description, and all vendor alternatives.")
 
 with st.spinner("Loading misidentification signals…"):
     sig_df = load_misidentification_signals(f_from, f_to, client_filter)
@@ -387,29 +388,75 @@ else:
         ],
     )
 
-    # Flagged businesses table
+    # ── Per-customer flag summary ─────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("#### 📋 Flag Count by Customer")
+    st.caption("How many businesses per client triggered each signal type. Sorted by total flags descending.")
+
+    all_signal_labels = [
+        "S1:null_winner", "S2:format_error", "S3:catchall_winner",
+        "S4:ghost_override", "S5:sector_mismatch",
+        "S6:vendor_consensus_ignored", "S7:catchall_w_specific_alt"
+    ]
+    client_flag_rows = []
+    for cli, grp in sig_df.groupby("client"):
+        row = {"Client": cli, "Total Businesses": len(grp)}
+        total_flagged = int((grp["signals"] != "ok").sum())
+        row["Flagged"] = total_flagged
+        row["Flag %"] = round(100 * total_flagged / len(grp), 1) if len(grp) else 0.0
+        for lbl in all_signal_labels:
+            code = lbl.split(":")[0]
+            desc = lbl.split(":")[1].replace("_"," ").title()
+            row[f"{code}: {desc}"] = int(grp["signals"].str.contains(code).sum())
+        client_flag_rows.append(row)
+
+    if client_flag_rows:
+        cflag_df = pd.DataFrame(client_flag_rows).sort_values("Flagged", ascending=False)
+        flag_col_cfg = {
+            "Total Businesses": st.column_config.NumberColumn(format="%d"),
+            "Flagged":          st.column_config.NumberColumn(format="%d"),
+            "Flag %":           st.column_config.NumberColumn(format="%.1f%%"),
+        }
+        for lbl in all_signal_labels:
+            code = lbl.split(":")[0]
+            desc = lbl.split(":")[1].replace("_"," ").title()
+            flag_col_cfg[f"{code}: {desc}"] = st.column_config.NumberColumn(format="%d")
+        st.dataframe(cflag_df, use_container_width=True, hide_index=True, column_config=flag_col_cfg)
+        st.download_button("⬇️ Download per-customer flag summary",
+                           cflag_df.to_csv(index=False).encode(),
+                           "flags_by_customer.csv","text/csv", key="dl_cflags")
+
+    st.markdown("---")
+
+    # ── Signal breakdown bar ──────────────────────────────────────────────────
     flagged = sig_df[sig_df["signals"] != "ok"].copy()
     if not flagged.empty:
-        st.markdown(f"**{len(flagged):,} businesses with at least one signal:**")
+        st.markdown(f"#### 📊 Signal Breakdown — {len(flagged):,} flagged businesses across all clients")
 
-        # Signal breakdown bar
         signal_counts = {}
-        for label in ["S1:null_winner","S2:format_error","S3:catchall_winner",
-                      "S4:ghost_override","S5:sector_mismatch",
-                      "S6:vendor_consensus_ignored","S7:catchall_w_specific_alt"]:
-            cnt = int(flagged["signals"].str.contains(label.split(":")[0]).sum())
-            signal_counts[label] = cnt
+        signal_descriptions = {
+            "S1": "S1 — Blank submission won (no NAICS code)",
+            "S2": "S2 — Wrong format (not 6 digits)",
+            "S3": "S3 — Generic placeholder 561499 won",
+            "S4": "S4 — Business form overrode vendors",
+            "S5": "S5 — Different industry sector than vendors",
+            "S6": "S6 — Multiple vendors agreed, result ignored",
+            "S7": "S7 — Generic code, but specific codes were available",
+        }
+        for lbl in all_signal_labels:
+            code = lbl.split(":")[0]
+            cnt = int(flagged["signals"].str.contains(code).sum())
+            signal_counts[signal_descriptions.get(code, code)] = cnt
 
         sig_bar_df = pd.DataFrame(list(signal_counts.items()), columns=["Signal","Count"])
         sig_bar_df = sig_bar_df[sig_bar_df["Count"] > 0].sort_values("Count", ascending=True)
-        colors = {"S1":"#dc2626","S2":"#ef4444","S3":"#f59e0b",
-                  "S4":"#f97316","S5":"#ef4444","S6":"#f59e0b","S7":"#f97316"}
+        colors_map = {"S1":"#dc2626","S2":"#ef4444","S3":"#f59e0b",
+                      "S4":"#f97316","S5":"#ef4444","S6":"#f59e0b","S7":"#f97316"}
         sig_bar_df["color"] = sig_bar_df["Signal"].apply(
-            lambda s: colors.get(s.split(":")[0], "#64748b")
+            lambda s: next((v for k,v in colors_map.items() if s.startswith(k)), "#64748b")
         )
         fig_sig = go.Figure(go.Bar(
-            x=sig_bar_df["Count"], y=sig_bar_df["Signal"],
-            orientation="h",
+            x=sig_bar_df["Count"], y=sig_bar_df["Signal"], orientation="h",
             marker_color=sig_bar_df["color"].tolist(),
             hovertemplate="<b>%{y}</b><br>Count: %{x:,}<extra></extra>",
         ))
@@ -420,31 +467,78 @@ else:
             yaxis=dict(showgrid=False),
         )
         st.plotly_chart(fig_sig, use_container_width=True, key="mis_sig_bar")
+        st.markdown("---")
 
-        display_f = flagged[[
-            "client","business_id","winning_naics","platform_name",
-            "winning_confidence","winning_sector",
-            "vendor_alts_str","signals","winner_quality",
-        ]].copy()
-        display_f.columns = [
-            "Client","Business ID","Winning NAICS","Winner Platform",
-            "Confidence","Sector",
-            "Vendor Alternatives","Signals","Winner Quality",
-        ]
-        display_f["Confidence"] = pd.to_numeric(display_f["Confidence"], errors="coerce").round(3)
+        # ── Full detail table ─────────────────────────────────────────────────
+        st.markdown("#### 📋 Flagged Business Detail Table")
+        st.caption(
+            "Full classification picture per flagged business: NAICS code + description, "
+            "MCC codes (all variants), industry description, winner platform, vendor alternatives, and signal flags. "
+            "Use the filter below to focus on a specific signal type."
+        )
 
-        # Filter by signal type
+        # Signal filter
         sig_types = ["All Signals"] + sorted({
             s for row in flagged["signals"] for s in row.split("|") if s
         })
         sig_filter = st.selectbox("Filter by signal type", sig_types, key="mis_sig_filter")
+
+        display_flagged = flagged.copy()
         if sig_filter != "All Signals":
-            display_f = display_f[display_f["Signals"].str.contains(sig_filter.split(":")[0])]
+            code = sig_filter.split(":")[0]
+            display_flagged = display_flagged[display_flagged["signals"].str.contains(code)]
+
+        # Build display columns — include NAICS description, MCC codes, MCC description
+        has_naics_desc = "naics_description" in display_flagged.columns
+        has_mcc        = "mcc_code"          in display_flagged.columns
+        has_mcc_desc   = "mcc_description"   in display_flagged.columns
+
+        base_cols = [
+            "client","business_id",
+            "winning_naics",
+        ]
+        if has_naics_desc:
+            base_cols.append("naics_description")
+        base_cols += ["platform_name","winning_confidence","winning_sector"]
+        if has_mcc:
+            base_cols.append("mcc_code")
+        if "mcc_code_from_naics" in display_flagged.columns:
+            base_cols.append("mcc_code_from_naics")
+        if "mcc_code_found" in display_flagged.columns:
+            base_cols.append("mcc_code_found")
+        if has_mcc_desc:
+            base_cols.append("mcc_description")
+        base_cols += ["vendor_alts_str","signals","winner_quality"]
+
+        present_cols = [c for c in base_cols if c in display_flagged.columns]
+        display_f = display_flagged[present_cols].copy()
+
+        col_rename = {
+            "client":              "Client",
+            "business_id":         "Business ID",
+            "winning_naics":       "NAICS Code",
+            "naics_description":   "NAICS Description",
+            "platform_name":       "Winner Platform",
+            "winning_confidence":  "Confidence",
+            "winning_sector":      "Sector",
+            "mcc_code":            "MCC (Final)",
+            "mcc_code_from_naics": "MCC (NAICS-derived)",
+            "mcc_code_found":      "MCC (AI-assigned)",
+            "mcc_description":     "MCC Description",
+            "vendor_alts_str":     "Vendor Alternatives (Value | Platform)",
+            "signals":             "Signals",
+            "winner_quality":      "Winner Quality",
+        }
+        display_f = display_f.rename(columns={k:v for k,v in col_rename.items() if k in display_f.columns})
+        if "Confidence" in display_f.columns:
+            display_f["Confidence"] = pd.to_numeric(display_f["Confidence"], errors="coerce").round(3)
 
         st.dataframe(display_f, use_container_width=True, hide_index=True,
                      column_config={"Confidence": st.column_config.NumberColumn(format="%.3f")})
+        st.caption(f"Showing {len(display_f):,} flagged businesses" +
+                   (f" filtered to signal '{sig_filter}'" if sig_filter != "All Signals" else ""))
         st.download_button(
-            "⬇️ Download flagged businesses",
+            "⬇️ Download flagged businesses (full detail)",
             display_f.to_csv(index=False).encode(),
             "misidentification_signals.csv","text/csv", key="dl_mis"
         )
