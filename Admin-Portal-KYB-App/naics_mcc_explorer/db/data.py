@@ -113,7 +113,8 @@ def _cache_dispatch(query_name: str, **kwargs) -> pd.DataFrame:
     if fn is None:
         return pd.DataFrame()
     try:
-        return fn() or pd.DataFrame()
+        result = fn()
+        return result if result is not None else pd.DataFrame()
     except Exception as e:
         st.warning(f"Cache query '{query_name}' failed: {e}. Falling back to Redshift.", icon="⚠️")
         return _redshift_dispatch(query_name, **kwargs)
