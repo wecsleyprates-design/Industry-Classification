@@ -107,7 +107,17 @@ def sql_panel(
 def platform_legend_panel() -> None:
     """Collapsible platform ID legend + schema reference."""
     from utils.platform_map import PLATFORM_LEGEND, NAICS_MCC_DERIVATION
-    with st.expander("📖 Platform ID Legend + Schema Reference"):
+    with st.expander("📖 Platform ID Legend + Schema Reference  ·  📐 See 'How It Works' for full workflow"):
+        st.markdown(
+            "**📐 See the [How It Works](#) page** (first tab in the sidebar) for the full "
+            "workflow diagram showing how vendor data → facts table → Admin Portal API → "
+            "SQLite cache → this dashboard.\n\n"
+            "**Quick summary:** Vendors run → arbitration picks winner (highest confidence) → "
+            "stored in `rds_warehouse_public.facts` → Admin Portal API reads same data → "
+            "weekly refresh script fetches API for all businesses → `facts_cache.sqlite` → "
+            "all app pages read from cache. Redshift used only for lookups."
+        )
+        st.markdown("---")
         st.markdown(PLATFORM_LEGEND)
         st.markdown("---")
         st.markdown("**NAICS/MCC derivation chain** (from `businessDetails/index.ts`):")
