@@ -137,6 +137,10 @@ else:
     err_df["platform_name"] = err_df["winning_platform_id"].apply(platform_label)
     err_df["color"]         = err_df["winning_platform_id"].apply(platform_color)
 
+    # Filter out UUID-only client names before pivoting
+    if "client" in err_df.columns:
+        err_df = err_df[err_df["client"].notna() & (err_df["client"].str.len() != 36)]
+
     # Heatmap: client × platform, value = flag_pct
     pivot_err = err_df.pivot_table(
         index="client", columns="platform_name", values="flag_pct",
@@ -210,6 +214,10 @@ with st.spinner("Loading sector distribution…"):
 if sector_df is None or sector_df.empty:
     no_data()
 else:
+    # Filter out UUID-only client names
+    if "client" in sector_df.columns:
+        sector_df = sector_df[sector_df["client"].notna() & (sector_df["client"].str.len() != 36)]
+
     sector_df["sector_name"] = sector_df["winning_sector"].map(NAICS_SECTORS).fillna("Other")
     sector_df["sector_label"]= sector_df["winning_sector"] + " — " + sector_df["sector_name"]
     sector_df["catchall_pct"]= (sector_df["catchall_count"] / sector_df["businesses"] * 100).round(1)

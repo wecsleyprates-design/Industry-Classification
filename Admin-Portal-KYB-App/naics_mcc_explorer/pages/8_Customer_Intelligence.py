@@ -100,6 +100,13 @@ else:
     dist_df["platform_name"] = dist_df["winning_platform_id"].apply(platform_label)
     dist_df["color"]         = dist_df["winning_platform_id"].apply(platform_color)
 
+    # Filter out UUID-only client names (36 chars = UUID format)
+    if "client" in dist_df.columns:
+        dist_df = dist_df[
+            dist_df["client"].notna() &
+            (dist_df["client"].str.len() != 36)
+        ]
+
     if client_filter:
         # Single client: horizontal bar
         d = dist_df.sort_values("businesses", ascending=True)
@@ -292,10 +299,12 @@ with st.spinner("Loading applicant submission data…"):
 
 if p0_df is None or p0_df.empty:
     st.success(
-        "✅ No cases where the business's own submission won with a blank/null NAICS value "
-        "for the selected filters. This means: either (1) no businesses submitted blank "
-        "industry fields and had P0 win, or (2) the cache was built after a re-enrichment "
-        "that fixed these cases (suppliers like ZoomInfo won the tiebreak)."
+        "✅ No cases where the business's own form submission (P0) won the NAICS score comparison "
+        "for the selected filters. "
+        "This means external suppliers (ZoomInfo, Equifax, SERP) are currently winning the "
+        "arbitration for all businesses — which is the correct outcome. "
+        "If this cache was built after a re-enrichment event, suppliers likely won via the "
+        "weight tiebreaker (ZoomInfo weight 0.8 > P0 weight 0.2 when confidences are within 0.05)."
     )
 else:
     st.info(f"Showing all **{len(p0_df):,} businesses** where the business's own submission won the NAICS score comparison.")
