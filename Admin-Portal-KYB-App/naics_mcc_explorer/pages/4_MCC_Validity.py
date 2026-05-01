@@ -24,8 +24,9 @@ h1,h2,h3{color:#f1f5f9;} .stMarkdown p{color:#cbd5e1;}
 
 filters = render_sidebar()
 f_from, f_to = filters["date_from"], filters["date_to"]
-f_cust = filters["customer_id"]
-f_biz  = filters["business_id"]
+f_cust    = filters["customer_id"]
+f_client  = filters.get("client_name")
+f_biz     = filters["business_id"]
 
 st.markdown("# 💳 MCC Code Validity & Source Analysis")
 st.markdown(
@@ -41,7 +42,7 @@ data_source_banner()
 st.markdown("---")
 
 with st.spinner("Loading MCC facts…"):
-    df = get_data('mcc_facts', date_from=f_from, date_to=f_to, customer_id=f_cust, business_id=f_biz)
+    df = get_data('mcc_facts', date_from=f_from, date_to=f_to, customer_id=f_cust, client_name=f_client, business_id=f_biz)
 with st.spinner("Loading MCC lookup…"):
     mcc_lookup = load_mcc_lookup()
 

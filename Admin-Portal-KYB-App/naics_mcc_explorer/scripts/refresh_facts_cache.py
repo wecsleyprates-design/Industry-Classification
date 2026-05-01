@@ -194,8 +194,17 @@ def fetch_sector_lookup(rconn) -> dict[str, str]:
 
 # ── API fetch ──────────────────────────────────────────────────────────────────
 def fetch_business_facts(business_id: str, token: str, api_base: str) -> dict | None:
-    """GET /facts/business/{id}/all — returns all facts as {fact_name: fact_obj}."""
-    url = f"{api_base}/facts/business/{business_id}/all"
+    """GET /facts/business/{id}/details — same endpoint as the Admin Portal.
+
+    Source confirmed from Admin Portal frontend:
+      microsites-main/packages/case/src/services/api/integration.service.ts:390
+      getFactsBusinessDetails(): api.get(`/facts/business/${businessId}/details`)
+
+    Returns the full fact picture for a business — same JSON structure
+    shown in the Admin Portal: value, source, schema, dependencies,
+    description, ruleApplied, isNormalized, override, alternatives[].
+    """
+    url = f"{api_base}/facts/business/{business_id}/details"
     try:
         resp = requests.get(
             url,
@@ -203,7 +212,8 @@ def fetch_business_facts(business_id: str, token: str, api_base: str) -> dict | 
             timeout=20,
         )
         if resp.status_code == 200:
-            return resp.json().get("data", {})
+            data = resp.json().get("data", {})
+            return data
         return None
     except Exception:
         return None

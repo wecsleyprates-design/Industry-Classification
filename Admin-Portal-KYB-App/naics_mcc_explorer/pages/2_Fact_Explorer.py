@@ -24,8 +24,9 @@ h1,h2,h3{color:#f1f5f9;} .stMarkdown p{color:#cbd5e1;}
 
 filters = render_sidebar()
 f_from, f_to = filters["date_from"], filters["date_to"]
-f_cust = filters["customer_id"]
-f_biz  = filters["business_id"]
+f_cust    = filters["customer_id"]
+f_client  = filters.get("client_name")
+f_biz     = filters["business_id"]
 
 st.markdown("# 🔭 Data Explorer")
 data_source_banner()

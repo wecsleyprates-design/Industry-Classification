@@ -27,8 +27,9 @@ h1,h2,h3{color:#f1f5f9;} .stMarkdown p{color:#cbd5e1;}
 
 filters = render_sidebar()
 f_from, f_to = filters["date_from"], filters["date_to"]
-f_cust = filters["customer_id"]
-f_biz  = filters["business_id"]
+f_cust    = filters["customer_id"]
+f_client  = filters.get("client_name")  # human-readable for cache
+f_biz     = filters["business_id"]
 
 st.markdown("# 🏆 Data Source Winner Distribution")
 data_source_banner()
@@ -93,7 +94,7 @@ def _make_bar(df: pd.DataFrame, title: str, chart_key: str) -> None:
 all_winners: dict[str, pd.DataFrame] = {}
 for fn in FACTS_TO_SHOW:
     with st.spinner(f"Loading {fn}…"):
-        df = get_data('platform_winners', fact_name=fn, date_from=f_from, date_to=f_to, customer_id=f_cust, business_id=f_biz)
+        df = get_data('platform_winners', fact_name=fn, date_from=f_from, date_to=f_to, customer_id=f_cust, client_name=f_client, business_id=f_biz)
     if df is not None and not df.empty:
         df["platform_id"] = df.apply(
             lambda r: r["platform_id"] if str(r["platform_id"]) not in ("unknown","","None")

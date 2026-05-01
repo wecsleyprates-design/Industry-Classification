@@ -81,10 +81,34 @@ def get_data(query_name: str, **kwargs) -> pd.DataFrame:
         return _redshift_dispatch(query_name, **kwargs)
 
 
+def _resolve_client_name(kwargs: dict) -> str | None:
+    """Resolve client_name from kwargs. If only customer_id given, look it up in cache."""
+    name = kwargs.get("client_name") or kwargs.get("client")
+    if name:
+        return name
+    cid = kwargs.get("customer_id")
+    if not cid:
+        return None
+    # Look up client_name for this customer_id in the cache businesses table
+    try:
+        from db.cache_manager import get_conn
+        conn = get_conn()
+        row = conn.execute(
+            "SELECT client_name FROM businesses WHERE customer_id=? AND is_latest=1 "
+            "AND LENGTH(client_name) != 36 LIMIT 1", (cid,)
+        ).fetchone()
+        conn.close()
+        if row and row[0]:
+            return row[0]
+    except Exception:
+        pass
+    return None
+
+
 def _cache_dispatch(query_name: str, **kwargs) -> pd.DataFrame:
     from db import sqlite_queries as sq
 
-    client_name = kwargs.get("client_name") or kwargs.get("client")
+    client_name = _resolve_client_name(kwargs)
     business_id = kwargs.get("business_id")
     fact_name   = kwargs.get("fact_name", "naics_code")
 

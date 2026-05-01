@@ -31,8 +31,9 @@ h1,h2,h3{color:#f1f5f9;} .stMarkdown p{color:#cbd5e1;}
 
 filters = render_sidebar()
 f_from, f_to = filters["date_from"], filters["date_to"]
-f_cust = filters["customer_id"]
-f_biz  = filters["business_id"]
+f_cust    = filters["customer_id"]
+f_client  = filters.get("client_name")
+f_biz     = filters["business_id"]
 
 st.markdown("# 🔗 Industry-to-Payment Category Mapping Analysis")
 st.markdown(
@@ -84,7 +85,7 @@ section_header("📊 NAICS+MCC Pair Status — Overall",
                f"Period: {f_from} → {f_to}")
 
 with st.spinner("Classifying NAICS+MCC pairs…"):
-    status_df = get_data('canonical_pair_status', date_from=f_from, date_to=f_to, customer_id=f_cust, business_id=f_biz)
+    status_df = get_data('canonical_pair_status', date_from=f_from, date_to=f_to, customer_id=f_cust, client_name=f_client, business_id=f_biz)
 
 if status_df is None or status_df.empty:
     no_data("No NAICS/MCC facts found for the selected filters.")
