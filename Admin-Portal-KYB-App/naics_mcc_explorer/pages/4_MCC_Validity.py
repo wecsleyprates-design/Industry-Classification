@@ -47,7 +47,17 @@ with st.spinner("Loading MCC lookup…"):
     mcc_lookup = load_mcc_lookup()
 
 if df.empty:
-    no_data("No MCC facts found.")
+    from utils.sql_runner import analyst_note as _an
+    _an(
+        "No MCC data available — what this means",
+        "Same root cause as the NAICS Validity page: the cache was built before "
+        "<code>business_name</code> was added to the schema, causing queries to fail silently.<br><br>"
+        "This code fix now handles old caches gracefully (omits business_name when missing). "
+        "After pulling the latest code and restarting, this page should load correctly "
+        "with the current cache.",
+        level="warning",
+        action="If still empty: run python3 scripts/refresh_facts_cache.py",
+    )
     st.stop()
 
 df["eff_pid"] = df.apply(

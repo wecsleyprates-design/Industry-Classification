@@ -303,7 +303,19 @@ with st.spinner("Loading misidentification signals…"):
     sig_df = get_data('misidentification_signals', date_from=f_from, date_to=f_to, client_name=client_filter)
 
 if sig_df is None or sig_df.empty:
-    no_data()
+    from utils.sql_runner import analyst_note as _an
+    _an(
+        "No misidentification signals data — what this means",
+        "The deep signal analysis returned no data. Possible reasons:<br><br>"
+        "1. <strong>Cache schema mismatch</strong>: the cache was built before "
+        "<code>business_name</code> was added to the businesses table. After pulling the "
+        "latest code, restart Streamlit — the query now handles old caches gracefully.<br>"
+        "2. <strong>All businesses are correctly classified</strong> for this filter — "
+        "no signals fired (unlikely for large datasets).<br>"
+        "3. <strong>Client filter too narrow</strong> — no businesses matched.",
+        level="warning",
+        action="Pull latest code → restart Streamlit. If still empty: python3 scripts/refresh_facts_cache.py",
+    )
 else:
     sig_df["platform_name"] = sig_df["winning_platform_id"].apply(platform_label)
 

@@ -45,7 +45,19 @@ with st.spinner("Loading lookups…"):
     mcc_lookup   = load_mcc_lookup()
 
 if df.empty:
-    no_data("No data found.")
+    from utils.sql_runner import analyst_note as _an
+    _an(
+        "No cascade data available — what this means",
+        "The local cache exists but returned no data for this page. "
+        "The most common reasons are:<br><br>"
+        "1. <strong>Cache was built before business_name column was added</strong> — "
+        "re-run <code>python3 scripts/refresh_facts_cache.py</code> to rebuild with the latest schema.<br>"
+        "2. <strong>Client/date filter is too narrow</strong> — no businesses match the current filters.<br>"
+        "3. <strong>Falling back to Redshift</strong> — the Redshift query also returned nothing "
+        "for the selected filters (try 'All Customers' with a wider date range).",
+        level="warning",
+        action="Run: python3 scripts/refresh_facts_cache.py  (from naics_mcc_explorer/ folder)",
+    )
     st.stop()
 
 total = len(df)

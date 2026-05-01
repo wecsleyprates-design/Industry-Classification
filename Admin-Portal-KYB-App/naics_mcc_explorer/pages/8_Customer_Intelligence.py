@@ -291,7 +291,12 @@ with st.spinner("Loading applicant submission data…"):
     p0_df = get_data('client_applicant_vs_vendor', date_from=f_from, date_to=f_to, client_name=client_filter)
 
 if p0_df is None or p0_df.empty:
-    st.success("✅ No cases where the business's own submission won for the selected filters.")
+    st.success(
+        "✅ No cases where the business's own submission won with a blank/null NAICS value "
+        "for the selected filters. This means: either (1) no businesses submitted blank "
+        "industry fields and had P0 win, or (2) the cache was built after a re-enrichment "
+        "that fixed these cases (suppliers like ZoomInfo won the tiebreak)."
+    )
 else:
     st.info(f"Showing all **{len(p0_df):,} businesses** where the business's own submission won the NAICS score comparison.")
 

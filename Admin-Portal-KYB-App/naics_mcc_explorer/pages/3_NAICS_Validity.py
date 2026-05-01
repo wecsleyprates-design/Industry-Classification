@@ -44,7 +44,17 @@ with st.spinner("Loading NAICS lookup…"):
     naics_lookup = load_naics_lookup()
 
 if df.empty:
-    no_data("No NAICS facts found.")
+    from utils.sql_runner import analyst_note as _an
+    _an(
+        "No NAICS data available — what this means",
+        "The local cache exists but returned no NAICS facts for this page. "
+        "This is almost always because the cache was built before the "
+        "<code>business_name</code> column was added to the schema, and a "
+        "<code>LEFT JOIN businesses b ON b.business_name</code> query is failing silently.<br><br>"
+        "<strong>Fix:</strong> Re-run the cache refresh script to rebuild with the current schema.",
+        level="warning",
+        action="Run: python3 scripts/refresh_facts_cache.py  (from naics_mcc_explorer/ folder)",
+    )
     st.stop()
 
 # Resolve platform display

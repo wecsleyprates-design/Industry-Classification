@@ -22,6 +22,31 @@ def cache_available() -> bool:
     return cache_exists()
 
 
+def _has_column(table: str, column: str) -> bool:
+    """Check if a column exists in a SQLite table (handles schema evolution)."""
+    try:
+        conn = get_conn()
+        cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        conn.close()
+        return column in cols
+    except Exception:
+        return False
+
+
+def _business_name_expr(alias: str = "b") -> str:
+    """Return the business_name SELECT expression — safe for older caches without the column."""
+    if _has_column("businesses", "business_name"):
+        return f"COALESCE({alias}.business_name, '') AS business_name"
+    return "'' AS business_name"
+
+
+def _business_join(facts_alias: str = "f") -> str:
+    """Return LEFT JOIN businesses clause only when the table has business_name."""
+    if _has_column("businesses", "business_name"):
+        return f"LEFT JOIN businesses b ON b.business_id={facts_alias}.business_id AND b.is_latest=1"
+    return ""
+
+
 # ── Shared filter builder ──────────────────────────────────────────────────────
 
 def _where(
@@ -149,12 +174,14 @@ def get_naics_facts(client_name: str | None = None,
         clauses.append("f.business_id = ?")
         p.append(business_id)
     w = "WHERE " + " AND ".join(clauses)
+    _bname = _business_name_expr()
+    _bjoin = _business_join()
     return _q(f"""
         SELECT
             f.business_id,
             f.customer_id,
             f.client_name,
-            b.business_name,
+            {_bname},
             f.winning_value        AS naics_value,
             f.winning_platform_id  AS platform_id,
             f.winning_platform_name AS legacy_source_name,
@@ -167,8 +194,7 @@ def get_naics_facts(client_name: str | None = None,
             f.platform_changed,
             f.prev_winning_value,
             f.alternatives_json    AS raw_json
-        FROM facts f
-        LEFT JOIN businesses b ON b.business_id=f.business_id AND b.is_latest=1
+        FROM facts f {_bjoin}
         {w}
         ORDER BY f.client_name, f.business_id
     """, p)
@@ -187,13 +213,15 @@ def get_mcc_facts(client_name: str | None = None,
         clauses.append("f.business_id = ?")
         p.append(business_id)
     where_str = "WHERE " + " AND ".join(clauses)
+    _bname = _business_name_expr()
+    _bjoin = _business_join()
     return _q(f"""
         SELECT
             f.business_id,
             f.customer_id,
             f.client_name,
             f.fact_name,
-            b.business_name,
+            {_bname},
             f.winning_value        AS mcc_value,
             f.winning_platform_id  AS platform_id,
             f.winning_platform_name AS legacy_source_name,
@@ -204,8 +232,7 @@ def get_mcc_facts(client_name: str | None = None,
             f.value_changed,
             f.prev_winning_value,
             f.alternatives_json    AS raw_json
-        FROM facts f
-        LEFT JOIN businesses b ON b.business_id=f.business_id AND b.is_latest=1
+        FROM facts f {_bjoin}
         {where_str}
         ORDER BY f.client_name, f.business_id, f.fact_name
     """, p)
@@ -225,12 +252,13 @@ def get_cascade_summary(client_name: str | None = None,
         clauses.append("business_id = ?")
         p.append(business_id)
     w = "WHERE " + " AND ".join(clauses)
+    _bname_col = "business_name" if _has_column("businesses", "business_name") else "'' AS business_name"
     return _q(f"""
         SELECT
             business_id,
             customer_id,
             client_name,
-            business_name,
+            {_bname_col},
             naics_code           AS naics_value,
             naics_platform_id    AS naics_platform,
             naics_platform_name  AS naics_platform_name,
@@ -294,11 +322,12 @@ def get_misidentification_signals(client_name: str | None = None,
         clauses.append("business_id = ?")
         p.append(business_id)
     w = "WHERE " + " AND ".join(clauses)
+    _bname_col = "business_name" if _has_column("businesses", "business_name") else "'' AS business_name"
     return _q(f"""
         SELECT
             client_name              AS client,
             business_id,
-            business_name,
+            {_bname_col},
             naics_code               AS winning_naics,
             naics_description,
             naics_platform_id        AS winning_platform_id,
