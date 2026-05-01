@@ -262,7 +262,7 @@ def _cache_error_rate(client_name=None) -> pd.DataFrame:
                ROUND(100.0*SUM(CASE WHEN naics_code IS NULL THEN 1
                         WHEN naics_code='561499' THEN 1
                         WHEN LENGTH(naics_code)!=6 THEN 1 ELSE 0 END)
-                    /MAX(1.0*COUNT(DISTINCT business_id)),1) AS flag_pct
+                    /CAST(COUNT(DISTINCT business_id) AS FLOAT),1) AS flag_pct
         FROM businesses {w}
         GROUP BY client_name, naics_platform_id
         ORDER BY client_name, total_wins DESC

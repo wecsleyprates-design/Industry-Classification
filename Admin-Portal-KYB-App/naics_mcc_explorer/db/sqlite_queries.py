@@ -140,64 +140,74 @@ def get_fact_drilldown(fact_name: str, client_name: str | None = None,
 def get_naics_facts(client_name: str | None = None,
                     business_id: str | None = None) -> pd.DataFrame:
     """Full NAICS validity dataset. Mirrors load_naics_facts()."""
-    w, p = _where(client_name, business_id, "naics_code")
-    df = _q(f"""
+    clauses = ["f.is_latest=1", "f.fact_name='naics_code'"]
+    p = []
+    if client_name:
+        clauses.append("f.client_name = ?")
+        p.append(client_name)
+    if business_id:
+        clauses.append("f.business_id = ?")
+        p.append(business_id)
+    w = "WHERE " + " AND ".join(clauses)
+    return _q(f"""
         SELECT
-            business_id,
-            customer_id,
-            client_name,
-            (SELECT b2.business_name FROM businesses b2 WHERE b2.business_id=f.business_id AND b2.is_latest=1 LIMIT 1) AS business_name,
-            winning_value        AS naics_value,
-            winning_platform_id  AS platform_id,
-            winning_platform_name AS legacy_source_name,
-            winning_confidence   AS confidence,
-            winner_updated_at,
-            naics_validity,
-            naics_description,
-            industry_sector_code AS winning_sector,
-            value_changed,
-            platform_changed,
-            prev_winning_value,
-            alternatives_json    AS raw_json
-        FROM facts {w}
-        ORDER BY client_name, business_id
+            f.business_id,
+            f.customer_id,
+            f.client_name,
+            b.business_name,
+            f.winning_value        AS naics_value,
+            f.winning_platform_id  AS platform_id,
+            f.winning_platform_name AS legacy_source_name,
+            f.winning_confidence   AS confidence,
+            f.winner_updated_at,
+            f.naics_validity,
+            f.naics_description,
+            f.industry_sector_code AS winning_sector,
+            f.value_changed,
+            f.platform_changed,
+            f.prev_winning_value,
+            f.alternatives_json    AS raw_json
+        FROM facts f
+        LEFT JOIN businesses b ON b.business_id=f.business_id AND b.is_latest=1
+        {w}
+        ORDER BY f.client_name, f.business_id
     """, p)
-    return df
 
 
 def get_mcc_facts(client_name: str | None = None,
                   business_id: str | None = None) -> pd.DataFrame:
     """All MCC fact variants. Mirrors load_mcc_facts()."""
-    w, p = _where(client_name, business_id)
-    # Need all three MCC fact names
-    clauses = ["is_latest=1",
-               "fact_name IN ('mcc_code','mcc_code_found','mcc_code_from_naics')"]
+    clauses = ["f.is_latest=1",
+               "f.fact_name IN ('mcc_code','mcc_code_found','mcc_code_from_naics')"]
+    p = []
     if client_name:
-        clauses.append("client_name = ?")
+        clauses.append("f.client_name = ?")
         p.append(client_name)
     if business_id:
-        clauses.append("business_id = ?")
+        clauses.append("f.business_id = ?")
         p.append(business_id)
     where_str = "WHERE " + " AND ".join(clauses)
     return _q(f"""
         SELECT
-            business_id,
-            customer_id,
-            client_name,
-            fact_name,
-            (SELECT b2.business_name FROM businesses b2 WHERE b2.business_id=f.business_id AND b2.is_latest=1 LIMIT 1) AS business_name,
-            winning_value        AS mcc_value,
-            winning_platform_id  AS platform_id,
-            winning_platform_name AS legacy_source_name,
-            winning_confidence   AS confidence,
-            winner_updated_at,
-            mcc_validity         AS validity_status,
-            mcc_description,
-            value_changed,
-            prev_winning_value,
-            alternatives_json    AS raw_json
-        FROM facts {where_str}
-        ORDER BY client_name, business_id, fact_name
+            f.business_id,
+            f.customer_id,
+            f.client_name,
+            f.fact_name,
+            b.business_name,
+            f.winning_value        AS mcc_value,
+            f.winning_platform_id  AS platform_id,
+            f.winning_platform_name AS legacy_source_name,
+            f.winning_confidence   AS confidence,
+            f.winner_updated_at,
+            f.mcc_validity         AS validity_status,
+            f.mcc_description,
+            f.value_changed,
+            f.prev_winning_value,
+            f.alternatives_json    AS raw_json
+        FROM facts f
+        LEFT JOIN businesses b ON b.business_id=f.business_id AND b.is_latest=1
+        {where_str}
+        ORDER BY f.client_name, f.business_id, f.fact_name
     """, p)
 
 
@@ -436,8 +446,15 @@ def get_overview(client_name: str | None = None) -> pd.DataFrame:
 
 
 def get_client_list(client_name: str | None = None) -> pd.DataFrame:
-    """List of clients with business counts from cache."""
-    clauses = ["is_latest=1"]
+    """List of clients with business counts from cache.
+    Excludes bare UUIDs from the list (those have no billing_prices match).
+    """
+    clauses = [
+        "is_latest=1",
+        "client_name IS NOT NULL",
+        "LENGTH(client_name) != 36",   # exclude raw UUID customer_ids
+        "client_name NOT LIKE '________-____-____-____-____________'",
+    ]
     p = []
     if client_name:
         clauses.append("client_name = ?")
