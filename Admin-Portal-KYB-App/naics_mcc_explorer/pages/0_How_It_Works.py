@@ -35,136 +35,162 @@ st.markdown("---")
 # ═══════════════════════════════════════════════════════════════════════════════
 st.markdown("## 🔀 Full Data Workflow")
 
-# ── Clean top-down flowchart using Plotly shapes + annotations ──────────────
-# Layout: 5 columns × 5 rows, each node = (col, row, label, color, sublabel)
-# Rows go top=1 (vendors) to bottom=5 (app)
+# ── Clean left-to-right flowchart ───────────────────────────────────────────
+# Nodes positioned in pixel coords on a wide canvas.
+# Each node is drawn as a filled rect with title + subtitle on separate lines.
+# BOX_W × BOX_H are large enough that text never overlaps.
 
-W, H = 1200, 700   # canvas size
-COL = [0.10, 0.28, 0.46, 0.64, 0.82, 0.95]  # x positions (0-1)
-ROW = [0.08, 0.25, 0.45, 0.65, 0.85]          # y positions (0-1, top→bottom)
+W, H   = 1400, 820   # canvas pixels
+BOX_W  = 200          # node box width
+BOX_H  = 80           # node box height — tall enough for 3 lines
 
-# node: (x_frac, y_frac, label, bg_color, text_color, sublabel)
+# node dict: key → (cx, cy, title_line1, title_line2, sub_line1, sub_line2, bg, border)
 nodes = {
-    # Row 0 — Vendors (left column, spread vertically)
-    "p24":  (COL[0], 0.12, "ZoomInfo (P24)",         "#1e3a5f", "#60a5fa", "Firmographics · conf ~0.8–1.0"),
-    "p22":  (COL[0], 0.30, "SERP Scrape (P22)",       "#1a3320", "#4ade80", "Web scraping · conf ~0.3"),
-    "p17":  (COL[0], 0.48, "Equifax (P17)",            "#1a3320", "#4ade80", "Bureau data · conf ~0.8"),
-    "p16":  (COL[0], 0.63, "Middesk (P16)",            "#3b2a00", "#fbbf24", "SOS registry"),
-    "p23":  (COL[0], 0.75, "OpenCorporates (P23)",     "#1a3320", "#4ade80", "Business registry"),
-    "p31":  (COL[0], 0.87, "AI Enrichment (P31)",      "#2d1500", "#fb923c", "GPT-4o-mini · conf 0.15"),
-    "p0":   (COL[1], 0.50, "⚠️  Applicant Entry (P0)", "#3b0000", "#ef4444", "Onboarding form · conf 1.0 ← BUG"),
+    # Column 1 — Vendors (x=130)
+    "p24": (130,  90, "ZoomInfo", "(P24)", "Firmographics", "conf ~0.8–1.0", "#0d2035","#3b82f6"),
+    "p22": (130, 210, "SERP Scrape", "(P22)", "Web scraping", "conf ~0.3",    "#1a3320","#4ade80"),
+    "p17": (130, 330, "Equifax", "(P17)", "Bureau data", "conf ~0.8",          "#1a3320","#4ade80"),
+    "p16": (130, 450, "Middesk", "(P16)", "SOS registry", "conf ~0.99",        "#3b2a00","#fbbf24"),
+    "p23": (130, 570, "OpenCorporates", "(P23)", "Business registry", "",       "#1a3320","#4ade80"),
+    "p31": (130, 690, "AI Enrichment", "(P31)", "GPT-4o-mini fallback", "conf 0.15","#2d1500","#fb923c"),
 
-    # Row 1 — Arbitration
-    "arb":  (COL[2], 0.50, "Fact Arbitration Engine",  "#2d1f5f", "#a78bfa",
-             "factWithHighestConfidence\npicks winner, stores alternatives[]"),
+    # Column 2 — Ghost Assigner (x=390)
+    "p0":  (390, 390, "⚠️  Applicant Entry", "(P0 — GHOST ASSIGNER)", "Onboarding form submission", "Hardcoded conf = 1.0  ← THE BUG","#3b0000","#ef4444"),
 
-    # Row 2 — Storage (split)
-    "rds":  (COL[3], 0.30, "PostgreSQL RDS",           "#0d2035", "#38bdf8",
-             "rds_warehouse_public.facts\none row per (business_id × fact_name)"),
-    "lkp":  (COL[3], 0.72, "Redshift Lookup Tables",   "#1e293b", "#94a3b8",
-             "core_naics_code · core_mcc_code\nrel_naics_mcc · billing_prices"),
+    # Column 3 — Arbitration (x=640)
+    "arb": (640, 390, "Fact Arbitration Engine", "factWithHighestConfidence", "Picks winner by highest score", "Stores all others in alternatives[]","#1e0d4a","#a78bfa"),
 
-    # Row 3 — Exit paths
-    "api":  (COL[4], 0.18, "Worth AI API",             "#0d2035", "#38bdf8",
-             "/facts/business/{id}/all\nAdmin Portal uses this endpoint"),
-    "rsfed":(COL[4], 0.45, "Redshift Federated View",  "#1e1035", "#818cf8",
-             "Same PostgreSQL data\nMay lag a few minutes"),
-    "cache":(COL[4], 0.72, "facts_cache.sqlite",       "#0d2818", "#22c55e",
-             "Built by weekly refresh\n~300 MB · ~8 snapshots"),
+    # Column 4 — Storage (x=890)
+    "rds": (890, 220, "PostgreSQL RDS", "rds_warehouse_public.facts", "One row per (business_id × fact_name)", "JSON: value + source + alternatives[]","#0d2035","#38bdf8"),
+    "lkp": (890, 580, "Redshift Lookup Tables", "core_naics_code · core_mcc_code", "rel_naics_mcc · billing_prices", "Used for labels + canonical pairs","#1e293b","#94a3b8"),
 
-    # Row 4 — App
-    "app":  (COL[5], 0.50, "App Dashboard",            "#1e293b", "#f1f5f9",
-             "All 9 analysis pages\nget_data() → cache → Redshift"),
+    # Column 5 — Exit paths (x=1150)
+    "api":   (1150, 130, "Worth AI API", "/facts/business/{id}/all", "Same PostgreSQL source as Redshift", "Used by Admin Portal & refresh script","#0d2035","#38bdf8"),
+    "rsfed": (1150, 390, "Redshift Federated View", "rds_warehouse_public.facts", "Same data — live federated query", "May lag a few minutes","#1e1035","#818cf8"),
+    "cache": (1150, 620, "facts_cache.sqlite", "Built by weekly refresh script", "~300 MB · stores 8 snapshots", "Admin Portal data — always current","#0d2818","#22c55e"),
+
+    # Column 6 — App (x=1370)
+    "app":   (1370, 390, "App Dashboard", "All 9 analysis pages", "get_data() checks cache first", "Falls back to Redshift if no cache","#1e293b","#f1f5f9"),
 }
 
-# edges: (from_key, to_key, label, color)
+# edges: (from_key, to_key, arrow_label, color)
 edges = [
-    ("p24",  "arb",   "NAICS + conf",     "#22c55e"),
-    ("p22",  "arb",   "NAICS + conf",     "#84cc16"),
-    ("p17",  "arb",   "NAICS + conf",     "#16a34a"),
-    ("p16",  "arb",   "SOS data",         "#f59e0b"),
-    ("p23",  "arb",   "codes",            "#15803d"),
-    ("p31",  "arb",   "fallback NAICS",   "#f97316"),
-    ("p0",   "arb",   "conf=1.0 ← BUG",  "#ef4444"),
-    ("arb",  "rds",   "winner + alts[]",  "#a78bfa"),
-    ("rds",  "api",   "live read",        "#38bdf8"),
-    ("rds",  "rsfed", "federated view",   "#818cf8"),
-    ("lkp",  "cache", "labels + pairs",   "#64748b"),
-    ("api",  "cache", "weekly refresh",   "#22c55e"),
-    ("rsfed","cache", "biz IDs",          "#818cf8"),
-    ("cache","app",   "primary source",   "#22c55e"),
-    ("rsfed","app",   "fallback",         "#6366f1"),
-    ("lkp",  "app",   "enrichment",       "#64748b"),
+    ("p24", "arb",   "NAICS + confidence",   "#3b82f6"),
+    ("p22", "arb",   "NAICS + confidence",   "#4ade80"),
+    ("p17", "arb",   "NAICS + confidence",   "#4ade80"),
+    ("p16", "arb",   "SOS data",             "#fbbf24"),
+    ("p23", "arb",   "business codes",       "#4ade80"),
+    ("p31", "arb",   "fallback NAICS",       "#fb923c"),
+    ("p0",  "arb",   "conf=1.0  ← THE BUG", "#ef4444"),
+    ("arb", "rds",   "winner + alternatives[]", "#a78bfa"),
+    ("rds", "api",   "live read (same RDS)", "#38bdf8"),
+    ("rds", "rsfed", "federated view",       "#818cf8"),
+    ("lkp", "cache", "labels + canonical pairs","#94a3b8"),
+    ("api", "cache", "weekly refresh\n(all businesses)", "#22c55e"),
+    ("rsfed","cache","business IDs",         "#818cf8"),
+    ("cache","app",  "✅ primary source\n(matches Admin Portal)","#22c55e"),
+    ("rsfed","app",  "fallback when\nno cache","#6366f1"),
+    ("lkp", "app",   "lookup enrichment",    "#64748b"),
 ]
 
 fig = go.Figure()
 
-def _px(frac, total): return frac * total
-
-# Draw edges first (behind nodes)
+# ── Draw edges (bezier curves) ────────────────────────────────────────────────
 for src_k, dst_k, lbl, col in edges:
-    sx = _px(nodes[src_k][0], W) + 90
-    sy = H - _px(nodes[src_k][1], H)
-    dx = _px(nodes[dst_k][0], W) - 10
-    dy = H - _px(nodes[dst_k][1], H)
-    # Bezier control points
-    cx1, cy1 = sx + (dx-sx)*0.4, sy
-    cx2, cy2 = dx - (dx-sx)*0.4, dy
+    n_s = nodes[src_k]
+    n_d = nodes[dst_k]
+    sx = n_s[0] + BOX_W // 2       # right edge of source
+    sy = n_s[1]
+    dx = n_d[0] - BOX_W // 2 + 5  # left edge of dest
+    dy = n_d[1]
+    # Horizontal bezier — control points extend 35% of distance
+    span = dx - sx
+    cx1, cy1 = sx + span * 0.4, sy
+    cx2, cy2 = dx - span * 0.4, dy
     fig.add_shape(type="path",
         path=f"M {sx},{sy} C {cx1},{cy1} {cx2},{cy2} {dx},{dy}",
-        line=dict(color=col, width=2),
-        opacity=0.6,
+        line=dict(color=col, width=2.5),
+        opacity=0.7,
+        layer="below",
     )
-    # Edge label at midpoint
+    # Arrow tip
+    fig.add_annotation(
+        x=dx, y=dy, ax=dx - 12, ay=dy,
+        xref="x", yref="y", axref="x", ayref="y",
+        showarrow=True, arrowhead=2, arrowsize=1.2,
+        arrowwidth=2, arrowcolor=col,
+    )
+    # Edge label — midpoint, offset slightly above curve
     mx = (sx + dx) / 2
-    my = (sy + dy) / 2
-    fig.add_annotation(x=mx, y=my, text=lbl,
+    my = (sy + dy) / 2 - 10
+    fig.add_annotation(
+        x=mx, y=my, text=lbl,
         showarrow=False,
-        font=dict(size=8, color=col),
-        bgcolor="rgba(15,23,42,0.7)",
-        bordercolor=col, borderwidth=1,
-        borderpad=2,
+        font=dict(size=9, color=col),
+        bgcolor="rgba(15,23,42,0.85)",
+        bordercolor=col, borderwidth=1, borderpad=3,
+        xanchor="center",
     )
 
-# Draw nodes
-BOX_W, BOX_H = 140, 52
-for key, (xf, yf, label, bg, fg, sub) in nodes.items():
-    cx = _px(xf, W)
-    cy = H - _px(yf, H)
-    # Box
+# ── Draw nodes ────────────────────────────────────────────────────────────────
+for key, (cx, cy, t1, t2, s1, s2, bg, border) in nodes.items():
+    x0, x1 = cx - BOX_W//2, cx + BOX_W//2
+    y0, y1 = cy - BOX_H//2, cy + BOX_H//2
+    # Box fill
     fig.add_shape(type="rect",
-        x0=cx-BOX_W/2, y0=cy-BOX_H/2, x1=cx+BOX_W/2, y1=cy+BOX_H/2,
-        fillcolor=bg, line=dict(color=fg, width=2),
+        x0=x0, y0=y0, x1=x1, y1=y1,
+        fillcolor=bg,
+        line=dict(color=border, width=2.5),
         layer="above",
     )
-    # Label
-    fig.add_annotation(x=cx, y=cy+10, text=f"<b>{label}</b>",
-        showarrow=False, font=dict(size=10, color=fg),
+    # Title line 1 — bold, large
+    fig.add_annotation(
+        x=cx, y=cy + 26, text=f"<b>{t1}</b>",
+        showarrow=False, font=dict(size=12, color=border),
         xanchor="center", yanchor="middle",
     )
-    # Sub-label
-    if sub:
-        fig.add_annotation(x=cx, y=cy-14, text=sub,
-            showarrow=False, font=dict(size=7.5, color="#94a3b8"),
+    # Title line 2
+    fig.add_annotation(
+        x=cx, y=cy + 10, text=t2,
+        showarrow=False, font=dict(size=10, color=border),
+        xanchor="center", yanchor="middle",
+    )
+    # Sub line 1
+    if s1:
+        fig.add_annotation(
+            x=cx, y=cy - 8, text=s1,
+            showarrow=False, font=dict(size=9, color="#94a3b8"),
+            xanchor="center", yanchor="middle",
+        )
+    # Sub line 2
+    if s2:
+        fig.add_annotation(
+            x=cx, y=cy - 24, text=s2,
+            showarrow=False, font=dict(size=9, color="#64748b"),
             xanchor="center", yanchor="middle",
         )
 
 fig.update_layout(
     height=H,
-    width=W,
-    margin=dict(l=10, r=10, t=10, b=10),
+    margin=dict(l=5, r=5, t=10, b=10),
     paper_bgcolor="#0f172a",
     plot_bgcolor="#0f172a",
-    xaxis=dict(visible=False, range=[0, W]),
-    yaxis=dict(visible=False, range=[0, H]),
+    xaxis=dict(visible=False, range=[-10, W + 10]),
+    yaxis=dict(visible=False, range=[-10, H + 10]),
     showlegend=False,
 )
 st.plotly_chart(fig, use_container_width=True)
 
-st.caption(
-    "Read left → right. 🔴 Red = Ghost Assigner (P0) — hardcoded confidence 1.0 beats all vendors. "
-    "🟢 Green path = weekly refresh: Admin Portal API → SQLite cache → app (current data). "
-    "🟣 Purple path = Redshift fallback (when no cache, may lag)."
+st.markdown(
+    "<div style='font-size:.85rem;color:#94a3b8;padding:6px 0'>"
+    "🔵 Blue = data storage/API  &nbsp;|&nbsp;  "
+    "🟢 Green = vendor data providers  &nbsp;|&nbsp;  "
+    "🟠 Orange = AI fallback  &nbsp;|&nbsp;  "
+    "🔴 Red = Applicant Entry (the scoring bug — confidence 1.0 beats all vendors)  &nbsp;|&nbsp;  "
+    "🟣 Purple = Arbitration engine  &nbsp;|&nbsp;  "
+    "🟩 Green border = SQLite cache (Admin Portal data, built weekly)  &nbsp;|&nbsp;  "
+    "⚪ White = Dashboard</div>",
+    unsafe_allow_html=True,
 )
 st.markdown("---")
 
