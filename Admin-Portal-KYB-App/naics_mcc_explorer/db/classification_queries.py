@@ -256,56 +256,34 @@ def load_suppressed_correct_answer(client_name: str = None) -> pd.DataFrame:
             clauses.append("f.client_name=?")
             p.append(client_name)
         w = "WHERE " + " AND ".join(clauses)
-        # business_name column was added after initial cache builds — use COALESCE for safety
-        try:
-            df = _q(f"""
-                SELECT
-                    f.business_id,
-                    f.client_name,
-                    COALESCE(b.business_name, '') AS business_name,
-                    f.winning_value                 AS p0_value,
-                    f.winning_confidence            AS p0_confidence,
-                    GROUP_CONCAT(a.alt_platform_name || ': ' || a.alt_value, ' | ') AS supplier_alternatives,
-                    COUNT(DISTINCT a.alt_platform_id) AS supplier_count
-                FROM facts f
-                LEFT JOIN businesses b ON b.business_id=f.business_id AND b.is_latest=1
-                JOIN alternatives a
-                    ON a.business_id=f.business_id
-                    AND a.fact_name='naics_code'
-                    AND a.is_latest=1
-                    AND a.alt_platform_id IN ('17','22','24')
-                    AND a.alt_value IS NOT NULL AND a.alt_value != ''
-                {w}
-                GROUP BY f.business_id, f.client_name,
-                         f.winning_value, f.winning_confidence
-                ORDER BY supplier_count DESC
-                LIMIT 500
-            """, p)
-            return df
-        except Exception:
-            # Fallback without business_name (older cache schema)
-            return _q(f"""
-                SELECT
-                    f.business_id,
-                    f.client_name,
-                    '' AS business_name,
-                    f.winning_value                 AS p0_value,
-                    f.winning_confidence            AS p0_confidence,
-                    GROUP_CONCAT(a.alt_platform_name || ': ' || a.alt_value, ' | ') AS supplier_alternatives,
-                    COUNT(DISTINCT a.alt_platform_id) AS supplier_count
-                FROM facts f
-                JOIN alternatives a
-                    ON a.business_id=f.business_id
-                    AND a.fact_name='naics_code'
-                    AND a.is_latest=1
-                    AND a.alt_platform_id IN ('17','22','24')
-                    AND a.alt_value IS NOT NULL AND a.alt_value != ''
-                {w}
-                GROUP BY f.business_id, f.client_name,
-                         f.winning_value, f.winning_confidence
-                ORDER BY supplier_count DESC
-                LIMIT 500
-            """, p)
+        # Use _has_column to safely detect schema version — avoids silent empty results
+        from db.sqlite_queries import _has_column as _hc
+        has_bname = _hc("businesses", "business_name")
+        bname_sel = "COALESCE(b.business_name, '') AS business_name" if has_bname else "'' AS business_name"
+        bjoin     = "LEFT JOIN businesses b ON b.business_id=f.business_id AND b.is_latest=1" if has_bname else ""
+        return _q(f"""
+            SELECT
+                f.business_id,
+                f.client_name,
+                {bname_sel},
+                f.winning_value                 AS p0_value,
+                f.winning_confidence            AS p0_confidence,
+                GROUP_CONCAT(a.alt_platform_name || ': ' || a.alt_value, ' | ') AS supplier_alternatives,
+                COUNT(DISTINCT a.alt_platform_id) AS supplier_count
+            FROM facts f
+            {bjoin}
+            JOIN alternatives a
+                ON a.business_id=f.business_id
+                AND a.fact_name='naics_code'
+                AND a.is_latest=1
+                AND a.alt_platform_id IN ('17','22','24')
+                AND a.alt_value IS NOT NULL AND a.alt_value != ''
+            {w}
+            GROUP BY f.business_id, f.client_name,
+                     f.winning_value, f.winning_confidence
+            ORDER BY supplier_count DESC
+            LIMIT 500
+        """, p)
     return pd.DataFrame()
 
 
@@ -366,9 +344,11 @@ def load_alt_would_be_canonical(client_name: str = None) -> pd.DataFrame:
             p.append(client_name)
         w = "WHERE " + " AND ".join(clauses)
 
+        from db.sqlite_queries import _has_column as _hc2
+        _bname2 = "b.business_name," if _hc2("businesses", "business_name") else "'' AS business_name,"
         df = _q(f"""
             SELECT
-                b.business_id, b.client_name, b.business_name,
+                b.business_id, b.client_name, {_bname2}
                 b.naics_code AS winner_naics, b.mcc_code AS winner_mcc,
                 b.naics_platform_name AS winner_source, b.is_canonical_pair,
                 a.alt_value AS alt_naics, a.alt_platform_name AS alt_source,

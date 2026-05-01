@@ -673,6 +673,21 @@ if alt_cov is not None and not alt_cov.empty:
         yaxis=dict(showgrid=False),
     )
     st.plotly_chart(fig_alts, use_container_width=True, key="alt_avg")
+    analyst_note(
+        "Reading the average alternatives chart",
+        "Each bar = the average number of other sources that also submitted a value "
+        "when this source won. A high average means the winner had competition — "
+        "other sources ran and their values are sitting in <code>alternatives[]</code>. "
+        "A near-zero average means this source was the only one that ran (no competition). "
+        "For quality analysis, <strong>high alternatives count + low canonical rate = "
+        "the winner beat other sources but was probably wrong</strong>.",
+        level="info",
+        bullets=[
+            "P0 (Applicant Entry) with high alternatives = P0 beat real supplier data → the correct answer was suppressed",
+            "AI Enrichment with low alternatives = AI ran as last resort when no supplier provided NAICS",
+            "ZoomInfo with 2+ alternatives = competed against Equifax/SERP and won — highest confidence winner",
+        ],
+    )
 
     display_alt = alt_cov[["source_name","platform_id","businesses","avg_alternatives",
                             "businesses_no_alts","businesses_2plus_alts"]].copy()
@@ -702,6 +717,19 @@ if agree_df is not None and not agree_df.empty:
                      "Disagreed": st.column_config.NumberColumn(format="%d"),
                      "Agreement %": st.column_config.NumberColumn(format="%.1f%%"),
                  })
+    analyst_note(
+        "Interpreting the supplier agreement matrix",
+        "Each row answers: 'When source A won AND source B also submitted a value — "
+        "how often did they return the same NAICS code?' "
+        "This reveals whether disagreements are systematic or random.",
+        level="info",
+        bullets=[
+            "<strong>High agreement % + high canonical rate</strong>: both sources agree and are correct — healthy classification",
+            "<strong>High agreement % + low canonical rate</strong>: both sources agree but are both wrong — systematic misclassification (e.g. both classify an auto shop as a professional services firm)",
+            "<strong>Low agreement %</strong>: genuine industry uncertainty — these businesses need manual review",
+            "<strong>P0 vs ZoomInfo disagreement</strong>: the applicant claimed a different industry than ZoomInfo found — the applicant is likely wrong (or the business changed industry)",
+        ],
+    )
 
 if suppressed_df is not None and not suppressed_df.empty:
     n_supp = len(suppressed_df)
@@ -774,6 +802,21 @@ if canon_df is not None and not canon_df.empty:
                                 "Total Wins": st.column_config.NumberColumn(format="%d"),
                                 "Canonical Wins": st.column_config.NumberColumn(format="%d")})
 
+    analyst_note(
+        "Interpreting the canonical rate bar chart",
+        "Each bar = % of that source's NAICS wins that result in a valid NAICS+MCC combination "
+        "per Worth AI's official mapping table (<code>rel_naics_mcc</code>). "
+        "Think of it as an accuracy score — <strong>the higher the bar, the more trustworthy the source</strong>. "
+        "A source with 90%+ canonical rate is producing correct classifications. "
+        "A source with 20% canonical rate is guessing most of the time.",
+        level="info",
+        bullets=[
+            "ZoomInfo (P24) should have the highest canonical rate — it's the primary firmographic source with direct industry data",
+            "P0 (Applicant Entry) will have low canonical rate — businesses often submit incorrect or generic industry codes",
+            "AI (P31) canonical rate tells you whether GPT's classifications align with the official mapping — a low rate means AI is producing codes that don't map to valid MCCs",
+            "Any source below 50% canonical rate = that source is wrong more than half the time it wins",
+        ],
+    )
     analyst_note(
         "Reading the canonical rate",
         "The canonical rate measures: 'when this source wins, what fraction of results are "
@@ -870,6 +913,20 @@ if ai_acc_df is not None and not ai_acc_df.empty:
     )
     st.plotly_chart(fig_ai, use_container_width=True, key="ai_mcc_top")
     st.caption("🟢 Specific  🟡 Catch-all 7399  🔴 Invalid 5614 (AI bug)")
+    analyst_note(
+        "Reading the AI MCC output distribution",
+        "This shows what payment category codes (<code>mcc_code_found</code>) the AI actually produces. "
+        "Since AI wins the final <code>mcc_code</code> whenever it returns any non-null value, "
+        "the quality of these codes directly determines the quality of the portfolio's MCC classification. "
+        "A concentration of red (5614) or amber (7399) in the top codes is a critical quality signal.",
+        level="warning" if True else "info",
+        bullets=[
+            "🟢 <strong>Specific codes dominating</strong>: AI is classifying businesses correctly — the MCC population is healthy",
+            "🟡 <strong>7399 appearing in top 5</strong>: AI can't confidently classify many businesses — 'Business Services NEC' is the MCC equivalent of 561499",
+            "🔴 <strong>5614 appearing at all</strong>: AI bug code present — these businesses have an invalid MCC that no payment network recognizes",
+            "The distribution of AI codes directly determines the quality of downstream payment routing and risk rules",
+        ],
+    )
 
 st.markdown("---")
 
@@ -918,12 +975,17 @@ if time_df is not None and not time_df.empty:
 
     analyst_note(
         "What the timeline reveals about the classification pipeline",
-        "Each spike in the timeline = a bulk enrichment run by that source. "
-        "ZoomInfo runs appear as large one-time batches (when a new client is onboarded). "
-        "AI enrichment runs continuously as a fallback. "
-        "P0 spikes correspond to business onboarding events. "
-        "Gaps = periods where no enrichment ran for that source.",
+        "Each spike = a batch enrichment run by that source. "
+        "The <strong>source.updatedAt timestamp</strong> inside each fact's JSON records exactly when the source last wrote — "
+        "this chart is built from those real timestamps, not from row creation dates.",
         level="info",
+        bullets=[
+            "<strong>ZoomInfo spikes</strong>: large one-time batches when a new client is onboarded or re-enriched. No spike = ZoomInfo coverage gap for that period",
+            "<strong>AI enrichment</strong>: runs as a deferrable task after other sources complete. Appears as scattered small events, not large batches",
+            "<strong>P0 (Applicant Entry)</strong>: spikes on business onboarding dates. Continuous activity = steady onboarding flow",
+            "<strong>Gaps between supplier spikes</strong>: periods where businesses onboarded but suppliers hadn't run yet — those businesses only have P0 or AI data",
+            "<strong>Overlapping spikes</strong>: multiple sources ran on the same day = re-enrichment event (e.g. calling /facts/business/{id}/details triggered re-arbitration)",
+        ],
     )
 
 if gap_df is not None and not gap_df.empty:
