@@ -285,6 +285,127 @@ The canonical pair rate is our best proxy for classification accuracy.
 
 st.markdown("---")
 
+# ── Section 0b: Decision Tree Visualization ───────────────────────────────────
+st.markdown("### 🌳 Classification Decision Tree")
+st.markdown("Visual representation of the 4-step classification workflow and every decision point.")
+
+# Build a top-down Plotly decision tree using shapes + annotations
+# Layout: 5 levels top→bottom, each node at fixed (x, y)
+_W, _H = 1200, 700
+
+# nodes: key → (x, y, label_lines, bg, border, shape)
+_nodes = {
+    # Level 0 — Business submits form
+    "form":  (600, 40,  ["Business submits", "onboarding form"], "#1e293b","#94a3b8","rect"),
+
+    # Level 1 — All sources run in parallel
+    "p0":    (150, 155, ["Applicant Entry (P0)", "conf=1.0 · weight=0.2"], "#3b0000","#ef4444","rect"),
+    "zi":    (350, 155, ["ZoomInfo (P24)", "weight=0.8"], "#0d2035","#3b82f6","rect"),
+    "eq":    (550, 155, ["Equifax (P17)", "weight=0.7"], "#0d2035","#22c55e","rect"),
+    "serp":  (750, 155, ["SERP Scrape (P22)", "weight=0.3"], "#1a3320","#84cc16","rect"),
+    "ai":    (950, 155, ["AI Enrichment (P31)", "conf=0.1–0.2"], "#2d1500","#f97316","rect"),
+
+    # Level 2 — Arbitration
+    "arb":   (600, 290, ["factWithHighestConfidence", "winner = highest conf · weight tiebreak at ±0.05"], "#1e0d4a","#a78bfa","rect"),
+
+    # Level 3 — naics_code result (two outcomes)
+    "naics_good":  (350, 420, ["naics_code = valid", "6-digit specific code"], "#0d2818","#22c55e","rect"),
+    "naics_bad":   (850, 420, ["naics_code = null/wrong", "P0 won or no supplier coverage"], "#3b0000","#ef4444","rect"),
+
+    # Level 4a — from valid naics_code
+    "lookup":  (250, 555, ["mcc_code_from_naics", "rel_naics_mcc lookup → MCC"], "#0d2035","#38bdf8","rect"),
+    "ai_mcc":  (450, 555, ["mcc_code_found (AI)", "GPT picks MCC directly"], "#2d1500","#f97316","rect"),
+
+    # Level 4b — from bad naics_code
+    "lookup_bad": (750, 555, ["mcc_code_from_naics = null/7399", "lookup of wrong code fails"], "#3b0000","#ef4444","rect"),
+    "ai_mcc2":    (950, 555, ["mcc_code_found (AI)", "only path left"], "#2d1500","#f97316","rect"),
+
+    # Level 5 — final mcc_code
+    "mcc_good":  (350, 665, ["mcc_code = foundMcc ?? inferredMcc", "✅ likely correct"], "#0d2818","#22c55e","rect"),
+    "mcc_bad":   (850, 665, ["mcc_code = AI result or null", "⚠️ unreliable"], "#3b0000","#ef4444","rect"),
+}
+
+_edges = [
+    # form → all sources
+    ("form","p0","submits","#ef4444"), ("form","zi","","#3b82f6"),
+    ("form","eq","","#22c55e"),        ("form","serp","","#84cc16"),
+    ("form","ai","","#f97316"),
+    # all sources → arbitration
+    ("p0","arb","conf=1.0 wins if gap>0.05","#ef4444"),
+    ("zi","arb","conf~0.8-1.0","#3b82f6"),
+    ("eq","arb","conf~0.7-1.0","#22c55e"),
+    ("serp","arb","conf heuristic","#84cc16"),
+    ("ai","arb","conf 0.1-0.2","#f97316"),
+    # arbitration → two outcomes
+    ("arb","naics_good","supplier wins (weight 0.8>0.2)","#22c55e"),
+    ("arb","naics_bad","P0 wins when conf gap >0.05","#ef4444"),
+    # valid naics → MCC paths
+    ("naics_good","lookup","lookup rel_naics_mcc","#38bdf8"),
+    ("naics_good","ai_mcc","AI also runs","#f97316"),
+    # bad naics → MCC paths
+    ("naics_bad","lookup_bad","lookup fails/7399","#ef4444"),
+    ("naics_bad","ai_mcc2","AI fallback","#f97316"),
+    # final mcc_code
+    ("lookup","mcc_good","foundMcc??inferredMcc","#22c55e"),
+    ("ai_mcc","mcc_good","AI wins if non-null","#f97316"),
+    ("lookup_bad","mcc_bad","","#ef4444"),
+    ("ai_mcc2","mcc_bad","AI at 0.1-0.2","#f97316"),
+]
+
+_fig = go.Figure()
+_BW, _BH = 185, 52
+
+def _cx(key): return _nodes[key][0]
+def _cy(key): return _nodes[key][1]
+
+# Draw edges
+for src_k, dst_k, lbl, col in _edges:
+    sx = _cx(src_k)
+    sy = _cy(src_k) + _BH//2
+    dx = _cx(dst_k)
+    dy = _cy(dst_k) - _BH//2
+    span_y = dy - sy
+    cx1, cy1 = sx, sy + span_y*0.35
+    cx2, cy2 = dx, dy - span_y*0.35
+    _fig.add_shape(type="path",
+        path=f"M {sx},{sy} C {cx1},{cy1} {cx2},{cy2} {dx},{dy}",
+        line=dict(color=col, width=1.8), opacity=0.6, layer="below")
+    if lbl:
+        _fig.add_annotation(x=(sx+dx)/2, y=(sy+dy)/2, text=lbl,
+            showarrow=False, font=dict(size=8, color=col),
+            bgcolor="rgba(15,23,42,0.85)", borderpad=2)
+
+# Draw nodes
+for key, (x, y, lines, bg, border, shape) in _nodes.items():
+    _fig.add_shape(type="rect",
+        x0=x-_BW//2, y0=y-_BH//2, x1=x+_BW//2, y1=y+_BH//2,
+        fillcolor=bg, line=dict(color=border, width=2), layer="above")
+    for i, ln in enumerate(lines):
+        offset = 10 if len(lines)==2 else 0
+        _fig.add_annotation(
+            x=x, y=y + (8 if i==0 else -10),
+            text=f"<b>{ln}</b>" if i==0 else ln,
+            showarrow=False, xanchor="center", yanchor="middle",
+            font=dict(size=9 if i==0 else 8, color=border))
+
+_fig.update_layout(
+    height=_H, margin=dict(l=5,r=5,t=10,b=10),
+    paper_bgcolor="#0f172a", plot_bgcolor="#0f172a",
+    xaxis=dict(visible=False, range=[0, _W]),
+    yaxis=dict(visible=False, range=[0, _H], autorange="reversed"),
+    showlegend=False,
+)
+st.plotly_chart(_fig, use_container_width=True, key="decision_tree")
+st.caption(
+    "🔴 Red = risk path (P0 wins or wrong NAICS)  "
+    "🟢 Green = healthy path (supplier wins, canonical result)  "
+    "🟣 Purple = arbitration engine  "
+    "🟠 Orange = AI enrichment  "
+    "🔵 Blue = data sources / lookup tables"
+)
+
+st.markdown("---")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # SECTION 1 — LIVE DECISION FLOW COUNTS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -541,10 +662,13 @@ if suppressed_df is not None and not suppressed_df.empty:
         level="danger",
         action="Fix sources.ts:148: lower businessDetails confidence from 1.0 to 0.1. All these businesses will auto-correct on next facts refresh.",
     )
-    disp_supp = suppressed_df[["business_id","client_name","business_name",
-                               "p0_value","vendor_alternatives","vendor_count"]].copy()
+    alt_col = "supplier_alternatives" if "supplier_alternatives" in suppressed_df.columns else "vendor_alternatives"
+    cnt_col = "supplier_count" if "supplier_count" in suppressed_df.columns else "vendor_count"
+    show_cols = ["business_id","client_name","business_name","p0_value", alt_col, cnt_col]
+    show_cols = [c for c in show_cols if c in suppressed_df.columns]
+    disp_supp = suppressed_df[show_cols].copy()
     disp_supp.columns = ["Business ID","Client","Legal Name","P0 Value (blank)",
-                         "Supplier Alternatives (suppressed)","Supplier Count"]
+                         "Supplier Alternatives (suppressed)","Supplier Count"][:len(show_cols)]
     st.dataframe(disp_supp, use_container_width=True, hide_index=True)
     st.download_button("⬇️ Download suppressed correct answers",
                        disp_supp.to_csv(index=False).encode(),

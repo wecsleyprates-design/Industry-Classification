@@ -256,29 +256,56 @@ def load_suppressed_correct_answer(client_name: str = None) -> pd.DataFrame:
             clauses.append("f.client_name=?")
             p.append(client_name)
         w = "WHERE " + " AND ".join(clauses)
-        return _q(f"""
-            SELECT
-                f.business_id,
-                f.client_name,
-                b.business_name,
-                f.winning_value                 AS p0_value,
-                f.winning_confidence            AS p0_confidence,
-                GROUP_CONCAT(a.alt_platform_name || ': ' || a.alt_value, ' | ') AS vendor_alternatives,
-                COUNT(DISTINCT a.alt_platform_id) AS vendor_count
-            FROM facts f
-            LEFT JOIN businesses b ON b.business_id=f.business_id AND b.is_latest=1
-            JOIN alternatives a
-                ON a.business_id=f.business_id
-                AND a.fact_name='naics_code'
-                AND a.is_latest=1
-                AND a.alt_platform_id IN ('17','22','24')
-                AND a.alt_value IS NOT NULL AND a.alt_value != ''
-            {w}
-            GROUP BY f.business_id, f.client_name, b.business_name,
-                     f.winning_value, f.winning_confidence
-            ORDER BY vendor_count DESC
-            LIMIT 500
-        """, p)
+        # business_name column was added after initial cache builds — use COALESCE for safety
+        try:
+            df = _q(f"""
+                SELECT
+                    f.business_id,
+                    f.client_name,
+                    COALESCE(b.business_name, '') AS business_name,
+                    f.winning_value                 AS p0_value,
+                    f.winning_confidence            AS p0_confidence,
+                    GROUP_CONCAT(a.alt_platform_name || ': ' || a.alt_value, ' | ') AS supplier_alternatives,
+                    COUNT(DISTINCT a.alt_platform_id) AS supplier_count
+                FROM facts f
+                LEFT JOIN businesses b ON b.business_id=f.business_id AND b.is_latest=1
+                JOIN alternatives a
+                    ON a.business_id=f.business_id
+                    AND a.fact_name='naics_code'
+                    AND a.is_latest=1
+                    AND a.alt_platform_id IN ('17','22','24')
+                    AND a.alt_value IS NOT NULL AND a.alt_value != ''
+                {w}
+                GROUP BY f.business_id, f.client_name,
+                         f.winning_value, f.winning_confidence
+                ORDER BY supplier_count DESC
+                LIMIT 500
+            """, p)
+            return df
+        except Exception:
+            # Fallback without business_name (older cache schema)
+            return _q(f"""
+                SELECT
+                    f.business_id,
+                    f.client_name,
+                    '' AS business_name,
+                    f.winning_value                 AS p0_value,
+                    f.winning_confidence            AS p0_confidence,
+                    GROUP_CONCAT(a.alt_platform_name || ': ' || a.alt_value, ' | ') AS supplier_alternatives,
+                    COUNT(DISTINCT a.alt_platform_id) AS supplier_count
+                FROM facts f
+                JOIN alternatives a
+                    ON a.business_id=f.business_id
+                    AND a.fact_name='naics_code'
+                    AND a.is_latest=1
+                    AND a.alt_platform_id IN ('17','22','24')
+                    AND a.alt_value IS NOT NULL AND a.alt_value != ''
+                {w}
+                GROUP BY f.business_id, f.client_name,
+                         f.winning_value, f.winning_confidence
+                ORDER BY supplier_count DESC
+                LIMIT 500
+            """, p)
     return pd.DataFrame()
 
 
