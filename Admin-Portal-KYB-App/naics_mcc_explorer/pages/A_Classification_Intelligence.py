@@ -46,7 +46,7 @@ f_client = filters.get("client_name")
 st.markdown("# 🧬 Classification Decision Intelligence")
 data_source_banner()
 st.markdown(
-    "A full audit of how the system classifies businesses — from raw vendor inputs "
+    "A full audit of how the system classifies businesses — from raw supplier inputs "
     "through the arbitration engine to the final `naics_code`, `mcc_code_found`, "
     "`mcc_code_from_naics`, and `mcc_code` facts. "
     "Every decision path is quantified, every confidence score is profiled, "
@@ -95,7 +95,7 @@ Understanding this order is essential to understanding every quality problem we 
 
 | Fact | Type | Source | Description |
 |---|---|---|---|
-| `naics_code` | **Vendor-sourced** | ZoomInfo, Equifax, SERP, AI, or applicant | 6-digit US industry code. The root fact. Everything else derives from this. |
+| `naics_code` | **Supplier-sourced** | ZoomInfo, Equifax, SERP, AI, or applicant | 6-digit US industry code. The root fact. Everything else derives from this. |
 | `mcc_code_found` | **Computed (AI direct)** | AI NAICS Enrichment (P31) | 4-digit payment category code assigned by GPT-4o-mini from business context. |
 | `mcc_code_from_naics` | **Computed (lookup)** | Fact Engine (P-1) | 4-digit payment code derived by looking up `naics_code` in `rel_naics_mcc` table. |
 | `mcc_code` | **Computed (final)** | Fact Engine (P-1) | Final winner: `mcc_code_found ?? mcc_code_from_naics`. AI wins if it returned anything. |
@@ -182,7 +182,7 @@ WHERE nc.code = naics_code.value
 
 - If a mapping exists → `mcc_code_from_naics` = the mapped MCC
 - If no mapping exists → `mcc_code_from_naics` = null
-- Source is always `platformId: -1, name: "dependent"` (computed fact, no vendor)
+- Source is always `platformId: -1, name: "dependent"` (computed fact, no supplier)
 - Confidence is always **null** — deterministic lookup has no confidence score
 
 **Critical implication:** If `naics_code` is wrong (null, 561499, or wrong code),
@@ -242,8 +242,8 @@ regardless of whether the AI's answer is more or less accurate.
 ## The Full Cascade: How One Bad NAICS Decision Breaks Six Facts
 
 ```
-naics_code wrong (P0 null wins when vendor confidence < 0.95,
-                  OR vendor returns wrong code and wins)
+naics_code wrong (P0 null wins when supplier confidence < 0.95,
+                  OR supplier returns wrong code and wins)
     ↓
 mcc_code_from_naics wrong or null
     (rel_naics_mcc lookup of the wrong NAICS → wrong or missing MCC)
@@ -276,7 +276,7 @@ correspond to which MCC codes. When a business has a NAICS+MCC combination that 
 in this table, we call it a **canonical pair** — the system worked correctly.
 
 When the pair is NOT in this table, one of:
-1. The NAICS code is wrong (wrong vendor won, or P0 suppressed real data)
+1. The NAICS code is wrong (wrong supplier won, or P0 suppressed real data)
 2. The AI direct MCC (`mcc_code_found`) overrode the canonical lookup result
 3. The NAICS code is valid but not in our mapping table (gap in rel_naics_mcc)
 
@@ -509,7 +509,7 @@ if alt_cov is not None and not alt_cov.empty:
                                 "Times Won": st.column_config.NumberColumn(format="%d")})
 
 if agree_df is not None and not agree_df.empty:
-    st.markdown("**Vendor agreement matrix — when winner and vendor alternative co-occur, do they agree?**")
+    st.markdown("**Supplier agreement matrix — when winner and supplier alternative co-occur, do they agree?**")
     st.caption(
         "Each row = one (winner source, alternative source) pair. "
         "Agreement % = how often they returned the same NAICS code. "
@@ -544,7 +544,7 @@ if suppressed_df is not None and not suppressed_df.empty:
     disp_supp = suppressed_df[["business_id","client_name","business_name",
                                "p0_value","vendor_alternatives","vendor_count"]].copy()
     disp_supp.columns = ["Business ID","Client","Legal Name","P0 Value (blank)",
-                         "Vendor Alternatives (suppressed)","Vendor Count"]
+                         "Supplier Alternatives (suppressed)","Supplier Count"]
     st.dataframe(disp_supp, use_container_width=True, hide_index=True)
     st.download_button("⬇️ Download suppressed correct answers",
                        disp_supp.to_csv(index=False).encode(),
@@ -761,14 +761,14 @@ if gap_df is not None and not gap_df.empty:
                    "Catch-all (561499)": st.column_config.NumberColumn(format="%d")})
 
     analyst_note(
-        "Vendor coverage gaps",
-        "These businesses have no trusted vendor (ZoomInfo/Equifax/SERP/OpenCorporates) "
+        "Supplier coverage gaps",
+        "These businesses have no trusted supplier (ZoomInfo/Equifax/SERP/OpenCorporates) "
         "providing a NAICS code — only the business's own form submission (P0) or AI fallback (P31). "
-        "For clients with large gaps, the root cause is usually that the vendor integration "
+        "For clients with large gaps, the root cause is usually that the supplier integration "
         "didn't cover those businesses (e.g. ZoomInfo didn't have a match). "
         "AI at 0.15 is the only classification these businesses have.",
         level="warning",
-        action="For high-gap clients: request vendor re-enrichment or expand ZoomInfo/Equifax coverage.",
+        action="For high-gap clients: request supplier re-enrichment or expand ZoomInfo/Equifax coverage.",
     )
 
 st.markdown("---")

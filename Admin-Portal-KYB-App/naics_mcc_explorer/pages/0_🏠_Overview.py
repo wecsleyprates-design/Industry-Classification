@@ -140,7 +140,7 @@ for fact, col, title in [
                 p0_n = int(p0_row["business_count"].iloc[0])
                 analyst_note(
                     f"⚠️ Ghost Assigner (P0) winning for {p0_n:,} {fact} businesses",
-                    "Self-reported onboarding data is beating real vendor data. "
+                    "Self-reported onboarding data is beating real supplier data. "
                     "Root cause: <code>confidence: 1</code> hardcoded in <code>sources.ts:151</code>. "
                     "See Platform Winners page for full analysis.",
                     level="danger",

@@ -28,42 +28,42 @@ from __future__ import annotations
 
 # Full platform map from integrations.constant.ts INTEGRATION_ID enum
 PLATFORM_MAP: dict[str, dict] = {
-    # Calculated/dependent — sources.calculated, NOT a vendor
+    # Calculated/dependent — sources.calculated, NOT a supplier
     "-1": {"name": "Calculated / Dependent",       "short": "P-1", "type": "calculated","color": "#64748b"},
     # Applicant Entry — businessDetails source — confidence:1 hardcoded (THE BUG)
     "0":  {"name": "Applicant Entry (Ghost Assigner)","short":"P0", "type": "applicant", "color": "#ef4444"},
     # External vendors (from INTEGRATION_ID enum)
-    "1":  {"name": "Plaid Banking",                "short": "P1",  "type": "vendor",    "color": "#0284c7"},
-    "4":  {"name": "Verdata",                      "short": "P4",  "type": "vendor",    "color": "#6366f1"},
-    "15": {"name": "Tax Status",                   "short": "P15", "type": "vendor",    "color": "#a3a3a3"},
-    "16": {"name": "Middesk",                      "short": "P16", "type": "vendor",    "color": "#f59e0b"},
-    "17": {"name": "Equifax",                      "short": "P17", "type": "vendor",    "color": "#22c55e"},
-    "18": {"name": "Plaid IDV",                    "short": "P18", "type": "vendor",    "color": "#0ea5e9"},
-    "19": {"name": "Google Places Reviews",         "short": "P19", "type": "vendor",    "color": "#a3a3a3"},
-    "20": {"name": "Google Business Reviews",       "short": "P20", "type": "vendor",    "color": "#a3a3a3"},
-    "21": {"name": "Manual Upload",                "short": "P21", "type": "vendor",    "color": "#64748b"},
-    "22": {"name": "SERP Scrape",                  "short": "P22", "type": "vendor",    "color": "#a855f7"},
-    "23": {"name": "OpenCorporates",               "short": "P23", "type": "vendor",    "color": "#3b82f6"},
-    "24": {"name": "ZoomInfo",                     "short": "P24", "type": "vendor",    "color": "#8b5cf6"},
-    "27": {"name": "Adverse Media",                "short": "P27", "type": "vendor",    "color": "#a3a3a3"},
-    "28": {"name": "NPI",                          "short": "P28", "type": "vendor",    "color": "#a3a3a3"},
+    "1":  {"name": "Plaid Banking",                "short": "P1",  "type": "supplier",    "color": "#0284c7"},
+    "4":  {"name": "Verdata",                      "short": "P4",  "type": "supplier",    "color": "#6366f1"},
+    "15": {"name": "Tax Status",                   "short": "P15", "type": "supplier",    "color": "#a3a3a3"},
+    "16": {"name": "Middesk",                      "short": "P16", "type": "supplier",    "color": "#f59e0b"},
+    "17": {"name": "Equifax",                      "short": "P17", "type": "supplier",    "color": "#22c55e"},
+    "18": {"name": "Plaid IDV",                    "short": "P18", "type": "supplier",    "color": "#0ea5e9"},
+    "19": {"name": "Google Places Reviews",         "short": "P19", "type": "supplier",    "color": "#a3a3a3"},
+    "20": {"name": "Google Business Reviews",       "short": "P20", "type": "supplier",    "color": "#a3a3a3"},
+    "21": {"name": "Manual Upload",                "short": "P21", "type": "supplier",    "color": "#64748b"},
+    "22": {"name": "SERP Scrape",                  "short": "P22", "type": "supplier",    "color": "#a855f7"},
+    "23": {"name": "OpenCorporates",               "short": "P23", "type": "supplier",    "color": "#3b82f6"},
+    "24": {"name": "ZoomInfo",                     "short": "P24", "type": "supplier",    "color": "#8b5cf6"},
+    "27": {"name": "Adverse Media",                "short": "P27", "type": "supplier",    "color": "#a3a3a3"},
+    "28": {"name": "NPI",                          "short": "P28", "type": "supplier",    "color": "#a3a3a3"},
     "29": {"name": "Entity Matching",              "short": "P29", "type": "internal",  "color": "#6366f1"},
     "30": {"name": "Worth Website Scanning",       "short": "P30", "type": "internal",  "color": "#6366f1"},
     # AI enrichment sources
     "31": {"name": "AI NAICS Enrichment (GPT)",    "short": "P31", "type": "ai",        "color": "#f97316"},
-    "32": {"name": "Canada Open",                  "short": "P32", "type": "vendor",    "color": "#10b981"},
+    "32": {"name": "Canada Open",                  "short": "P32", "type": "supplier",    "color": "#10b981"},
     "36": {"name": "AI Website Enrichment",        "short": "P36", "type": "ai",        "color": "#fb923c"},
-    "38": {"name": "Trulioo",                      "short": "P38", "type": "vendor",    "color": "#ec4899"},
-    "39": {"name": "SERP Google Profile",          "short": "P39", "type": "vendor",    "color": "#9333ea"},
-    "40": {"name": "Plaid / KYX",                  "short": "P40", "type": "vendor",    "color": "#06b6d4"},
-    "42": {"name": "Trulioo PSC",                  "short": "P42", "type": "vendor",    "color": "#f43f5e"},
-    "43": {"name": "Baselayer",                    "short": "P43", "type": "vendor",    "color": "#a3a3a3"},
+    "38": {"name": "Trulioo",                      "short": "P38", "type": "supplier",    "color": "#ec4899"},
+    "39": {"name": "SERP Google Profile",          "short": "P39", "type": "supplier",    "color": "#9333ea"},
+    "40": {"name": "Plaid / KYX",                  "short": "P40", "type": "supplier",    "color": "#06b6d4"},
+    "42": {"name": "Trulioo PSC",                  "short": "P42", "type": "supplier",    "color": "#f43f5e"},
+    "43": {"name": "Baselayer",                    "short": "P43", "type": "supplier",    "color": "#a3a3a3"},
     # Worth internal
     "99": {"name": "DirectSOS (internal)",         "short": "P99", "type": "internal",  "color": "#06b6d4"},
 }
 
 PLATFORM_TYPE_COLORS = {
-    "vendor":     "#22c55e",
+    "supplier":     "#22c55e",
     "ai":         "#f97316",
     "applicant":  "#ef4444",
     "calculated": "#64748b",
@@ -72,10 +72,10 @@ PLATFORM_TYPE_COLORS = {
 }
 
 # ── Core classification facts ──────────────────────────────────────────────────
-# Facts that participate in real vendor arbitration (can have any platformId winner)
+# Facts that participate in real supplier arbitration (can have any platformId winner)
 CLASSIFICATION_FACTS = ["naics_code", "mcc_code_found"]
 
-# Facts that are ALWAYS calculated/dependent (platformId=-1, no vendor wins)
+# Facts that are ALWAYS calculated/dependent (platformId=-1, no supplier wins)
 # Source: businessDetails/index.ts — these use dependencies[] not source vendors
 DEPENDENT_FACT_NAMES = [
     "mcc_code",              # from mcc_code_found ?? mcc_code_from_naics
@@ -119,16 +119,16 @@ KNOWN_INVALID_MCC = {"5614"}   # AI prompt bug — not a real MCC code
 PLATFORM_LEGEND = """
 | ID | Platform | Type | Source |
 |---|---|---|---|
-| **-1** | Calculated / Dependent | ⚫ Computed | Fact derived from other facts by Fact Engine. No vendor, no confidence, no ruleApplied. NAICS/MCC: `mcc_code`, `mcc_code_from_naics`, `mcc_description`, `naics_description`, `industry`. |
+| **-1** | Calculated / Dependent | ⚫ Computed | Fact derived from other facts by Fact Engine. No supplier, no confidence, no ruleApplied. NAICS/MCC: `mcc_code`, `mcc_code_from_naics`, `mcc_description`, `naics_description`, `industry`. |
 | **0** | Applicant Entry | 🔴 Ghost Assigner | `businessDetails` in `sources.ts:148`. Hardcoded `confidence:1`. Runs first. Beats all vendors. THE BUG. |
-| **16** | Middesk | 🟡 Vendor | US SOS live registry. Weight=2.0. |
-| **17** | Equifax | 🟢 Vendor | Firmographic + public records. Weight=0.7. NAICS from `primnaicscode`. |
-| **22** | SERP Scrape | 🟣 Vendor | Google Search scraping. Weight=0.3. NAICS from `businessLegitimacyClassification.naics_code`. |
-| **23** | OpenCorporates | 🔵 Vendor | Global company registry. NAICS from `firmographic.industry_code_uids` (us_naics prefix). |
-| **24** | ZoomInfo | 🔵 Vendor | Firmographics. Weight=0.8. NAICS from `firmographic.zi_c_naics6`. Primary NAICS source. |
+| **16** | Middesk | 🟡 Supplier | US SOS live registry. Weight=2.0. |
+| **17** | Equifax | 🟢 Supplier | Firmographic + public records. Weight=0.7. NAICS from `primnaicscode`. |
+| **22** | SERP Scrape | 🟣 Supplier | Google Search scraping. Weight=0.3. NAICS from `businessLegitimacyClassification.naics_code`. |
+| **23** | OpenCorporates | 🔵 Supplier | Global company registry. NAICS from `firmographic.industry_code_uids` (us_naics prefix). |
+| **24** | ZoomInfo | 🔵 Supplier | Firmographics. Weight=0.8. NAICS from `firmographic.zi_c_naics6`. Primary NAICS source. |
 | **31** | AI NAICS Enrichment | 🟠 AI | GPT-4o-mini. Weight=0.1. Confidence=0.15. Falls back to NAICS `561499` + MCC `5614` when no evidence. |
 | **36** | AI Website Enrichment | 🟠 AI | AI analysis of website content. Weight=0.1. |
-| **38** | Trulioo | 🔴 Vendor | KYB/PSC compliance screening. NAICS from `extractStandardizedIndustriesFromTruliooResponse`. |
+| **38** | Trulioo | 🔴 Supplier | KYB/PSC compliance screening. NAICS from `extractStandardizedIndustriesFromTruliooResponse`. |
 | **null** | No source | ⚫ Unknown | `platformId=null` in DB. Fact has no source metadata. Use `ruleApplied` to understand origin (e.g. `combineFacts`). |
 """
 

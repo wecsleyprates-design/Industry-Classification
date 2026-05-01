@@ -127,8 +127,8 @@ analyst_note(
     "How to read these charts",
     "Each bar = number of businesses where that source had the highest score and became the winner. "
     "For industry codes (NAICS), <strong>ZoomInfo, Equifax, or SERP</strong> should be winning most of the time. "
-    "For payment categories (MCC), <strong>Automatically Computed</strong> winning is normal — payment categories are always derived, never submitted directly by a vendor. "
-    "⚠️ Red flag: <strong>Business's own submission</strong> in the top 2 for industry codes means the onboarding form data is overriding real vendor data.",
+    "For payment categories (MCC), <strong>Automatically Computed</strong> winning is normal — payment categories are always derived, never submitted directly by a supplier. "
+    "⚠️ Red flag: <strong>Business's own submission</strong> in the top 2 for industry codes means the onboarding form data is overriding real supplier data.",
     level="info",
     bullets=[
         "🟢 Green = external data provider (ZoomInfo, SERP, Equifax) — these should dominate for industry codes",
@@ -168,7 +168,7 @@ for fn in FACTS_TO_SHOW:
                         "Avg Confidence":r["avg_confidence"]})
 if p0_rows:
     total_p0 = sum(r["P0 Wins"] for r in p0_rows)
-    st.error(f"⚠️ The business's own submission is winning for {total_p0:,} records across monitored data types — real vendor data is being overridden.", icon="🚨")
+    st.error(f"⚠️ The business's own submission is winning for {total_p0:,} records across monitored data types — real supplier data is being overridden.", icon="🚨")
     c1,c2,c3 = st.columns(3)
     naics_p0 = next((r for r in p0_rows if r["Fact"]=="naics_code"),{})
     mcc_p0   = next((r for r in p0_rows if r["Fact"]=="mcc_code"),{})

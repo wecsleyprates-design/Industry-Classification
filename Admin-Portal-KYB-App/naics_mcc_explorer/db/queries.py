@@ -882,7 +882,7 @@ def load_misidentification_signals(date_from=None, date_to=None,
 def load_platform_error_rate_by_client(date_from=None, date_to=None,
                                        client_name=None) -> pd.DataFrame:
     """Per client × platform: estimate error rate using proxy signals.
-    'Potential error' = winner is P0/AI/catch-all BUT alternatives contain specific vendor codes.
+    'Potential error' = winner is P0/AI/catch-all BUT alternatives contain specific supplier codes.
     Returns: client, winning_platform_id, total_wins, potential_errors, error_proxy_pct
     """
     cte = _billing_cte(date_from, date_to, client_name)

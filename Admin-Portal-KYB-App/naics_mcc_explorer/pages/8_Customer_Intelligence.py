@@ -6,7 +6,7 @@ joined to rds_warehouse_public.facts via rel_business_customer_monitoring.
 Analysis:
   1. Per-client winner + alternative platform distribution (NAICS)
   2. NAICS digit-length distribution — catches P0 truncation bugs (54161 vs 541612)
-  3. Applicant input (P0) vs vendor alternatives — what did the business submit,
+  3. Applicant input (P0) vs supplier alternatives — what did the business submit,
      what did ZoomInfo/Equifax/SERP return, and did they agree?
   4. Platform win share table with 561499 / null / digit-error rates per client
 """
@@ -206,7 +206,7 @@ else:
         level="info",
         bullets=[
             "P0 > 50% for a client = systemic arbitration bug exposure for that client",
-            "AI (P31) in top 2 = vendor coverage gap; AI fallback running too often",
+            "AI (P31) in top 2 = supplier coverage gap; AI fallback running too often",
             "Null wins = P0 wrote null and locked out real data — worst quality outcome",
         ],
     )
@@ -275,16 +275,16 @@ else:
         bullets=[
             "5-digit codes: P0 integer overflow — leading zero dropped (e.g. 054161 → 54161)",
             "7+ digit codes: P0 appended extra characters from the form",
-            "null: P0 wrote nothing — real vendor data was then locked out by confidence:1",
+            "null: P0 wrote nothing — real supplier data was then locked out by confidence:1",
         ],
         action="Validate NAICS format in the onboarding form frontend before P0 writes the fact.",
     )
 st.markdown("---")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3. APPLICANT (P0) INPUT vs VENDOR ALTERNATIVES
+# 3. APPLICANT (P0) INPUT vs SUPPLIER ALTERNATIVES
 # ═══════════════════════════════════════════════════════════════════════════════
-section_header("🔍 Section 3 — Applicant Submission vs Vendor Alternatives",
+section_header("🔍 Section 3 — Applicant Submission vs Supplier Alternatives",
                "What P0 (the business itself) submitted, vs what ZoomInfo/Equifax/SERP returned in alternatives[].")
 
 with st.spinner("Loading applicant submission data…"):
@@ -297,7 +297,7 @@ else:
 
     # Parse alternatives from raw JSON
     def _parse_vendor_alts(raw):
-        """Extract only trusted vendor alternatives (P17, P22, P24) with their values."""
+        """Extract only trusted supplier alternatives (P17, P22, P24) with their values."""
         VENDOR_PIDS = {"17", "22", "24"}
         alts = parse_alternatives(raw)
         vendor_alts = [a for a in alts if a["alt_platform_id"] in VENDOR_PIDS]
@@ -342,17 +342,17 @@ else:
 
     c1,c2,c3,c4,c5 = st.columns(5)
     with c1: kpi("P0 Wins (total)", f"{n_total:,}", "", "#ef4444")
-    with c2: kpi("✅ P0 = Vendor",  f"{n_agree:,}",
+    with c2: kpi("✅ P0 = Supplier",  f"{n_agree:,}",
                  f"{100*n_agree/n_total:.1f}% — applicant was right", "#22c55e")
     with c3: kpi("~Same Sector",    f"{n_sector_agree:,}",
                  f"{100*n_sector_agree/n_total:.1f}% — sector matches, code differs", "#f59e0b")
     with c4: kpi("❌ Full Disagree", f"{n_full_disagree:,}",
                  f"{100*n_full_disagree/n_total:.1f}% — different sector entirely", "#ef4444")
-    with c5: kpi("P0 null, vendor has data", f"{n_p0_null:,}",
+    with c5: kpi("P0 null, supplier has data", f"{n_p0_null:,}",
                  f"{100*n_p0_null/n_total:.1f}% — worst: null beat real code", "#dc2626")
 
     analyst_note(
-        "Interpreting agreement between applicant and vendor",
+        "Interpreting agreement between applicant and supplier",
         "When P0 (the business itself) submits a NAICS code and vendors like ZoomInfo return a <em>different</em> code, "
         "one of them is wrong. We cannot know which without ground truth — but the pattern matters: "
         "<strong>full disagree at sector level</strong> is the most serious signal (e.g. "
@@ -361,12 +361,12 @@ else:
         "applicant may have submitted a Professional Services code instead of Employment Placement (561311).",
         level="warning",
         bullets=[
-            "✅ P0 = Vendor: applicant submitted correctly AND it won — OK (but P0 shouldn't win)",
+            "✅ P0 = Supplier: applicant submitted correctly AND it won — OK (but P0 shouldn't win)",
             "~Same Sector: correct broad industry, wrong specific code — minor misidentification",
             "❌ Full Disagree: completely different industry sector — high-impact misidentification",
-            "P0 null + vendor has data: worst case — blank submission locked out correct vendor data",
+            "P0 null + supplier has data: worst case — blank submission locked out correct supplier data",
         ],
-        action="Fix sources.ts:148 confidence:1→0.1. This ensures vendor codes win over applicant submissions.",
+        action="Fix sources.ts:148 confidence:1→0.1. This ensures supplier codes win over applicant submissions.",
     )
 
     # Display table
@@ -376,14 +376,14 @@ else:
     ]].copy()
     display.columns = [
         "Client","Business ID","P0 Submitted NAICS","P0 Confidence",
-        "Vendor Alternatives","Vendor Platforms","Submission Last Updated","Agreement"
+        "Supplier Alternatives","Supplier Platforms","Submission Last Updated","Agreement"
     ]
     st.dataframe(display, use_container_width=True, hide_index=True)
-    st.download_button("⬇️ Download P0 vs Vendor data",
+    st.download_button("⬇️ Download P0 vs Supplier data",
                        display.to_csv(index=False).encode(),
                        "p0_vs_vendor.csv","text/csv", key="dl_p0")
 
-    sql_panel("P0 wins with vendor alternatives",
+    sql_panel("P0 wins with supplier alternatives",
               f"""\
 {_billing_cte(f_from, f_to, client_filter)}\
 SELECT c.client, f.business_id,

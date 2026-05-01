@@ -247,7 +247,7 @@ else:
     level="info",
     bullets=[
         "Low Canonical % → many of this customer's businesses have mismatched or wrong codes",
-        "High 'Industry code missing' → blank form submissions are overriding real vendor data for this customer",
+        "High 'Industry code missing' → blank form submissions are overriding real supplier data for this customer",
         "High 'Generic / Invalid' → the generic placeholder code (561499) is dominating this customer's portfolio",
     ],
     )

@@ -332,7 +332,7 @@ if api_ok:
     if mismatches:
         analyst_note(
             f"⚠️ {len(mismatches)} fact(s) differ between local cache and live API",
-            "The local cache may have been built before the latest vendor enrichment ran. "
+            "The local cache may have been built before the latest supplier enrichment ran. "
             "Re-run <code>python3 scripts/refresh_facts_cache.py</code> to update.",
             level="warning",
             bullets=[

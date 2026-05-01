@@ -110,7 +110,7 @@ def platform_legend_panel() -> None:
     with st.expander("📖 Platform ID Legend + Schema Reference  ·  📐 See 'How It Works' for full workflow"):
         st.markdown(
             "**📐 See the [How It Works](#) page** (first tab in the sidebar) for the full "
-            "workflow diagram showing how vendor data → facts table → Admin Portal API → "
+            "workflow diagram showing how supplier data → facts table → Admin Portal API → "
             "SQLite cache → this dashboard.\n\n"
             "**Quick summary:** Vendors run → arbitration picks winner (highest confidence) → "
             "stored in `rds_warehouse_public.facts` → Admin Portal API reads same data → "
@@ -140,7 +140,7 @@ def platform_legend_panel() -> None:
         st.markdown(
             "**Important: platformId = -1 means 'Calculated/Dependent', NOT a legacy schema bug.**\n\n"
             "Facts with `platformId: -1` are computed by the Fact Engine from other facts. "
-            "They are never sourced from a vendor. Examples:\n\n"
+            "They are never sourced from a supplier. Examples:\n\n"
             "- `mcc_code` — derived from `mcc_code_found ?? mcc_code_from_naics`\n"
             "- `mcc_code_from_naics` — `rel_naics_mcc` lookup keyed by the winning `naics_code`\n"
             "- `mcc_description` — `core_mcc_code` lookup by `mcc_code`\n"

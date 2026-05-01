@@ -3,12 +3,12 @@
 The core challenge: we do not have ground truth for NAICS classification.
 We use PROXY ERROR SIGNALS to estimate misidentification rates:
 
-Signal 1 — Ghost Assigner Override (P0 won, vendor disagrees):
+Signal 1 — Ghost Assigner Override (P0 won, supplier disagrees):
   P0 wins with a value different from what trusted vendors (P24/P17/P22) returned.
   This is not necessarily wrong (the applicant may know their industry better),
   but when P0 wins with NULL or a catch-all, it is definitively wrong.
 
-Signal 2 — Vendor Consensus vs Winner Mismatch:
+Signal 2 — Supplier Consensus vs Winner Mismatch:
   Multiple trusted vendors agree on a code, but the winner is different.
   High confidence that the winner is wrong when 2+ vendors agree on something else.
 
@@ -76,7 +76,7 @@ st.markdown("# 🎯 Classification Accuracy & Misidentification Analysis")
 st.markdown(
     "Quantifies **proxy signals** for NAICS misidentification across paying clients. "
     "We cannot know the 'correct' NAICS without ground truth — but we can detect "
-    "cases where the winner conflicts with trusted vendor data, uses catch-alls, "
+    "cases where the winner conflicts with trusted supplier data, uses catch-alls, "
     "or has digit format errors. The **Employment Agency example** (541612 vs 561311) "
     "is a sector-level disagreement — captured in Signal 3 below."
 )
@@ -174,7 +174,7 @@ else:
         "<strong>Red = high flag rate (systemic problem)</strong>. "
         "P0 (Applicant Entry) is expected to have a high rate — it writes null when "
         "businesses leave the industry field blank. P31 (AI) often shows high catch-all rates. "
-        "ZoomInfo (P24) flagged cells are more serious — vendor should not produce catch-alls.",
+        "ZoomInfo (P24) flagged cells are more serious — supplier should not produce catch-alls.",
         level="info",
         bullets=[
             "P0 red cell = many businesses left industry blank on the onboarding form for that client",
@@ -296,8 +296,8 @@ st.markdown("---")
 # SECTION 3: SIGNAL 4/5 — GHOST OVERRIDE + SECTOR MISMATCH (alternatives)
 # ═══════════════════════════════════════════════════════════════════════════════
 section_header("🔬 Section 3 — Deep Misidentification Signals",
-               "Per-business: detects where the winning code conflicts with vendor alternatives. "
-               "Includes NAICS description, MCC codes, industry description, and all vendor alternatives.")
+               "Per-business: detects where the winning code conflicts with supplier alternatives. "
+               "Includes NAICS description, MCC codes, industry description, and all supplier alternatives.")
 
 with st.spinner("Loading misidentification signals…"):
     sig_df = get_data('misidentification_signals', date_from=f_from, date_to=f_to, client_name=client_filter)
@@ -337,7 +337,7 @@ else:
         # S5: sector mismatch
         if vendor_sectors and winning_sector and winning_sector not in vendor_sectors:
             signals.append("S5:sector_mismatch")
-        # S6: vendor consensus ignored
+        # S6: supplier consensus ignored
         from collections import Counter
         if len(vendor_values) >= 2:
             most_common = Counter(vendor_values).most_common(1)[0]
@@ -370,7 +370,7 @@ else:
     with c3: kpi("S5: Sector Mismatch", f"{n_sector:,}",
                  f"{100*n_sector/total_biz:.1f}% — Employment Agency type", "#ef4444")
     with c4: kpi("S4: Ghost Override", f"{n_ghost:,}",
-                 f"{100*n_ghost/total_biz:.1f}% — P0 beat vendor", "#ef4444")
+                 f"{100*n_ghost/total_biz:.1f}% — P0 beat supplier", "#ef4444")
     with c5: kpi("S6: Consensus Ignored", f"{n_consensus:,}",
                  f"{100*n_consensus/total_biz:.1f}% — 2+ vendors agreed, winner different", "#f59e0b")
     with c6: kpi("S3: Catch-all Won", f"{n_catchall:,}",
@@ -389,7 +389,7 @@ else:
         bullets=[
             f"S5 Wrong Sector ({n_sector:,}): winner's industry doesn't match what any external provider suggested — investigate per client",
             f"S6 Vendors Agree But Ignored ({n_consensus:,}): multiple providers returned the same code but it wasn't used — strongest misidentification indicator",
-            f"S4 Form Overrides Vendors ({n_ghost:,}): business's form submission won over a vendor with a different code — fix the scoring configuration",
+            f"S4 Form Overrides Vendors ({n_ghost:,}): business's form submission won over a supplier with a different code — fix the scoring configuration",
             f"S3 Generic Placeholder ({n_catchall:,}): 561499 won — the system could not determine the industry — re-classification needed",
         ],
     )
@@ -479,7 +479,7 @@ else:
         st.markdown("#### 📋 Flagged Business Detail Table")
         st.caption(
             "Full classification picture per flagged business: NAICS code + description, "
-            "MCC codes (all variants), industry description, winner platform, vendor alternatives, and signal flags. "
+            "MCC codes (all variants), industry description, winner platform, supplier alternatives, and signal flags. "
             "Use the filter below to focus on a specific signal type."
         )
 
@@ -531,7 +531,7 @@ else:
             "mcc_code_from_naics": "MCC (NAICS-derived)",
             "mcc_code_found":      "MCC (AI-assigned)",
             "mcc_description":     "MCC Description",
-            "vendor_alts_str":     "Vendor Alternatives (Value | Platform)",
+            "vendor_alts_str":     "Supplier Alternatives (Value | Platform)",
             "signals":             "Signals",
             "winner_quality":      "Winner Quality",
         }

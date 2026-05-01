@@ -106,7 +106,7 @@ analyst_note(
     level="info",
     bullets=[
         f"<strong>{n_healthy:,} fully classified</strong>: valid industry code AND valid payment category — everything working correctly",
-        f"<strong>{n_null_naics:,} missing industry code</strong>: the business submitted nothing (or submitted a blank), and the data vendor's result was overridden by the submission",
+        f"<strong>{n_null_naics:,} missing industry code</strong>: the business submitted nothing (or submitted a blank), and the data supplier's result was overridden by the submission",
         f"<strong>{n_ca_naics:,} generic industry code (561499)</strong>: no specific industry was determined — payment category conversion is unreliable",
         f"<strong>{n_ai_prot:,} AI-rescued</strong>: industry code is missing/wrong, but the AI independently assigned a valid payment category — payment category is likely OK",
         f"<strong>{n_double_bad:,} both codes generic</strong>: industry code (561499) AND payment category (7399) are both generic placeholders — highest priority for correction",

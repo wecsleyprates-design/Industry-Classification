@@ -212,7 +212,7 @@ def load_alternative_coverage(client_name: str = None) -> pd.DataFrame:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_vendor_agreement_matrix(client_name: str = None) -> pd.DataFrame:
-    """When multiple vendor alternatives exist, do they agree with winner or each other?"""
+    """When multiple supplier alternatives exist, do they agree with winner or each other?"""
     if _using_cache():
         clauses = ["f.is_latest=1", "f.fact_name='naics_code'"]
         p = []
@@ -245,7 +245,7 @@ def load_vendor_agreement_matrix(client_name: str = None) -> pd.DataFrame:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_suppressed_correct_answer(client_name: str = None) -> pd.DataFrame:
-    """Cases where winner is P0/null but vendor alternatives have specific codes.
+    """Cases where winner is P0/null but supplier alternatives have specific codes.
     These are the definitive cases of correct data being suppressed."""
     if _using_cache():
         clauses = ["f.is_latest=1", "f.fact_name='naics_code'",
@@ -477,7 +477,7 @@ def load_source_frequency_over_time(client_name: str = None) -> pd.DataFrame:
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_naics_null_gap_analysis(client_name: str = None) -> pd.DataFrame:
-    """Businesses with NO vendor NAICS (only P0 or AI), broken down by what AI produced."""
+    """Businesses with NO supplier NAICS (only P0 or AI), broken down by what AI produced."""
     if _using_cache():
         clauses = ["is_latest=1",
                    "(naics_platform_id='0' OR naics_platform_id='31' OR naics_code IS NULL)"]

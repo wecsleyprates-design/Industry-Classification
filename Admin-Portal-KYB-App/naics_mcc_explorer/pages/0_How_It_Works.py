@@ -25,7 +25,7 @@ h1,h2,h3,h4{color:#f1f5f9;} .stMarkdown p{color:#cbd5e1;}
 
 st.markdown("# 📐 How It Works — Full Data Pipeline")
 st.markdown(
-    "This page explains how data flows from vendor integrations through Worth AI's "
+    "This page explains how data flows from supplier integrations through Worth AI's "
     "platform to this dashboard — and why the data you see matches the Admin Portal."
 )
 st.markdown("---")
@@ -184,7 +184,7 @@ st.plotly_chart(fig, use_container_width=True)
 st.markdown(
     "<div style='font-size:.85rem;color:#94a3b8;padding:6px 0'>"
     "🔵 Blue = data storage/API  &nbsp;|&nbsp;  "
-    "🟢 Green = vendor data providers  &nbsp;|&nbsp;  "
+    "🟢 Green = supplier data providers  &nbsp;|&nbsp;  "
     "🟠 Orange = AI fallback  &nbsp;|&nbsp;  "
     "🔴 Red = Applicant Entry (the scoring bug — confidence 1.0 beats all vendors)  &nbsp;|&nbsp;  "
     "🟣 Purple = Arbitration engine  &nbsp;|&nbsp;  "
@@ -200,10 +200,10 @@ st.markdown("---")
 st.markdown("## 📋 Step-by-Step: How Data Gets Into the Dashboard")
 
 steps = [
-    ("1️⃣", "Vendor Integrations Run", "#3b82f6",
+    ("1️⃣", "Supplier Integrations Run", "#3b82f6",
      "When a business is onboarded, Worth AI's **integration-service** calls multiple external vendors "
      "in parallel: ZoomInfo, Equifax, SERP Scrape, Middesk, OpenCorporates, and others. "
-     "Each vendor returns facts about the business — including NAICS industry codes — along with a "
+     "Each supplier returns facts about the business — including NAICS industry codes — along with a "
      "confidence score indicating how certain they are. The AI enrichment (GPT-4o-mini) also runs as "
      "a fallback if vendors don't return a NAICS code."),
 
@@ -375,16 +375,16 @@ Source: `integration-service/src/constants/integrations.constant.ts`
 """)
 
 platform_data = [
-    ("-1", "Calculated / Dependent",    "⚫ Computed",   "Derived from other facts. Never from a vendor. Examples: `mcc_code`, `mcc_description`, `naics_description`, `industry`. No confidence, no ruleApplied."),
+    ("-1", "Calculated / Dependent",    "⚫ Computed",   "Derived from other facts. Never from a supplier. Examples: `mcc_code`, `mcc_description`, `naics_description`, `industry`. No confidence, no ruleApplied."),
     ("0",  "Applicant Entry",           "🔴 Bug source", "Self-reported onboarding form. Confidence hardcoded to 1.0 — beats all vendors. Root cause of the ghost assigner problem. Fix: lower to 0.1 in `sources.ts:148`."),
-    ("16", "Middesk",                   "🟡 Vendor",     "US Secretary of State live registry lookup. Weight=2.0. SOS verification."),
-    ("17", "Equifax",                   "🟢 Vendor",     "Credit bureau + firmographic data. Weight=0.7. NAICS from `primnaicscode`."),
-    ("22", "SERP Scrape",               "🟣 Vendor",     "Google Search scraping. Weight=0.3. NAICS from website content."),
-    ("23", "OpenCorporates",            "🔵 Vendor",     "Global business registry. NAICS from `firmographic.industry_code_uids` (us_naics prefix)."),
-    ("24", "ZoomInfo",                  "🔵 Vendor",     "Primary firmographics source. Weight=0.8. NAICS from `firmographic.zi_c_naics6`. Best NAICS source."),
+    ("16", "Middesk",                   "🟡 Supplier",     "US Secretary of State live registry lookup. Weight=2.0. SOS verification."),
+    ("17", "Equifax",                   "🟢 Supplier",     "Credit bureau + firmographic data. Weight=0.7. NAICS from `primnaicscode`."),
+    ("22", "SERP Scrape",               "🟣 Supplier",     "Google Search scraping. Weight=0.3. NAICS from website content."),
+    ("23", "OpenCorporates",            "🔵 Supplier",     "Global business registry. NAICS from `firmographic.industry_code_uids` (us_naics prefix)."),
+    ("24", "ZoomInfo",                  "🔵 Supplier",     "Primary firmographics source. Weight=0.8. NAICS from `firmographic.zi_c_naics6`. Best NAICS source."),
     ("31", "AI NAICS Enrichment (GPT)", "🟠 AI",         "GPT-4o-mini classifier. Weight=0.1. Confidence=0.15. Last resort — assigns 561499 when no evidence. Source: `aiNaicsEnrichment.ts:63`."),
     ("36", "AI Website Enrichment",     "🟠 AI",         "AI analysis of business website content. Weight=0.1."),
-    ("38", "Trulioo",                   "🟢 Vendor",     "KYB/PSC compliance screening. NAICS from industry classification response."),
+    ("38", "Trulioo",                   "🟢 Supplier",     "KYB/PSC compliance screening. NAICS from industry classification response."),
 ]
 
 import pandas as pd
