@@ -105,7 +105,7 @@ for fact, col, title in [
     with col:
         st.markdown(f"**{title}**")
         with st.spinner(f"Loading {fact} winners…"):
-            pw_df = load_platform_winners(fact, f_from, f_to, f_cust, f_biz)
+            pw_df = get_data('platform_winners', fact_name=fact, date_from=f_from, date_to=f_to, customer_id=f_cust, business_id=f_biz)
 
         if pw_df.empty:
             no_data(f"No {fact} facts found.")

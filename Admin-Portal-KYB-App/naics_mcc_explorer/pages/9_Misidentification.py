@@ -86,7 +86,7 @@ data_source_banner()
 # ── Client filter ─────────────────────────────────────────────────────────────
 from db.queries import load_paying_clients
 with st.spinner("Loading paying clients…"):
-    clients_df = load_paying_clients(f_from, f_to)
+    clients_df = get_data('paying_clients', date_from=f_from, date_to=f_to)
 
 client_options = ["All Paying Clients"] + (clients_df["client"].tolist() if not clients_df.empty else [])
 selected_client = st.selectbox("**Filter by Client Name**", client_options, key="mis_client")
@@ -125,7 +125,7 @@ section_header("📊 Section 1 — Platform Error Rate by Client",
                "% of each platform's wins that carry null, catch-all, or digit-format flags (S1+S2+S3).")
 
 with st.spinner("Loading error rate data…"):
-    err_df = load_platform_error_rate_by_client(f_from, f_to, client_filter)
+    err_df = get_data('platform_error_rate', date_from=f_from, date_to=f_to, client_name=client_filter)
 
 if err_df is None or err_df.empty:
     no_data()
@@ -201,7 +201,7 @@ section_header("🏭 Section 2 — Industry Sector Distribution by Client",
                "Concentration in sector 54 (Professional Services) for a staffing client = misidentification signal.")
 
 with st.spinner("Loading sector distribution…"):
-    sector_df = load_sector_mismatch_by_client(f_from, f_to, client_filter)
+    sector_df = get_data('sector_mismatch', date_from=f_from, date_to=f_to, client_name=client_filter)
 
 if sector_df is None or sector_df.empty:
     no_data()
@@ -296,7 +296,7 @@ section_header("🔬 Section 3 — Deep Misidentification Signals",
                "Includes NAICS description, MCC codes, industry description, and all vendor alternatives.")
 
 with st.spinner("Loading misidentification signals…"):
-    sig_df = load_misidentification_signals(f_from, f_to, client_filter)
+    sig_df = get_data('misidentification_signals', date_from=f_from, date_to=f_to, client_name=client_filter)
 
 if sig_df is None or sig_df.empty:
     no_data()

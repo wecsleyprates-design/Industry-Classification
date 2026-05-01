@@ -58,7 +58,7 @@ st.markdown("---")
 
 # ── Client filter (paying clients only) ───────────────────────────────────────
 with st.spinner("Loading paying clients…"):
-    clients_df = load_paying_clients(f_from, f_to)
+    clients_df = get_data('paying_clients', date_from=f_from, date_to=f_to)
 
 if clients_df.empty:
     no_data("No paying clients found via datascience.billing_prices for the selected date range.")
@@ -86,7 +86,7 @@ section_header("🏆 Section 1 — Winner Platform Distribution by Client",
                "Which platform wins the NAICS confidence race for each paying client?")
 
 with st.spinner("Loading platform distribution…"):
-    dist_df = load_client_platform_distribution(f_from, f_to, client_filter)
+    dist_df = get_data('client_platform_distribution', date_from=f_from, date_to=f_to, client_name=client_filter)
 
 if dist_df is None or dist_df.empty:
     no_data("No NAICS platform data found.")
@@ -227,7 +227,7 @@ section_header("🔢 Section 2 — NAICS Digit Length Distribution by Client",
                "Valid NAICS = exactly 6 digits. P0 often writes 5-digit integers (data type bug).")
 
 with st.spinner("Loading digit length data…"):
-    len_df = load_client_naics_length(f_from, f_to, client_filter)
+    len_df = get_data('client_naics_length', date_from=f_from, date_to=f_to, client_name=client_filter)
 
 if len_df is None or len_df.empty:
     no_data()
@@ -282,7 +282,7 @@ section_header("🔍 Section 3 — Applicant Submission vs Vendor Alternatives",
                "What P0 (the business itself) submitted, vs what ZoomInfo/Equifax/SERP returned in alternatives[].")
 
 with st.spinner("Loading applicant submission data…"):
-    p0_df = load_client_applicant_vs_vendor(f_from, f_to, client_filter)  # no row limit
+    p0_df = get_data('client_applicant_vs_vendor', date_from=f_from, date_to=f_to, client_name=client_filter)
 
 if p0_df is None or p0_df.empty:
     st.success("✅ No cases where the business's own submission won for the selected filters.")

@@ -48,7 +48,7 @@ st.markdown("---")
 # ── Canonical mapping reference table ─────────────────────────────────────────
 with st.expander("📚 View the official industry-to-payment-category mapping table"):
     with st.spinner("Loading mapping table…"):
-        pairs_df = load_canonical_pairs()
+        pairs_df = load_canonical_pairs()  # lookup table — always from Redshift
     if pairs_df is not None and not pairs_df.empty:
         st.caption(f"**{len(pairs_df):,} recognized industry + payment category combinations** in Worth's official mapping table")
         search = st.text_input("Search by NAICS or MCC code", "", key="pairs_search")
@@ -84,7 +84,7 @@ section_header("📊 NAICS+MCC Pair Status — Overall",
                f"Period: {f_from} → {f_to}")
 
 with st.spinner("Classifying NAICS+MCC pairs…"):
-    status_df = load_canonical_pair_status(f_from, f_to, f_cust, f_biz)
+    status_df = get_data('canonical_pair_status', date_from=f_from, date_to=f_to, customer_id=f_cust, business_id=f_biz)
 
 if status_df is None or status_df.empty:
     no_data("No NAICS/MCC facts found for the selected filters.")
@@ -188,7 +188,7 @@ section_header("👥 Canonical Pair Status by Customer",
                "Linked to sidebar date filter; select a specific customer in the sidebar to drill in.")
 
 with st.spinner("Loading per-customer pair status…"):
-    by_cust = load_canonical_pair_by_customer(f_from, f_to)
+    by_cust = get_data('canonical_pair_by_customer', date_from=f_from, date_to=f_to)
 
 if by_cust is None or by_cust.empty:
     no_data("Could not load per-customer canonical pair data.")

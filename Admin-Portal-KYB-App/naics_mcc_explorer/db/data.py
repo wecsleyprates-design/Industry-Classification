@@ -99,10 +99,12 @@ def _cache_dispatch(query_name: str, **kwargs) -> pd.DataFrame:
         "client_platform_distribution":  lambda: sq.get_client_platform_distribution(client_name),
         "misidentification_signals":     lambda: sq.get_misidentification_signals(client_name, business_id),
         "canonical_pair_status":         lambda: sq.get_misidentification_signals(client_name, business_id),
+        "canonical_pair_by_customer":    lambda: _cache_canonical_by_customer(),
         "business_facts":                lambda: sq.get_business_drilldown(business_id).get("facts", pd.DataFrame()),
         "changed_businesses":            lambda: sq.get_changed_businesses(client_name, kwargs.get("field","naics")),
         "snapshot_comparison":           lambda: sq.get_snapshot_comparison(fact_name, client_name),
         "paying_clients":                lambda: sq.get_client_list(client_name),
+        "client_applicant_vs_vendor":    lambda: _cache_p0_data(client_name, business_id),
         "client_naics_length":           lambda: _cache_naics_length(client_name),
         "client_applicant_vs_vendor":    lambda: _cache_p0_data(client_name, business_id),
         "platform_error_rate":           lambda: _cache_error_rate(client_name),
@@ -241,6 +243,31 @@ def _cache_error_rate(client_name=None) -> pd.DataFrame:
         GROUP BY client_name, naics_platform_id
         ORDER BY client_name, total_wins DESC
     """, conn, params=p)
+    conn.close()
+    return df
+
+
+def _cache_canonical_by_customer() -> pd.DataFrame:
+    """Canonical pair status aggregated by customer from cache."""
+    from db.cache_manager import get_conn
+    conn = get_conn()
+    df = pd.read_sql_query("""
+        SELECT client_name AS customer_name,
+               customer_id,
+               CASE
+                   WHEN naics_code='561499' OR mcc_code='5614' THEN 'Fallback / Invalid'
+                   WHEN naics_code IS NULL OR naics_code=''    THEN 'NAICS Missing'
+                   WHEN mcc_code IS NULL OR mcc_code=''        THEN 'MCC Missing'
+                   WHEN is_canonical_pair=1                     THEN 'Canonical Pair'
+                   ELSE 'Non-Canonical Pair'
+               END AS pair_status,
+               COUNT(DISTINCT business_id) AS businesses,
+               ROUND(100.0*COUNT(DISTINCT business_id)
+                   /SUM(COUNT(DISTINCT business_id)) OVER (PARTITION BY client_name),1) AS pct
+        FROM businesses WHERE is_latest=1
+        GROUP BY client_name, customer_id, pair_status
+        ORDER BY client_name, businesses DESC
+    """, conn)
     conn.close()
     return df
 

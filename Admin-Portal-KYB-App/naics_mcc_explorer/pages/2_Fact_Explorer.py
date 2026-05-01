@@ -46,7 +46,7 @@ with col_limit:
     row_limit = st.number_input("Row limit", min_value=50, max_value=5000, value=500, step=100, key="fe_lim")
 
 with st.spinner(f"Loading {fact_name} facts…"):
-    df = load_fact_explorer(fact_name, f_from, f_to, f_cust, f_biz, limit=int(row_limit))
+    df = get_data('fact_drilldown', fact_name=fact_name, date_from=f_from, date_to=f_to, customer_id=f_cust, business_id=f_biz)
 
 if df.empty:
     no_data(f"No `{fact_name}` facts found.")
