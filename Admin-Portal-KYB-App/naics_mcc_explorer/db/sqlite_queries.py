@@ -445,7 +445,8 @@ def get_client_list(client_name: str | None = None) -> pd.DataFrame:
     w = "WHERE " + " AND ".join(clauses)
     return _q(f"""
         SELECT
-            client_name,
+            client_name        AS client,
+            client_name        AS customer_name,
             customer_id,
             COUNT(DISTINCT business_id) AS business_count
         FROM businesses {w}
