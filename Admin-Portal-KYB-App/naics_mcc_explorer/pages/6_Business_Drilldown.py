@@ -1,9 +1,12 @@
 """Page 6 — Business Drilldown.
 
-Shows a single unified classification table for all NAICS/MCC facts.
-When the live API is loaded, shows the full Admin Portal JSON format
-(with schema, dependencies, description, ruleApplied, isNormalized)
-and flags any discrepancy between API and Redshift.
+Data priority:
+  1. SQLite cache (built from Admin Portal API, weekly refresh) — primary source
+  2. Live API call (on-demand, real-time) — comparison / override
+  3. Redshift (fallback when no cache and no API) — may be stale
+
+The Business Drilldown now shows cache data by default (same as Admin Portal).
+The live API button gives an on-demand refresh for a single business.
 """
 from __future__ import annotations
 import sys, os
@@ -14,10 +17,11 @@ import pandas as pd
 import json
 
 from utils.filters import render_sidebar, kpi, section_header, no_data, parse_alternatives
-from utils.platform_map import PLATFORM_MAP, platform_label, platform_color, FACT_NAMES
+from utils.platform_map import platform_label, platform_color, FACT_NAMES
 from utils.validators import validate_naics, validate_mcc, STATUS_COLORS, STATUS_ICONS
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
 from utils import worth_api
+from db.data import data_source_banner, _using_cache
 from db.queries import (
     load_business_facts, load_business_customer,
     load_naics_lookup, load_mcc_lookup, load_canonical_pairs,
@@ -33,9 +37,10 @@ h1,h2,h3{color:#f1f5f9;} .stMarkdown p{color:#cbd5e1;}
 filters = render_sidebar()
 
 st.markdown("# 🔍 Business Drilldown")
+data_source_banner()
 st.markdown(
     "Complete NAICS/MCC classification picture for a single business. "
-    "Load the live API data to compare against Redshift and see the full Admin Portal JSON format."
+    "When the local cache is active, all data matches the Admin Portal exactly."
 )
 platform_legend_panel()
 st.markdown("---")
@@ -45,25 +50,22 @@ default_bid = filters.get("business_id") or ""
 bid_input = st.text_input(
     "🔑 Business ID (UUID)",
     value=default_bid,
-    placeholder="e.g. 6a65f7bd-f1a5-42f9-9a8f-666b20009b24",
+    placeholder="e.g. 9dfa545e-a493-408d-9716-0f34970b3e14",
     key="drill_bid",
 )
 st.caption(
-    "💡 From the Admin Portal URL "
-    "`admin.joinworth.com/businesses/`**{A}**`/cases/{B}/kyb/...` — "
-    "use **{A}** (first UUID). The tab (Background, Business Registration, etc.) doesn't matter."
+    "💡 Use the first UUID from the Admin Portal URL: "
+    "`admin.joinworth.com/businesses/`**{THIS_UUID}**`/cases/{...}/kyb/...`"
 )
 
 if not bid_input.strip():
-    st.info("Enter a Business ID above to begin the drilldown.", icon="👆")
+    st.info("Enter a Business ID above to begin.", icon="👆")
     st.stop()
 
 business_id = bid_input.strip()
 
-# ── Load Redshift data ─────────────────────────────────────────────────────────
-with st.spinner("Loading from Redshift…"):
-    facts_df  = load_business_facts(business_id)
-    cust_df   = load_business_customer(business_id)
+# ── Load lookups ──────────────────────────────────────────────────────────────
+with st.spinner("Loading lookup tables…"):
     naics_lkp = load_naics_lookup()
     mcc_lkp   = load_mcc_lookup()
 
@@ -76,47 +78,119 @@ with st.spinner("Loading canonical mapping…"):
             for _, r in canon_df.iterrows()
         }
 
-# ── Resolve platform for Redshift rows ────────────────────────────────────────
-if facts_df is not None and not facts_df.empty:
-    facts_df["eff_pid"] = facts_df.apply(
-        lambda r: r["winning_platform_id"]
-        if str(r["winning_platform_id"]) not in ("unknown", "", "None")
-        else (r.get("legacy_source_name") or "unknown"),
-        axis=1,
-    ).astype(str)
-    facts_df["platform_name"] = facts_df["eff_pid"].apply(platform_label)
-    facts_df["conf_f"] = pd.to_numeric(facts_df["winning_confidence"], errors="coerce").fillna(0)
-else:
-    facts_df = pd.DataFrame()
+# ── Determine primary data source ─────────────────────────────────────────────
+cache_active = _using_cache()
+primary_data: dict = {}   # fact_name → fact_obj (Admin Portal format)
+primary_source_label = ""
+
+if cache_active:
+    # Try loading from SQLite cache first
+    try:
+        from db.cache_manager import get_conn
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT fact_name, winning_value, winning_platform_id, winning_platform_name, "
+            "winning_confidence, winner_updated_at, rule_applied, naics_description, "
+            "mcc_description, naics_validity, mcc_validity, is_canonical_pair, "
+            "alternatives_json "
+            "FROM facts WHERE is_latest=1 AND business_id=?",
+            (business_id,)
+        ).fetchall()
+        conn.close()
+
+        if rows:
+            for r in rows:
+                fn = r[0]
+                alts = json.loads(r[12]) if r[12] else []
+                primary_data[fn] = {
+                    "name":           fn,
+                    "value":          r[1],
+                    "source": {
+                        "platformId":  r[2],
+                        "name":        r[3],
+                        "confidence":  r[4],
+                        "updatedAt":   r[5],
+                    },
+                    "source.platformId":  r[2],
+                    "source.name":        r[3],
+                    "source.confidence":  r[4],
+                    "ruleApplied":    {"name": r[6]} if r[6] else None,
+                    "alternatives":   alts,
+                    "_naics_description": r[7],
+                    "_mcc_description":   r[8],
+                    "_naics_validity":    r[9],
+                    "_mcc_validity":      r[10],
+                    "_is_canonical_pair": r[11],
+                }
+            primary_source_label = "🗄️ Local Cache (from Admin Portal API)"
+    except Exception as e:
+        st.warning(f"Cache read failed: {e}. Falling back to Redshift.", icon="⚠️")
+
+if not primary_data:
+    # Fallback to Redshift
+    with st.spinner("Loading from Redshift…"):
+        facts_df = load_business_facts(business_id)
+    if facts_df is not None and not facts_df.empty:
+        facts_df["eff_pid"] = facts_df.apply(
+            lambda r: r["winning_platform_id"]
+            if str(r["winning_platform_id"]) not in ("unknown","","None")
+            else (r.get("legacy_source_name") or "unknown"), axis=1
+        ).astype(str)
+        for _, r in facts_df.iterrows():
+            fn = r["fact_name"]
+            raw = r.get("raw_json","")
+            alts = parse_alternatives(raw)
+            alt_list = [{
+                "value": a["alt_value"],
+                "source": {"platformId": a["alt_platform_id"], "name": a["alt_platform"]},
+                "confidence": a["alt_confidence"],
+                "updatedAt": a["alt_updated_at"],
+            } for a in alts]
+            primary_data[fn] = {
+                "name":    fn,
+                "value":   r["winning_value"],
+                "source": {
+                    "platformId": r["eff_pid"],
+                    "name":       r.get("platform_name",""),
+                    "confidence": float(r.get("conf_f", 0)),
+                    "updatedAt":  str(r.get("winner_updated_at","") or ""),
+                },
+                "source.platformId":  r["eff_pid"],
+                "source.name":        r.get("platform_name",""),
+                "source.confidence":  float(r.get("conf_f", 0)),
+                "ruleApplied": None,
+                "alternatives": alt_list,
+            }
+        primary_source_label = "📡 Redshift (may be behind Admin Portal)"
+    else:
+        facts_df = pd.DataFrame()
+        primary_source_label = "📡 Redshift"
 
 # ── Business header ────────────────────────────────────────────────────────────
+with st.spinner("Loading customer info…"):
+    cust_df = load_business_customer(business_id)
+
 st.markdown(f"### 🏢 `{business_id}`")
 if cust_df is not None and not cust_df.empty:
     c1, c2, c3 = st.columns(3)
     with c1: st.markdown(f"**Customer:** `{cust_df['customer_name'].iloc[0]}`")
-    with c2: st.markdown(f"**First seen (monitoring):** {cust_df['first_seen'].iloc[0]}")
-    with c3: st.markdown(f"**Last seen (monitoring):** {cust_df['last_seen'].iloc[0]}")
+    with c2: st.markdown(f"**Monitoring start:** {cust_df['first_seen'].iloc[0]}")
+    with c3: st.markdown(f"**Last seen:** {cust_df['last_seen'].iloc[0]}")
+
+st.info(f"**Data source:** {primary_source_label}", icon="📋")
 st.markdown("---")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# LIVE API SECTION
+# LIVE API COMPARISON
 # ═══════════════════════════════════════════════════════════════════════════════
-
-api_configured = worth_api.is_configured()
 api_facts = {}
-api_ok = False
+api_ok    = False
 
-if not api_configured:
-    st.info(
-        "**Live API comparison not configured.** "
-        "Add credentials to `.streamlit/secrets.toml` to enable real-time data.",
-        icon="🔑",
-    )
-else:
+if worth_api.is_configured():
     load_btn = st.button(
-        "🔄 Load live API data for this business",
+        "🔄 Compare with live API (real-time refresh for this business)",
         key="load_api_btn",
-        help="Calls /facts/business/{id}/details in real time",
+        help="Calls /facts/business/{id}/all — bypasses any local cache",
     )
     if load_btn or st.session_state.get(f"api_loaded_{business_id}"):
         st.session_state[f"api_loaded_{business_id}"] = True
@@ -125,9 +199,9 @@ else:
                 raw_api   = worth_api.get_business_details(business_id)
                 api_facts = worth_api.extract_classification_facts(raw_api)
                 api_ok    = True
-                st.success("✅ Live API data loaded successfully.")
+                st.success("✅ Live API data loaded.")
             except RuntimeError as e:
-                st.error(f"❌ API call failed: {e}", icon="🚨")
+                st.error(f"❌ {e}", icon="🚨")
 
 st.markdown("---")
 
@@ -136,9 +210,7 @@ st.markdown("---")
 # ═══════════════════════════════════════════════════════════════════════════════
 section_header(
     "📋 Classification Facts — Unified View",
-    "All NAICS/MCC facts in one table. "
-    + ("API column shows live data from Admin Portal." if api_ok else
-       "Load live API data above to add the API column.")
+    f"Source: {primary_source_label}" + (" | API column added" if api_ok else ""),
 )
 
 DISPLAY_FACTS = [
@@ -147,225 +219,202 @@ DISPLAY_FACTS = [
     "industry", "classification_codes",
 ]
 
-def _get_rds(fn: str) -> dict:
-    if facts_df.empty:
-        return {}
-    row = facts_df[facts_df["fact_name"] == fn]
-    if row.empty:
-        return {}
-    r = row.iloc[0]
-    return {
-        "value":      r.get("winning_value"),
-        "platform":   r.get("platform_name", ""),
-        "pid":        r.get("eff_pid", ""),
-        "confidence": r.get("conf_f", 0),
-        "updated_at": r.get("winner_updated_at", ""),
-        "received_at": str(r.get("received_at", "")),
-        "raw_json":   r.get("raw_json", ""),
-    }
-
-def _get_api(fn: str) -> dict:
-    fact = api_facts.get(fn) or {}
-    if not fact:
-        return {}
-    src = fact.get("source") or {}
-    val = fact.get("value")
-    if isinstance(src, dict):
-        pid    = str(src.get("platformId", ""))
-        pname  = src.get("name", "") or platform_label(pid)
-        conf   = src.get("confidence")
-        ts     = src.get("updatedAt", "")
-    else:
-        pid = pname = conf = ts = ""
-    return {
-        "value":       val,
-        "platform":    pname or platform_label(pid),
-        "pid":         pid,
-        "confidence":  float(conf) if conf is not None else None,
-        "updated_at":  ts,
-        "rule_applied":(fact.get("ruleApplied") or {}).get("name", ""),
-        "dependencies": ", ".join(fact.get("dependencies") or []),
-        "description": fact.get("description", ""),
-        "is_normalized": fact.get("isNormalized"),
-        "override":    fact.get("override"),
-        "alts_count":  len(fact.get("alternatives") or []),
-    }
+def _v(x): return str(x).strip() if x is not None else ""
 
 rows = []
 for fn in DISPLAY_FACTS:
-    rds = _get_rds(fn)
-    api = _get_api(fn)
-
-    rds_val = str(rds.get("value") or "").strip()
-    api_val = str(api.get("value") or "").strip()
+    p = primary_data.get(fn, {})
+    src = p.get("source") or {}
+    pid      = _v(src.get("platformId"))
+    val      = _v(p.get("value"))
+    pname    = src.get("name","") or platform_label(pid)
+    conf     = src.get("confidence")
+    updated  = _v(src.get("updatedAt",""))[:19]
+    rule     = (p.get("ruleApplied") or {}).get("name","")
+    n_alts   = len(p.get("alternatives") or [])
+    deps     = ", ".join(p.get("dependencies") or [])
 
     # Validity
     if fn == "naics_code":
-        validity_status = STATUS_ICONS.get(validate_naics(rds_val or api_val, naics_lkp)[0], "")
-    elif fn in ("mcc_code", "mcc_code_found"):
-        validity_status = STATUS_ICONS.get(validate_mcc(rds_val or api_val, mcc_lkp)[0], "")
+        vs = validate_naics(val, naics_lkp)
+        validity = STATUS_ICONS.get(vs[0],"") + f" {vs[0]}"
+    elif fn in ("mcc_code","mcc_code_found"):
+        vs = validate_mcc(val, mcc_lkp)
+        validity = STATUS_ICONS.get(vs[0],"") + f" {vs[0]}"
     else:
-        validity_status = ""
-
-    # Match check
-    if api_ok and rds_val and api_val:
-        match = "✅" if rds_val == api_val else "⚠️ Differ"
-    else:
-        match = "—"
+        validity = ""
 
     row = {
-        "Fact":                   fn,
-        "Redshift Value":         rds_val or "—",
-        "Redshift Platform":      rds.get("platform", "—"),
-        "Redshift Confidence":    round(rds.get("confidence", 0), 3) if rds else None,
-        "Redshift Last Updated":  (rds.get("updated_at") or "")[:19] or "—",
-        "Validity":               validity_status,
+        "Fact":           fn,
+        "Value":          val or "—",
+        "Platform":       f"{pname} (ID:{pid})" if pid else "—",
+        "Confidence":     round(float(conf),3) if conf is not None else None,
+        "Last Updated":   updated or "—",
+        "Rule Applied":   rule or "—",
+        "Dependencies":   deps or "—",
+        "Alternatives #": n_alts,
+        "Validity":       validity,
     }
 
     if api_ok:
-        row["API Value"]        = api_val or "—"
-        row["API Platform"]     = api.get("platform", "—")
-        row["API Confidence"]   = round(api.get("confidence", 0), 3) if api.get("confidence") is not None else None
-        row["API Updated At"]   = (api.get("updated_at") or "")[:19] or "—"
-        row["API Rule Applied"] = api.get("rule_applied", "")
-        row["Dependencies"]     = api.get("dependencies", "")
-        row["Alternatives #"]   = api.get("alts_count", 0)
-        row["Match"]            = match
+        af  = api_facts.get(fn, {}) or {}
+        as_ = af.get("source") or {}
+        av  = _v(af.get("value"))
+        ap  = as_.get("name","") or platform_label(_v(as_.get("platformId","")))
+        match = "✅" if (val and av and val == av) else ("⚠️ Differ" if (val and av) else "—")
+        row["API Value"]    = av or "—"
+        row["API Platform"] = ap or "—"
+        row["Match"]        = match
 
     rows.append(row)
 
 table_df = pd.DataFrame(rows)
-cfg = {"Redshift Confidence": st.column_config.NumberColumn(format="%.3f")}
-if api_ok:
-    cfg["API Confidence"] = st.column_config.NumberColumn(format="%.3f")
-    cfg["Alternatives #"] = st.column_config.NumberColumn(format="%d")
-
+cfg = {"Confidence": st.column_config.NumberColumn(format="%.3f"),
+       "Alternatives #": st.column_config.NumberColumn(format="%d")}
 st.dataframe(table_df, use_container_width=True, hide_index=True, column_config=cfg)
 
-# ── Match discrepancy note ─────────────────────────────────────────────────────
+# Mismatch warning
 if api_ok:
-    mismatches = table_df[table_df.get("Match", pd.Series()) == "⚠️ Differ"] if "Match" in table_df.columns else pd.DataFrame()
-    if not mismatches.empty:
+    mismatches = [r for r in rows if r.get("Match","") == "⚠️ Differ"]
+    if mismatches:
         analyst_note(
-            "⚠️ Discrepancy detected between Redshift and live API",
-            f"<strong>{len(mismatches)} fact(s)</strong> show different values in Redshift vs the live API. "
-            "This usually means a vendor enrichment ran recently and updated the fact, "
-            "but the Redshift federated view hasn't reflected it yet — or the federation layer cached an older value. "
-            "<strong>The API value is the current truth</strong> (same as what the Admin Portal shows).",
+            f"⚠️ {len(mismatches)} fact(s) differ between local cache and live API",
+            "The local cache may have been built before the latest vendor enrichment ran. "
+            "Re-run <code>python3 scripts/refresh_facts_cache.py</code> to update.",
             level="warning",
             bullets=[
-                f"<code>{r['Fact']}</code>: Redshift = <code>{r['Redshift Value']}</code> | API = <code>{r['API Value']}</code>"
-                for _, r in mismatches.iterrows()
+                f"<code>{r['Fact']}</code>: cache = <code>{r['Value']}</code> | API = <code>{r['API Value']}</code>"
+                for r in mismatches
             ],
-            action="Run the weekly cache refresh (python3 scripts/refresh_facts_cache.py) to sync Redshift-based analysis with the latest API data.",
+            action="python3 scripts/refresh_facts_cache.py  (from naics_mcc_explorer/ folder)",
         )
     else:
-        st.success("✅ Redshift and live API values match for all classification facts.")
+        st.success("✅ Local cache matches live API for all classification facts.")
 
 st.markdown("---")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ALTERNATIVES DETAIL
+# ALTERNATIVES
 # ═══════════════════════════════════════════════════════════════════════════════
 section_header("📦 Alternatives — Other Sources That Submitted a Value")
 
-# If API loaded, use API alternatives (richer). Otherwise parse from Redshift raw JSON.
 for fn in ["naics_code", "mcc_code", "mcc_code_found"]:
-    alts = []
-
+    # Prefer API alternatives if loaded, then cache/redshift
     if api_ok and fn in api_facts:
-        raw_alts = (api_facts.get(fn) or {}).get("alternatives") or []
+        src_label = "🌐 Live API"
+        raw_alts  = (api_facts.get(fn) or {}).get("alternatives") or []
+        alts = []
         for a in raw_alts:
-            src = a.get("source", {})
-            if isinstance(src, dict):
-                pid, conf, ts = str(src.get("platformId","")), src.get("confidence"), src.get("updatedAt","")
+            s = a.get("source",{})
+            if isinstance(s, dict):
+                pid, conf, ts = str(s.get("platformId","")), s.get("confidence"), s.get("updatedAt","")
             else:
-                pid, conf, ts = str(src), a.get("confidence"), ""
-            alts.append({
-                "Platform": platform_label(pid),
-                "Platform ID": pid,
-                "Value": a.get("value"),
-                "Confidence": conf,
-                "Updated At": ts,
-                "Source": "🌐 Live API",
-            })
+                pid, conf, ts = str(s), a.get("confidence"), ""
+            alts.append({"Platform": platform_label(pid), "ID": pid,
+                         "Value": a.get("value"), "Confidence": conf,
+                         "Updated At": ts, "Source": src_label})
     else:
-        rds = _get_rds(fn)
-        alts = [{**a, "Source": "🗄️ Redshift"} for a in parse_alternatives(rds.get("raw_json",""))]
-        if alts:
-            for a in alts:
-                a["Platform"]    = a.pop("alt_platform", "")
-                a["Platform ID"] = a.pop("alt_platform_id", "")
-                a["Value"]       = a.pop("alt_value", "")
-                a["Confidence"]  = a.pop("alt_confidence", "")
-                a["Updated At"]  = a.pop("alt_updated_at", "")
+        src_label = primary_source_label
+        p_alts = (primary_data.get(fn) or {}).get("alternatives") or []
+        alts = []
+        for a in p_alts:
+            s = a.get("source",{})
+            if isinstance(s, dict):
+                pid, conf, ts = str(s.get("platformId","")), s.get("confidence"), s.get("updatedAt","")
+            else:
+                pid, conf, ts = str(s), a.get("confidence"), ""
+            alts.append({"Platform": platform_label(pid), "ID": pid,
+                         "Value": a.get("value"), "Confidence": conf,
+                         "Updated At": ts, "Source": src_label})
 
     st.markdown(f"**`{fn}`** — {len(alts)} other source(s):")
     if alts:
         st.dataframe(pd.DataFrame(alts), hide_index=True, use_container_width=True)
     else:
-        st.caption("No alternatives found for this fact.")
+        st.caption("No alternatives found.")
 
 st.markdown("---")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# FULL API JSON — matching Admin Portal format exactly
+# FULL JSON VIEW — Admin Portal format
 # ═══════════════════════════════════════════════════════════════════════════════
-if api_ok:
-    section_header(
-        "🔬 Full API JSON — Admin Portal Format",
-        "Exactly what the Admin Portal sees. Includes schema, dependencies, description, "
-        "ruleApplied, isNormalized, override, and all flat source.* fields."
-    )
-    fact_to_show = st.selectbox(
-        "Select fact to inspect",
-        options=[fn for fn in DISPLAY_FACTS if fn in api_facts],
-        key="raw_api_sel",
-    )
-    if fact_to_show:
-        fact_obj = api_facts.get(fact_to_show, {})
-        # Reconstruct exactly as Admin Portal shows (with flat source.* fields)
-        display_obj = dict(fact_obj)
+section_header(
+    "🔬 Full JSON — Admin Portal Format",
+    "Includes schema, source, dependencies, description, ruleApplied, isNormalized, alternatives."
+)
+
+# Choose source: API if loaded, else primary_data
+json_source = api_facts if api_ok else primary_data
+json_source_label = "🌐 Live API" if api_ok else primary_source_label
+
+fact_options = [fn for fn in DISPLAY_FACTS if fn in json_source]
+if fact_options:
+    fact_sel = st.selectbox("Select fact", fact_options, key="json_fact_sel")
+    st.caption(f"Data from: {json_source_label}")
+    if fact_sel:
+        fact_obj = dict(json_source.get(fact_sel, {}))
+        # Remove internal cache keys
+        for k in list(fact_obj.keys()):
+            if k.startswith("_"):
+                del fact_obj[k]
+        # Add flat source.* fields if missing
         src = fact_obj.get("source") or {}
         if isinstance(src, dict):
-            display_obj["source.confidence"] = src.get("confidence")
-            display_obj["source.platformId"]  = src.get("platformId")
-            display_obj["source.name"]        = src.get("name")
-        st.json(display_obj)
+            fact_obj.setdefault("source.confidence", src.get("confidence"))
+            fact_obj.setdefault("source.platformId",  src.get("platformId"))
+            fact_obj.setdefault("source.name",        src.get("name"))
+        st.json(fact_obj)
 
-    st.markdown("---")
-
+if api_ok:
     with st.expander("📄 Full raw API response (all facts)"):
         st.json(api_facts)
 
-# ── Redshift raw JSON ──────────────────────────────────────────────────────────
-with st.expander("🗄️ Raw JSON from Redshift (internal storage format)"):
-    st.caption(
-        "⚠️ This is Worth AI's **internal storage format** — more compact than the Admin Portal JSON. "
-        "It may not reflect the latest facts if a vendor enrichment ran recently. "
-        "The live API (above) is always the current truth."
-    )
-    fact_to_show_rds = st.selectbox(
-        "Select fact",
-        options=[fn for fn in DISPLAY_FACTS if not facts_df.empty and fn in facts_df["fact_name"].values],
-        key="raw_rds_sel",
-    )
-    if fact_to_show_rds:
-        rds_row = facts_df[facts_df["fact_name"] == fact_to_show_rds]
-        if not rds_row.empty:
-            raw = rds_row.iloc[0].get("raw_json","")
-            try:
-                st.json(json.loads(str(raw)))
-            except Exception:
-                st.code(str(raw))
+st.markdown("---")
 
-sql_panel("Redshift facts query",
-          f"""SELECT f.name AS fact_name,
-       JSON_EXTRACT_PATH_TEXT(f.value,'value')                                    AS winning_value,
-       COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId'),'unknown')  AS platform_id,
-       JSON_EXTRACT_PATH_TEXT(f.value,'source','name')                            AS source_name,
-       COALESCE(JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence'),'0')        AS confidence,
-       JSON_EXTRACT_PATH_TEXT(f.value,'source','updatedAt')                       AS updated_at,
+# ═══════════════════════════════════════════════════════════════════════════════
+# TIMING ANALYSIS
+# ═══════════════════════════════════════════════════════════════════════════════
+with st.expander("🕐 Timing Analysis — When each source submitted its value"):
+    analyst_note(
+        "The ~4-minute timing gap",
+        "When a business submits the onboarding form, the system records it immediately with "
+        "score 1.0. External providers return ~4 minutes later. "
+        "<strong>Source Updated At</strong> = <code>source.updatedAt</code> inside the JSON — the real freshness indicator.",
+        level="warning",
+    )
+    timing_rows = []
+    for fn in FACT_NAMES:
+        p = primary_data.get(fn)
+        if not p: continue
+        src = p.get("source") or {}
+        alts = p.get("alternatives") or []
+        pid   = _v(src.get("platformId",""))
+        pname = src.get("name","") or platform_label(pid)
+        timing_rows.append({
+            "Fact": fn, "Role": "🏆 Winner",
+            "Platform": pname, "Value": _v(p.get("value")),
+            "Source Updated At": _v(src.get("updatedAt",""))[:19] or "—",
+        })
+        for a in alts:
+            s = a.get("source",{})
+            if isinstance(s, dict):
+                ap, ats = platform_label(_v(s.get("platformId",""))), _v(s.get("updatedAt",""))[:19]
+            else:
+                ap, ats = platform_label(str(s)), ""
+            timing_rows.append({
+                "Fact": fn, "Role": "🥈 Other source",
+                "Platform": ap, "Value": _v(a.get("value")),
+                "Source Updated At": ats or "— (older format)",
+            })
+    if timing_rows:
+        st.dataframe(pd.DataFrame(timing_rows), hide_index=True, use_container_width=True)
+
+sql_panel("Redshift direct query for this business",
+          f"""SELECT f.name, JSON_EXTRACT_PATH_TEXT(f.value,'value') AS value,
+       JSON_EXTRACT_PATH_TEXT(f.value,'source','platformId') AS platform_id,
+       JSON_EXTRACT_PATH_TEXT(f.value,'source','name') AS source_name,
+       JSON_EXTRACT_PATH_TEXT(f.value,'source','confidence') AS confidence,
+       JSON_EXTRACT_PATH_TEXT(f.value,'source','updatedAt') AS updated_at,
        f.received_at
 FROM rds_warehouse_public.facts f
 WHERE f.business_id = '{business_id}'
@@ -373,52 +422,3 @@ WHERE f.business_id = '{business_id}'
                  'naics_description','mcc_description','industry')
   AND LENGTH(f.value) < 60000
 ORDER BY f.name""", key_suffix="biz_drill")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# TIMING ANALYSIS
-# ═══════════════════════════════════════════════════════════════════════════════
-if not facts_df.empty:
-    st.markdown("---")
-    with st.expander("🕐 Timing Analysis — When each source submitted its value"):
-        analyst_note(
-            "The ~4-minute timing gap",
-            "When a business submits the onboarding form, the system records that submission "
-            "immediately with the highest score (1.0). External providers like ZoomInfo and SERP "
-            "run separately and return ~4 minutes later. "
-            "The <strong>Source Updated At</strong> timestamp comes from <code>source.updatedAt</code> inside "
-            "the JSON — this is the real freshness indicator. "
-            "<strong>Fact Received At</strong> is when the Redshift row was first created — it does not "
-            "update when the fact is refreshed.",
-            level="warning",
-        )
-        timing_rows = []
-        for fn in FACT_NAMES:
-            row = facts_df[facts_df["fact_name"] == fn]
-            if row.empty:
-                continue
-            r = row.iloc[0]
-            raw = r.get("raw_json","")
-            alts = parse_alternatives(raw)
-            winner_ts     = str(r.get("winner_updated_at","")).strip()
-            fact_received = str(r.get("received_at","")).strip()
-
-            timing_rows.append({
-                "Fact":              fn,
-                "Role":              "🏆 Winner",
-                "Platform":          platform_label(r["eff_pid"]),
-                "Value":             r.get("winning_value",""),
-                "Source Updated At": winner_ts or "—",
-                "Fact Received At":  fact_received or "—",
-            })
-            for a in alts:
-                timing_rows.append({
-                    "Fact":              fn,
-                    "Role":              "🥈 Other source",
-                    "Platform":          a["alt_platform"],
-                    "Value":             str(a["alt_value"] or ""),
-                    "Source Updated At": str(a["alt_updated_at"] or "—") or "— (older format)",
-                    "Fact Received At":  "—",
-                })
-
-        if timing_rows:
-            st.dataframe(pd.DataFrame(timing_rows), hide_index=True, use_container_width=True)
