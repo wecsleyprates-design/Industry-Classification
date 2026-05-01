@@ -384,6 +384,20 @@ else:
         "Supplier Alternatives","Supplier Platforms","Submission Last Updated","Agreement"
     ]
     st.dataframe(display, use_container_width=True, hide_index=True)
+    analyst_note(
+        "How to use this table",
+        "Each row = one business where the applicant's own form submission (P0) won the NAICS race. "
+        "The <strong>Supplier Alternatives</strong> column shows what ZoomInfo/Equifax/SERP actually returned — "
+        "these are the values that should have won but were overruled. "
+        "<strong>Agreement</strong> shows whether P0 and suppliers agreed or disagreed on the industry. "
+        "Full disagreement cases are the highest priority for correction.",
+        level="info",
+        bullets=[
+            "Full disagree + P0 null: business submitted blank AND suppliers had specific data — definitive data loss",
+            "Full disagree + P0 had value: applicant typed wrong industry AND suppliers disagreed — verify with business",
+            "~Same sector: broad industry correct, specific code wrong — lower severity, may self-correct on re-enrichment",
+        ],
+    )
     st.download_button("⬇️ Download P0 vs Supplier data",
                        display.to_csv(index=False).encode(),
                        "p0_vs_vendor.csv","text/csv", key="dl_p0")

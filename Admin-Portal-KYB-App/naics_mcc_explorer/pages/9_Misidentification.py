@@ -444,6 +444,21 @@ else:
                            cflag_df.to_csv(index=False).encode(),
                            "flags_by_customer.csv","text/csv", key="dl_cflags")
 
+    analyst_note(
+        "Reading the per-customer flag summary",
+        "Each row = one paying client. The flag counts show how many businesses triggered each "
+        "of the 7 misidentification signals. "
+        "<strong>Sort by 'Flagged' to find the clients most at risk of classification complaints.</strong> "
+        "The signal columns (S1–S7) help identify the dominant quality issue per client.",
+        level="info",
+        bullets=[
+            "High S1 (blank winner): many businesses submitted nothing — P0 confidence fix needed",
+            "High S3 (561499 catch-all): AI fallback dominating — no supplier coverage for this client",
+            "High S5 (sector mismatch): winner and alternatives disagree on industry sector — highest complaint risk",
+            "High S6 (multiple sources agreed but ignored): strongest indicator of systematic wrong classification",
+        ],
+    )
+
     st.markdown("---")
 
     # ── Signal breakdown bar ──────────────────────────────────────────────────
@@ -485,6 +500,23 @@ else:
             yaxis=dict(showgrid=False),
         )
         st.plotly_chart(fig_sig, use_container_width=True, key="mis_sig_bar")
+
+        analyst_note(
+            "Reading the signal breakdown bar",
+            "Each bar = total businesses that triggered that signal across all clients. "
+            "These are proxy indicators of likely misidentification — not confirmed errors, "
+            "but the strongest evidence we can compute without manual ground truth. "
+            "<strong>S5 and S6 are the most actionable</strong> — they indicate the correct "
+            "answer was available but not used.",
+            level="warning",
+            bullets=[
+                "S5 (sector mismatch): winner places business in completely different industry sector than all suppliers suggest — highest complaint risk",
+                "S6 (multiple sources agreed but ignored): 2+ independent sources returned same code but winner is different — strongest proxy for wrong decision",
+                "S4 (form overrides suppliers): applicant submission beat a supplier with different code — fix = lower P0 confidence",
+                "S3 (catch-all won): 561499 assigned — no specific industry determined — needs re-enrichment",
+            ],
+        )
+
         st.markdown("---")
 
         # ── Full detail table ─────────────────────────────────────────────────
