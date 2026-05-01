@@ -40,6 +40,7 @@ import json
 from utils.filters import render_sidebar, kpi, section_header, no_data, parse_alternatives
 from utils.platform_map import platform_label, platform_color, CATCH_ALL_NAICS
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
+from db.data import get_data, data_source_banner
 from db.queries import (
     load_misidentification_signals,
     load_platform_error_rate_by_client,
@@ -80,6 +81,7 @@ st.markdown(
     "is a sector-level disagreement — captured in Signal 3 below."
 )
 platform_legend_panel()
+data_source_banner()
 
 # ── Client filter ─────────────────────────────────────────────────────────────
 from db.queries import load_paying_clients

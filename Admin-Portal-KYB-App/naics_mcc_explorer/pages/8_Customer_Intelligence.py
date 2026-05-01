@@ -26,6 +26,7 @@ from utils.platform_map import (
     PLATFORM_MAP,
 )
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
+from db.data import get_data, data_source_banner
 from db.queries import (
     load_paying_clients,
     load_client_platform_distribution,
@@ -52,6 +53,7 @@ st.markdown(
     "Use the **Client filter** below to drill into a single client."
 )
 platform_legend_panel()
+data_source_banner()
 st.markdown("---")
 
 # ── Client filter (paying clients only) ───────────────────────────────────────

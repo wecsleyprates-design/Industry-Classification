@@ -12,7 +12,8 @@ from utils.filters import render_sidebar, kpi, section_header, no_data, parse_al
 from utils.platform_map import platform_label, platform_color, CATCH_ALL_MCC, KNOWN_INVALID_MCC
 from utils.validators import validate_mcc, STATUS_COLORS, STATUS_ICONS
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
-from db.queries import load_mcc_facts, load_mcc_lookup, _onboarded_cte
+from db.data import get_data, data_source_banner
+from db.queries import load_mcc_lookup, _onboarded_cte
 
 st.set_page_config(page_title="MCC Validity", page_icon="💳", layout="wide")
 st.markdown("""<style>
@@ -36,10 +37,11 @@ st.markdown(
     "**If the NAICS code is missing or wrong, the `mcc_code_from_naics` will also be wrong.**"
 )
 platform_legend_panel()
+data_source_banner()
 st.markdown("---")
 
 with st.spinner("Loading MCC facts…"):
-    df = load_mcc_facts(f_from, f_to, f_cust, f_biz)
+    df = get_data('mcc_facts', date_from=f_from, date_to=f_to, customer_id=f_cust, business_id=f_biz)
 with st.spinner("Loading MCC lookup…"):
     mcc_lookup = load_mcc_lookup()
 

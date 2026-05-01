@@ -15,10 +15,8 @@ from utils.platform_map import (
     DEPENDENT_FACT_NAMES, CLASSIFICATION_FACTS,
 )
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
-from db.queries import (
-    load_platform_winners, load_platform_winner_values,
-    load_fact_drilldown, _onboarded_cte,
-)
+from db.data import get_data, data_source_banner
+from db.queries import load_platform_winner_values, load_fact_drilldown, _onboarded_cte
 
 st.set_page_config(page_title="Platform Winners", page_icon="🏆", layout="wide")
 st.markdown("""<style>
@@ -33,6 +31,7 @@ f_cust = filters["customer_id"]
 f_biz  = filters["business_id"]
 
 st.markdown("# 🏆 Data Source Winner Distribution")
+data_source_banner()
 st.markdown(
     "When multiple data sources provide an industry code for the same business, the system picks the one with the highest score. "
     "This page shows which source is winning that comparison. "
@@ -94,7 +93,7 @@ def _make_bar(df: pd.DataFrame, title: str, chart_key: str) -> None:
 all_winners: dict[str, pd.DataFrame] = {}
 for fn in FACTS_TO_SHOW:
     with st.spinner(f"Loading {fn}…"):
-        df = load_platform_winners(fn, f_from, f_to, f_cust, f_biz)
+        df = get_data('platform_winners', fact_name=fn, date_from=f_from, date_to=f_to, customer_id=f_cust, business_id=f_biz)
     if df is not None and not df.empty:
         df["platform_id"] = df.apply(
             lambda r: r["platform_id"] if str(r["platform_id"]) not in ("unknown","","None")

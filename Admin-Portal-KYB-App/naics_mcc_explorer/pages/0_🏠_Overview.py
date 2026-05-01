@@ -16,7 +16,8 @@ import pandas as pd
 from utils.filters import render_sidebar, kpi, section_header, no_data
 from utils.platform_map import PLATFORM_MAP, platform_label, platform_color, CATCH_ALL_NAICS, CATCH_ALL_MCC
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
-from db.queries import load_overview, load_platform_winners, _onboarded_cte
+from db.data import get_data, data_source_banner, DATA_SOURCE
+from db.queries import load_platform_winners, _onboarded_cte
 
 # ── Dark theme override ────────────────────────────────────────────────────────
 st.markdown("""
@@ -60,10 +61,11 @@ analyst_note(
 st.markdown("---")
 
 # ── Overview KPIs ──────────────────────────────────────────────────────────────
+data_source_banner()
 section_header("📊 Platform Overview", f"Period: {f_from} → {f_to}")
 
 with st.spinner("Loading overview metrics…"):
-    ov_df = load_overview(f_from, f_to, f_cust)
+    ov_df = get_data("overview", date_from=f_from, date_to=f_to, customer_id=f_cust)
 
 if ov_df.empty or ov_df.iloc[0]["total_businesses"] == 0:
     no_data("No businesses found for the selected filters.")

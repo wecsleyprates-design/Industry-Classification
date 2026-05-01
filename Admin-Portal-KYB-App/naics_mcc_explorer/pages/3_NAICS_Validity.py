@@ -11,7 +11,8 @@ from utils.filters import render_sidebar, kpi, section_header, no_data, parse_al
 from utils.platform_map import platform_label, platform_color, CATCH_ALL_NAICS
 from utils.validators import validate_naics, STATUS_COLORS, STATUS_ICONS
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
-from db.queries import load_naics_facts, load_naics_lookup, _onboarded_cte
+from db.data import get_data, data_source_banner
+from db.queries import load_naics_lookup, _onboarded_cte
 
 st.set_page_config(page_title="NAICS Validity", page_icon="🔢", layout="wide")
 st.markdown("""<style>
@@ -33,10 +34,11 @@ st.markdown(
     "Also shows the values that other data sources submitted but didn't win — useful for spotting cases where a valid code existed but was overridden."
 )
 platform_legend_panel()
+data_source_banner()
 st.markdown("---")
 
 with st.spinner("Loading NAICS facts…"):
-    df = load_naics_facts(f_from, f_to, f_cust, f_biz)
+    df = get_data('naics_facts', date_from=f_from, date_to=f_to, customer_id=f_cust, business_id=f_biz)
 with st.spinner("Loading NAICS lookup…"):
     naics_lookup = load_naics_lookup()
 

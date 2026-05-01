@@ -12,7 +12,8 @@ import json
 from utils.filters import render_sidebar, kpi, section_header, no_data, parse_alternatives
 from utils.platform_map import platform_label, platform_color, FACT_NAMES
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
-from db.queries import load_fact_explorer, load_platform_winners, _onboarded_cte
+from db.data import get_data, data_source_banner
+from db.queries import load_fact_explorer, _onboarded_cte
 
 st.set_page_config(page_title="Fact Explorer", page_icon="🔭", layout="wide")
 st.markdown("""<style>
@@ -27,6 +28,7 @@ f_cust = filters["customer_id"]
 f_biz  = filters["business_id"]
 
 st.markdown("# 🔭 Data Explorer")
+data_source_banner()
 st.markdown(
     "Explore which data source provided the winning value for any data type — "
     "plus every other source that also submitted a value, even those that didn't win. "

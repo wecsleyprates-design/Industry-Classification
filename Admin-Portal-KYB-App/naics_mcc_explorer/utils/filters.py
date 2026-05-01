@@ -40,8 +40,9 @@ def _init_session_defaults() -> None:
 def render_sidebar() -> dict:
     """Render sidebar filters and return current filter state dict.
     Selections persist across page navigation via session_state.
+    Uses cache-aware loaders from db.data when cache is available.
     """
-    from db.queries import load_customers, load_businesses
+    from db.data import load_customers_unified as load_customers, load_businesses_unified as load_businesses
 
     # ── Pre-initialize defaults (only runs once per session) ──────────────
     _init_session_defaults()
