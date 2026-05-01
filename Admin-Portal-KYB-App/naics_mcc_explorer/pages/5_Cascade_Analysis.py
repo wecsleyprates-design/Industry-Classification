@@ -76,9 +76,10 @@ df["mcc_bad"]        = df["mcc_value"].apply(_bad_mcc)
 df["has_ai_mcc"]     = ~df["mcc_found_value"].apply(_null)
 df["has_naics_mcc"]  = ~df["mcc_from_naics_value"].apply(_null)
 
-# Platform labels
-df["naics_platform_name"] = df["naics_platform"].apply(platform_label)
-df["mcc_platform_name"]   = df["mcc_platform"].apply(platform_label)
+# Platform labels — handle both cache (mcc_platform_id) and Redshift (mcc_platform) column names
+df["naics_platform_name"] = df["naics_platform"].apply(platform_label) if "naics_platform" in df.columns else ""
+_mcc_pid_col = next((c for c in ["mcc_platform_id","mcc_platform"] if c in df.columns), None)
+df["mcc_platform_name"] = df[_mcc_pid_col].apply(platform_label) if _mcc_pid_col else ""
 
 # NAICS alternatives from raw JSON
 def _alt_vals(raw):
@@ -88,8 +89,12 @@ def _alt_plats(raw):
     alts = parse_alternatives(raw)
     return " | ".join(a["alt_platform"] for a in alts) if alts else ""
 
-df["naics_alt_values"]    = df["naics_raw_json"].apply(_alt_vals)
-df["naics_alt_platforms"] = df["naics_raw_json"].apply(_alt_plats)
+if "naics_raw_json" in df.columns:
+    df["naics_alt_values"]    = df["naics_raw_json"].apply(_alt_vals)
+    df["naics_alt_platforms"] = df["naics_raw_json"].apply(_alt_plats)
+else:
+    df["naics_alt_values"]    = ""
+    df["naics_alt_platforms"] = ""
 
 n_healthy    = int(df[df["naics_valid"] & ~df["mcc_null"] & ~df["mcc_catchall"]].shape[0])
 n_bad_naics  = int(df[df["naics_null"] | df["naics_catchall"]].shape[0])
