@@ -392,7 +392,7 @@ _fig.update_layout(
     height=_H, margin=dict(l=5,r=5,t=10,b=10),
     paper_bgcolor="#0f172a", plot_bgcolor="#0f172a",
     xaxis=dict(visible=False, range=[0, _W]),
-    yaxis=dict(visible=False, range=[0, _H], autorange="reversed"),
+    yaxis=dict(visible=False, range=[0, _H]),   # y=0 is TOP (form node), y=H is BOTTOM (mcc_code)
     showlegend=False,
 )
 st.plotly_chart(_fig, use_container_width=True, key="decision_tree")
@@ -420,9 +420,14 @@ if flow:
     has_n   = int(flow.get("has_naics", 0))
     no_n    = int(flow.get("no_naics", 0))
     catchall= int(flow.get("naics_catchall", 0))
+    specific_naics = has_n - catchall  # valid specific NAICS (not 561499)
     ai_fired= int(flow.get("ai_mcc_fired", 0))
     lkp_frd = int(flow.get("lookup_mcc_fired", 0))
+    both_ran = ai_fired + lkp_frd - total  # rough estimate of overlap
     ai_won  = int(flow.get("ai_won_mcc", 0))
+    # Lookup won = has final MCC but AI didn't win
+    final_mcc = total - int(flow.get("final_mcc_missing", 0))
+    lkp_won = max(0, final_mcc - ai_won)
     no_mcc  = int(flow.get("final_mcc_missing", 0))
     canon   = int(flow.get("canonical_pairs", 0))
     bad5614 = int(flow.get("has_5614", 0))
@@ -430,39 +435,87 @@ if flow:
 
     def _pct(n, d): return f"{100*n/d:.1f}%" if d else "—"
 
-    # Flow diagram as KPI cards
-    st.markdown("#### naics_code assignment")
-    c1,c2,c3,c4 = st.columns(4)
-    with c1: kpi("Total Businesses",    f"{total:,}",       "", "#3b82f6")
-    with c2: kpi("✅ Has NAICS value",  f"{has_n:,}",       _pct(has_n,total), "#22c55e")
-    with c3: kpi("⬜ No NAICS (null)",  f"{no_n:,}",        _pct(no_n,total), "#ef4444")
-    with c4: kpi("⚠️ Catch-all 561499", f"{catchall:,}",   _pct(catchall,total), "#f59e0b")
+    # ── Row 1: NAICS assignment ────────────────────────────────────────────
+    st.markdown("#### Step 1 — naics_code assignment")
+    st.caption(
+        "Out of all businesses, how many got a usable industry code? "
+        "**Specific** = valid 6-digit code that is NOT the 561499 catch-all."
+    )
+    c1,c2,c3,c4,c5 = st.columns(5)
+    with c1: kpi("Total Businesses",         f"{total:,}",       "", "#3b82f6")
+    with c2: kpi("✅ Specific NAICS",         f"{specific_naics:,}", _pct(specific_naics,total), "#22c55e")
+    with c3: kpi("⚠️ Catch-all (561499)",    f"{catchall:,}",    _pct(catchall,total), "#f59e0b")
+    with c4: kpi("⬜ No NAICS (null/blank)",  f"{no_n:,}",        _pct(no_n,total), "#ef4444")
+    with c5: kpi("📊 Total with any NAICS",  f"{has_n:,}",       _pct(has_n,total), "#6366f1")
 
     st.markdown("")
-    st.markdown("#### mcc derivation paths")
-    c5,c6,c7,c8 = st.columns(4)
-    with c5: kpi("AI MCC fired\n(mcc_code_found)",    f"{ai_fired:,}",  _pct(ai_fired,total), "#8b5cf6")
-    with c6: kpi("Lookup MCC fired\n(mcc_code_from_naics)", f"{lkp_frd:,}", _pct(lkp_frd,total), "#6366f1")
-    with c7: kpi("AI won final MCC",    f"{ai_won:,}",    _pct(ai_won,total), "#f97316")
-    with c8: kpi("No MCC at all",       f"{no_mcc:,}",    _pct(no_mcc,total), "#64748b")
+
+    # ── Row 2: MCC derivation — the key storytelling section ──────────────
+    st.markdown("#### Step 2 — mcc_code derivation (from valid NAICS)")
+    st.caption(
+        "Of the businesses with a NAICS code, how did MCC get assigned? "
+        "**mcc_code = mcc_code_found (AI) ?? mcc_code_from_naics (lookup).** "
+        "AI wins whenever it returns any non-null value. Lookup wins only when AI returned nothing."
+    )
+    c6,c7,c8,c9 = st.columns(4)
+    with c6: kpi(
+        "mcc_code_found ran (AI path)",
+        f"{ai_fired:,}", _pct(ai_fired,total),
+        "#8b5cf6",
+    )
+    with c7: kpi(
+        "mcc_code_from_naics ran (lookup path)",
+        f"{lkp_frd:,}", _pct(lkp_frd,total),
+        "#3b82f6",
+    )
+    with c8: kpi(
+        "AI won final mcc_code",
+        f"{ai_won:,}", _pct(ai_won,total),
+        "#f97316",
+    )
+    with c9: kpi(
+        "Lookup won final mcc_code",
+        f"{lkp_won:,}", _pct(lkp_won,total),
+        "#22c55e",
+    )
 
     st.markdown("")
-    st.markdown("#### classification quality")
-    c9,c10,c11 = st.columns(3)
-    with c9:  kpi("✅ Canonical Pairs",     f"{canon:,}",   _pct(canon,total), "#22c55e")
-    with c10: kpi("❌ Invalid MCC (5614)",  f"{bad5614:,}", _pct(bad5614,total), "#ef4444")
-    with c11: kpi("⚠️ Catch-all MCC (7399)",f"{c7399:,}",  _pct(c7399,total), "#f59e0b")
 
+    # ── Row 3: MCC quality ─────────────────────────────────────────────────
+    st.markdown("#### Step 3 — final mcc_code quality")
+    st.caption("How good is the mcc_code that was assigned? Canonical = exists in rel_naics_mcc mapping table.")
+    c10,c11,c12,c13,c14 = st.columns(5)
+    with c10: kpi("✅ Canonical NAICS+MCC",    f"{canon:,}",   _pct(canon,total), "#22c55e")
+    with c11: kpi("No MCC at all",             f"{no_mcc:,}",  _pct(no_mcc,total), "#64748b")
+    with c12: kpi("⚠️ Catch-all MCC (7399)",   f"{c7399:,}",   _pct(c7399,total), "#f59e0b")
+    with c13: kpi("❌ Invalid MCC (5614 — AI error)", f"{bad5614:,}", _pct(bad5614,total), "#ef4444")
+    with c14: kpi("Total with final MCC",      f"{final_mcc:,}", _pct(final_mcc,total), "#6366f1")
+
+    st.markdown("")
+
+    # ── The key question: when does lookup win? ────────────────────────────
     analyst_note(
-        "What these numbers reveal",
-        f"Out of <strong>{total:,} businesses</strong>: "
-        f"<strong>{no_n:,} ({_pct(no_n,total)})</strong> have no NAICS value at all — "
-        f"this is the direct result of P0 (Applicant Entry) winning with null. "
-        f"<strong>{ai_won:,} ({_pct(ai_won,total)})</strong> got their final MCC from AI "
-        f"at confidence 0.15 — because AI's non-null answer beats the lookup table's null confidence. "
-        f"Only <strong>{_pct(canon,total)}</strong> have a canonical NAICS+MCC pair — "
-        f"our best proxy for classification accuracy.",
-        level="warning" if no_n > total * 0.1 else "info",
+        "❓ When does mcc_code_from_naics (lookup) win over mcc_code_found (AI)?",
+        f"<strong>Answer: only when AI returned nothing</strong> (mcc_code_found is null). "
+        f"The final mcc_code is computed as: <code>mcc_code_found ?? mcc_code_from_naics</code> — "
+        f"nullish coalescing, not confidence comparison.<br><br>"
+        f"<strong>AI fired for {ai_fired:,} businesses ({_pct(ai_fired,total)})</strong> and won the final MCC for "
+        f"<strong>{ai_won:,} ({_pct(ai_won,total)})</strong> of them — because AI returned a non-null code "
+        f"(even at confidence 0.1–0.2) which automatically beats the lookup table's confidence=null.<br><br>"
+        f"<strong>Lookup won for {lkp_won:,} ({_pct(lkp_won,total)})</strong> businesses — "
+        f"these are cases where AI either didn't run or returned null, so <code>mcc_code_from_naics</code> "
+        f"was the only non-null value available.<br><br>"
+        f"<strong>The design implication:</strong> AI at confidence 0.1 always beats the canonical mapping "
+        f"table because <code>??</code> checks for null, not for quality. "
+        f"If AI returns <code>5614</code> (invalid) or <code>7399</code> (catch-all), it still wins "
+        f"over a perfectly valid lookup result.",
+        level="warning",
+        bullets=[
+            f"mcc_code_from_naics fired: {lkp_frd:,} — but only {lkp_won:,} actually became the final mcc_code",
+            f"The gap ({lkp_frd - lkp_won:,}) = businesses where lookup ran BUT AI also ran and won (AI non-null > lookup null confidence)",
+            f"Lookup wins exclusively when: AI returned null OR AI enrichment was not triggered for that business",
+            f"5,614 invalid AI codes and {c7399:,} catch-all 7399 codes are in the final mcc_code despite lookup having a valid answer",
+        ],
     )
 else:
     no_data("Flow counts not available. Build the cache or check the filters.")
