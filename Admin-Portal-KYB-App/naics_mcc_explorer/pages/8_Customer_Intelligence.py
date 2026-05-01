@@ -26,7 +26,7 @@ from utils.platform_map import (
     PLATFORM_MAP,
 )
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
-from db.data import get_data, data_source_banner
+from db.data import get_data, data_source_banner, enrich_with_business_name
 from db.queries import (
     load_paying_clients,
     load_client_platform_distribution,

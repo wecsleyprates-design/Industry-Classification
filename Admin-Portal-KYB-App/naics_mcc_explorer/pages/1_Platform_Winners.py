@@ -15,7 +15,7 @@ from utils.platform_map import (
     DEPENDENT_FACT_NAMES, CLASSIFICATION_FACTS,
 )
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
-from db.data import get_data, data_source_banner
+from db.data import get_data, data_source_banner, enrich_with_business_name
 from db.queries import load_platform_winner_values, load_fact_drilldown, _onboarded_cte
 
 st.set_page_config(page_title="Platform Winners", page_icon="🏆", layout="wide")
@@ -345,6 +345,7 @@ for tab, fn in zip(tabs, FACTS_TO_SHOW):
                     "MCC NAICS-Derived (mcc_code_from_naics)","MCC NAICS-Derived Last Updated",
                     "NAICS Description","MCC Description",
                 ]
+                display_dd = enrich_with_business_name(display_dd, "Business ID")
                 st.dataframe(display_dd, use_container_width=True, hide_index=True,
                              column_config={
                                  "Winner Confidence": st.column_config.NumberColumn(format="%.3f"),

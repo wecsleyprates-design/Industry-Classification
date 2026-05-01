@@ -320,6 +320,67 @@ def _cache_sector(client_name=None) -> pd.DataFrame:
     return df
 
 
+# ── Business name helpers ─────────────────────────────────────────────────────
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_business_names(business_ids: tuple) -> dict[str, str]:
+    """Returns {business_id: legal_name} for a list of business IDs.
+    Uses cache businesses table when available, otherwise queries Redshift facts.
+    """
+    if not business_ids:
+        return {}
+
+    if _using_cache():
+        try:
+            from db.cache_manager import get_conn
+            placeholders = ",".join("?" * len(business_ids))
+            conn = get_conn()
+            rows = conn.execute(
+                f"SELECT business_id, business_name FROM businesses "
+                f"WHERE is_latest=1 AND business_id IN ({placeholders})",
+                list(business_ids)
+            ).fetchall()
+            conn.close()
+            return {r[0]: r[1] or "" for r in rows if r[1]}
+        except Exception:
+            pass
+
+    # Redshift fallback
+    try:
+        from db.connection import run_query
+        bids = "','".join(business_ids)
+        df = run_query(f"""
+            SELECT f.business_id,
+                   JSON_EXTRACT_PATH_TEXT(f.value,'value') AS business_name
+            FROM rds_warehouse_public.facts f
+            WHERE f.name = 'business_name'
+              AND f.business_id IN ('{bids}')
+              AND LENGTH(f.value) < 60000
+        """)
+        if df is not None and not df.empty:
+            return dict(zip(df["business_id"], df["business_name"].fillna("")))
+    except Exception:
+        pass
+    return {}
+
+
+def enrich_with_business_name(df: pd.DataFrame,
+                               bid_col: str = "business_id") -> pd.DataFrame:
+    """Add a 'Business Name' column to any DataFrame that has a business_id column."""
+    if df is None or df.empty or bid_col not in df.columns:
+        return df
+    bids = tuple(df[bid_col].dropna().unique().tolist())
+    names = load_business_names(bids)
+    if names:
+        df = df.copy()
+        df.insert(
+            df.columns.tolist().index(bid_col) + 1,
+            "Business Name",
+            df[bid_col].map(names).fillna("")
+        )
+    return df
+
+
 # ── Customer/client name helpers ───────────────────────────────────────────────
 
 @st.cache_data(ttl=300, show_spinner=False)

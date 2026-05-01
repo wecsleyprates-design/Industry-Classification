@@ -12,7 +12,7 @@ import json
 from utils.filters import render_sidebar, kpi, section_header, no_data, parse_alternatives
 from utils.platform_map import platform_label, platform_color, FACT_NAMES
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
-from db.data import get_data, data_source_banner
+from db.data import get_data, data_source_banner, enrich_with_business_name
 from db.queries import load_fact_explorer, _onboarded_cte
 
 st.set_page_config(page_title="Fact Explorer", page_icon="🔭", layout="wide")
@@ -172,6 +172,7 @@ display = df[[c for c in display_cols if c in df.columns]].copy()
 display = display.rename(columns=display_cols)
 
 # Show condensed table
+display = enrich_with_business_name(display, "Business ID")
 st.dataframe(display, use_container_width=True, hide_index=True,
              column_config={"Confidence": st.column_config.NumberColumn(format="%.3f"),
                             "Last Updated (source.updatedAt)": st.column_config.TextColumn(),

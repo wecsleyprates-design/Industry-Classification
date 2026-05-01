@@ -11,7 +11,7 @@ from utils.filters import render_sidebar, kpi, section_header, no_data, parse_al
 from utils.platform_map import platform_label, platform_color, CATCH_ALL_NAICS
 from utils.validators import validate_naics, STATUS_COLORS, STATUS_ICONS
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
-from db.data import get_data, data_source_banner
+from db.data import get_data, data_source_banner, enrich_with_business_name
 from db.queries import load_naics_lookup, _onboarded_cte
 
 st.set_page_config(page_title="NAICS Validity", page_icon="🔢", layout="wide")
@@ -172,6 +172,7 @@ display.columns = [
     "Alternative Values","Alternative Platforms","Alt Confidences",
 ]
 
+display = enrich_with_business_name(display, 'Business ID') if 'Business ID' in display.columns else enrich_with_business_name(display)
 st.dataframe(display, use_container_width=True, hide_index=True,
              column_config={"Confidence": st.column_config.NumberColumn(format="%.3f"),
                             "Last Updated (source.updatedAt)": st.column_config.TextColumn()})

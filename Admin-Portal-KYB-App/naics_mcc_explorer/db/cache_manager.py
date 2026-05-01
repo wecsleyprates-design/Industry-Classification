@@ -176,6 +176,7 @@ CREATE TABLE IF NOT EXISTS businesses (
     business_id                 TEXT NOT NULL,
     customer_id                 TEXT,
     client_name                 TEXT,
+    business_name               TEXT,   -- legal name from business_name fact
     snapshot_date               TEXT NOT NULL,
     is_latest                   INTEGER DEFAULT 0,
 

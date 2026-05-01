@@ -12,7 +12,7 @@ from utils.filters import render_sidebar, kpi, section_header, no_data, parse_al
 from utils.platform_map import platform_label, platform_color, CATCH_ALL_MCC, KNOWN_INVALID_MCC
 from utils.validators import validate_mcc, STATUS_COLORS, STATUS_ICONS
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
-from db.data import get_data, data_source_banner
+from db.data import get_data, data_source_banner, enrich_with_business_name
 from db.queries import load_mcc_lookup, _onboarded_cte
 
 st.set_page_config(page_title="MCC Validity", page_icon="💳", layout="wide")
@@ -281,6 +281,7 @@ display_f.columns = [
     "Last Updated (source.updatedAt)","Status","Reason",
     "Alternative MCC Values","Alternative Platforms","Alt Confidences",
 ]
+display_f = enrich_with_business_name(display_f, 'Business ID') if 'Business ID' in display_f.columns else enrich_with_business_name(display_f)
 st.dataframe(display_f, use_container_width=True, hide_index=True,
              column_config={"Confidence": st.column_config.NumberColumn(format="%.3f"),
                             "Last Updated (source.updatedAt)": st.column_config.TextColumn()})

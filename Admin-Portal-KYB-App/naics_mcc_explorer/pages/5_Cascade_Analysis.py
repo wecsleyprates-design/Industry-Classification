@@ -11,7 +11,7 @@ from utils.filters import render_sidebar, kpi, section_header, no_data, parse_al
 from utils.platform_map import platform_label, platform_color, CATCH_ALL_NAICS, CATCH_ALL_MCC, KNOWN_INVALID_MCC
 from utils.validators import validate_naics, validate_mcc, STATUS_COLORS
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
-from db.data import get_data, data_source_banner
+from db.data import get_data, data_source_banner, enrich_with_business_name
 from db.queries import load_naics_lookup, load_mcc_lookup, _onboarded_cte
 
 st.set_page_config(page_title="Cascade Analysis", page_icon="⛓️", layout="wide")
@@ -235,6 +235,7 @@ with st.expander("Show full per-business data"):
     display.columns = list(present.values())
     display["NAICS Status"] = df["naics_value"].apply(lambda v: validate_naics(v, naics_lookup)[0])
     display["MCC Status"]   = df["mcc_value"].apply(lambda v: validate_mcc(v, mcc_lookup)[0])
+    display = enrich_with_business_name(display, "Business ID")
     st.dataframe(display, hide_index=True, use_container_width=True)
     st.download_button("⬇️ Download CSV", display.to_csv(index=False).encode(),
                        "cascade.csv","text/csv")

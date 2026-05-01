@@ -67,6 +67,7 @@ FACTS_OF_INTEREST = {
     "naics_code", "naics_description",
     "mcc_code", "mcc_code_found", "mcc_code_from_naics", "mcc_description",
     "industry", "classification_codes",
+    "business_name",   # legal name — shown in all tables alongside business_id
     "sos_match_boolean", "sos_active", "formation_state",
     "tin_match_boolean", "idv_passed_boolean",
     "watchlist_hits", "num_bankruptcies", "num_judgements", "num_liens",
@@ -414,6 +415,9 @@ def build_business_row(
                 return r.get(field)
         return None
 
+    # Legal business name — from business_name fact (applicant-submitted, winning value)
+    business_name = _get("business_name") or ""
+
     naics_val  = _get("naics_code")
     mcc_val    = _get("mcc_code")
     naics_pid  = _get("naics_code", "winning_platform_id")
@@ -448,6 +452,7 @@ def build_business_row(
         "business_id":          biz["business_id"],
         "customer_id":          biz["customer_id"],
         "client_name":          biz["client_name"],
+        "business_name":        business_name or None,
         "snapshot_date":        snapshot_date,
         "is_latest":            1,
         "naics_code":           naics_v_str or None,

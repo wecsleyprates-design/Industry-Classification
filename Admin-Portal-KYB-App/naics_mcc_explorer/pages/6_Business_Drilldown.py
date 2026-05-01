@@ -173,7 +173,15 @@ if not primary_data:
 with st.spinner("Loading customer info…"):
     cust_df = load_business_customer(business_id)
 
+
+# Try to get legal name from cache
+from db.data import load_business_names as _lbn
+_names = _lbn((business_id,))
+legal_name = _names.get(business_id, "")
+
 st.markdown(f"### 🏢 `{business_id}`")
+if legal_name:
+    st.markdown(f"**Legal Name:** {legal_name}")
 if cust_df is not None and not cust_df.empty:
     c1, c2, c3 = st.columns(3)
     with c1: st.markdown(f"**Customer:** `{cust_df['customer_name'].iloc[0]}`")

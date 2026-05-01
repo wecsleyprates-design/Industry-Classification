@@ -16,7 +16,7 @@ import pandas as pd
 from utils.filters import render_sidebar, kpi, section_header, no_data
 from utils.platform_map import platform_label, platform_color
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
-from db.data import get_data, data_source_banner
+from db.data import get_data, data_source_banner, enrich_with_business_name
 from db.queries import (
     load_canonical_pair_status, load_canonical_pair_by_customer,
     load_canonical_pairs, _onboarded_cte,
