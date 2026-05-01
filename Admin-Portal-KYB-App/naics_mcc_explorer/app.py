@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import streamlit as st
 
 pg = st.navigation([
+    st.Page("pages/A_Classification_Intelligence.py", title="Classification Intelligence", icon="🧬"),
     st.Page("pages/0_How_It_Works.py",          title="How It Works",          icon="📐"),
     st.Page("pages/1_Platform_Winners.py",      title="Platform Winners",      icon="🏆"),
     st.Page("pages/2_Fact_Explorer.py",         title="Fact Explorer",         icon="🔭"),
