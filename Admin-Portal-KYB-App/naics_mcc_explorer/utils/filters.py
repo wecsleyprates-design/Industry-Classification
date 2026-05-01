@@ -31,6 +31,8 @@ def _init_session_defaults() -> None:
         st.session_state["g_date_to"] = today
     if "g_customer_sel" not in st.session_state:
         st.session_state["g_customer_sel"] = "All Customers"
+    if "g_customer_id_direct" not in st.session_state:
+        st.session_state["g_customer_id_direct"] = "All"
     if "g_business_id" not in st.session_state:
         st.session_state["g_business_id"] = "All Businesses"
     if "g_fact_types" not in st.session_state:
@@ -73,7 +75,7 @@ def render_sidebar() -> dict:
     df_from = str(date_from)
     df_to   = str(date_to)
 
-    # ── Customer ──────────────────────────────────────────────────────────
+    # ── Customer Name (named clients only — no bare UUIDs) ────────────────
     st.sidebar.markdown("**👥 Customer Name**")
     with st.sidebar:
         with st.spinner("Loading customers…"):
@@ -85,29 +87,49 @@ def render_sidebar() -> dict:
             name  = str(row.get("customer_name", "")).strip()
             cid   = str(row.get("customer_id", "")).strip()
             count = row.get("business_count", 0)
-            if name and name != cid:
+            # Only show rows with a real name (not a UUID)
+            if name and name != cid and len(name) != 36:
                 return f"{name}  ({count:,} biz)"
-            return f"{cid}  ({count:,} biz)"
+            return None   # skip UUID-only entries
 
         cust_df["display"] = cust_df.apply(_label, axis=1)
-        options = ["All Customers"] + cust_df["display"].tolist()
+        named = cust_df[cust_df["display"].notna()]
+        name_options = ["All Customers"] + named["display"].tolist()
 
-        # Keep previous selection if it still exists in the new option list
-        prev = st.session_state.get("g_customer_sel", "All Customers")
-        if prev not in options:
+        prev_name = st.session_state.get("g_customer_sel", "All Customers")
+        if prev_name not in name_options:
             st.session_state["g_customer_sel"] = "All Customers"
 
-        selected = st.sidebar.selectbox(
-            "Customer Name",
-            options,
-            key="g_customer_sel",
-        )
-        if selected != "All Customers":
-            matched = cust_df[cust_df["display"] == selected]
+        selected_name = st.sidebar.selectbox("Customer Name", name_options, key="g_customer_sel")
+        if selected_name != "All Customers":
+            matched = named[named["display"] == selected_name]
             if not matched.empty:
                 customer_id = matched.iloc[0]["customer_id"]
     else:
-        st.sidebar.info("No customers found for this date range.")
+        st.sidebar.info("No named customers found for this date range.")
+
+    # ── Customer ID (all customers including UUID-only) ────────────────────
+    st.sidebar.markdown("**🔑 Customer ID**")
+    with st.sidebar:
+        with st.spinner("Loading customer IDs…"):
+            try:
+                # Always load from Redshift for the ID list (complete, includes UUID-only)
+                from db.queries import load_customers as _load_all_cust
+                all_cust_df = _load_all_cust(df_from, df_to)
+            except Exception:
+                all_cust_df = cust_df
+
+    if all_cust_df is not None and not all_cust_df.empty:
+        all_ids = ["All"] + sorted(all_cust_df["customer_id"].dropna().unique().tolist())
+        prev_cid = st.session_state.get("g_customer_id_direct", "All")
+        if prev_cid not in all_ids:
+            st.session_state["g_customer_id_direct"] = "All"
+        selected_cid = st.sidebar.selectbox("Customer ID", all_ids, key="g_customer_id_direct")
+        # Customer ID selection takes precedence over Name selection
+        if selected_cid != "All":
+            customer_id = selected_cid
+    else:
+        st.sidebar.info("No customers found.")
 
     # ── Business ID ────────────────────────────────────────────────────────
     st.sidebar.markdown("**🏢 Business ID**")

@@ -275,13 +275,28 @@ def _cache_sector(client_name=None) -> pd.DataFrame:
 def load_customers_unified(date_from=None, date_to=None) -> pd.DataFrame:
     """Returns paying clients from cache or Redshift.
     Columns: customer_id, customer_name, business_count
+
+    When using cache: only returns rows where client_name is a real name
+    (not a bare UUID). UUIDs appear when billing_prices had no match for
+    that customer_id — they are excluded from the Name dropdown and
+    accessible via the Customer ID filter instead.
     """
     if _using_cache():
         from db.cache_manager import get_conn
         conn = get_conn()
+        # Exclude rows where client_name looks like a UUID (xxxxxxxx-xxxx-...)
+        # A UUID has exactly 36 chars and matches the 8-4-4-4-12 hex pattern
         df = pd.read_sql_query(
-            "SELECT customer_id, client_name AS customer_name, COUNT(DISTINCT business_id) AS business_count "
-            "FROM businesses WHERE is_latest=1 GROUP BY customer_id, client_name ORDER BY business_count DESC",
+            """SELECT customer_id,
+                      client_name AS customer_name,
+                      COUNT(DISTINCT business_id) AS business_count
+               FROM businesses
+               WHERE is_latest=1
+                 AND client_name IS NOT NULL
+                 AND LENGTH(client_name) != 36
+                 AND client_name NOT LIKE '________-____-____-____-____________'
+               GROUP BY customer_id, client_name
+               ORDER BY business_count DESC""",
             conn
         )
         conn.close()
