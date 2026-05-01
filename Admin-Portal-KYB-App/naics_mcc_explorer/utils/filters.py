@@ -170,16 +170,35 @@ def render_sidebar() -> dict:
     st.sidebar.markdown("---")
     try:
         from db.cache_manager import cache_exists, get_cache_meta
+        from datetime import datetime as _dt
         if cache_exists():
             meta = get_cache_meta()
             snap = meta.get("snapshot_date","")[:16].replace("T"," ")
             n_biz = meta.get("total_businesses", 0)
+            # Calculate staleness
+            snap_date_str = meta.get("snapshot_date","")[:10]
+            days_old = 0
+            stale_color = "#22c55e"
+            stale_label = "Current"
+            try:
+                snap_d = _dt.strptime(snap_date_str, "%Y-%m-%d").date()
+                days_old = (_dt.utcnow().date() - snap_d).days
+                if days_old > 7:
+                    stale_color = "#ef4444"
+                    stale_label = f"⚠️ {days_old}d old — refresh needed"
+                elif days_old > 1:
+                    stale_color = "#f59e0b"
+                    stale_label = f"⏰ {days_old}d old"
+            except Exception:
+                pass
+            border = stale_color
             st.sidebar.markdown(
-                f"<div style='background:#0d2818;border:1px solid #22c55e;border-radius:6px;"
+                f"<div style='background:#0d2818;border:1px solid {border};border-radius:6px;"
                 f"padding:8px 10px;font-size:.78rem'>"
-                f"<div style='color:#22c55e;font-weight:700'>🗄️ Local Cache Active</div>"
+                f"<div style='color:{border};font-weight:700'>🗄️ Local Cache · {stale_label}</div>"
                 f"<div style='color:#6ee7b7'>Data as of: {snap}</div>"
                 f"<div style='color:#6ee7b7'>{n_biz:,} businesses</div>"
+                f"{'<div style=\"color:#fcd34d;margin-top:4px\">Run refresh_facts_cache.py</div>' if days_old > 1 else ''}"
                 f"</div>",
                 unsafe_allow_html=True
             )
@@ -189,7 +208,7 @@ def render_sidebar() -> dict:
                 "padding:8px 10px;font-size:.78rem'>"
                 "<div style='color:#f59e0b;font-weight:700'>📡 No Local Cache</div>"
                 "<div style='color:#fcd34d'>Reading live from Redshift</div>"
-                "<div style='color:#fcd34d'>Run the refresh script to build cache</div>"
+                "<div style='color:#fcd34d'>Run refresh_facts_cache.py to build</div>"
                 "</div>",
                 unsafe_allow_html=True
             )

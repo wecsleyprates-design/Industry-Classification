@@ -64,19 +64,22 @@ if not bid_input.strip():
 
 business_id = bid_input.strip()
 
-# ── Load lookups ──────────────────────────────────────────────────────────────
-with st.spinner("Loading lookup tables…"):
-    naics_lkp = load_naics_lookup()
-    mcc_lkp   = load_mcc_lookup()
+# ── Load lookups — cached in session state so they only load once per session ──
+if "drill_naics_lkp" not in st.session_state:
+    with st.spinner("Loading lookup tables (one-time)…"):
+        st.session_state["drill_naics_lkp"] = load_naics_lookup()
+        st.session_state["drill_mcc_lkp"]   = load_mcc_lookup()
+        canon_df = load_canonical_pairs()
+        st.session_state["drill_canonical"] = set()
+        if canon_df is not None and not canon_df.empty:
+            st.session_state["drill_canonical"] = {
+                (str(r["naics_code"]).strip(), str(r["mcc_code"]).strip())
+                for _, r in canon_df.iterrows()
+            }
 
-with st.spinner("Loading canonical mapping…"):
-    canon_df = load_canonical_pairs()
-    canonical_pairs = set()
-    if canon_df is not None and not canon_df.empty:
-        canonical_pairs = {
-            (str(r["naics_code"]).strip(), str(r["mcc_code"]).strip())
-            for _, r in canon_df.iterrows()
-        }
+naics_lkp       = st.session_state["drill_naics_lkp"]
+mcc_lkp         = st.session_state["drill_mcc_lkp"]
+canonical_pairs = st.session_state["drill_canonical"]
 
 # ── Determine primary data source ─────────────────────────────────────────────
 cache_active = _using_cache()
@@ -178,6 +181,27 @@ if cust_df is not None and not cust_df.empty:
     with c3: st.markdown(f"**Last seen:** {cust_df['last_seen'].iloc[0]}")
 
 st.info(f"**Data source:** {primary_source_label}", icon="📋")
+
+# ── Stale cache warning ────────────────────────────────────────────────────────
+if cache_active:
+    from db.cache_manager import get_cache_meta
+    from datetime import datetime, timedelta
+    meta = get_cache_meta()
+    snap_str = meta.get("snapshot_date","")[:10]
+    if snap_str:
+        try:
+            snap_date = datetime.strptime(snap_str, "%Y-%m-%d").date()
+            days_old  = (datetime.utcnow().date() - snap_date).days
+            if days_old > 1:
+                st.warning(
+                    f"⚠️ **Cache is {days_old} days old** (built {snap_str}). "
+                    "The Admin Portal may show newer data. "
+                    "Re-run `python3 scripts/refresh_facts_cache.py` to update.",
+                    icon="⏰",
+                )
+        except Exception:
+            pass
+
 st.markdown("---")
 
 # ═══════════════════════════════════════════════════════════════════════════════
