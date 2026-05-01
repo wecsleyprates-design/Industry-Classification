@@ -90,6 +90,8 @@ with st.spinner("Loading paying clients…"):
 
 if not clients_df.empty and "client" not in clients_df.columns and "client_name" in clients_df.columns:
     clients_df = clients_df.rename(columns={"client_name": "client"})
+if not clients_df.empty:
+    clients_df = clients_df[clients_df["client"].notna() & (clients_df["client"].str.len() != 36)]
 client_options = ["All Paying Clients"] + (clients_df["client"].tolist() if not clients_df.empty else [])
 selected_client = st.selectbox("**Filter by Client Name**", client_options, key="mis_client")
 client_filter = None if selected_client == "All Paying Clients" else selected_client

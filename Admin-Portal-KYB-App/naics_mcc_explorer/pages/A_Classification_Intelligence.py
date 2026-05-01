@@ -66,6 +66,11 @@ else:
 if not clients_df.empty:
     if "client" not in clients_df.columns and "client_name" in clients_df.columns:
         clients_df = clients_df.rename(columns={"client_name":"client"})
+    # Filter out bare UUIDs (36-char hex strings)
+    clients_df = clients_df[
+        clients_df["client"].notna() &
+        (clients_df["client"].str.len() != 36)
+    ]
     client_opts = ["All Paying Clients"] + clients_df["client"].tolist()
     sel_client = st.selectbox("**Filter by Client**", client_opts, key="ci_client")
     client_filter = None if sel_client == "All Paying Clients" else sel_client
@@ -104,43 +109,64 @@ The Fact Engine applies the **`factWithHighestConfidence`** rule — the source 
 highest confidence score wins and becomes the `naics_code` winner.
 All other sources are stored in `alternatives[]`.
 
-**Sources in priority order (by typical confidence):**
+**Sources for `naics_code` — defined in `businessDetails/index.ts:278`:**
 
-| Source | Platform ID | Confidence | Notes |
-|---|---|---|---|
-| ZoomInfo | P24 | ~0.8–1.0 | Primary firmographics — best NAICS source |
-| Equifax | P17 | ~0.7–1.0 | Credit bureau firmographics |
-| SERP Scrape | P22 | ~0.3–1.0 | Web scraping — variable quality |
-| OpenCorporates | P23 | ~0.9–1.0 | Business registry codes |
-| Middesk | P16 | ~0.2–1.0 | SOS-based classification |
-| **Applicant Entry** | **P0** | **1.0 (hardcoded)** | **⚠️ THE BUG: always 1.0, beats everyone** |
-| AI NAICS Enrichment | P31 | 0.15 (fixed) | Last resort — runs when vendors fail |
+| Source | Platform ID | Source weight | Fact-level weight | Runtime confidence | Notes |
+|---|---|---|---|---|---|
+| Equifax | P17 | 0.7 | (default 1) | set at runtime | First in array |
+| ZoomInfo | P24 | 0.8 | (default 1) | set at runtime | Primary firmographics |
+| OpenCorporates | P23 | 0.9 | (default 1) | set at runtime | Business registry |
+| SERP Scrape | P22 | (default) | **0.3** | heuristic | Variable quality |
+| Trulioo (business) | P38 | 0.8 | **0.7** | set at runtime | PSC classification |
+| **Applicant Entry** | **P0** | **10** | **0.2** | **1.0 (hardcoded)** | **⚠️ source confidence=1 hardcoded in sources.ts:148** |
+| AI NAICS Enrichment | P31 | (default) | **0.1** | 0.1–0.2 (mapped from HIGH/MED/LOW) | Last resort |
 
-**Why P0 (Applicant Entry) always wins:**
+**The arbitration rule (`factWithHighestConfidence`, rules.ts:36-75):**
 
+```typescript
+// 1. Compare confidence scores
+if (|confidenceA - confidenceB| > WEIGHT_THRESHOLD) {
+    // Strict confidence ordering — higher wins, no weight applied
+} else {
+    // Within 0.05: use weightedFactSelector — higher WEIGHT wins
+}
+// WEIGHT_THRESHOLD = 0.05 (rules.ts:9)
 ```
-sources.ts:148:
-businessDetails: {
-    confidence: 1,   ← hardcoded maximum confidence
-    platformId: 0,
-    getter: async (businessID) => { return business_from_onboarding_form; }
+
+**Does P0 always win? No — it depends on the confidence gap:**
+
+The key insight from reading the actual code:
+- P0 source has `confidence: 1.0` (hardcoded, `sources.ts:148`) AND source `weight: 10`
+- For `naics_code` specifically, the fact-level entry sets `weight: 0.2` (`businessDetails/index.ts:313`)
+- ZoomInfo has source weight `0.8` and no fact-level weight override
+
+**Case 1: ZoomInfo confidence < 0.95**
+Gap = 1.0 - 0.95+ = >0.05 → pure confidence comparison → **P0 wins** (even with null value)
+
+**Case 2: ZoomInfo confidence ≥ 0.95 (within 0.05 of P0)**
+Gap ≤ 0.05 → `weightedFactSelector` uses weights:
+- P0 fact-level weight = **0.2** (defined in businessDetails/index.ts:313)
+- ZoomInfo effective weight = **0.8** (source weight, no fact override)
+- **ZoomInfo wins the tie-break** (0.8 > 0.2)
+
+**Case 3: businessDetails value is null and schema validation**
+The `naics_code` entry for businessDetails has `schema: z.string().regex(/^\\d{6}$/)`.
+When P0 submits null or a non-6-digit value, `coerceValueToSchema` is called with
+`returnOnFailure: "value"` — meaning schema coercion failure returns the original (bad) value.
+The null or invalid value still enters arbitration. However, in the `factWithHighestConfidence`
+rule, this line filters out undefined and empty arrays but NOT null:
+```typescript
+if (fact.value === undefined || (Array.isArray(fact.value) && fact.value.length === 0)) {
+    return acc;  // skip this fact
 }
 ```
+**null is NOT filtered** — so P0 with null value enters arbitration and wins on confidence.
 
-When a business submits `null` for their industry on the onboarding form, P0 writes:
-```json
-{"value": null, "source": {"platformId": 0, "confidence": 1.0, "updatedAt": "..."}}
-```
-
-ZoomInfo returns `811111` with confidence 0.8 four minutes later. The arbitration engine
-compares 1.0 vs 0.8 and P0 wins — even though its value is null.
-
-**The weight system that should prevent this (but doesn't):**
-
-`rules.ts:9: WEIGHT_THRESHOLD = 0.05`
-
-Weight is only used as a tiebreaker when two confidences are within 0.05 of each other.
-P0 at 1.0 vs ZoomInfo at 0.8 = gap of 0.2 → weight is never applied.
+**When does the API enrichment refresh fix this?**
+When `GET /facts/business/{id}/details` is called (or the integration service re-runs),
+all sources are re-fetched in a new engine run. If ZoomInfo returns with confidence ≥ 0.95,
+ZoomInfo wins via weight (0.8 > 0.2). This explains why calling the API at scale "fixed" the
+Redshift data — it triggered re-arbitration where ZoomInfo won on the weight tiebreaker.
 
 ---
 
@@ -213,23 +239,33 @@ regardless of whether the AI's answer is more or less accurate.
 
 ---
 
-## The Full Cascade: How One Bad Decision Breaks Everything
+## The Full Cascade: How One Bad NAICS Decision Breaks Six Facts
 
 ```
-naics_code wrong (P0 wins with null or wrong value)
+naics_code wrong (P0 null wins when vendor confidence < 0.95,
+                  OR vendor returns wrong code and wins)
     ↓
-mcc_code_from_naics wrong or null (lookup of wrong NAICS)
+mcc_code_from_naics wrong or null
+    (rel_naics_mcc lookup of the wrong NAICS → wrong or missing MCC)
     ↓
-mcc_code wrong (AI at 0.15 wins over null lookup)
+mcc_code wrong
+    (foundMcc?.value ?? inferredMcc?.value — AI at 0.1–0.2 wins over null lookup)
     ↓
-mcc_description wrong (lookup of wrong mcc_code)
+mcc_description wrong   (core_mcc_code lookup of wrong mcc_code)
     ↓
-naics_description wrong (lookup of wrong naics_code)
+naics_description wrong (core_naics_code lookup of wrong naics_code)
     ↓
-industry wrong (2-digit sector of wrong naics_code)
+industry wrong          (naics_code.substring(0,2) → wrong sector)
 ```
 
 **Six facts broken by one bad NAICS arbitration decision.**
+
+**Important: the cascade was partially correct in the data we observed.**
+When the API was called at scale on May 1, ZoomInfo's returned confidence for many
+businesses was ≥ 0.95, putting it within the 0.05 WEIGHT_THRESHOLD of P0's 1.0.
+ZoomInfo's fact-level weight (0.8) beat P0's fact-level weight (0.2) → ZoomInfo won →
+naics_code was updated → all 6 downstream facts were recomputed correctly.
+The Redshift counts changing was a consequence of this re-arbitration, not a bug.
 
 ---
 
@@ -474,16 +510,24 @@ if alt_cov is not None and not alt_cov.empty:
 
 if agree_df is not None and not agree_df.empty:
     st.markdown("**Vendor agreement matrix — when winner and vendor alternative co-occur, do they agree?**")
-    fig_ag = px.scatter(agree_df, x="co_occurrences", y="agreement_pct",
-                        text="alt_source", color="winner_source",
-                        size="co_occurrences", size_max=40,
-                        labels={"co_occurrences":"Co-occurrences","agreement_pct":"Agreement %",
-                                "winner_source":"Winner","alt_source":"Alternative"},
-                        title="Agreement rate between winner and each alternative source")
-    fig_ag.update_traces(textposition="top center")
-    fig_ag.update_layout(height=400, paper_bgcolor="#0f172a", plot_bgcolor="#0f172a",
-                         font_color="#cbd5e1")
-    st.plotly_chart(fig_ag, use_container_width=True, key="agree_scatter")
+    st.caption(
+        "Each row = one (winner source, alternative source) pair. "
+        "Agreement % = how often they returned the same NAICS code. "
+        "High agreement with a low canonical rate = both wrong together. "
+        "Low agreement = genuine disagreement about the business's industry."
+    )
+    agree_display = agree_df[["winner_source","alt_source","co_occurrences",
+                               "agreed","disagreed","agreement_pct"]].copy()
+    agree_display.columns = ["Winner Source","Alternative Source","Co-occurrences",
+                              "Agreed on Same Code","Disagreed","Agreement %"]
+    agree_display = agree_display.sort_values("Co-occurrences", ascending=False)
+    st.dataframe(agree_display, use_container_width=True, hide_index=True,
+                 column_config={
+                     "Co-occurrences": st.column_config.NumberColumn(format="%d"),
+                     "Agreed on Same Code": st.column_config.NumberColumn(format="%d"),
+                     "Disagreed": st.column_config.NumberColumn(format="%d"),
+                     "Agreement %": st.column_config.NumberColumn(format="%.1f%%"),
+                 })
 
 if suppressed_df is not None and not suppressed_df.empty:
     n_supp = len(suppressed_df)

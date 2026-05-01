@@ -260,12 +260,13 @@ def load_suppressed_correct_answer(client_name: str = None) -> pd.DataFrame:
             SELECT
                 f.business_id,
                 f.client_name,
-                f.business_name,
+                b.business_name,
                 f.winning_value                 AS p0_value,
                 f.winning_confidence            AS p0_confidence,
                 GROUP_CONCAT(a.alt_platform_name || ': ' || a.alt_value, ' | ') AS vendor_alternatives,
                 COUNT(DISTINCT a.alt_platform_id) AS vendor_count
             FROM facts f
+            LEFT JOIN businesses b ON b.business_id=f.business_id AND b.is_latest=1
             JOIN alternatives a
                 ON a.business_id=f.business_id
                 AND a.fact_name='naics_code'
@@ -273,7 +274,7 @@ def load_suppressed_correct_answer(client_name: str = None) -> pd.DataFrame:
                 AND a.alt_platform_id IN ('17','22','24')
                 AND a.alt_value IS NOT NULL AND a.alt_value != ''
             {w}
-            GROUP BY f.business_id, f.client_name, f.business_name,
+            GROUP BY f.business_id, f.client_name, b.business_name,
                      f.winning_value, f.winning_confidence
             ORDER BY vendor_count DESC
             LIMIT 500
