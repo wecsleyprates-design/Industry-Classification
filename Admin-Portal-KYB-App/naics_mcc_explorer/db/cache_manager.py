@@ -17,9 +17,14 @@ from datetime import datetime
 from pathlib import Path
 
 # ── File location ──────────────────────────────────────────────────────────────
-# Option A: SQLite file lives next to the app in the naics_mcc_explorer folder
-_THIS_DIR   = Path(__file__).parent.parent  # naics_mcc_explorer/
-CACHE_DB    = _THIS_DIR / "facts_cache.sqlite"
+# The cache file always lives in the naics_mcc_explorer/ folder,
+# next to app.py. Path is derived from THIS file's location so it
+# works regardless of the working directory when scripts are run.
+#
+# Override with environment variable: NAICS_CACHE_PATH=/custom/path/facts_cache.sqlite
+import os as _os
+_THIS_DIR    = Path(__file__).parent.parent.resolve()   # naics_mcc_explorer/ (absolute)
+CACHE_DB     = Path(_os.getenv("NAICS_CACHE_PATH", str(_THIS_DIR / "facts_cache.sqlite")))
 CACHE_DB_STR = str(CACHE_DB)
 
 
