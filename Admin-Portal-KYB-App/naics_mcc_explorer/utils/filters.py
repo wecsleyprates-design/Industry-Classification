@@ -198,8 +198,8 @@ def render_sidebar() -> dict:
                 f"<div style='color:{border};font-weight:700'>🗄️ Local Cache · {stale_label}</div>"
                 f"<div style='color:#6ee7b7'>Data as of: {snap}</div>"
                 f"<div style='color:#6ee7b7'>{n_biz:,} businesses</div>"
-                f"{'<div style=\"color:#fcd34d;margin-top:4px\">Run refresh_facts_cache.py</div>' if days_old > 1 else ''}"
-                f"</div>",
+                + ("<div style='color:#fcd34d;margin-top:4px'>Run refresh_facts_cache.py</div>" if days_old > 1 else "")
+                + "</div>",
                 unsafe_allow_html=True
             )
         else:
