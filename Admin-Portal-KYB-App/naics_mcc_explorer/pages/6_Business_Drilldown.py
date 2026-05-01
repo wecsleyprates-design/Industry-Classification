@@ -104,21 +104,42 @@ if cache_active:
         if rows:
             for r in rows:
                 fn = r[0]
-                alts = json.loads(r[12]) if r[12] else []
+                raw_alts = json.loads(r[12]) if r[12] else []
+                # Convert cache format → Admin Portal format
+                # Cache: {alt_platform_id, alt_platform_name, alt_value, alt_confidence, alt_updated_at}
+                # API:   {value, source (int or dict), confidence, updatedAt}
+                api_alts = []
+                for a in raw_alts:
+                    pid  = a.get("alt_platform_id", "")
+                    conf = a.get("alt_confidence")
+                    ts   = a.get("alt_updated_at", "")
+                    # Reconstruct source as numeric int (original API format for alternatives)
+                    src_val = int(pid) if pid and str(pid).lstrip("-").isdigit() else pid
+                    api_alts.append({
+                        "value":      a.get("alt_value"),
+                        "source":     src_val,
+                        "confidence": conf,
+                        "updatedAt":  ts if ts else None,
+                        # Keep extra fields for display
+                        "_alt_platform_name": a.get("alt_platform_name", ""),
+                    })
                 primary_data[fn] = {
-                    "name":           fn,
-                    "value":          r[1],
+                    "name":  fn,
+                    "value": r[1],
+                    "schema": None,
                     "source": {
                         "platformId":  r[2],
                         "name":        r[3],
                         "confidence":  r[4],
-                        "updatedAt":   r[5],
+                        "updatedAt":   r[5] if r[5] else None,
                     },
+                    "override":           None,
                     "source.platformId":  r[2],
                     "source.name":        r[3],
                     "source.confidence":  r[4],
-                    "ruleApplied":    {"name": r[6]} if r[6] else None,
-                    "alternatives":   alts,
+                    "ruleApplied":    {"name": r[6], "description": "Get the fact with the highest confidence and weight if the same confidence"} if r[6] else None,
+                    "isNormalized":   None,
+                    "alternatives":   api_alts,
                     "_naics_description": r[7],
                     "_mcc_description":   r[8],
                     "_naics_validity":    r[9],
@@ -332,32 +353,33 @@ section_header("📦 Alternatives — Other Sources That Submitted a Value")
 
 for fn in ["naics_code", "mcc_code", "mcc_code_found"]:
     # Prefer API alternatives if loaded, then cache/redshift
-    if api_ok and fn in api_facts:
-        src_label = "🌐 Live API"
-        raw_alts  = (api_facts.get(fn) or {}).get("alternatives") or []
-        alts = []
-        for a in raw_alts:
-            s = a.get("source",{})
-            if isinstance(s, dict):
-                pid, conf, ts = str(s.get("platformId","")), s.get("confidence"), s.get("updatedAt","")
-            else:
-                pid, conf, ts = str(s), a.get("confidence"), ""
-            alts.append({"Platform": platform_label(pid), "ID": pid,
-                         "Value": a.get("value"), "Confidence": conf,
-                         "Updated At": ts, "Source": src_label})
-    else:
-        src_label = primary_source_label
-        p_alts = (primary_data.get(fn) or {}).get("alternatives") or []
-        alts = []
-        for a in p_alts:
-            s = a.get("source",{})
-            if isinstance(s, dict):
-                pid, conf, ts = str(s.get("platformId","")), s.get("confidence"), s.get("updatedAt","")
-            else:
-                pid, conf, ts = str(s), a.get("confidence"), ""
-            alts.append({"Platform": platform_label(pid), "ID": pid,
-                         "Value": a.get("value"), "Confidence": conf,
-                         "Updated At": ts, "Source": src_label})
+    src = api_facts if api_ok else primary_data
+    src_label = "🌐 Live API" if api_ok else primary_source_label
+    raw_alts = (src.get(fn) or {}).get("alternatives") or []
+    alts = []
+    for a in raw_alts:
+        s = a.get("source", {})
+        # source can be: dict (API format), int (old API format), or str
+        if isinstance(s, dict):
+            pid  = str(s.get("platformId", ""))
+            conf = s.get("confidence")
+            ts   = s.get("updatedAt", "") or ""
+        elif s is not None:
+            pid  = str(s)
+            conf = a.get("confidence")
+            ts   = a.get("updatedAt", "") or ""
+        else:
+            pid = conf = ts = ""
+        # Use cached platform name if available
+        pname = a.get("_alt_platform_name") or platform_label(pid)
+        alts.append({
+            "Platform":   pname,
+            "Platform ID": pid,
+            "Value":      a.get("value"),
+            "Confidence": conf,
+            "Updated At": ts or "—",
+            "Source":     src_label,
+        })
 
     st.markdown(f"**`{fn}`** — {len(alts)} other source(s):")
     if alts:
@@ -384,12 +406,22 @@ if fact_options:
     fact_sel = st.selectbox("Select fact", fact_options, key="json_fact_sel")
     st.caption(f"Data from: {json_source_label}")
     if fact_sel:
-        fact_obj = dict(json_source.get(fact_sel, {}))
-        # Remove internal cache keys
-        for k in list(fact_obj.keys()):
+        raw_obj = dict(json_source.get(fact_sel, {}))
+        # Build clean Admin Portal-format JSON (remove internal _ keys, clean alts)
+        fact_obj = {}
+        for k, v in raw_obj.items():
             if k.startswith("_"):
-                del fact_obj[k]
-        # Add flat source.* fields if missing
+                continue
+            if k == "alternatives":
+                # Clean alternatives: remove internal _alt_* keys
+                clean_alts = []
+                for a in (v or []):
+                    ca = {ck: cv for ck, cv in a.items() if not ck.startswith("_")}
+                    clean_alts.append(ca)
+                fact_obj[k] = clean_alts
+            else:
+                fact_obj[k] = v
+        # Ensure flat source.* fields present (Admin Portal format)
         src = fact_obj.get("source") or {}
         if isinstance(src, dict):
             fact_obj.setdefault("source.confidence", src.get("confidence"))

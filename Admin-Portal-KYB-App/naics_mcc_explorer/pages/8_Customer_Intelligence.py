@@ -64,6 +64,10 @@ if clients_df.empty:
     no_data("No paying clients found via datascience.billing_prices for the selected date range.")
     st.stop()
 
+# Normalize column name — cache returns 'client', Redshift also returns 'client'
+# Guard against any schema mismatch
+if "client" not in clients_df.columns and "client_name" in clients_df.columns:
+    clients_df = clients_df.rename(columns={"client_name": "client"})
 client_options = ["All Paying Clients"] + clients_df["client"].tolist()
 selected_client = st.selectbox("**Filter by Client Name**", client_options, key="ci_client")
 client_filter = None if selected_client == "All Paying Clients" else selected_client

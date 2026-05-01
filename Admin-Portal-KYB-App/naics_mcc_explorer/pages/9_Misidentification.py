@@ -88,6 +88,8 @@ from db.queries import load_paying_clients
 with st.spinner("Loading paying clients…"):
     clients_df = get_data('paying_clients', date_from=f_from, date_to=f_to)
 
+if not clients_df.empty and "client" not in clients_df.columns and "client_name" in clients_df.columns:
+    clients_df = clients_df.rename(columns={"client_name": "client"})
 client_options = ["All Paying Clients"] + (clients_df["client"].tolist() if not clients_df.empty else [])
 selected_client = st.selectbox("**Filter by Client Name**", client_options, key="mis_client")
 client_filter = None if selected_client == "All Paying Clients" else selected_client
