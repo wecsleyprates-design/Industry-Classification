@@ -81,16 +81,17 @@ def render_sidebar() -> dict:
         with st.spinner("Loading customers…"):
             cust_df = load_customers(df_from, df_to)
 
-    customer_id = None
+    customer_id  = None
+    client_name  = None   # human-readable name for cache queries
+
     if not cust_df.empty:
         def _label(row):
             name  = str(row.get("customer_name", "")).strip()
             cid   = str(row.get("customer_id", "")).strip()
             count = row.get("business_count", 0)
-            # Only show rows with a real name (not a UUID)
             if name and name != cid and len(name) != 36:
                 return f"{name}  ({count:,} biz)"
-            return None   # skip UUID-only entries
+            return None
 
         cust_df["display"] = cust_df.apply(_label, axis=1)
         named = cust_df[cust_df["display"].notna()]
@@ -105,22 +106,15 @@ def render_sidebar() -> dict:
             matched = named[named["display"] == selected_name]
             if not matched.empty:
                 customer_id = matched.iloc[0]["customer_id"]
+                client_name = matched.iloc[0]["customer_name"]  # real name for cache
     else:
         st.sidebar.info("No named customers found for this date range.")
 
-    # ── Customer ID (all customers including UUID-only) ────────────────────
+    # ── Customer ID (uses same cached customer list — no extra Redshift call) ──
     st.sidebar.markdown("**🔑 Customer ID**")
-    with st.sidebar:
-        with st.spinner("Loading customer IDs…"):
-            try:
-                # Always load from Redshift for the ID list (complete, includes UUID-only)
-                from db.queries import load_customers as _load_all_cust
-                all_cust_df = _load_all_cust(df_from, df_to)
-            except Exception:
-                all_cust_df = cust_df
-
-    if all_cust_df is not None and not all_cust_df.empty:
-        all_ids = ["All"] + sorted(all_cust_df["customer_id"].dropna().unique().tolist())
+    # Use the same cust_df already loaded — no second Redshift query
+    if cust_df is not None and not cust_df.empty:
+        all_ids = ["All"] + sorted(cust_df["customer_id"].dropna().unique().tolist())
         prev_cid = st.session_state.get("g_customer_id_direct", "All")
         if prev_cid not in all_ids:
             st.session_state["g_customer_id_direct"] = "All"
@@ -128,6 +122,12 @@ def render_sidebar() -> dict:
         # Customer ID selection takes precedence over Name selection
         if selected_cid != "All":
             customer_id = selected_cid
+            # Try to resolve client_name from the customer_id
+            id_match = cust_df[cust_df["customer_id"] == selected_cid]
+            if not id_match.empty:
+                nm = str(id_match.iloc[0].get("customer_name","")).strip()
+                if nm and nm != selected_cid and len(nm) != 36:
+                    client_name = nm
     else:
         st.sidebar.info("No customers found.")
 
@@ -200,6 +200,7 @@ def render_sidebar() -> dict:
         "date_from":   df_from,
         "date_to":     df_to,
         "customer_id": customer_id,
+        "client_name": client_name,   # human-readable name for cache queries
         "business_id": business_id,
         "fact_types":  fact_types,
     }

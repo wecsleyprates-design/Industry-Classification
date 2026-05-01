@@ -35,103 +35,136 @@ st.markdown("---")
 # ═══════════════════════════════════════════════════════════════════════════════
 st.markdown("## 🔀 Full Data Workflow")
 
-# Build Sankey-style flow diagram using Plotly
-# Nodes: External Vendors → Worth API → Facts Table → API Endpoint → SQLite Cache → App Pages
-node_labels = [
-    # 0-5: Vendor sources
-    "ZoomInfo (P24)\nFirmographics",
-    "SERP Scrape (P22)\nWeb scraping",
-    "Equifax (P17)\nBureau data",
-    "Middesk (P16)\nSOS registry",
-    "OpenCorporates (P23)\nBusiness registry",
-    "AI Enrichment (P31)\nGPT-4o-mini fallback",
-    # 6: Ghost Assigner
-    "Applicant Entry (P0)\nOnboarding form\n⚠️ GHOST ASSIGNER",
-    # 7: Arbitration
-    "Fact Arbitration Engine\nfactWithHighestConfidence\n(picks highest confidence score)",
-    # 8: PostgreSQL RDS
-    "PostgreSQL RDS\nrds_warehouse_public.facts\n(one row per business × fact_name)",
-    # 9: Redshift federated
-    "Redshift Federated View\nrds_warehouse_public.facts\n(live query, may lag ~minutes)",
-    # 10: Worth API
-    "Worth AI API\n/facts/business/{id}/all\n(real-time, same PostgreSQL source)",
-    # 11: Redshift lookups
-    "Redshift Lookup Tables\ncore_naics_code · core_mcc_code\nrel_naics_mcc · billing_prices",
-    # 12: SQLite Cache
-    "facts_cache.sqlite\n(local, ~300MB)\nBuilt weekly from API",
-    # 13: App pages
-    "App Dashboard\nAll 9 analysis pages\n(reads cache → Redshift fallback)",
-]
+# ── Clean top-down flowchart using Plotly shapes + annotations ──────────────
+# Layout: 5 columns × 5 rows, each node = (col, row, label, color, sublabel)
+# Rows go top=1 (vendors) to bottom=5 (app)
 
-colors = [
-    "#22c55e","#84cc16","#16a34a","#f59e0b","#15803d","#f97316",  # vendors 0-5
-    "#ef4444",   # ghost assigner 6
-    "#8b5cf6",   # arbitration 7
-    "#3b82f6",   # PostgreSQL 8
-    "#6366f1",   # Redshift facts 9
-    "#0ea5e9",   # API 10
-    "#64748b",   # Redshift lookups 11
-    "#22c55e",   # SQLite 12
-    "#f1f5f9",   # App 13
-]
+W, H = 1200, 700   # canvas size
+COL = [0.10, 0.28, 0.46, 0.64, 0.82, 0.95]  # x positions (0-1)
+ROW = [0.08, 0.25, 0.45, 0.65, 0.85]          # y positions (0-1, top→bottom)
 
-# Edges: (source_idx, target_idx, value, label)
+# node: (x_frac, y_frac, label, bg_color, text_color, sublabel)
+nodes = {
+    # Row 0 — Vendors (left column, spread vertically)
+    "p24":  (COL[0], 0.12, "ZoomInfo (P24)",         "#1e3a5f", "#60a5fa", "Firmographics · conf ~0.8–1.0"),
+    "p22":  (COL[0], 0.30, "SERP Scrape (P22)",       "#1a3320", "#4ade80", "Web scraping · conf ~0.3"),
+    "p17":  (COL[0], 0.48, "Equifax (P17)",            "#1a3320", "#4ade80", "Bureau data · conf ~0.8"),
+    "p16":  (COL[0], 0.63, "Middesk (P16)",            "#3b2a00", "#fbbf24", "SOS registry"),
+    "p23":  (COL[0], 0.75, "OpenCorporates (P23)",     "#1a3320", "#4ade80", "Business registry"),
+    "p31":  (COL[0], 0.87, "AI Enrichment (P31)",      "#2d1500", "#fb923c", "GPT-4o-mini · conf 0.15"),
+    "p0":   (COL[1], 0.50, "⚠️  Applicant Entry (P0)", "#3b0000", "#ef4444", "Onboarding form · conf 1.0 ← BUG"),
+
+    # Row 1 — Arbitration
+    "arb":  (COL[2], 0.50, "Fact Arbitration Engine",  "#2d1f5f", "#a78bfa",
+             "factWithHighestConfidence\npicks winner, stores alternatives[]"),
+
+    # Row 2 — Storage (split)
+    "rds":  (COL[3], 0.30, "PostgreSQL RDS",           "#0d2035", "#38bdf8",
+             "rds_warehouse_public.facts\none row per (business_id × fact_name)"),
+    "lkp":  (COL[3], 0.72, "Redshift Lookup Tables",   "#1e293b", "#94a3b8",
+             "core_naics_code · core_mcc_code\nrel_naics_mcc · billing_prices"),
+
+    # Row 3 — Exit paths
+    "api":  (COL[4], 0.18, "Worth AI API",             "#0d2035", "#38bdf8",
+             "/facts/business/{id}/all\nAdmin Portal uses this endpoint"),
+    "rsfed":(COL[4], 0.45, "Redshift Federated View",  "#1e1035", "#818cf8",
+             "Same PostgreSQL data\nMay lag a few minutes"),
+    "cache":(COL[4], 0.72, "facts_cache.sqlite",       "#0d2818", "#22c55e",
+             "Built by weekly refresh\n~300 MB · ~8 snapshots"),
+
+    # Row 4 — App
+    "app":  (COL[5], 0.50, "App Dashboard",            "#1e293b", "#f1f5f9",
+             "All 9 analysis pages\nget_data() → cache → Redshift"),
+}
+
+# edges: (from_key, to_key, label, color)
 edges = [
-    # Vendors → Arbitration
-    (0, 7, 4, "NAICS code\n(confidence ~0.8-1.0)"),
-    (1, 7, 2, "NAICS code\n(confidence ~0.3)"),
-    (2, 7, 2, "NAICS code\n(confidence ~0.8)"),
-    (3, 7, 1, "SOS data"),
-    (4, 7, 1, "Business codes"),
-    (5, 7, 1, "NAICS fallback\n(confidence 0.15)"),
-    (6, 7, 5, "Form submission\n(confidence 1.0 ← THE BUG)"),
-    # Arbitration → PostgreSQL
-    (7, 8, 8, "Winning fact stored\n+ alternatives[]"),
-    # PostgreSQL → Redshift federated
-    (8, 9, 3, "Federated view\n(live, same data)"),
-    # PostgreSQL → API
-    (8, 10, 5, "API reads live\nfrom same RDS"),
-    # Redshift lookups (separate path)
-    (11, 12, 2, "NAICS/MCC labels\nCanonical pairs"),
-    # API + Redshift lookups → SQLite
-    (10, 12, 5, "Weekly refresh:\n/facts/business/{id}/all\nfor all businesses"),
-    (9, 12, 1, "Business IDs\ncustomer links"),
-    # SQLite + Redshift lookups → App
-    (12, 13, 8, "Primary source\n(Admin Portal data)"),
-    (9, 13, 2, "Fallback when\nno cache"),
-    (11, 13, 2, "Lookup enrichment\n(labels, canonical)"),
+    ("p24",  "arb",   "NAICS + conf",     "#22c55e"),
+    ("p22",  "arb",   "NAICS + conf",     "#84cc16"),
+    ("p17",  "arb",   "NAICS + conf",     "#16a34a"),
+    ("p16",  "arb",   "SOS data",         "#f59e0b"),
+    ("p23",  "arb",   "codes",            "#15803d"),
+    ("p31",  "arb",   "fallback NAICS",   "#f97316"),
+    ("p0",   "arb",   "conf=1.0 ← BUG",  "#ef4444"),
+    ("arb",  "rds",   "winner + alts[]",  "#a78bfa"),
+    ("rds",  "api",   "live read",        "#38bdf8"),
+    ("rds",  "rsfed", "federated view",   "#818cf8"),
+    ("lkp",  "cache", "labels + pairs",   "#64748b"),
+    ("api",  "cache", "weekly refresh",   "#22c55e"),
+    ("rsfed","cache", "biz IDs",          "#818cf8"),
+    ("cache","app",   "primary source",   "#22c55e"),
+    ("rsfed","app",   "fallback",         "#6366f1"),
+    ("lkp",  "app",   "enrichment",       "#64748b"),
 ]
 
-fig = go.Figure(go.Sankey(
-    arrangement="snap",
-    node=dict(
-        pad=20, thickness=20,
-        line=dict(color="#0f172a", width=1),
-        label=node_labels,
-        color=colors,
-        hovertemplate="<b>%{label}</b><extra></extra>",
-    ),
-    link=dict(
-        source=[e[0] for e in edges],
-        target=[e[1] for e in edges],
-        value= [e[2] for e in edges],
-        label= [e[3] for e in edges],
-        color=[f"rgba(100,100,200,0.3)"] * len(edges),
-        hovertemplate="<b>%{label}</b><extra></extra>",
-    ),
-))
+fig = go.Figure()
+
+def _px(frac, total): return frac * total
+
+# Draw edges first (behind nodes)
+for src_k, dst_k, lbl, col in edges:
+    sx = _px(nodes[src_k][0], W) + 90
+    sy = H - _px(nodes[src_k][1], H)
+    dx = _px(nodes[dst_k][0], W) - 10
+    dy = H - _px(nodes[dst_k][1], H)
+    # Bezier control points
+    cx1, cy1 = sx + (dx-sx)*0.4, sy
+    cx2, cy2 = dx - (dx-sx)*0.4, dy
+    fig.add_shape(type="path",
+        path=f"M {sx},{sy} C {cx1},{cy1} {cx2},{cy2} {dx},{dy}",
+        line=dict(color=col, width=2),
+        opacity=0.6,
+    )
+    # Edge label at midpoint
+    mx = (sx + dx) / 2
+    my = (sy + dy) / 2
+    fig.add_annotation(x=mx, y=my, text=lbl,
+        showarrow=False,
+        font=dict(size=8, color=col),
+        bgcolor="rgba(15,23,42,0.7)",
+        bordercolor=col, borderwidth=1,
+        borderpad=2,
+    )
+
+# Draw nodes
+BOX_W, BOX_H = 140, 52
+for key, (xf, yf, label, bg, fg, sub) in nodes.items():
+    cx = _px(xf, W)
+    cy = H - _px(yf, H)
+    # Box
+    fig.add_shape(type="rect",
+        x0=cx-BOX_W/2, y0=cy-BOX_H/2, x1=cx+BOX_W/2, y1=cy+BOX_H/2,
+        fillcolor=bg, line=dict(color=fg, width=2),
+        layer="above",
+    )
+    # Label
+    fig.add_annotation(x=cx, y=cy+10, text=f"<b>{label}</b>",
+        showarrow=False, font=dict(size=10, color=fg),
+        xanchor="center", yanchor="middle",
+    )
+    # Sub-label
+    if sub:
+        fig.add_annotation(x=cx, y=cy-14, text=sub,
+            showarrow=False, font=dict(size=7.5, color="#94a3b8"),
+            xanchor="center", yanchor="middle",
+        )
+
 fig.update_layout(
-    height=650,
-    margin=dict(l=10, r=10, t=20, b=20),
+    height=H,
+    width=W,
+    margin=dict(l=10, r=10, t=10, b=10),
     paper_bgcolor="#0f172a",
-    font=dict(color="#cbd5e1", size=11),
+    plot_bgcolor="#0f172a",
+    xaxis=dict(visible=False, range=[0, W]),
+    yaxis=dict(visible=False, range=[0, H]),
+    showlegend=False,
 )
 st.plotly_chart(fig, use_container_width=True)
 
 st.caption(
-    "Flow left → right. Width of arrows = relative volume. "
-    "🔴 Red node (P0 Applicant Entry) = the scoring bug — it claims confidence 1.0 and beats real vendors. "
-    "🟢 Green path = recommended flow (vendor → arbitration → API → SQLite cache → app)."
+    "Read left → right. 🔴 Red = Ghost Assigner (P0) — hardcoded confidence 1.0 beats all vendors. "
+    "🟢 Green path = weekly refresh: Admin Portal API → SQLite cache → app (current data). "
+    "🟣 Purple path = Redshift fallback (when no cache, may lag)."
 )
 st.markdown("---")
 
