@@ -183,9 +183,11 @@ if p0_rows:
     analyst_note("Why this happens",
         "The system assigns a score of 1.0 (the maximum) to whatever the business types on the onboarding form. "
         "External providers like ZoomInfo typically score 0.8 or lower. "
-        "Since the onboarding form always has the highest score, it wins — "
-        "even when its value is blank, and even when ZoomInfo returned a perfectly valid industry code. "
-        "This is a configuration issue: the form submission score is set too high.",
+        "When the gap exceeds 0.05, the higher score wins outright — "
+        "so P0 at 1.0 beats ZoomInfo at 0.8 (gap = 0.2 > 0.05). "
+        "However, when ZoomInfo returns with confidence ≥ 0.95 (gap ≤ 0.05), "
+        "the weight tiebreaker applies and ZoomInfo wins (weight 0.8 > P0 weight 0.2 for naics_code). "
+        "This is why re-enrichment events can fix P0 wins without any code change.",
         level="danger",
         action="Engineering fix: lower the score assigned to form submissions from 1.0 to 0.1. This single change will allow ZoomInfo and SERP to win for thousands of businesses on the next data refresh.")
 else:

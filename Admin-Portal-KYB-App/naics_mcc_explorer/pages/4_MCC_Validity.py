@@ -116,8 +116,9 @@ with c8: kpi("⬜ Null mcc_code",       f"{n_null:,}",  "No winning value",     
 
 analyst_note(
     "Interpreting MCC coverage metrics",
-    "The final `mcc_code` fact is produced in two independent ways and the best one wins. "
-    "`mcc_code_found` (AI-assigned) takes priority; `mcc_code_from_naics` is the backup.",
+    "The final `mcc_code` is: **`mcc_code = mcc_code_found ?? mcc_code_from_naics`** (nullish coalescing). "
+        "AI wins whenever it returns **any non-null value** — this is a presence check, not a confidence comparison. "
+        "`mcc_code_from_naics` wins only when AI returned null or didn't run.",
     level="info",
     bullets=[
         "<strong>mcc_code_found only</strong>: the AI assigned the code directly — not affected by NAICS quality",
@@ -254,8 +255,8 @@ if not mcc_found.empty and not mcc_fromnaics.empty:
         level="info",
         bullets=[
             "Many mcc_code_found records at score 0 → the AI was uncertain or returned no result for those businesses",
-            "mcc_code_from_naics at score 0 → correct behavior — the NAICS→MCC conversion table does not produce confidence scores",
-            "Both averaging near 0.15 → the AI fallback (mcc_code_found) is running for most businesses because data vendors did not provide NAICS codes",
+            "mcc_code_from_naics at score 0 → correct behavior — rel_naics_mcc is a deterministic lookup, no confidence score exists",
+            "Both averaging near 0.10–0.15 → AI is running; AI confidence maps to 0.10(LOW)/0.15(MED)/0.20(HIGH) — not a fixed 0.15",
         ],
     )
 

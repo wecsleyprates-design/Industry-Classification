@@ -73,7 +73,7 @@ def load_flow_counts(client_name: str = None) -> dict:
                          AND mcc_code_found IS NULL
                          AND mcc_code IS NOT NULL THEN 1 ELSE 0 END)                      AS lookup_won_mcc,
                 SUM(CASE WHEN is_canonical_pair=1 THEN 1 ELSE 0 END)                      AS canonical_pairs,
-                SUM(CASE WHEN naics_code='5614' OR mcc_code='5614' THEN 1 ELSE 0 END)     AS has_5614,
+                SUM(CASE WHEN mcc_code='5614' THEN 1 ELSE 0 END)                          AS has_5614,
                 SUM(CASE WHEN mcc_code='7399' THEN 1 ELSE 0 END)                          AS mcc_catchall
             FROM businesses {w}
         """, p)

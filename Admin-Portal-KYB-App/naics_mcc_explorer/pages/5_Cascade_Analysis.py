@@ -29,10 +29,10 @@ f_biz     = filters["business_id"]
 
 st.markdown("# ⛓️ Industry Code → Payment Category: Ripple Effect Analysis")
 st.markdown(
-    "When a business's **industry code (NAICS) is missing or wrong**, its **payment category (MCC) breaks too**. "
-    "That's because the payment category is automatically derived by converting the industry code using a mapping table. "
-    "A bad input produces a bad output. "
-    "This page shows how many businesses are affected, and groups them by how much work is needed to fix them."
+    "When a business's **industry code (NAICS) is missing or wrong**, its **payment category (MCC) is at risk**. "
+    "The final MCC (`mcc_code`) uses: `mcc_code_found (AI) ?? mcc_code_from_naics (NAICS lookup)`. "
+    "If the NAICS is wrong, the NAICS-derived path produces a wrong MCC — but the AI path may still rescue it independently. "
+    "This page shows how many businesses are affected, whether AI saved them, and what work remains."
 )
 platform_legend_panel()
 data_source_banner()
@@ -96,7 +96,7 @@ else:
     df["naics_alt_values"]    = ""
     df["naics_alt_platforms"] = ""
 
-n_healthy    = int(df[df["naics_valid"] & ~df["mcc_null"] & ~df["mcc_catchall"]].shape[0])
+n_healthy    = int(df[df["naics_valid"] & ~df["mcc_null"] & ~df["mcc_catchall"] & ~df["mcc_bad"]].shape[0])
 n_bad_naics  = int(df[df["naics_null"] | df["naics_catchall"]].shape[0])
 n_null_naics = int(df[df["naics_null"]].shape[0])
 n_ca_naics   = int(df[df["naics_catchall"]].shape[0])

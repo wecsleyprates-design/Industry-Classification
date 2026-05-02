@@ -202,11 +202,11 @@ a good NAICS code already exists** — it's an independent classification.
 // aiNaicsEnrichment.ts
 // AI prompt returns both naics_code and mcc_code in one call.
 // mcc_code is stored as mcc_code_found.
-// Confidence is always 0.15 — self-reported by the AI.
+// Confidence: 0.10 (LOW), 0.15 (MED), or 0.20 (HIGH) — self-reported from AI response.confidence field.
 ```
 
 **Key characteristics of mcc_code_found:**
-- Confidence = **always 0.15** (hardcoded, not actually measured)
+- Confidence = **0.10 / 0.15 / 0.20** mapped from LOW / MED / HIGH in the AI response (not hardcoded)
 - Source = P31 (AI NAICS Enrichment)
 - Runs for businesses where vendors failed OR as a parallel path
 - Quality varies — can produce valid codes, catch-alls (7399), or the invalid bug code (5614)
@@ -439,7 +439,9 @@ if flow:
     st.markdown("#### Step 1 — naics_code assignment")
     st.caption(
         "Out of all businesses, how many got a usable industry code? "
-        "**Specific** = valid 6-digit code that is NOT the 561499 catch-all."
+        "**Specific** = has a NAICS value AND it is not the 561499 catch-all. "
+        "Note: this includes codes not in the NAICS lookup table or wrong-format codes — "
+        "see NAICS Validity page for full format/lookup validation."
     )
     c1,c2,c3,c4,c5 = st.columns(5)
     with c1: kpi("Total Businesses",         f"{total:,}",       "", "#3b82f6")
@@ -514,7 +516,7 @@ if flow:
             f"mcc_code_from_naics fired: {lkp_frd:,} — but only {lkp_won:,} actually became the final mcc_code",
             f"The gap ({lkp_frd - lkp_won:,}) = businesses where lookup ran BUT AI also ran and won (AI non-null > lookup null confidence)",
             f"Lookup wins exclusively when: AI returned null OR AI enrichment was not triggered for that business",
-            f"5,614 invalid AI codes and {c7399:,} catch-all 7399 codes are in the final mcc_code despite lookup having a valid answer",
+            f"{bad5614:,} invalid AI codes (5614) and {c7399:,} catch-all 7399 codes are in the final mcc_code despite lookup having a valid answer",
         ],
     )
 else:
@@ -627,7 +629,7 @@ if mcc_conf_df is not None and not mcc_conf_df.empty:
     st.plotly_chart(fig_mcc_conf, use_container_width=True, key="mcc_conf")
 
     analyst_note(
-        "Why mcc_code_found confidence is always 0.15",
+        "Why mcc_code_found confidence is always low (0.10–0.20),"
         "The AI NAICS Enrichment module hardcodes confidence=0.15 for ALL its outputs "
         "regardless of how certain it actually is. This means the distribution above will show "
         "nearly all businesses at exactly 0.15. "
