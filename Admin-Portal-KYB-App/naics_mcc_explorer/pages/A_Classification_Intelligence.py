@@ -18,7 +18,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 
-from utils.filters import render_sidebar, kpi, section_header, no_data
+from utils.filters import render_sidebar, kpi, section_header, no_data, strip_uuid_clients
 from utils.platform_map import platform_label, platform_color
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
 from db.data import data_source_banner
@@ -59,7 +59,7 @@ from db.sqlite_queries import get_client_list
 from db.queries import load_paying_clients
 
 if _using_cache():
-    clients_df = get_client_list()
+    clients_df = strip_uuid_clients(get_client_list(), "client")
 else:
     clients_df = load_paying_clients(f_from, f_to) or pd.DataFrame()
 

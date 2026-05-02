@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
 
-from utils.filters import render_sidebar, kpi, section_header, no_data
+from utils.filters import render_sidebar, kpi, section_header, no_data, strip_uuid_clients
 from utils.platform_map import platform_label, platform_color
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
 from db.data import get_data, data_source_banner, enrich_with_business_name

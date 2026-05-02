@@ -243,6 +243,18 @@ def kpi(label: str, value: str, delta: str = "", color: str = "#3b82f6") -> None
     st.markdown(html, unsafe_allow_html=True)
 
 
+def strip_uuid_clients(df: "pd.DataFrame", col: str = "client") -> "pd.DataFrame":
+    """Remove rows where the client column is a raw UUID (36-char hex string).
+    Call this on any DataFrame before displaying charts or tables.
+    """
+    if df is None or df.empty or col not in df.columns:
+        return df
+    import re
+    _uuid_re = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+    mask = df[col].notna() & ~df[col].astype(str).str.match(_uuid_re)
+    return df[mask].copy()
+
+
 def no_data(msg: str = "No data for the selected filters.") -> None:
     st.info(f"📭 {msg}", icon="📭")
 

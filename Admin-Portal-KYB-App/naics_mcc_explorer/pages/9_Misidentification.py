@@ -37,7 +37,7 @@ import plotly.express as px
 import pandas as pd
 import json
 
-from utils.filters import render_sidebar, kpi, section_header, no_data, parse_alternatives
+from utils.filters import render_sidebar, kpi, section_header, no_data, strip_uuid_clients, parse_alternatives
 from utils.platform_map import platform_label, platform_color, CATCH_ALL_NAICS
 from utils.sql_runner import analyst_note, sql_panel, platform_legend_panel
 from db.data import get_data, data_source_banner, enrich_with_business_name
@@ -137,9 +137,7 @@ else:
     err_df["platform_name"] = err_df["winning_platform_id"].apply(platform_label)
     err_df["color"]         = err_df["winning_platform_id"].apply(platform_color)
 
-    # Filter out UUID-only client names before pivoting
-    if "client" in err_df.columns:
-        err_df = err_df[err_df["client"].notna() & (err_df["client"].str.len() != 36)]
+    err_df = strip_uuid_clients(err_df, "client")
 
     # Heatmap: client × platform, value = flag_pct
     pivot_err = err_df.pivot_table(
@@ -214,9 +212,7 @@ with st.spinner("Loading sector distribution…"):
 if sector_df is None or sector_df.empty:
     no_data()
 else:
-    # Filter out UUID-only client names
-    if "client" in sector_df.columns:
-        sector_df = sector_df[sector_df["client"].notna() & (sector_df["client"].str.len() != 36)]
+    sector_df = strip_uuid_clients(sector_df, "client")
 
     sector_df["sector_name"] = sector_df["winning_sector"].map(NAICS_SECTORS).fillna("Other")
     sector_df["sector_label"]= sector_df["winning_sector"] + " — " + sector_df["sector_name"]
@@ -309,6 +305,37 @@ section_header("🔬 Section 3 — Deep Misidentification Signals",
 
 with st.spinner("Loading misidentification signals…"):
     sig_df = get_data('misidentification_signals', date_from=f_from, date_to=f_to, client_name=client_filter)
+
+# When cache is active, raw_json is NULL — load alternatives separately so S4/S5/S6/S7 can fire
+if sig_df is not None and not sig_df.empty:
+    from db.data import _using_cache as _uc2
+    if _uc2() and ("raw_json" not in sig_df.columns or sig_df["raw_json"].isna().all()):
+        try:
+            from db.sqlite_queries import get_alternatives_for_businesses
+            bids = tuple(sig_df["business_id"].unique().tolist())
+            alts_df = get_alternatives_for_businesses(list(bids), fact_name="naics_code")
+            if not alts_df.empty:
+                import json as _json
+                def _build_raw(bid):
+                    rows = alts_df[alts_df["business_id"]==bid]
+                    if rows.empty:
+                        return "{}"
+                    alts = []
+                    for _, a in rows.iterrows():
+                        src = a.get("alt_platform_id","")
+                        try: src = int(src)
+                        except Exception: pass
+                        alts.append({"value": a.get("alt_value"),
+                                     "source": src,
+                                     "confidence": a.get("alt_confidence"),
+                                     "updatedAt": a.get("alt_updated_at","")})
+                    return _json.dumps({"alternatives": alts})
+                sig_df["raw_json"] = sig_df["business_id"].apply(_build_raw)
+        except Exception as _e:
+            pass  # raw_json stays NULL, S4/S5/S6/S7 won't fire but app won't crash
+
+if sig_df is not None and not sig_df.empty:
+    sig_df = strip_uuid_clients(sig_df, "client")
 
 if sig_df is None or sig_df.empty:
     from utils.sql_runner import analyst_note as _an
@@ -437,7 +464,7 @@ else:
         client_flag_rows.append(row)
 
     if client_flag_rows:
-        cflag_df = pd.DataFrame(client_flag_rows).sort_values("Flagged", ascending=False)
+        cflag_df = strip_uuid_clients(pd.DataFrame(client_flag_rows).sort_values("Flagged", ascending=False), "Client")
         flag_col_cfg = {
             "Total Businesses": st.column_config.NumberColumn(format="%d"),
             "Flagged":          st.column_config.NumberColumn(format="%d"),

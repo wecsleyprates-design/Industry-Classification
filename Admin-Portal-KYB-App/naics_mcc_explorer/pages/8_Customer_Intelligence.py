@@ -20,7 +20,7 @@ import plotly.express as px
 import pandas as pd
 import json
 
-from utils.filters import render_sidebar, kpi, section_header, no_data, parse_alternatives
+from utils.filters import render_sidebar, kpi, section_header, no_data, strip_uuid_clients, parse_alternatives
 from utils.platform_map import (
     platform_label, platform_color, CATCH_ALL_NAICS,
     PLATFORM_MAP,
@@ -100,12 +100,7 @@ else:
     dist_df["platform_name"] = dist_df["winning_platform_id"].apply(platform_label)
     dist_df["color"]         = dist_df["winning_platform_id"].apply(platform_color)
 
-    # Filter out UUID-only client names (36 chars = UUID format)
-    if "client" in dist_df.columns:
-        dist_df = dist_df[
-            dist_df["client"].notna() &
-            (dist_df["client"].str.len() != 36)
-        ]
+    dist_df = strip_uuid_clients(dist_df, "client")
 
     if client_filter:
         # Single client: horizontal bar
